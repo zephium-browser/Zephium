@@ -705,12 +705,12 @@ jobs:
           python3 -m json.tool "${output}" >/dev/null
 
       - name: Attest Linux release outputs at their producing runner
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: target/release/bundle/rpm/*
 
       - name: Attest the exact Linux RPM SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: target/release/bundle/rpm/*.rpm
           sbom-path: target/release/bundle/rpm/Zephium-${{ needs.release_gate.outputs.version }}-linux-x86_64.cdx.json
@@ -1217,7 +1217,7 @@ jobs:
           Get-Content -Raw $output | ConvertFrom-Json | Out-Null
 
       - name: Attest Windows release outputs at their producing runner
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: |
             target/release/bundle/msi/*.msi
@@ -1227,7 +1227,7 @@ jobs:
             target/release/bundle/*.cdx.json
 
       - name: Attest the exact Windows installer SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: |
             target/release/bundle/msi/*.msi
@@ -1548,12 +1548,12 @@ jobs:
           python3 -m json.tool "${sbom}" >/dev/null
 
       - name: Attest macOS release outputs at their producing runner
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ runner.temp }}/zephium-public/*
 
       - name: Attest the exact macOS DMG SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ runner.temp }}/zephium-public/Zephium-${{ needs.release_gate.outputs.version }}-macos-${{ matrix.arch }}.dmg
           sbom-path: ${{ runner.temp }}/zephium-public/Zephium-${{ needs.release_gate.outputs.version }}-macos-${{ matrix.arch }}.cdx.json
@@ -1846,7 +1846,7 @@ jobs:
           (cd release/public && sha256sum --check --strict SHA256SUMS)
 
       - name: Generate producing-runner provenance for assembly outputs
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: |
             release/public/zephium-update-stable.json
