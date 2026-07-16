@@ -15,7 +15,7 @@
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/geist-mono": "^5.2.8",
     "@hugeicons/core-free-icons": "^4.2.2",
-    "@kobalte/core": "^0.13.11",
+    "@kobalte/core": "^0.13.12",
     "@tauri-apps/api": "^2",
     "solid-js": "^1.9.3",
     "solid-motionone": "^1.0.4"
