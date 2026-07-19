@@ -117,7 +117,7 @@ jobs:
       - name: Enforce native-adapter sources and fixture provenance
         run: cargo xtask check-native-adapter-locks
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
           fallback: none
@@ -207,7 +207,7 @@ jobs:
 
       - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-nextest@0.9.137
           fallback: none
@@ -465,7 +465,7 @@ jobs:
         with:
           key: coverage
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-llvm-cov@0.8.6,cargo-nextest@0.9.137
           fallback: none
