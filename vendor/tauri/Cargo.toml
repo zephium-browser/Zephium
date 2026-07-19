@@ -412,7 +412,7 @@ version = "0.6"
 version = "0.6"
 
 [target."cfg(windows)".dependencies.webview2-com]
-version = "0.38"
+version = "0.39"
 optional = true
 
 [target."cfg(windows)".dependencies.window-vibrancy]
