@@ -141,7 +141,7 @@ version = "0.4"
 default-features = false
 
 [target."cfg(windows)".dependencies.webview2-com]
-version = "0.38"
+version = "0.39"
 
 [target."cfg(windows)".dependencies.windows]
 version = "0.61"
