@@ -147,7 +147,7 @@ features = ["psl"]
 default-features = false
 
 [dev-dependencies.mock_instant]
-version = "=0.5.1"
+version = "=0.6.1"
 
 [dev-dependencies.sha2]
 version = "=0.9.9"
