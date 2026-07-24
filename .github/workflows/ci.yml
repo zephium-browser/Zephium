@@ -141,7 +141,7 @@ jobs:
           shared-key: blocker-fuzz
           workspaces: crates/zephium-blocker/fuzz
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
           fallback: none
@@ -221,7 +221,7 @@ jobs:
       - name: Enforce vendored security-fork sources and fixture provenance
         run: cargo xtask check-security-fork-locks
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
           fallback: none
@@ -320,7 +320,7 @@ jobs:
 
       - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-nextest@0.9.137
           fallback: none
@@ -658,7 +658,7 @@ jobs:
         with:
           key: coverage
 
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+      - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2
         with:
           tool: cargo-llvm-cov@0.8.6,cargo-nextest@0.9.137
           fallback: none
