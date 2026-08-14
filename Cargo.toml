@@ -41,7 +41,7 @@ serde_json = "1"
 base64 = "0.22"
 ring = "=0.17.14"
 thiserror = "2"
-ulid = "1"
+ulid = "3"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 tracing = "0.1"
