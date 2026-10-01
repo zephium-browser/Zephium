@@ -1,6 +1,6 @@
 # Windows protection and resource qualification
 
-Worktree: `codex/windows-protection`, based on `cffa2fe2`. This work does not
+Worktree: `windows-protection`, based on `cffa2fe2`. This work does not
 change the shared product interface or merge into main. The original extension
 checkout is untouched.
 
