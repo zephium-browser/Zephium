@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "blocked": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 5.7780242,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 0,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 0,
+  "matcher": {
+    "count": 0,
+    "max_ns": null,
+    "p50_ns": null,
+    "p95_ns": null,
+    "p99_ns": null
+  },
+  "mode": "off",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 35868,
+        "readyState": "complete",
+        "title": "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub",
+        "url": "https://github.com/rust-lang/rust"
+      },
+      "host_load_ms": 2353.5857,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 298,
+        "connectStart": 227.7000000178814,
+        "contentEncoding": "gzip",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 360322,
+        "deliveryType": "",
+        "domComplete": 2344.800000011921,
+        "domContentLoadedEventEnd": 1465.800000011921,
+        "domContentLoadedEventStart": 1465.600000023842,
+        "domInteractive": 1192.2000000178814,
+        "domainLookupEnd": 227.7000000178814,
+        "domainLookupStart": 202.80000001192093,
+        "duration": 2350.100000023842,
+        "encodedBodySize": 46636,
+        "entryType": "navigation",
+        "fetchStart": 3.600000023841858,
+        "finalResponseHeadersStart": 760.4000000059605,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 2350.100000023842,
+        "loadEventStart": 2347.2000000178814,
+        "name": "https://github.com/rust-lang/rust",
+        "navigationId": 7439,
+        "nextHopProtocol": "h2",
+        "notRestoredReasons": null,
+        "redirectCount": 0,
+        "redirectEnd": 0,
+        "redirectStart": 0,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 298.2000000178814,
+        "responseEnd": 810.8000000119209,
+        "responseStart": 760.4000000059605,
+        "responseStatus": 200,
+        "secureConnectionStart": 263.7000000178814,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 46936,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "github",
+  "tabs": 1
+}

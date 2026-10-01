@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 8,
+      "max_ns": 100800,
+      "p50_ns": 56600,
+      "p95_ns": 100800,
+      "p99_ns": 100800
+    },
+    "blocked": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 5.0881439,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 8,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 0,
+  "matcher": {
+    "count": 8,
+    "max_ns": 82200,
+    "p50_ns": 48500,
+    "p95_ns": 82200,
+    "p99_ns": 82200
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 1256,
+        "readyState": "complete",
+        "title": "https://www.google.com/search",
+        "url": "https://www.google.com/sorry/index"
+      },
+      "host_load_ms": 1650.5665000000001,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 565.5,
+        "connectStart": 565.5,
+        "contentEncoding": "",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 3331,
+        "deliveryType": "",
+        "domComplete": 1266.5,
+        "domContentLoadedEventEnd": 607.0999999940395,
+        "domContentLoadedEventStart": 607.0999999940395,
+        "domInteractive": 607.0999999940395,
+        "domainLookupEnd": 565.5,
+        "domainLookupStart": 565.5,
+        "duration": 1267.4000000059605,
+        "encodedBodySize": 3331,
+        "entryType": "navigation",
+        "fetchStart": 565.5,
+        "finalResponseHeadersStart": 592.5999999940395,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 1267.4000000059605,
+        "loadEventStart": 1266.5,
+        "name": "https://www.google.com/sorry/index",
+        "navigationId": 9624,
+        "nextHopProtocol": "h3",
+        "notRestoredReasons": null,
+        "redirectCount": 1,
+        "redirectEnd": 565.5,
+        "redirectStart": 2,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 566.8000000119209,
+        "responseEnd": 593,
+        "responseStart": 592.5999999940395,
+        "responseStatus": 429,
+        "secureConnectionStart": 565.5,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 3631,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "google",
+  "tabs": 1
+}

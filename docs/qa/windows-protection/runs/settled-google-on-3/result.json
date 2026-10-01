@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 13,
+      "max_ns": 260500,
+      "p50_ns": 52900,
+      "p95_ns": 260500,
+      "p99_ns": 260500
+    },
+    "blocked": {
+      "count": 7,
+      "max_ns": 84800,
+      "p50_ns": 61900,
+      "p95_ns": 84800,
+      "p99_ns": 84800
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 4.5419886,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 20,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 7,
+  "matcher": {
+    "count": 20,
+    "max_ns": 203700,
+    "p50_ns": 46300,
+    "p95_ns": 161700,
+    "p99_ns": 203700
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 498791,
+        "readyState": "complete",
+        "title": "rust programming - Google Search",
+        "url": "https://www.google.com/search"
+      },
+      "host_load_ms": 1109.3379,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "high"
+        },
+        "connectEnd": 27.5,
+        "connectStart": 4.700000017881393,
+        "contentEncoding": "br",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 674899,
+        "deliveryType": "",
+        "domComplete": 712.3000000119209,
+        "domContentLoadedEventEnd": 560.2000000178814,
+        "domContentLoadedEventStart": 559.7000000178814,
+        "domInteractive": 559.7000000178814,
+        "domainLookupEnd": 4.700000017881393,
+        "domainLookupStart": 4.700000017881393,
+        "duration": 713,
+        "encodedBodySize": 192041,
+        "entryType": "navigation",
+        "fetchStart": 1.9000000059604645,
+        "finalResponseHeadersStart": 105.10000002384186,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 713,
+        "loadEventStart": 712.9000000059605,
+        "name": "https://www.google.com/search",
+        "navigationId": 7273,
+        "nextHopProtocol": "h3",
+        "notRestoredReasons": null,
+        "redirectCount": 0,
+        "redirectEnd": 0,
+        "redirectStart": 0,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 6.5,
+        "responseEnd": 512.7000000178814,
+        "responseStart": 105.10000002384186,
+        "responseStatus": 200,
+        "secureConnectionStart": 4.700000017881393,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 192341,
+        "type": "navigate",
+        "unloadEventEnd": 110.7000000178814,
+        "unloadEventStart": 110.7000000178814,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "google",
+  "tabs": 1
+}

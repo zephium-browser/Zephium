@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 201,
+      "max_ns": 245100,
+      "p50_ns": 49800,
+      "p95_ns": 106600,
+      "p99_ns": 189700
+    },
+    "blocked": {
+      "count": 14,
+      "max_ns": 119600,
+      "p50_ns": 69100,
+      "p95_ns": 119600,
+      "p99_ns": 119600
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 4.4657716,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 215,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 14,
+  "matcher": {
+    "count": 215,
+    "max_ns": 226400,
+    "p50_ns": 42100,
+    "p95_ns": 86800,
+    "p99_ns": 148500
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 548825,
+        "readyState": "complete",
+        "title": "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos",
+        "url": "https://www.yahoo.com/"
+      },
+      "host_load_ms": 1025.7282,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 257.2999999821186,
+        "connectStart": 214.0999999940395,
+        "contentEncoding": "gzip",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 618856,
+        "deliveryType": "",
+        "domComplete": 1022.0999999940396,
+        "domContentLoadedEventEnd": 695.5,
+        "domContentLoadedEventStart": 695.5,
+        "domInteractive": 695.4000000059605,
+        "domainLookupEnd": 214.0999999940395,
+        "domainLookupStart": 214,
+        "duration": 1022.4000000059604,
+        "encodedBodySize": 129553,
+        "entryType": "navigation",
+        "fetchStart": 3.4000000059604645,
+        "finalResponseHeadersStart": 456,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 1022.4000000059604,
+        "loadEventStart": 1022.4000000059604,
+        "name": "https://www.yahoo.com/",
+        "navigationId": 3236,
+        "nextHopProtocol": "h2",
+        "notRestoredReasons": null,
+        "redirectCount": 0,
+        "redirectEnd": 0,
+        "redirectStart": 0,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 258,
+        "responseEnd": 666.5,
+        "responseStart": 456,
+        "responseStatus": 200,
+        "secureConnectionStart": 232.4000000059605,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 129853,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "yahoo",
+  "tabs": 1
+}

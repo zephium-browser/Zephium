@@ -1,0 +1,129 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 100,
+      "max_ns": 41200,
+      "p50_ns": 7000,
+      "p95_ns": 31300,
+      "p99_ns": 37600
+    },
+    "blocked": {
+      "count": 100,
+      "max_ns": 60500,
+      "p50_ns": 6300,
+      "p95_ns": 35200,
+      "p99_ns": 54600
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 1.2557586,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 200,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 100,
+  "installed_blocks": 100,
+  "matcher": {
+    "count": 200,
+    "max_ns": 42300,
+    "p50_ns": 5200,
+    "p95_ns": 25500,
+    "p99_ns": 29900
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 14,
+        "readyState": "complete",
+        "title": "Protection fixture",
+        "url": "http://127.0.0.1:53043/heavy"
+      },
+      "host_load_ms": 720.5496999999999,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 1.5999999940395355,
+        "connectStart": 1.5999999940395355,
+        "contentEncoding": "",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 7951,
+        "deliveryType": "",
+        "domComplete": 716.5,
+        "domContentLoadedEventEnd": 716.3000000119209,
+        "domContentLoadedEventStart": 716.3000000119209,
+        "domInteractive": 716.1999999880791,
+        "domainLookupEnd": 1.5999999940395355,
+        "domainLookupStart": 1.5999999940395355,
+        "duration": 716.5,
+        "encodedBodySize": 7951,
+        "entryType": "navigation",
+        "fetchStart": 1.5999999940395355,
+        "finalResponseHeadersStart": 444.09999999403954,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 716.5,
+        "loadEventStart": 716.5,
+        "name": "http://127.0.0.1:53043/heavy",
+        "navigationId": 1205,
+        "nextHopProtocol": "http/1.1",
+        "notRestoredReasons": null,
+        "redirectCount": 0,
+        "redirectEnd": 0,
+        "redirectStart": 0,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 307,
+        "responseEnd": 444.800000011921,
+        "responseStart": 444.09999999403954,
+        "responseStatus": 200,
+        "secureConnectionStart": 0,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 8251,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "runtime": "154.0.4258.48",
+  "site": "fixture",
+  "tabs": 1
+}

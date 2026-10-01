@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 67,
+      "max_ns": 162900,
+      "p50_ns": 45800,
+      "p95_ns": 107300,
+      "p99_ns": 162900
+    },
+    "blocked": {
+      "count": 11,
+      "max_ns": 63000,
+      "p50_ns": 32200,
+      "p95_ns": 63000,
+      "p99_ns": 63000
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 4.1726893,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 78,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 11,
+  "matcher": {
+    "count": 78,
+    "max_ns": 138100,
+    "p50_ns": 35700,
+    "p95_ns": 88300,
+    "p99_ns": 138100
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 14029,
+        "readyState": "complete",
+        "title": "Google defeats US justice department bid to force ad tech sale | Google | The Guardian",
+        "url": "https://www.theguardian.com/technology/2026/sep/02/google-defeats-justice-department-bid-ad-tech-sale"
+      },
+      "host_load_ms": 745.8652999999999,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 182.2000000178814,
+        "connectStart": 121.59999999403954,
+        "contentEncoding": "gzip",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 323907,
+        "deliveryType": "",
+        "domComplete": 740.3000000119209,
+        "domContentLoadedEventEnd": 593.0999999940395,
+        "domContentLoadedEventStart": 592.5999999940395,
+        "domInteractive": 365.7000000178814,
+        "domainLookupEnd": 121.59999999403954,
+        "domainLookupStart": 121.40000000596046,
+        "duration": 742.3000000119209,
+        "encodedBodySize": 53545,
+        "entryType": "navigation",
+        "fetchStart": 4.5999999940395355,
+        "finalResponseHeadersStart": 319,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 742.3000000119209,
+        "loadEventStart": 740.5,
+        "name": "https://www.theguardian.com/technology/2026/sep/02/google-defeats-justice-department-bid-ad-tech-sale",
+        "navigationId": 6457,
+        "nextHopProtocol": "h2",
+        "notRestoredReasons": null,
+        "redirectCount": 0,
+        "redirectEnd": 0,
+        "redirectStart": 0,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 182.30000001192093,
+        "responseEnd": 353.7000000178814,
+        "responseStart": 319,
+        "responseStatus": 200,
+        "secureConnectionStart": 152.5,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 53845,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "news",
+  "tabs": 1
+}

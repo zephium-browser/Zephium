@@ -1,0 +1,130 @@
+{
+  "callback": {
+    "allowed": {
+      "count": 387,
+      "max_ns": 176300,
+      "p50_ns": 31800,
+      "p95_ns": 104000,
+      "p99_ns": 153100
+    },
+    "blocked": {
+      "count": 16,
+      "max_ns": 109600,
+      "p50_ns": 33100,
+      "p95_ns": 109600,
+      "p99_ns": 109600
+    },
+    "native_fail_open": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "paused": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "response_failed": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    }
+  },
+  "construction_and_load_seconds": 9.5827955,
+  "counting": "on",
+  "coverage": [],
+  "debug_assertions": false,
+  "diagnostics": {
+    "attribution_unavailable": 0,
+    "budget_exhausted": 0,
+    "decisions": 403,
+    "errors": 0,
+    "unavailable": 0,
+    "unprepared": 0
+  },
+  "dropped_samples": 0,
+  "fixture_allowed_hits": 0,
+  "installed_blocks": 16,
+  "matcher": {
+    "count": 403,
+    "max_ns": 148200,
+    "p50_ns": 26500,
+    "p95_ns": 86200,
+    "p99_ns": 132100
+  },
+  "mode": "on",
+  "pages": [
+    {
+      "document": {
+        "bodyCharacters": 6404676,
+        "readyState": "complete",
+        "title": "Bloomberg Europe",
+        "url": "https://www.bloomberg.com/europe"
+      },
+      "host_load_ms": 6124.1551,
+      "navigation": {
+        "activationStart": 0,
+        "confidence": {
+          "randomizedTriggerRate": 0.4994798,
+          "value": "low"
+        },
+        "connectEnd": 471.40000000596046,
+        "connectStart": 471.40000000596046,
+        "contentEncoding": "br",
+        "contentType": "text/html",
+        "criticalCHRestart": 0,
+        "decodedBodySize": 7260238,
+        "deliveryType": "",
+        "domComplete": 5737.0999999940395,
+        "domContentLoadedEventEnd": 1869.699999988079,
+        "domContentLoadedEventStart": 1866.2999999821184,
+        "domInteractive": 1492.2999999821186,
+        "domainLookupEnd": 471.40000000596046,
+        "domainLookupStart": 471.40000000596046,
+        "duration": 5746.699999988079,
+        "encodedBodySize": 184097,
+        "entryType": "navigation",
+        "fetchStart": 471.40000000596046,
+        "finalResponseHeadersStart": 593.2999999821186,
+        "firstInterimResponseStart": 0,
+        "initiatorType": "navigation",
+        "loadEventEnd": 5746.699999988079,
+        "loadEventStart": 5741,
+        "name": "https://www.bloomberg.com/europe",
+        "navigationId": 5421,
+        "nextHopProtocol": "h2",
+        "notRestoredReasons": null,
+        "redirectCount": 1,
+        "redirectEnd": 471.40000000596046,
+        "redirectStart": 4,
+        "renderBlockingStatus": "non-blocking",
+        "requestStart": 474.09999999403954,
+        "responseEnd": 690.5999999940395,
+        "responseStart": 593.2999999821186,
+        "responseStatus": 200,
+        "secureConnectionStart": 471.40000000596046,
+        "serverTiming": [],
+        "startTime": 0,
+        "transferSize": 184397,
+        "type": "navigate",
+        "unloadEventEnd": 0,
+        "unloadEventStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerFinalSourceType": "",
+        "workerMatchedSourceType": "",
+        "workerRouterEvaluationStart": 0,
+        "workerStart": 0
+      }
+    }
+  ],
+  "public_settle_seconds": 3,
+  "runtime": "154.0.4258.48",
+  "site": "bloomberg",
+  "tabs": 1
+}

@@ -1,0 +1,4058 @@
+[
+  {
+    "run": "final-coverage",
+    "site": "coverage",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 145.73274999999998,
+    "sampledPeakPrivateMiB": 184.15234375,
+    "sampledCpuSeconds": 2.484375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Coverage fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-csp",
+    "site": "csp",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 49.091,
+    "sampledPeakPrivateMiB": 164.91796875,
+    "sampledCpuSeconds": 2.203125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Strict CSP fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-off-10",
+    "site": "fixture",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 10,
+    "pageLoadMs": 397.16425000000004,
+    "sampledPeakPrivateMiB": 491.90625,
+    "sampledCpuSeconds": 9.78125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-off-30",
+    "site": "fixture",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 30,
+    "pageLoadMs": 341.16185,
+    "sampledPeakPrivateMiB": 1214.44921875,
+    "sampledCpuSeconds": 24.96875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-on-1",
+    "site": "fixture",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 720.5496999999999,
+    "sampledPeakPrivateMiB": 179.66015625,
+    "sampledCpuSeconds": 2.84375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 100,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 100,
+        "max_ns": 41200,
+        "p50_ns": 7000,
+        "p95_ns": 31300,
+        "p99_ns": 37600
+      },
+      "blocked": {
+        "count": 100,
+        "max_ns": 60500,
+        "p50_ns": 6300,
+        "p95_ns": 35200,
+        "p99_ns": 54600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 200,
+      "max_ns": 42300,
+      "p50_ns": 5200,
+      "p95_ns": 25500,
+      "p99_ns": 29900
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 200,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "cffa2fe275d79c27920bf1b50da92be1994a24b1",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-on-10",
+    "site": "fixture",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 10,
+    "pageLoadMs": 301.13375,
+    "sampledPeakPrivateMiB": 488.875,
+    "sampledCpuSeconds": 10.0,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 1000,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 1000,
+        "max_ns": 85600,
+        "p50_ns": 7700,
+        "p95_ns": 34700,
+        "p99_ns": 56500
+      },
+      "blocked": {
+        "count": 1000,
+        "max_ns": 708000,
+        "p50_ns": 6700,
+        "p95_ns": 33800,
+        "p99_ns": 50600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 2000,
+      "max_ns": 691100,
+      "p50_ns": 5700,
+      "p95_ns": 26900,
+      "p99_ns": 42900
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 2000,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-on-30",
+    "site": "fixture",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 30,
+    "pageLoadMs": 320.32345,
+    "sampledPeakPrivateMiB": 1177.2109375,
+    "sampledCpuSeconds": 26.296875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 3000,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 3000,
+        "max_ns": 145400,
+        "p50_ns": 8600,
+        "p95_ns": 36600,
+        "p99_ns": 52500
+      },
+      "blocked": {
+        "count": 3000,
+        "max_ns": 240600,
+        "p50_ns": 7300,
+        "p95_ns": 35100,
+        "p99_ns": 48700
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 6000,
+      "max_ns": 180200,
+      "p50_ns": 6200,
+      "p95_ns": 27700,
+      "p99_ns": 38600
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 6000,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-paused-10",
+    "site": "fixture",
+    "mode": "paused",
+    "counting": "on",
+    "tabs": 10,
+    "pageLoadMs": 506.5707,
+    "sampledPeakPrivateMiB": 521.02734375,
+    "sampledCpuSeconds": 11.53125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 2000,
+        "max_ns": 1400,
+        "p50_ns": 100,
+        "p95_ns": 200,
+        "p99_ns": 300
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "final-fixture-paused-30",
+    "site": "fixture",
+    "mode": "paused",
+    "counting": "on",
+    "tabs": 30,
+    "pageLoadMs": 423.54245,
+    "sampledPeakPrivateMiB": 1232.16796875,
+    "sampledCpuSeconds": 29.609375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 6000,
+        "max_ns": 1500,
+        "p50_ns": 100,
+        "p95_ns": 100,
+        "p99_ns": 300
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "3d31174b76fcf29ccd0efa9866ce24bbe61500ad",
+    "binarySha256": "D83D2886DBD3269610CDC2AD4519A9AC01DB95AD098A63B98E12F01677ABC523"
+  },
+  {
+    "run": "idle-protected-counted",
+    "site": "clean",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 10,
+    "pageLoadMs": 211.47585,
+    "sampledPeakPrivateMiB": 487.703125,
+    "sampledCpuSeconds": 8.546875,
+    "retainedIdlePrivateMiB": 429.59765625,
+    "idleCpuSeconds": 1.25,
+    "idleWallSeconds": 299.5999863,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 1000,
+        "max_ns": 366300,
+        "p50_ns": 7700,
+        "p95_ns": 38100,
+        "p99_ns": 58200
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 1000,
+      "max_ns": 354400,
+      "p50_ns": 6100,
+      "p95_ns": 29900,
+      "p99_ns": 38900
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 1000,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "idle-protected-uncounted",
+    "site": "clean",
+    "mode": "on",
+    "counting": "off",
+    "tabs": 10,
+    "pageLoadMs": 222.45260000000002,
+    "sampledPeakPrivateMiB": 478.59375,
+    "sampledCpuSeconds": 9.15625,
+    "retainedIdlePrivateMiB": 426.126953125,
+    "idleCpuSeconds": 1.53125,
+    "idleWallSeconds": 297.87526469999995,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 1000,
+        "max_ns": 84900,
+        "p50_ns": 7300,
+        "p95_ns": 36800,
+        "p99_ns": 43000
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 1000,
+      "max_ns": 73500,
+      "p50_ns": 5700,
+      "p95_ns": 28800,
+      "p99_ns": 32300
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 1000,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "idle-unprotected",
+    "site": "clean",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 10,
+    "pageLoadMs": 187.43234999999999,
+    "sampledPeakPrivateMiB": 463.9453125,
+    "sampledCpuSeconds": 7.515625,
+    "retainedIdlePrivateMiB": 423.52734375,
+    "idleCpuSeconds": 1.03125,
+    "idleWallSeconds": 299.1134903,
+    "blocks": 0,
+    "title": [
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture",
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-off-1",
+    "site": "bloomberg",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 5887.214300000001,
+    "sampledPeakPrivateMiB": 973.1875,
+    "sampledCpuSeconds": 16.3125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-off-2",
+    "site": "bloomberg",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 6167.1726,
+    "sampledPeakPrivateMiB": 978.7578125,
+    "sampledCpuSeconds": 15.8125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-off-3",
+    "site": "bloomberg",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 6488.365400000001,
+    "sampledPeakPrivateMiB": 971.57421875,
+    "sampledCpuSeconds": 16.5,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-on-1",
+    "site": "bloomberg",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 8162.1849,
+    "sampledPeakPrivateMiB": 1028.2734375,
+    "sampledCpuSeconds": 17.421875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 20,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 387,
+        "max_ns": 373200,
+        "p50_ns": 42000,
+        "p95_ns": 105200,
+        "p99_ns": 154800
+      },
+      "blocked": {
+        "count": 20,
+        "max_ns": 122800,
+        "p50_ns": 41500,
+        "p95_ns": 90300,
+        "p99_ns": 122800
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 407,
+      "max_ns": 370000,
+      "p50_ns": 35400,
+      "p95_ns": 88600,
+      "p99_ns": 139800
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 407,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-on-2",
+    "site": "bloomberg",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 5839.339800000001,
+    "sampledPeakPrivateMiB": 969.0234375,
+    "sampledCpuSeconds": 17.109375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 17,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 386,
+        "max_ns": 1197700,
+        "p50_ns": 33600,
+        "p95_ns": 103300,
+        "p99_ns": 162700
+      },
+      "blocked": {
+        "count": 17,
+        "max_ns": 76100,
+        "p50_ns": 35200,
+        "p95_ns": 76100,
+        "p99_ns": 76100
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 403,
+      "max_ns": 1189400,
+      "p50_ns": 27600,
+      "p95_ns": 81300,
+      "p99_ns": 138400
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 403,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-bloomberg-on-3",
+    "site": "bloomberg",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 6124.1551,
+    "sampledPeakPrivateMiB": 976.0546875,
+    "sampledCpuSeconds": 16.28125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 16,
+    "title": [
+      "Bloomberg Europe"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 387,
+        "max_ns": 176300,
+        "p50_ns": 31800,
+        "p95_ns": 104000,
+        "p99_ns": 153100
+      },
+      "blocked": {
+        "count": 16,
+        "max_ns": 109600,
+        "p50_ns": 33100,
+        "p95_ns": 109600,
+        "p99_ns": 109600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 403,
+      "max_ns": 148200,
+      "p50_ns": 26500,
+      "p95_ns": 86200,
+      "p99_ns": 132100
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 403,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-off-1",
+    "site": "clean",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 628.1308,
+    "sampledPeakPrivateMiB": 173.0546875,
+    "sampledCpuSeconds": 2.484375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-off-2",
+    "site": "clean",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 414.31269999999995,
+    "sampledPeakPrivateMiB": 170.76953125,
+    "sampledCpuSeconds": 2.390625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-off-3",
+    "site": "clean",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 387.1603,
+    "sampledPeakPrivateMiB": 171.43359375,
+    "sampledCpuSeconds": 2.59375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-on-1",
+    "site": "clean",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 596.1681,
+    "sampledPeakPrivateMiB": 172.59765625,
+    "sampledCpuSeconds": 2.40625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 100,
+        "max_ns": 180200,
+        "p50_ns": 7900,
+        "p95_ns": 72300,
+        "p99_ns": 108100
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 100,
+      "max_ns": 173300,
+      "p50_ns": 6200,
+      "p95_ns": 41000,
+      "p99_ns": 82100
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 100,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-on-2",
+    "site": "clean",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 559.8416000000001,
+    "sampledPeakPrivateMiB": 174.01171875,
+    "sampledCpuSeconds": 2.40625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 100,
+        "max_ns": 151000,
+        "p50_ns": 17400,
+        "p95_ns": 53900,
+        "p99_ns": 81300
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 100,
+      "max_ns": 117400,
+      "p50_ns": 13000,
+      "p95_ns": 35800,
+      "p99_ns": 68100
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 100,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-clean-on-3",
+    "site": "clean",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 418.6009,
+    "sampledPeakPrivateMiB": 174.07421875,
+    "sampledCpuSeconds": 2.578125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Protection fixture"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 100,
+        "max_ns": 92800,
+        "p50_ns": 7500,
+        "p95_ns": 29100,
+        "p99_ns": 56200
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 100,
+      "max_ns": 70000,
+      "p50_ns": 5900,
+      "p95_ns": 23100,
+      "p99_ns": 38300
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 100,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-off-1",
+    "site": "github",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 2353.5857,
+    "sampledPeakPrivateMiB": 406.625,
+    "sampledCpuSeconds": 6.71875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-off-2",
+    "site": "github",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1908.968,
+    "sampledPeakPrivateMiB": 417.76953125,
+    "sampledCpuSeconds": 6.734375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-off-3",
+    "site": "github",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1858.933,
+    "sampledPeakPrivateMiB": 425.6171875,
+    "sampledCpuSeconds": 6.609375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-on-1",
+    "site": "github",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 2437.774,
+    "sampledPeakPrivateMiB": 521.27734375,
+    "sampledCpuSeconds": 7.421875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 3,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 174,
+        "max_ns": 155500,
+        "p50_ns": 19800,
+        "p95_ns": 63500,
+        "p99_ns": 105500
+      },
+      "blocked": {
+        "count": 3,
+        "max_ns": 78100,
+        "p50_ns": 47000,
+        "p95_ns": 78100,
+        "p99_ns": 78100
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 177,
+      "max_ns": 124700,
+      "p50_ns": 16600,
+      "p95_ns": 56300,
+      "p99_ns": 87800
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 177,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-on-2",
+    "site": "github",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 2364.7234,
+    "sampledPeakPrivateMiB": 417.37109375,
+    "sampledCpuSeconds": 6.609375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 3,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 174,
+        "max_ns": 394900,
+        "p50_ns": 19800,
+        "p95_ns": 58900,
+        "p99_ns": 262100
+      },
+      "blocked": {
+        "count": 3,
+        "max_ns": 115800,
+        "p50_ns": 76600,
+        "p95_ns": 115800,
+        "p99_ns": 115800
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 177,
+      "max_ns": 352200,
+      "p50_ns": 16400,
+      "p95_ns": 51400,
+      "p99_ns": 237500
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 177,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-github-on-3",
+    "site": "github",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1753.6057999999998,
+    "sampledPeakPrivateMiB": 450.98828125,
+    "sampledCpuSeconds": 6.875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 3,
+    "title": [
+      "GitHub - rust-lang/rust: Empowering everyone to build reliable and efficient software. · GitHub"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 174,
+        "max_ns": 125400,
+        "p50_ns": 21500,
+        "p95_ns": 73600,
+        "p99_ns": 105300
+      },
+      "blocked": {
+        "count": 3,
+        "max_ns": 79000,
+        "p50_ns": 66500,
+        "p95_ns": 79000,
+        "p99_ns": 79000
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 177,
+      "max_ns": 103100,
+      "p50_ns": 17500,
+      "p95_ns": 65800,
+      "p99_ns": 85700
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 177,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-off-1",
+    "site": "google",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1572.2014,
+    "sampledPeakPrivateMiB": 274.578125,
+    "sampledCpuSeconds": 4.21875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "https://www.google.com/search"
+    ],
+    "responseStatus": [
+      429
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-off-2",
+    "site": "google",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1492.4714,
+    "sampledPeakPrivateMiB": 279.6015625,
+    "sampledCpuSeconds": 4.46875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "https://www.google.com/search"
+    ],
+    "responseStatus": [
+      429
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-off-3",
+    "site": "google",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1146.248,
+    "sampledPeakPrivateMiB": 224.7734375,
+    "sampledCpuSeconds": 3.578125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "rust programming - Google Search"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-on-1",
+    "site": "google",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1650.5665000000001,
+    "sampledPeakPrivateMiB": 276.078125,
+    "sampledCpuSeconds": 4.28125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "https://www.google.com/search"
+    ],
+    "responseStatus": [
+      429
+    ],
+    "callback": {
+      "allowed": {
+        "count": 8,
+        "max_ns": 100800,
+        "p50_ns": 56600,
+        "p95_ns": 100800,
+        "p99_ns": 100800
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 8,
+      "max_ns": 82200,
+      "p50_ns": 48500,
+      "p95_ns": 82200,
+      "p99_ns": 82200
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 8,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-on-2",
+    "site": "google",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1435.8972999999999,
+    "sampledPeakPrivateMiB": 274.8125,
+    "sampledCpuSeconds": 4.359375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "https://www.google.com/search"
+    ],
+    "responseStatus": [
+      429
+    ],
+    "callback": {
+      "allowed": {
+        "count": 8,
+        "max_ns": 96900,
+        "p50_ns": 64000,
+        "p95_ns": 96900,
+        "p99_ns": 96900
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 8,
+      "max_ns": 83400,
+      "p50_ns": 49000,
+      "p95_ns": 83400,
+      "p99_ns": 83400
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 8,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-google-on-3",
+    "site": "google",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1109.3379,
+    "sampledPeakPrivateMiB": 224.62109375,
+    "sampledCpuSeconds": 3.828125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 7,
+    "title": [
+      "rust programming - Google Search"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 13,
+        "max_ns": 260500,
+        "p50_ns": 52900,
+        "p95_ns": 260500,
+        "p99_ns": 260500
+      },
+      "blocked": {
+        "count": 7,
+        "max_ns": 84800,
+        "p50_ns": 61900,
+        "p95_ns": 84800,
+        "p99_ns": 84800
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 20,
+      "max_ns": 203700,
+      "p50_ns": 46300,
+      "p95_ns": 161700,
+      "p99_ns": 203700
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 20,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-off-1",
+    "site": "news",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1017.0207,
+    "sampledPeakPrivateMiB": 230.84765625,
+    "sampledCpuSeconds": 3.84375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-off-2",
+    "site": "news",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 813.1291,
+    "sampledPeakPrivateMiB": 232.4765625,
+    "sampledCpuSeconds": 4.09375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-off-3",
+    "site": "news",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 862.0301999999999,
+    "sampledPeakPrivateMiB": 238.87890625,
+    "sampledCpuSeconds": 3.84375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-on-1",
+    "site": "news",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 801.4013,
+    "sampledPeakPrivateMiB": 235.1640625,
+    "sampledCpuSeconds": 3.90625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 11,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 66,
+        "max_ns": 380000,
+        "p50_ns": 45000,
+        "p95_ns": 115400,
+        "p99_ns": 380000
+      },
+      "blocked": {
+        "count": 11,
+        "max_ns": 110600,
+        "p50_ns": 36000,
+        "p95_ns": 110600,
+        "p99_ns": 110600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 77,
+      "max_ns": 298100,
+      "p50_ns": 35100,
+      "p95_ns": 104000,
+      "p99_ns": 298100
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 77,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-on-2",
+    "site": "news",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 791.4596,
+    "sampledPeakPrivateMiB": 233.4140625,
+    "sampledCpuSeconds": 3.859375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 11,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 66,
+        "max_ns": 125600,
+        "p50_ns": 45200,
+        "p95_ns": 87800,
+        "p99_ns": 125600
+      },
+      "blocked": {
+        "count": 11,
+        "max_ns": 116400,
+        "p50_ns": 34400,
+        "p95_ns": 116400,
+        "p99_ns": 116400
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 77,
+      "max_ns": 99900,
+      "p50_ns": 32800,
+      "p95_ns": 88800,
+      "p99_ns": 99900
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 77,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-news-on-3",
+    "site": "news",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 745.8652999999999,
+    "sampledPeakPrivateMiB": 234.80859375,
+    "sampledCpuSeconds": 3.765625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 11,
+    "title": [
+      "Google defeats US justice department bid to force ad tech sale | Google | The Guardian"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 67,
+        "max_ns": 162900,
+        "p50_ns": 45800,
+        "p95_ns": 107300,
+        "p99_ns": 162900
+      },
+      "blocked": {
+        "count": 11,
+        "max_ns": 63000,
+        "p50_ns": 32200,
+        "p95_ns": 63000,
+        "p99_ns": 63000
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 78,
+      "max_ns": 138100,
+      "p50_ns": 35700,
+      "p95_ns": 88300,
+      "p99_ns": 138100
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 78,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-nocount-1",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "off",
+    "tabs": 1,
+    "pageLoadMs": 995.2986999999999,
+    "sampledPeakPrivateMiB": 194.1171875,
+    "sampledCpuSeconds": 2.6875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Your privacy choices"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 9,
+        "max_ns": 173700,
+        "p50_ns": 63100,
+        "p95_ns": 173700,
+        "p99_ns": 173700
+      },
+      "blocked": {
+        "count": 3,
+        "max_ns": 87900,
+        "p50_ns": 38100,
+        "p95_ns": 87900,
+        "p99_ns": 87900
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 12,
+      "max_ns": 164800,
+      "p50_ns": 48300,
+      "p95_ns": 164800,
+      "p99_ns": 164800
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 12,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-nocount-2",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "off",
+    "tabs": 1,
+    "pageLoadMs": 1068.5219,
+    "sampledPeakPrivateMiB": 350.47265625,
+    "sampledCpuSeconds": 7.625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 201,
+        "max_ns": 149800,
+        "p50_ns": 49400,
+        "p95_ns": 80700,
+        "p99_ns": 124500
+      },
+      "blocked": {
+        "count": 16,
+        "max_ns": 136600,
+        "p50_ns": 63700,
+        "p95_ns": 136600,
+        "p99_ns": 136600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 217,
+      "max_ns": 129500,
+      "p50_ns": 42600,
+      "p95_ns": 73400,
+      "p99_ns": 114800
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 217,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-nocount-3",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "off",
+    "tabs": 1,
+    "pageLoadMs": 1029.3282,
+    "sampledPeakPrivateMiB": 353.17578125,
+    "sampledCpuSeconds": 7.5,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 202,
+        "max_ns": 268600,
+        "p50_ns": 47600,
+        "p95_ns": 82700,
+        "p99_ns": 168600
+      },
+      "blocked": {
+        "count": 15,
+        "max_ns": 125200,
+        "p50_ns": 65600,
+        "p95_ns": 125200,
+        "p99_ns": 125200
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 217,
+      "max_ns": 228200,
+      "p50_ns": 39500,
+      "p95_ns": 76000,
+      "p99_ns": 153700
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 217,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-off-1",
+    "site": "yahoo",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1263.6239,
+    "sampledPeakPrivateMiB": 356.1015625,
+    "sampledCpuSeconds": 7.828125,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-off-2",
+    "site": "yahoo",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1075.7298,
+    "sampledPeakPrivateMiB": 348.73046875,
+    "sampledCpuSeconds": 7.59375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-off-3",
+    "site": "yahoo",
+    "mode": "off",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1380.3186,
+    "sampledPeakPrivateMiB": 348.0546875,
+    "sampledCpuSeconds": 8.046875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 0,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "blocked": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 0,
+      "max_ns": null,
+      "p50_ns": null,
+      "p95_ns": null,
+      "p99_ns": null
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 0,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-on-1",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 993.7334,
+    "sampledPeakPrivateMiB": 364.9375,
+    "sampledCpuSeconds": 7.484375,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 14,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 203,
+        "max_ns": 156800,
+        "p50_ns": 51000,
+        "p95_ns": 119200,
+        "p99_ns": 150800
+      },
+      "blocked": {
+        "count": 14,
+        "max_ns": 166100,
+        "p50_ns": 63000,
+        "p95_ns": 166100,
+        "p99_ns": 166100
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 217,
+      "max_ns": 148100,
+      "p50_ns": 43800,
+      "p95_ns": 107800,
+      "p99_ns": 132600
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 217,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-on-2",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1064.5985,
+    "sampledPeakPrivateMiB": 351.46484375,
+    "sampledCpuSeconds": 7.265625,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 14,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 202,
+        "max_ns": 138400,
+        "p50_ns": 46800,
+        "p95_ns": 88200,
+        "p99_ns": 131300
+      },
+      "blocked": {
+        "count": 14,
+        "max_ns": 125400,
+        "p50_ns": 67200,
+        "p95_ns": 125400,
+        "p99_ns": 125400
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 216,
+      "max_ns": 126000,
+      "p50_ns": 41000,
+      "p95_ns": 85200,
+      "p99_ns": 119300
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 216,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  },
+  {
+    "run": "settled-yahoo-on-3",
+    "site": "yahoo",
+    "mode": "on",
+    "counting": "on",
+    "tabs": 1,
+    "pageLoadMs": 1025.7282,
+    "sampledPeakPrivateMiB": 364.90625,
+    "sampledCpuSeconds": 7.875,
+    "retainedIdlePrivateMiB": null,
+    "idleCpuSeconds": null,
+    "idleWallSeconds": null,
+    "blocks": 14,
+    "title": [
+      "Yahoo | Mail, Weather, Search, Politics, News, Finance, Sports & Videos"
+    ],
+    "responseStatus": [
+      200
+    ],
+    "callback": {
+      "allowed": {
+        "count": 201,
+        "max_ns": 245100,
+        "p50_ns": 49800,
+        "p95_ns": 106600,
+        "p99_ns": 189700
+      },
+      "blocked": {
+        "count": 14,
+        "max_ns": 119600,
+        "p50_ns": 69100,
+        "p95_ns": 119600,
+        "p99_ns": 119600
+      },
+      "native_fail_open": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "paused": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      },
+      "response_failed": {
+        "count": 0,
+        "max_ns": null,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null
+      }
+    },
+    "matcher": {
+      "count": 215,
+      "max_ns": 226400,
+      "p50_ns": 42100,
+      "p95_ns": 86800,
+      "p99_ns": 148500
+    },
+    "diagnostics": {
+      "attribution_unavailable": 0,
+      "budget_exhausted": 0,
+      "decisions": 215,
+      "errors": 0,
+      "unavailable": 0,
+      "unprepared": 0
+    },
+    "sourceRevision": "1751e2857e9611dfcbceda9e51de63be82c97694",
+    "binarySha256": "F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334"
+  }
+]
