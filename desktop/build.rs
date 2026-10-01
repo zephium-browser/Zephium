@@ -162,7 +162,11 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
+            // The override is supplied for the current build target. A Windows
+            // measurement identity does not rename the Linux desktop package;
+            // the repository Linux identity was validated independently above.
             if matches!(target, Target::Linux)
+                && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
                 && !rendering_probe
                 && !resource_ui_qa
                 && !file_workflows_qa

@@ -340,3 +340,149 @@ on this machine; that warning did not prevent browsing or the interaction tests.
    Windows runtimes/hardware and the installer separately.
 
 No default-on shipping decision or merge is made by this branch.
+
+## Windows efficiency follow-up (2026-10-01)
+
+This pass audits the complete Windows product's startup, residency, background
+maintenance and fixed page scripts. It retains the shared frontend and the
+existing discard grace periods and safety vetoes.
+
+Changes:
+
+- Windows keeps the already-hardened utility panel on `about:blank` until the
+  first actual panel request. The latest Rust-owned route and profile survive
+  loading, and the existing `panel_ready` barrier still precedes native reveal.
+  The native panel/environment is still created at startup; this defers its
+  application document, not its entire process group.
+- The discard observer holds weak references to shadow roots instead of keeping
+  detached component trees alive. Collected slots are compacted only when
+  admission needs capacity. Live closed shadow roots remain inspected; missing
+  APIs, overflow, dirty forms, media/capture and uncertain state veto discard.
+- Discard probes traverse at most 4,097 elements to accept a maximum 4,096-element
+  snapshot. Oversized pages are refused immediately. They no longer allocate a
+  whole-document `querySelectorAll('*')` result or repeatedly traverse each
+  shadow tree for every fixed safety selector.
+- Bare global `addEventListener('beforeunload', ...)` and corresponding removal
+  are tracked correctly. The previous strict wrapper missed an undefined
+  receiver even though the browser accepted the registration on Window.
+- Cosmetic discovery coalesces queued descendants covered by a queued subtree.
+  Mutations arriving during a partial walk remain independently queued, and
+  the per-node token-matching closure is eliminated. Existing 2 ms/200-element
+  slices, hidden-document pause and 2,048-selector cap remain in place.
+- Windows suspension completion checks the native view generation. Closing and
+  recreating an item cannot let the previous callback settle its replacement.
+  Revealing a view retains its in-flight admission slot until completion, so
+  quick show/hide transitions cannot issue overlapping suspend requests.
+- One diagnostic records Rust application entry to initialized main-document
+  reveal. It is not an OS cold-launch, first content paint or page-ready metric.
+- `tauri.performance.windows.conf.json` provides an isolated identity for the
+  normal release graph, with no QA features or runtime automation bridge.
+  Build validation now applies Linux override identity rules only on a Linux
+  build; repository Linux identity validation and QA release exclusions remain.
+
+Audit observations: restored tabs are already lazy; resident views already use
+soft/pressure/absolute limits of 12/24/32, dormant admission has a five-minute
+idle threshold, and exact safety probes precede discard. The app maintenance
+interval is 60 seconds. The style worker blocks on its bounded queue, the
+blocker reuses application maintenance instead of adding an idle timer, and
+Windows download progress polling stops once active work drains. This pass does
+not shorten grace periods or change those policies without workload evidence.
+
+Reproduction (from repository root, with the pinned Node/pnpm tools and installed
+Playwright browser path available):
+
+```powershell
+pnpm -C desktop exec tauri build --no-bundle --config tauri.performance.windows.conf.json
+node scripts/qualification/windows-dom-performance.cjs de3cb3c3 target/dom-before.json
+$env:ZEPHIUM_EXPECT_OPTIMIZED = '1'
+node scripts/qualification/windows-dom-performance.cjs working-tree target/dom-after.json
+./scripts/qualification/windows-browser-resources.ps1 -RootProcessId <isolated-app-pid> -Seconds 60 -OutputDirectory target/unique-run
+```
+
+The renderer fixture uses an independent Playwright Chromium, not the product.
+It checks actual production script bytes, detached-root collection, live closed
+shadow forms, unbound and removed unload handlers, large-page refusal, nested
+mutation coalescing and changes during partial scans. Explicit GC is confined
+to this test browser; collection timing is never product policy. Native WebView2
+also passed the discard checks and existing hiding/picker checks on the strict
+CSP fixture, with no page-to-host bridge. Fixture step counts are deterministic
+work evidence, not whole-browser speedup percentages.
+
+### Measured results and release limits
+
+Evidence is retained in [qa/windows-efficiency](qa/windows-efficiency/).
+The baseline production sources are de3cb3c3; the final script hashes are in the
+fixture JSON. Measurements ran on the i3-1115G4 (2 cores / 4 logical processors),
+about 12 GB RAM, Windows 11 build 26200, Balanced power plan. No compiler was
+running during the final samples.
+
+| Targeted renderer fixture | Before | After |
+| --- | ---: | ---: |
+| Detached closed shadow roots retained after explicit test GC (20 removed) | 20 | 0 |
+| 100,000-element safety probe, median of 15 calls | 16.6 ms | 0.4 ms |
+| Whole-document selector results allocated across those calls | 1,500,060 | 0 |
+| Bounded TreeWalker steps across those calls | 0 | 61,455 |
+| Nested cosmetic mutation traversal steps | 12,352 | 160 |
+| Bare beforeunload listener correctly vetoes discard | No | Yes |
+
+These use standalone Chromium 153.0.8010.12 and exact production scripts, not
+WebView2 app timings. Both versions refuse oversized documents. Live closed
+shadow forms still veto discard after GC. All 11 behavior cases and hiding
+updates during partial walks passed. Timing samples are one fixture run;
+operation counts and retention are the stronger evidence.
+
+| Full release process family, minimized new tab | Before | After |
+| --- | ---: | ---: |
+| Median private committed memory | 367.22 MiB | 351.64 MiB |
+| Peak private committed memory | 391.78 MiB | 375.30 MiB |
+| Sampled CPU time | 0.3125 s | 0.6875 s |
+| Measured interval | 58.79 s | 59.25 s |
+| Process count at end | 13 | 13 |
+
+One matched pair used the same isolated profile, default sidebar, unused panel,
+no network page, and a minimized window. The approximately 15.58 MiB reduction
+is an observation, not a statistical bound or a general RAM claim. CPU did not
+improve in this sample. There is no energy/wakeup result. Earlier unmatched
+foreground/occluded runs and the initial sampler run with a process timestamp
+precision bug are excluded. The sampler now compares process creation timestamps
+at CIM's microsecond precision, retaining the PID-reuse check.
+
+Normal release artifacts (no QA features):
+
+- Before: target/windows-performance-baseline/Zephium Performance.exe,
+  SHA256 1153B74DBBE003EF5D3F24A9CAEB5CDE1EA6E0E93CAF76A6EAF2E2BCFC934AAA.
+  Includes only the build-validation change needed to give Windows its isolated
+  measurement identity; runtime sources predate this efficiency pass.
+- After: target/windows-performance-after/Zephium Performance.exe,
+  SHA256 EEBF3861A7D1FF8D4633C5A013223BD254F923E20517B9F70E90D92460CFA33A.
+- Rust-entry to initialized main-window show was 2,556 ms and 2,276 ms on two
+  observed launches. No comparable baseline marker exists. This does not establish
+  cold-start improvement, instant startup, or time to first paint.
+
+Validation: 112 desktop and 211 engine unit tests passed (two ignored native
+qualifications); the strict-CSP native WebView2 qualification passed separately
+on runtime 154.0.4258.48, including the new discard checks and existing hiding /
+picker checks. Four SelectiveStyles component tests passed. Engine all-target
+Clippy with warnings denied passed apart from the existing dependency warnings.
+The normal release build succeeded. Native UI checks covered first panel use,
+reopening, Escape dismissal and the docked Notes surface. No shared frontend
+product source was changed.
+
+An initial baseline shutdown while test compilation was active failed the
+existing two-second privileged-environment exit proof and correctly quarantined
+its temporary generation. The next baseline shutdown and both updated-release
+shutdowns (panel used and never used) completed without this warning. This is
+not a demonstrated fix for shutdown under contention; stress qualification is
+still needed. No exit-proof or quarantine safeguard was weakened.
+
+Release sign-off remains separate: repeated foreground and ten-tab mixed-site
+measurements, restored-session cold/warm startup, ETW wakeups/energy, low-memory
+pressure, and suspend/resume stress still need qualification. The previously
+reported network-coverage gaps and mixed public-site protection results remain;
+this pass does not establish the original all-sites CPU/RAM/page-load targets.
+
+The optimized-debug QA app was rebuilt with the adblock-qa feature and isolated
+app.zephium.protection-qa identity. Artifact:
+target/protection-qa/Zephium Protection QA.exe, SHA256
+CFFACDEB4999A54DD8C8E592424A89A75D8AEBF7AB492AD4C99807C4C51C332F.
+It is a separate QA build, not a distributable release artifact.

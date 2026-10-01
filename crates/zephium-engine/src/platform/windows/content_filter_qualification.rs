@@ -389,6 +389,16 @@ fn native_protection_qualification() {
                 event.set(matches!(phase, wry::PageLoadEvent::Finished).then(Instant::now));
             });
         if site == "csp" {
+            // Exercise the exact fixed production bootstrap in a native CSP
+            // document, without introducing a page-to-host bridge.
+            let discard = include_str!("../../host/scripts.rs")
+                .split_once("const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#\"")
+                .unwrap()
+                .1
+                .split_once("\"#;")
+                .unwrap()
+                .0;
+            builder = builder.with_initialization_script_for_main_only(discard, true);
             builder = builder.with_initialization_script_for_main_only(
                 include_str!("../../host/content_style.js"),
                 true,
@@ -488,6 +498,33 @@ fn native_protection_qualification() {
             assert_eq!(evaluate(&view, "globalThis.adExecuted || 0"), ads);
         }
         if site == "csp" {
+            assert_eq!(
+                evaluate(
+                    &view,
+                    r#"(() => {
+                const report = globalThis.__zephium_discard_safety_v1__;
+                if (report() !== 1) return 'clean document rejected';
+                const listener = () => {};
+                addEventListener('beforeunload', listener);
+                if (!(report() & 2)) return 'bare unload handler missed';
+                removeEventListener('beforeunload', listener);
+                if (report() !== 1) return 'removed handler retained';
+                const host = document.createElement('div'); document.body.append(host);
+                const root = host.attachShadow({mode:'closed'});
+                const input = document.createElement('input'); root.append(input); input.value = 'unsaved';
+                if (!(report() & 4)) return 'closed shadow form missed';
+                input.value = '';
+                if (report() !== 1) return 'clean shadow form rejected';
+                const fragment = document.createDocumentFragment();
+                for (let i = 0; i < 25000; i++) fragment.append(document.createElement('span'));
+                host.append(fragment);
+                if (!(report() & 256)) return 'oversized document admitted';
+                host.remove();
+                return 'passed';
+            })()"#
+                ),
+                "passed"
+            );
             assert_eq!(
                 evaluate(
                     &view,

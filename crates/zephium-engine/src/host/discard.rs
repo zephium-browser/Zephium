@@ -12,6 +12,13 @@ use super::EngineHost;
 #[cfg(target_os = "windows")]
 const MAX_CONCURRENT_SUSPENDS: usize = 8;
 
+#[cfg(any(target_os = "windows", test))]
+fn suspend_result_matches(current: Option<&EventPermit>, requested: &EventPermit) -> bool {
+    current.is_some_and(|current| {
+        current.same_generation(requested) && current.active_token().is_some()
+    })
+}
+
 fn renderer_report_allows_discard(result: &str) -> bool {
     // Safe means the primitive mask contains only the ready bit. Reject every
     // alternate number/string/object representation without parsing.
@@ -190,7 +197,12 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "windows")]
-    fn on_suspend_result(&mut self, id: ItemId, suspended: bool) {
+    fn on_suspend_result(&mut self, id: ItemId, permit: &EventPermit, suspended: bool) {
+        // A close/recreate can reuse the item id while the old COM callback
+        // remains in flight. It must not settle or resume the replacement.
+        if !suspend_result_matches(self.views.get(&id).map(|view| &view.event_permit), permit) {
+            return;
+        }
         self.suspending.remove(&id);
         if suspended && self.desired_dormant.contains(&id) && self.hidden.contains(&id) {
             self.dormant.insert(id);
@@ -227,8 +239,11 @@ impl EngineHost {
             };
             self.suspending.insert(id);
             let started = self.views.get(&id).is_some_and(|view| {
+                let permit = view.event_permit.clone();
                 crate::platform::imp::try_suspend(view, move |suspended| {
-                    with_suspend_result(id, move |host| host.on_suspend_result(id, suspended));
+                    with_suspend_result(id, move |host| {
+                        host.on_suspend_result(id, &permit, suspended)
+                    });
                 })
             });
             if !started {
@@ -253,6 +268,21 @@ mod tests {
 
     use super::super::scripts::DISCARD_SAFETY_BOOTSTRAP_JS;
     use super::*;
+
+    #[test]
+    fn suspend_completion_cannot_settle_a_closed_or_replaced_view() {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let token = Arc::new(AtomicBool::new(true));
+        let current = EventPermit::bound(&token);
+        let requested = current.clone();
+        assert!(suspend_result_matches(Some(&current), &requested));
+        assert!(!suspend_result_matches(None, &requested));
+        let replacement_token = Arc::new(AtomicBool::new(true));
+        let replacement = EventPermit::bound(&replacement_token);
+        assert!(!suspend_result_matches(Some(&replacement), &requested));
+        current.revoke();
+        assert!(!suspend_result_matches(Some(&current), &requested));
+    }
 
     #[test]
     fn discard_report_accepts_only_the_exact_safe_primitive_mask() {

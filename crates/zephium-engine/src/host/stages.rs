@@ -413,7 +413,9 @@ impl EngineHost {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
                     self.desired_dormant.remove(id);
-                    self.suspending.remove(id);
+                    // Keep the in-flight slot until its exact callback settles.
+                    // A rapid show/hide must not issue overlapping TrySuspend
+                    // operations against the same native view.
                     self.suspend_failed.remove(id);
                     let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
                 }

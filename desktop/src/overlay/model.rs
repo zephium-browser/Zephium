@@ -190,6 +190,28 @@ impl Model {
 mod tests {
     use super::*;
     #[test]
+    fn requests_before_document_ready_preserve_latest_intent_and_dismissal() {
+        let mut model = Model::default();
+        model.search();
+        model.tool(ToolKind::Notes);
+        assert!(!model.ready);
+        model.ready = true;
+        assert!(model.snapshot().visible);
+        assert!(matches!(
+            model.snapshot().route,
+            PanelRoute::Tool {
+                tool: ToolKind::Notes
+            }
+        ));
+
+        let mut dismissed = Model::default();
+        dismissed.search();
+        dismissed.hide();
+        dismissed.ready = true;
+        assert!(!dismissed.snapshot().visible);
+    }
+
+    #[test]
     fn search_and_tools_have_distinct_focus_policy() {
         let mut m = Model::default();
         m.search();

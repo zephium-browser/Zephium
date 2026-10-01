@@ -1,0 +1,87 @@
+{
+  "reference": "working-tree",
+  "browser": "153.0.8010.12",
+  "bootstrap_sha256": "a0f37e581a7bc4844cf27f1a708f92239302fd887f0f4bcf73d8311d99dff3d9",
+  "cosmetics_sha256": "c0f6c7802157a1b9a1dedde6145bd44f82a390f91a2f31ba13e19d8764135452",
+  "behavior": [
+    {
+      "kind": "clean",
+      "mask": 1
+    },
+    {
+      "kind": "dirty-form",
+      "mask": 5
+    },
+    {
+      "kind": "closed-shadow-dirty",
+      "mask": 5
+    },
+    {
+      "kind": "nested-shadow-dirty",
+      "mask": 5
+    },
+    {
+      "kind": "beforeunload",
+      "mask": 3
+    },
+    {
+      "kind": "removed-beforeunload",
+      "mask": 1
+    },
+    {
+      "kind": "explicit-beforeunload",
+      "mask": 3
+    },
+    {
+      "kind": "editable",
+      "mask": 9
+    },
+    {
+      "kind": "frame",
+      "mask": 129
+    },
+    {
+      "kind": "hook-replaced",
+      "mask": 257
+    },
+    {
+      "kind": "shadow-overflow",
+      "mask": 257
+    }
+  ],
+  "retention": {
+    "detached_roots_retained": 0,
+    "live_dirty_mask_after_gc": 5
+  },
+  "large": {
+    "nodes": 100000,
+    "samples_ms": [
+      2.0999999940395355,
+      0.4000000059604645,
+      0.29999998211860657,
+      1.300000011920929,
+      0.5999999940395355,
+      0.5999999940395355,
+      0.5,
+      1.2000000178813934,
+      0.29999998211860657,
+      0.10000002384185791,
+      0.29999998211860657,
+      0.20000001788139343,
+      0.5,
+      0.19999998807907104,
+      0.19999998807907104
+    ],
+    "mask": 256,
+    "selector_results": 0,
+    "walker_steps": 61455
+  },
+  "cosmetics": {
+    "admitted": true,
+    "steps": 160,
+    "callbacks": 1,
+    "hidden": true,
+    "late_hidden": true,
+    "during_walk_hidden": true
+  }
+}
