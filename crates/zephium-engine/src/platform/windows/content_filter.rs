@@ -1,6 +1,10 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "content_filter_qualification.rs"]
+mod qualification;
+
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2_22, COREWEBVIEW2_WEB_RESOURCE_CONTEXT,
     COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH,
@@ -44,7 +48,7 @@ const FILTER_SOURCE_KINDS: COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS =
 thread_local! {
     /// WebResourceRequested is delivered on the WebView's apartment thread.
     /// Reuse bounded UTF-8 capacity there, but never hold this borrow across
-    /// COM response creation because a native call may pump re-entrant work.
+    /// COM response installation because a native call may pump re-entrant work.
     static REQUEST_BUFFERS: RefCell<RequestBuffers> = RefCell::new(RequestBuffers::default());
 }
 
@@ -199,14 +203,30 @@ pub(crate) fn install_scoped_on_view(
     let core22 = core
         .cast::<ICoreWebView2_22>()
         .map_err(|_| ContentRuleApplyFailure::NativeInstallation)?;
-    let environment = view.environment();
     let callback_policy = policy.clone();
-    let callback_environment = environment.clone();
+    // Empty, immutable and stream-free: the same response can be installed on
+    // every blocked request in this apartment. Construct it transactionally
+    // before registering the cohort, rather than allocating a COM response and
+    // reparsing identical headers for every ad. No body stream can be consumed
+    // or rewound and no page/request data is retained by this object.
+    let blocked_response = unsafe {
+        view.environment().CreateWebResourceResponse(
+            None,
+            403,
+            windows_core::w!("Blocked"),
+            windows_core::w!("Cache-Control: no-store\r\nContent-Length: 0"),
+        )
+    }
+    .map_err(|_| ContentRuleApplyFailure::NativeInstallation)?;
     let paused = pause.signal();
     let statistics = pause.statistics().cloned();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
-        run_web_resource_callback_fail_open(|| {
+        #[cfg(test)]
+        let mut sample = qualification::CallbackSample::start();
+        let result = run_web_resource_callback_fail_open(|| {
             if paused.load(std::sync::atomic::Ordering::Relaxed) {
+                #[cfg(test)]
+                sample.outcome("paused");
                 return Ok(());
             }
             // Callback errors, missing optional native values, oversized page
@@ -217,28 +237,35 @@ pub(crate) fn install_scoped_on_view(
             let Some(args) = args else {
                 return Ok(());
             };
-            if decide_observed_request(&args, callback_policy.as_ref()) != NetworkDecision::Block {
-                return Ok(());
+            match decide_observed_request(&args, callback_policy.as_ref()) {
+                Some(NetworkDecision::Block) => {}
+                Some(NetworkDecision::Allow) => {
+                    #[cfg(test)]
+                    sample.outcome("allowed");
+                    return Ok(());
+                }
+                None => return Ok(()),
             }
             if paused.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
             }
-            let Ok(response) = (unsafe {
-                callback_environment.CreateWebResourceResponse(
-                    None,
-                    403,
-                    windows_core::w!("Blocked"),
-                    windows_core::w!("Cache-Control: no-store\r\nContent-Length: 0"),
-                )
-            }) else {
-                return Ok(());
-            };
-            crate::platform::content_pause::record_installed_block(
-                statistics.as_ref(),
-                unsafe { args.SetResponse(&response) }.is_ok(),
-            );
+            let installed = unsafe { args.SetResponse(&blocked_response) }.is_ok();
+            crate::platform::content_pause::record_installed_block(statistics.as_ref(), installed);
+            #[cfg(test)]
+            sample.outcome(if installed {
+                "blocked"
+            } else {
+                "response_failed"
+            });
             Ok(())
-        })
+        });
+        // The test-only guard covers all synchronous callback work, including
+        // extraction, matching, SetResponse, statistics and panic containment.
+        // Response creation now belongs to installation, outside the callback.
+        // No clocks or sample buffers are compiled into shipping callbacks.
+        #[cfg(test)]
+        sample.finish();
+        result
     }));
 
     let mut registration = ContentPolicyRegistration {
@@ -290,7 +317,7 @@ struct RequestBuffers {
 fn decide_observed_request(
     args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs,
     policy: &dyn NetworkRequestPolicy,
-) -> NetworkDecision {
+) -> Option<NetworkDecision> {
     REQUEST_BUFFERS
         .try_with(|buffers| {
             let mut buffers = buffers.try_borrow_mut().ok()?;
@@ -304,11 +331,15 @@ fn decide_observed_request(
                 // synchronous hot path.
                 NetworkRequestSourceKind::Document,
             )?;
-            Some(policy.decide(&request))
+            #[cfg(test)]
+            let started = std::time::Instant::now();
+            let decision = policy.decide(&request);
+            #[cfg(test)]
+            qualification::record_matcher(started.elapsed());
+            Some(decision)
         })
         .ok()
         .flatten()
-        .unwrap_or(NetworkDecision::Allow)
 }
 
 fn extract_request_into(

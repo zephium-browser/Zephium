@@ -3763,7 +3763,12 @@ fn download_preferences_are_validated_and_persist_only_in_registered_profiles() 
     let profile = ProfileId::from(1);
     let value = DownloadPreferences {
         ask_destination: false,
-        directory: Some("/tmp/download-fixtures".into()),
+        directory: Some(
+            std::env::temp_dir()
+                .join("download-fixtures")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         directory_identity: Some("0000000000000001:0000000000000002".into()),
     };
     assert!(matches!(

@@ -331,6 +331,15 @@ impl Stage {
         self.state.borrow().views.contains_key(&id)
     }
 
+    /// Desired visibility, including children awaiting their first paint. A
+    /// re-entrant layout borrow is uncertainty: keep the view awake until the
+    /// next settled layout rather than applying a background resource policy.
+    pub fn wants_visible(&self, id: ItemId) -> bool {
+        self.state
+            .try_borrow()
+            .map_or(true, |state| state.visible.contains(&id))
+    }
+
     /// A coalesced layout may run before a later-queued controller creation.
     /// The stage retains that desired tree so creation can attach and schedule
     /// the missing child at the already-authoritative geometry.
@@ -1198,6 +1207,24 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64) {
 #[cfg(test)]
 mod tests {
     use super::{placement_delta, AppliedPlacement, PlacementDelta};
+
+    #[test]
+    fn resource_visibility_keeps_pending_paint_and_uncertain_layouts_awake() {
+        let stage = super::Stage::new(super::HWND::default(), 8.0, |_, _| {});
+        let visible = super::ItemId::generate();
+        let background = super::ItemId::generate();
+        // Layout has selected the item but no controller has attached or
+        // announced first paint yet. Resource policy must not suspend it.
+        stage.state.borrow_mut().visible.insert(visible);
+        assert!(stage.wants_visible(visible));
+        assert!(!stage.wants_visible(background));
+        let layout = stage.state.borrow_mut();
+        assert!(stage.wants_visible(visible));
+        assert!(stage.wants_visible(background));
+        drop(layout);
+        stage.state.borrow_mut().visible.clear();
+        assert!(!stage.wants_visible(visible));
+    }
 
     #[test]
     fn identical_placement_emits_no_native_calls() {

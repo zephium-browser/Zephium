@@ -210,7 +210,7 @@ impl EngineHost {
     #[cfg(target_os = "windows")]
     fn pump_suspends(&mut self) {
         while self.suspending.len() < MAX_CONCURRENT_SUSPENDS {
-            let mut candidates: Vec<ItemId> = self
+            let candidate = self
                 .desired_dormant
                 .iter()
                 .filter(|id| {
@@ -219,9 +219,10 @@ impl EngineHost {
                         && !self.suspend_failed.contains(id)
                 })
                 .copied()
-                .collect();
-            candidates.sort();
-            let Some(id) = candidates.first().copied() else {
+                .min();
+            // Preserve deterministic admission without allocating and sorting
+            // every remaining tab for each slot (or synchronous rejection).
+            let Some(id) = candidate else {
                 break;
             };
             self.suspending.insert(id);

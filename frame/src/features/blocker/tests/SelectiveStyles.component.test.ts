@@ -1,4 +1,4 @@
-import { afterEach, expect, inject, test } from "vitest";
+import { afterEach, expect, inject, test, vi } from "vitest";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -21,8 +21,35 @@ type StyleApi = {
 };
 let frame: HTMLIFrameElement | undefined;
 afterEach(() => {
+  vi.restoreAllMocks();
   frame?.remove();
   frame = undefined;
+});
+
+test("exhausted generic budget stops discovery until a replacement policy arrives", async () => {
+  const { win, api, token, url, update, display } = await fixture();
+  const idle = vi.spyOn(win, "requestIdleCallback");
+  const index = JSON.stringify([
+    [".ad", Array.from({ length: 2049 }, (_, i) => `.ad[data-slot="${i}"]`)],
+  ]);
+  expect(api.subscription(token, url, "0000000000000001", "c".repeat(64), "", index, "[]")).toBe(
+    true,
+  );
+  const rules = () => [...win.document.adoptedStyleSheets].flatMap((s) => [...s.cssRules]).length;
+  await expect.poll(rules).toBe(2048);
+  const scheduled = idle.mock.calls.length;
+  const later = win.document.createElement("div");
+  later.className = "ad";
+  later.id = "late";
+  win.document.body.append(later);
+  await new Promise<void>((resolve) => {
+    win.requestAnimationFrame(() => win.requestAnimationFrame(() => resolve()));
+  });
+  expect(idle.mock.calls.length).toBe(scheduled);
+  expect(rules()).toBe(2048);
+  expect(update(2, true)).toBe(true);
+  await expect.poll(() => display("#late")).toBe("none");
+  expect(rules()).toBe(2);
 });
 
 async function fixture() {

@@ -39,7 +39,7 @@
   }
   function scheduleGeneric() {
     const state = generic;
-    if (!state || document.hidden || state.idle !== null || (!state.walker && !state.roots.size)) return;
+    if (!state || state.seen.size >= 2048 || document.hidden || state.idle !== null || (!state.walker && !state.roots.size)) return;
     const callback = deadline => {
       state.idle = null;
       if (generic !== state || document.hidden) return;
@@ -67,6 +67,13 @@
             if (state.seen.size >= 2048) return;
             state.seen.add(selector);
             try { state.sheet.insertRule(`${selector}{display:none!important}`, state.sheet.cssRules.length); } catch (_) {}
+            if (state.seen.size === 2048) {
+              // No further rule can be admitted in this document/policy. Stop
+              // observing rather than scanning every later mutation forever,
+              // and release the now-unused per-document lookup payload.
+              stopGeneric(); state.index.clear(); state.exceptions.clear();
+              return;
+            }
           }
         };
         if (node.id && node.id.length <= 4096) add(`#${node.id}`);
@@ -83,7 +90,7 @@
       : setTimeout(() => callback(null), 32);
   }
   function observeGeneric() {
-    if (!generic || document.hidden) return;
+    if (!generic || generic.seen.size >= 2048 || document.hidden) return;
     generic.observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["id", "class"] });
     if (document.documentElement) generic.roots.set(document.documentElement, true);
     scheduleGeneric();
