@@ -368,6 +368,8 @@ fn native_protection_qualification() {
     let mut pages = Vec::new();
     let coverage = Rc::new(RefCell::new(Vec::new()));
     let mut observers = Vec::new();
+    let public_page = !["fixture", "clean", "csp", "coverage"].contains(&site.as_str());
+    let settle = Duration::from_secs(if public_page { 3 } else { 0 });
     let construction = Instant::now();
     SAMPLES.with(|samples| {
         *samples.borrow_mut() = Some(Samples {
@@ -377,16 +379,14 @@ fn native_protection_qualification() {
         })
     });
     for _ in 0..tabs {
-        let loaded = Rc::new(Cell::new(false));
+        let loaded = Rc::new(Cell::new(None::<Instant>));
         let event = loaded.clone();
         let mut builder = WebViewBuilder::new_with_web_context(&mut context)
             .with_visible(true)
             .with_focused(false)
             .with_devtools(false)
             .with_on_page_load_handler(move |phase, _| {
-                if matches!(phase, wry::PageLoadEvent::Finished) {
-                    event.set(true);
-                }
+                event.set(matches!(phase, wry::PageLoadEvent::Finished).then(Instant::now));
             });
         if site == "csp" {
             builder = builder.with_initialization_script_for_main_only(
@@ -454,11 +454,14 @@ fn native_protection_qualification() {
             &policy
         };
         registrations.push(install_scoped_on_view(&view, selected, &pause).unwrap());
-        loaded.set(false);
+        loaded.set(None);
         let started = Instant::now();
         view.load_url(&url).unwrap();
-        until(|| loaded.get(), 90);
-        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        // Consent and client redirects can follow an initial completion. Use
+        // the last completed navigation after a bounded quiet interval, and
+        // exclude that deliberate settle wait from the page-load metric.
+        until(|| loaded.get().is_some_and(|at| at.elapsed() >= settle), 90);
+        let elapsed = loaded.get().unwrap().duration_since(started).as_secs_f64() * 1000.0;
         if site == "coverage" {
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline {
@@ -568,6 +571,7 @@ fn native_protection_qualification() {
         "PROTECTION_RESULT {}",
         json!({"mode":mode, "counting":counting, "site":site, "tabs":tabs, "runtime":runtime,
         "debug_assertions":cfg!(debug_assertions), "construction_and_load_seconds":elapsed,
+        "public_settle_seconds":settle.as_secs(),
         "callback":callbacks, "matcher":summary(samples.matcher), "dropped_samples":samples.dropped,
         "installed_blocks":count, "fixture_allowed_hits":fixture.allowed_hits.load(Ordering::Relaxed),
         "diagnostics":diagnostics, "coverage":*coverage.borrow(), "pages":pages})
@@ -596,6 +600,8 @@ fn native_protection_qualification() {
             );
         }
     }
+    println!("PROTECTION_IDLE_COMPLETE");
+    std::io::stdout().flush().unwrap();
     for registration in registrations {
         registration.retire().unwrap();
     }

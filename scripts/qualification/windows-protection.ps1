@@ -19,6 +19,7 @@ $env:ZEPHIUM_PROTECTION_COUNTING = $Counting
 $env:ZEPHIUM_PROTECTION_TABS = [string]$Tabs
 $env:ZEPHIUM_PROTECTION_IDLE_SECONDS = [string]$IdleSeconds
 $metadata = [ordered]@{
+    startedUtc = [DateTime]::UtcNow.ToString('o')
     binarySha256 = (Get-FileHash -LiteralPath $binaryPath).Hash
     sourceRevision = (& git rev-parse HEAD)
     sourceDirty = [bool](& git status --porcelain)
@@ -27,6 +28,7 @@ $metadata = [ordered]@{
     os = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption,BuildNumber,TotalVisibleMemorySize)
     powerScheme = (& powercfg /getactivescheme)
     caveats = @('Native network adapter harness, not full browser chrome/cosmetics/startup.',
+        'Host window is hidden; these are background native views, not foreground render-performance measurements.',
         'Sampled private bytes; working sets double-count shared pages.',
         'CPU is a lower bound: processes exiting between samples can be missed.',
         'CPU and process counts do not measure idle wakeups or battery energy.',
@@ -55,7 +57,6 @@ while (-not $process.HasExited) {
         }
     } while ($added)
     $at = $clock.Elapsed.TotalSeconds
-    $idle = [bool](Select-String -LiteralPath $stdout -SimpleMatch 'PROTECTION_IDLE_READY' -Quiet)
     $current = @{}
     $cpuDelta = 0.0
     $private = 0L
@@ -78,6 +79,10 @@ while (-not $process.HasExited) {
             $working += $child.WorkingSet64
         } catch { continue } # A child may exit during this sample.
     }
+    # Read after sampling: discard intervals crossing native teardown rather
+    # than misreporting destruction CPU and disappearing views as idle savings.
+    $idle = [bool](Select-String -LiteralPath $stdout -SimpleMatch 'PROTECTION_IDLE_READY' -Quiet) -and
+        -not [bool](Select-String -LiteralPath $stdout -SimpleMatch 'PROTECTION_IDLE_COMPLETE' -Quiet)
     [pscustomobject]@{
         elapsedSeconds = $at
         intervalSeconds = $at - $lastAt
