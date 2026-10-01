@@ -18,3 +18,7 @@ __pycache__/
 /frame/.vitest-attachments/
 
 /frame/dist-work-preview/
+
+# Generated Windows qualification artifacts stay local under target/.
+/docs/qa/windows-protection/
+/docs/qa/windows-efficiency/

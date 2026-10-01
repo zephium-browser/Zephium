@@ -1,8 +1,0 @@
-{
-  "samples": 51,
-  "durationSeconds": 59.247234999999996,
-  "medianPrivateMiB": 351.640625,
-  "peakPrivateMiB": 375.296875,
-  "cpuSeconds": 0.6875,
-  "processCount": 13
-}

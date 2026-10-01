@@ -83,7 +83,7 @@ Baseline executable SHA-256:
 Raw local logs: `target/protection-evidence/baseline-comparison.log` and
 `target/protection-evidence/response-reuse-comparison.log`.
 The corresponding complete result records are retained under
-`docs/qa/windows-protection/*-comparison.json`. Response-reuse executable hash:
+`target/local-qualification-artifacts/windows-protection/*-comparison.json` (local only). Response-reuse executable hash:
 `B4123F59062B89AD73CDB392558AC90D3C9808D91178B8A2E0F75A26B6CFDFA4`.
 
 ## Public pages and clean control
@@ -190,7 +190,8 @@ checks cover that path separately. Wakeups and energy were not measured.
 
 The 51 complete native cases, per-run callback/matcher quantiles, machine and
 binary metadata, navigation records, and process samples are under
-`docs/qa/windows-protection/runs/`; `summary.json` contains the resource table.
+`target/local-qualification-artifacts/windows-protection/runs/` (local only);
+`summary.json` contains the resource table.
 The corrected public/idle qualifier SHA-256 is
 `F42F1B4E4D111AD0947359F679A580A027F1C03F266F227DFFAA596A2D76C334`.
 The recorded dirty flag includes uncommitted report artifacts; the later
@@ -225,8 +226,9 @@ The actual optimized-debug **Zephium Protection QA** application also passed:
 - A second clean restart restored the network page and blocked its ad again.
   The new-tab total was three: the prior two persisted plus that new block.
 
-Screenshots and the reproducible loopback server are retained in
-`docs/qa/windows-protection/` and `scripts/qualification/protection-ui-fixture.cjs`.
+Screenshots are retained locally under
+`target/local-qualification-artifacts/windows-protection/`. The reproducible
+loopback server is `scripts/qualification/protection-ui-fixture.cjs`.
 No flash was apparent in these observations, but frame-by-frame flash timing
 was not measured. Private-session persistence/isolation is covered by automated
 shell/store tests, not a completed native private-window interaction run.
@@ -410,7 +412,8 @@ work evidence, not whole-browser speedup percentages.
 
 ### Measured results and release limits
 
-Evidence is retained in [qa/windows-efficiency](qa/windows-efficiency/).
+Raw evidence is retained locally under
+`target/local-qualification-artifacts/windows-efficiency/`, outside version control.
 The baseline production sources are de3cb3c3; the final script hashes are in the
 fixture JSON. Measurements ran on the i3-1115G4 (2 cores / 4 logical processors),
 about 12 GB RAM, Windows 11 build 26200, Balanced power plan. No compiler was

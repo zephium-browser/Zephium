@@ -68,8 +68,9 @@ under those existing failures.
 
 ## Required behavior
 
-Use a local fixture plus representative daily-use pages; retain raw results and
-screenshots with the report. EasyList deliberately has generic-hide exceptions
+Use a local fixture plus representative daily-use pages. Keep raw results and
+screenshots locally under ignored `target/` directories; commit only concise
+results and reproducible qualification tooling. EasyList deliberately has generic-hide exceptions
 for localhost and 127.0.0.1. Use IPv6 loopback or an explicitly controlled test
 hostname when checking generic cosmetics. Verify selectors against the shipped
 list. A script path such as `/ads/cbr.js` is present in the current network list.
