@@ -24,10 +24,15 @@ const {
   finishSidebarResize,
   cancelSidebarResize,
   expanded,
+  effectiveWidth,
+  init,
+  isCompact,
   resolveDragWidth,
   adoptMode,
   setPanelExtent,
   sidebarMode,
+  sidebarResizeActive,
+  sidebarResizeRevision,
   toggleMode,
 } = await import("../sidebar-mode.svelte");
 
@@ -62,6 +67,38 @@ describe("resolveDragWidth", () => {
   });
 });
 
+describe("native live resize events", () => {
+  it("previews without echoing native geometry and restores on cancellation", async () => {
+    const window = new EventTarget();
+    vi.stubGlobal("window", window);
+    adoptResizeWidth(240);
+    await init();
+    native.width.mockClear();
+    const revision = sidebarResizeRevision();
+    const emit = (name: string, detail: object) =>
+      window.dispatchEvent(new CustomEvent(`zephium:${name}`, { detail }));
+    emit("sidebar-resize-started", { revision: revision - 1 });
+    expect(sidebarResizeActive()).toBe(false);
+    emit("sidebar-resize-started", { revision });
+    emit("sidebar-width-preview", { revision, width: 112 });
+    expect(effectiveWidth()).toBe(112);
+    expect(isCompact()).toBe(true);
+    emit("sidebar-width-preview", { revision, width: 260 });
+    expect(effectiveWidth()).toBe(260);
+    expect(isCompact()).toBe(false);
+    expect(expanded()).toBe(240);
+    emit("sidebar-width-preview", { revision: revision - 1, width: 320 });
+    emit("sidebar-width-preview", { revision, width: Number.NaN });
+    emit("sidebar-resize-cancelled", { revision: revision - 1 });
+    expect(effectiveWidth()).toBe(260);
+    emit("sidebar-resize-cancelled", { revision });
+    expect(sidebarResizeActive()).toBe(false);
+    expect(effectiveWidth()).toBe(240);
+    expect(native.width).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("which width changes the page travels with", () => {
   const last = () => native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean];
 
@@ -90,7 +127,7 @@ describe("which width changes the page travels with", () => {
     expect(last()[1]).toBe(true);
   });
 
-  it("keeps the sidebar and layout fixed while a guide moves, then commits once", () => {
+  it("moves the native width with the pointer, then settles once", () => {
     const originalWidth = expanded();
     const originalMode = sidebarMode();
     const before = native.width.mock.calls.length;
@@ -98,13 +135,14 @@ describe("which width changes the page travels with", () => {
     applyDragWidth(315);
     expect(expanded()).toBe(originalWidth);
     expect(sidebarMode()).toBe(originalMode);
-    expect(native.width.mock.calls.length).toBe(before);
-    finishSidebarResize(315);
     expect(native.width.mock.calls.length).toBe(before + 1);
+    expect(last()).toEqual([315, false]);
+    finishSidebarResize(315);
+    expect(native.width.mock.calls.length).toBe(before + 2);
     expect(last()).toEqual([315, false]);
   });
 
-  it("cancellation leaves the original shape untouched and emits no layout", () => {
+  it("cancellation restores the original width", () => {
     const originalMode = sidebarMode();
     const originalWidth = expanded();
     const before = native.width.mock.calls.length;
@@ -114,7 +152,23 @@ describe("which width changes the page travels with", () => {
     finishSidebarResize(300);
     expect(sidebarMode()).toBe(originalMode);
     expect(expanded()).toBe(originalWidth);
-    expect(native.width.mock.calls.length).toBe(before);
+    expect(native.width.mock.calls.length).toBe(before + 2);
+    expect(last()).toEqual([originalWidth, false]);
+  });
+
+  it("expands from the compact rail continuously before release", () => {
+    toggleMode();
+    expect(sidebarMode()).toBe("compact");
+    beginSidebarResize();
+    applyDragWidth(112);
+    expect(last()).toEqual([112, false]);
+    expect(sidebarMode()).toBe("compact");
+    applyDragWidth(260);
+    expect(last()).toEqual([260, false]);
+    expect(isCompact()).toBe(false);
+    finishSidebarResize(260);
+    expect(expanded()).toBe(260);
+    expect(sidebarMode()).toBe("default");
   });
 
   it("adopts a native selection without dispatching a second width change", () => {
@@ -132,7 +186,7 @@ describe("which width changes the page travels with", () => {
     toggleMode();
     cancelSidebarResize();
     finishSidebarResize(300);
-    expect(native.width.mock.calls.length).toBe(before + 1);
+    expect(native.width.mock.calls.length).toBe(before + 3);
     expect(sidebarMode()).toBe("compact");
     expect(last()).toEqual([COMPACT_WIDTH, true]);
     toggleMode();

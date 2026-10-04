@@ -19,8 +19,8 @@ const MODE_SETTING = "sidebar.mode";
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
-let drag: { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number } | null =
-  null;
+type SidebarDrag = { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number };
+let drag = $state.raw<SidebarDrag | null>(null);
 let resizeSettlement = $state(0);
 // One document-local ordering counter, seeded above earlier document owners.
 let resizeRevision = $state(Math.trunc(performance.timeOrigin * 1024));
@@ -32,7 +32,8 @@ export const sidebarResizeActive = () => drag !== null;
 export const sidebarResizeSettlement = () => resizeSettlement;
 
 export const sidebarMode = () => mode;
-export const isCompact = () => mode === "compact";
+/** The committed shape, or the shape currently previewed by a live drag. */
+export const isCompact = () => (drag ? resolveDragWidth(drag.pending).mode : mode) === "compact";
 export const expanded = () => expandedWidth;
 /** The chrome gap between the rail and an open utility panel. */
 const PANEL_GAP = 8;
@@ -41,9 +42,7 @@ let panelExtent = $state.raw(0);
 export const effectiveWidth = () =>
   panelExtent > 0
     ? COMPACT_WIDTH + PANEL_GAP + panelExtent
-    : mode === "compact"
-      ? COMPACT_WIDTH
-      : expandedWidth;
+    : (drag?.pending ?? (mode === "compact" ? COMPACT_WIDTH : expandedWidth));
 
 export const hasPanel = () => panelExtent > 0;
 
@@ -74,14 +73,18 @@ export function resolveDragWidth(value: number): { mode: SidebarMode; expanded: 
  */
 function publish(travel = false) {
   resizeRevision++;
-  if (drag) cancelSidebarResize();
+  if (drag) cancelSidebarResize(false);
   const width = effectiveWidth();
   void commands.sidebarSetWidth(width, travel, resizeRevision);
 }
 
 export function applyDragWidth(value: number) {
   if (drag) {
-    drag.pending = value;
+    const pending = Number.isFinite(value)
+      ? Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value))
+      : drag.pending;
+    drag = { ...drag, pending };
+    void commands.sidebarSetWidth(pending, false, resizeRevision);
     return;
   }
   const next = resolveDragWidth(value);
@@ -94,7 +97,7 @@ export function applyDragWidth(value: number) {
   if (modeChanged) save(mode);
 }
 
-/** The non-native capture fallback also keeps the rendered layout unchanged. */
+/** Begin a live width preview; the committed shape remains unchanged. */
 export function beginSidebarResize() {
   if (drag) return;
   drag = { mode, desired: desiredMode, expanded: expandedWidth, pending: effectiveWidth() };
@@ -102,19 +105,30 @@ export function beginSidebarResize() {
 
 export function finishSidebarResize(value: number) {
   if (!drag) return;
+  const finalWidth = Number.isFinite(value)
+    ? Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value))
+    : drag.pending;
   drag = null;
-  adoptResizeWidth(value);
+  adoptResizeWidth(finalWidth);
   void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
 }
 
-export function cancelSidebarResize() {
+export function cancelSidebarResize(restore = true) {
+  if (!drag) return;
+  const previous = drag;
   drag = null;
+  mode = previous.mode;
+  desiredMode = previous.desired;
+  expandedWidth = previous.expanded;
+  resizeSettlement++;
+  if (restore) void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
 }
 
 /** Native has admitted one final width; adopt its display shape without another layout command. */
 export function adoptResizeWidth(value: number, revision = resizeRevision) {
   if (revision !== resizeRevision) return;
   if (!Number.isFinite(value) || value < COMPACT_WIDTH || value > MAX_EXPANDED_WIDTH) return;
+  drag = null;
   const next = resolveDragWidth(value);
   const changed = next.mode !== mode;
   mode = next.mode;
@@ -128,13 +142,21 @@ let resizeListenerInstalled = false;
 function installResizeListener() {
   if (resizeListenerInstalled) return;
   resizeListenerInstalled = true;
-  window.addEventListener("zephium:sidebar-width-selected", (event) => {
-    if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
-      return;
-    const { width, revision } = event.detail;
-    if (typeof width === "number" && typeof revision === "number")
-      adoptResizeWidth(width, revision);
-  });
+  for (const kind of ["resize-started", "width-preview", "resize-cancelled", "width-selected"]) {
+    window.addEventListener(`zephium:sidebar-${kind}`, (event) => {
+      if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
+        return;
+      const { width, revision } = event.detail;
+      if (revision !== resizeRevision) return;
+      if (kind === "resize-started") beginSidebarResize();
+      else if (kind === "resize-cancelled") cancelSidebarResize(false);
+      else if (typeof width === "number" && Number.isFinite(width)) {
+        if (kind === "width-selected") adoptResizeWidth(width, revision);
+        else if (drag)
+          drag = { ...drag, pending: Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, width)) };
+      }
+    });
+  }
 }
 
 // The shape this column last saved, until the store reports it back. Values

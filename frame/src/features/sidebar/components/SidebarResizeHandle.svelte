@@ -7,7 +7,6 @@
     finishSidebarResize,
     cancelSidebarResize,
     sidebarResizeActive,
-    resolveDragWidth,
     COMPACT_WIDTH,
     MAX_EXPANDED_WIDTH,
     MIN_EXPANDED_WIDTH,
@@ -61,6 +60,9 @@
     const value = width;
     const enabled = !disabled;
     configuredRevision = sidebarResizeRevision();
+    // Native capture owns the gesture. Reconfiguring its hit target while a
+    // live preview changes the column would cancel the capture mid-drag.
+    if (sidebarResizeActive()) return;
     queueConfiguration({
       width: value,
       enabled,
@@ -92,14 +94,14 @@
   }
   function updateGuide(value: number) {
     pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-    // Preview where release lands, including the snap to the rail.
-    const landing = resolveDragWidth(pending);
-    pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
+    // Keep the native layout under the cursor while dragging. Release still
+    // resolves the value to the compact rail or an expanded shape.
     guide = pending;
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
       if (!resizing || !sidebarResizeActive()) return;
+      applyDragWidth(pending);
       guideRequested = true;
       void commands.sidebarResizeGuide(pending).catch(() => {});
     });
@@ -155,7 +157,9 @@
   });
 </script>
 
-<svelte:window onblur={() => cancelPointerResize()} onresize={() => cancelPointerResize()} />
+<!-- Changing the native chrome width can itself emit resize; capture must
+     survive that event while the column follows the pointer. -->
+<svelte:window onblur={() => cancelPointerResize()} />
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <div
   role="separator"
@@ -187,10 +191,10 @@
     ></span>{/if}
 </div>
 {#if resizing && guide !== null}
-  <!-- A renderer-only fallback stays inside chrome; page-overlapping guides are native. -->
+  <!-- The fallback follows the live column; page-overlapping guides are native. -->
   <span
     aria-hidden="true"
     class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-accent"
-    style:left={`${Math.min(startWidth - 2, guide - 2)}px`}
+    style:left={`${guide - 2}px`}
   ></span>
 {/if}

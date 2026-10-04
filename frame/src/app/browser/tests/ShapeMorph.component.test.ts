@@ -12,21 +12,87 @@ import * as launch from "$session/motion.svelte";
 import * as sidebar from "$session/sidebar-mode.svelte";
 import Shell from "../Shell.svelte";
 
+const native = vi.hoisted(() => ({
+  width: vi.fn(async () => {}),
+  resize: vi.fn(async () => false),
+}));
+
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     tabsBootstrap: async () => {},
-    sidebarSetWidth: async () => {},
-    sidebarResize: async () => false,
+    sidebarSetWidth: native.width,
+    sidebarResize: native.resize,
     sidebarResizeGuide: async () => true,
     settingSet: async () => ({ accepted: true, operation_id: null }),
   });
 });
 
 afterEach(() => {
+  sidebar.cancelSidebarResize();
+  sidebar.setMode("default");
   sidebar.adoptMode("default");
   surface.dispose();
   tabs.dispose();
+  vi.restoreAllMocks();
+});
+
+test("dragging out of compact mode updates the column before release and keeps capture", async () => {
+  await shell();
+  sidebar.adoptResizeWidth(sidebar.COMPACT_WIDTH);
+  flushSync();
+  const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+  const handle = aside.querySelector<HTMLElement>('[role="separator"]')!;
+  // Synthetic PointerEvents do not create a browser capture. Model capture
+  // here while exercising the production pointer handlers and reactive DOM.
+  vi.spyOn(handle, "setPointerCapture").mockImplementation(() => {});
+  vi.spyOn(handle, "hasPointerCapture").mockReturnValue(true);
+  vi.spyOn(handle, "releasePointerCapture").mockImplementation(() => {});
+  await expect.poll(() => native.resize.mock.calls.length).toBeGreaterThan(0);
+  native.resize.mockClear();
+  native.width.mockClear();
+  const pointer = (type: string, x: number) => {
+    handle.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        pointerId: 1,
+        button: 0,
+        clientX: x,
+      }),
+    );
+  };
+  pointer("pointerdown", 54);
+  pointer("pointermove", 198);
+  await expect.poll(() => aside.getBoundingClientRect().width).toBe(200);
+  expect(aside.dataset.reshaping).toBe("false");
+  expect(handle.getAttribute("aria-valuenow")).toBe("200");
+  expect(handle.getAttribute("aria-disabled")).toBe("false");
+  expect(aside.querySelector(".tab-label")).not.toBeNull();
+  expect(native.resize).not.toHaveBeenCalled();
+  window.dispatchEvent(new Event("resize"));
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  pointer("pointermove", 298);
+  await expect.poll(() => aside.getBoundingClientRect().width).toBe(300);
+  // A release outside the allowed range must settle at the maximum rather
+  // than returning to the old compact width.
+  pointer("pointerup", 600);
+  await expect.poll(() => aside.getBoundingClientRect().width).toBe(sidebar.MAX_EXPANDED_WIDTH);
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  expect(native.width.mock.calls.at(-1)?.slice(0, 2)).toEqual([sidebar.MAX_EXPANDED_WIDTH, false]);
+});
+
+test("cancelling a live expansion restores the rail and its compact body", async () => {
+  await shell();
+  sidebar.adoptResizeWidth(sidebar.COMPACT_WIDTH);
+  flushSync();
+  const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+  sidebar.beginSidebarResize();
+  sidebar.applyDragWidth(260);
+  await expect.poll(() => aside.getBoundingClientRect().width).toBe(260);
+  expect(aside.querySelector(".tab-label")).not.toBeNull();
+  sidebar.cancelSidebarResize();
+  await expect.poll(() => aside.getBoundingClientRect().width).toBe(sidebar.COMPACT_WIDTH);
+  expect(aside.querySelector(".tab-label")).toBeNull();
 });
 
 const open = ["a", "b", "c"].map((id) => tabFixture({ id, title: `Tab ${id}` }));

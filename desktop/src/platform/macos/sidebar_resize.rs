@@ -1,4 +1,4 @@
-//! Native pointer feedback for the Svelte sidebar. Only release changes layout.
+//! Native pointer feedback for the Svelte sidebar with live width preview.
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -22,7 +22,12 @@ use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
 use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-type Commit = Rc<dyn Fn(f64, u64)>;
+pub(super) struct Callbacks {
+    pub commit: Rc<dyn Fn(f64, u64)>,
+    pub preview: Rc<dyn Fn(f64, u64)>,
+    pub begin: Rc<dyn Fn(u64)>,
+    pub cancelled: Rc<dyn Fn(f64, u64)>,
+}
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -103,7 +108,7 @@ pub struct Ivars {
     guide: RefCell<Option<Retained<NSView>>>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     observers: RefCell<Option<Observers>>,
-    commit: Commit,
+    callbacks: Callbacks,
 }
 
 define_class!(
@@ -156,6 +161,8 @@ define_class!(
             let original = self.ivars().width.get();
             self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get() }));
             if !self.install_observers(window) { self.cancel(false); return; }
+            (self.ivars().callbacks.begin)(self.ivars().revision.get());
+            (self.ivars().callbacks.preview)(original, self.ivars().revision.get());
             self.feedback(original, true);
         }
         #[unsafe(method(mouseDragged:))]
@@ -170,8 +177,8 @@ define_class!(
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
             self.ivars().capture.set(Some(capture));
-            // Preview where release will land, including the rail snap.
-            self.feedback(resolved_width(capture.pending), true);
+            (self.ivars().callbacks.preview)(capture.pending, capture.revision);
+            self.feedback(capture.pending, true);
         }
         #[unsafe(method(mouseUp:))]
         fn up(&self, event: &NSEvent) {
@@ -183,9 +190,9 @@ define_class!(
             let generation = self.ivars().generation.get();
             self.feedback(width, true);
             if self.ivars().generation.get() != generation { return; }
-            self.cancel(true);
+            self.cancel_capture(true, false);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision); }
+            if revision_current(capture.revision) { (self.ivars().callbacks.commit)(width, capture.revision); }
         }
     }
 );
@@ -205,7 +212,7 @@ impl Control {
     fn new(
         chrome: &Retained<WKWebView>,
         width: f64,
-        commit: Commit,
+        callbacks: Callbacks,
         revision: u64,
         mtm: MainThreadMarker,
     ) -> Retained<Self> {
@@ -219,7 +226,7 @@ impl Control {
             guide: RefCell::new(None),
             tracking: RefCell::new(None),
             observers: RefCell::new(None),
-            commit,
+            callbacks,
         });
         // SAFETY: standard main-thread NSView initialization.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -233,8 +240,15 @@ impl Control {
             return;
         };
         let frame = chrome.frame();
-        let width = self.ivars().width.get();
-        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < width;
+        // Chrome follows layout asynchronously. Keep capture alive while its
+        // frame catches up, and position the hit target on the actual edge.
+        let capturing = self.ivars().capture.get().is_some();
+        let width = if capturing {
+            frame.size.width
+        } else {
+            self.ivars().width.get()
+        };
+        let hidden = !self.ivars().enabled.get() || (!capturing && frame.size.width + 0.5 < width);
         let target = NSRect::new(
             NSPoint::new(frame.origin.x + width - HOT_INSET, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
@@ -350,7 +364,10 @@ impl Control {
             })
     }
     fn cancel(&self, fade: bool) {
-        self.ivars().capture.set(None);
+        self.cancel_capture(fade, true);
+    }
+    fn cancel_capture(&self, fade: bool, notify: bool) {
+        let capture = self.ivars().capture.take();
         self.ivars()
             .generation
             .set(self.ivars().generation.get().wrapping_add(1));
@@ -367,6 +384,11 @@ impl Control {
             .ok()
             .and_then(|mut observers| observers.take());
         drop(observers);
+        if notify {
+            if let Some(capture) = capture {
+                (self.ivars().callbacks.cancelled)(capture.original, capture.revision);
+            }
+        }
         if let Some(guide) = guide {
             if !fade || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
                 guide.removeFromSuperview();
@@ -497,7 +519,7 @@ pub(super) fn configure(
     width: f64,
     enabled: bool,
     revision: u64,
-    commit: Commit,
+    callbacks: Callbacks,
 ) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
@@ -524,7 +546,7 @@ pub(super) fn configure(
         if !enabled || !configuration_current(epoch, generation, revision) {
             return false;
         }
-        let control = Control::new(chrome, width, commit, revision, mtm);
+        let control = Control::new(chrome, width, callbacks, revision, mtm);
         // SAFETY: native parent access is confined to the main thread.
         let Some(parent) = (unsafe { chrome.superview() }) else {
             return false;
@@ -606,6 +628,7 @@ pub(super) fn dispose(generation: Option<u64>) {
         control.removeFromSuperview();
     }
 }
+
 fn resolved_width(width: f64) -> f64 {
     if !width.is_finite() || width < SNAP {
         MIN_SIDEBAR_WIDTH

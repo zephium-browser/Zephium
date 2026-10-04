@@ -107,7 +107,15 @@ already in the backend needs a visible home, and this is the honest answer to
 
 ## 4. Compact mode
 
-Two modes only: Default (240-280px) and Compact (~52px, icons). No hidden mode.
+Two modes only: Default (240px initially, resizable from 180-420px) and Compact
+(56px, icons). No hidden mode.
+
+Dragging the Browse sidebar edge moves the column and native page boundary
+continuously, including when dragging out of Compact. Intermediate widths are
+temporary: release below 140px settles at the compact rail; release at or above
+140px settles at an expanded width of 180-420px. The body switches shapes during
+the drag without a toggle animation. Cancellation restores the starting width
+and shape, and only a completed change saves the mode preference.
 
 **Compact never hover-expands.** An expanding overlay would have to cover page
 pixels, which we cannot do, and hover-expand is twitchy regardless.
@@ -117,7 +125,7 @@ pixels, which we cannot do, and hover-expand is twitchy regardless.
   is what makes the launcher load-bearing rather than decorative, and it is free
   because the panel is already warm.
 - The tabs affordance opens the tab list as a flyout on the utility surface.
-- Window controls fold into the app menu; a 52px rail has no room.
+- Window controls fold into the app menu; a 56px rail has no room.
 
 ## 5. Tools
 

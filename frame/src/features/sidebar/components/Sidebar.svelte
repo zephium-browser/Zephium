@@ -10,6 +10,7 @@
     COMPACT_WIDTH,
     effectiveWidth,
     isCompact,
+    sidebarResizeActive,
     sidebarResizeSettlement,
     toggleMode,
   } from "$session/sidebar-mode.svelte";
@@ -67,7 +68,8 @@
   let morph: ReturnType<typeof shapeMorph.capture> = null;
   // While the shape changes, the column's width travels with the page
   // instead of jumping, and its contents hold their final width so only the
-  // space beside them moves. A resize guide commits its width immediately on release.
+  // space beside them moves. A pointer resize follows the cursor and commits
+  // its compact/default shape on release.
   let reshaping = $state(false);
   let resizeSettling = $state(false);
   let observedResizeSettlement = sidebarResizeSettlement();
@@ -89,6 +91,18 @@
         queueMicrotask(() => {
           if (observedResizeSettlement === settlement) resizeSettling = false;
         });
+        morph = null;
+        reshaping = false;
+        headerFresh = false;
+        clearTimeout(reshaped);
+        shown = next;
+        shownHeader = head;
+        return;
+      }
+      // A live pointer resize already owns the geometry. Switch the compact
+      // body immediately at the snap point instead of animating behind the
+      // cursor.
+      if (sidebarResizeActive()) {
         morph = null;
         reshaping = false;
         headerFresh = false;

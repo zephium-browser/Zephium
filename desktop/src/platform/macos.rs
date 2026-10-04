@@ -613,15 +613,63 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
+            let begin_sender = sender.clone();
+            let begin = std::rc::Rc::new(move |revision| {
+                if CHROME_GENERATION.load(Ordering::Acquire) != generation
+                    || !sidebar_resize::publish_revision(revision)
+                {
+                    return;
+                }
+                crate::emit_to_privileged(
+                    begin_sender.app_handle(),
+                    crate::MAIN_LABEL,
+                    "zephium:sidebar-resize-started",
+                    &serde_json::json!({"revision": revision}),
+                );
+            });
+            let preview_sender = sender.clone();
+            let preview_shell = shell.clone();
+            let preview = std::rc::Rc::new(move |width, revision| {
+                if CHROME_GENERATION.load(Ordering::Acquire) != generation
+                    || !sidebar_resize::publish_revision(revision)
+                {
+                    return;
+                }
+                if preview_shell.dispatch(zephium_app::Command::SetSidebarWidth(width, false)) {
+                    crate::emit_to_privileged(
+                        preview_sender.app_handle(),
+                        crate::MAIN_LABEL,
+                        "zephium:sidebar-width-preview",
+                        &serde_json::json!({"width": width, "revision": revision}),
+                    );
+                }
+            });
+            let cancelled_sender = sender.clone();
+            let cancelled_shell = shell.clone();
+            let cancelled = std::rc::Rc::new(move |width, revision| {
+                if CHROME_GENERATION.load(Ordering::Acquire) != generation
+                    || !sidebar_resize::publish_revision(revision)
+                {
+                    return;
+                }
+                if cancelled_shell.dispatch(zephium_app::Command::SetSidebarWidth(width, false)) {
+                    crate::emit_to_privileged(
+                        cancelled_sender.app_handle(),
+                        crate::MAIN_LABEL,
+                        "zephium:sidebar-resize-cancelled",
+                        &serde_json::json!({"revision": revision}),
+                    );
+                }
+            });
             let commit = std::rc::Rc::new(move |width, revision| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
                     return;
                 }
-                // A guide release is a snap to a new shape: the content
-                // travels there, which also covers the chrome's repaint.
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, true)) {
+                // The content already followed the pointer; release only
+                // settles the compact/default shape.
+                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, false)) {
                     crate::emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
@@ -630,7 +678,19 @@ pub async fn configure_sidebar_resize(
                     );
                 }
             });
-            sidebar_resize::configure(&view, generation, width, enabled, revision, commit)
+            sidebar_resize::configure(
+                &view,
+                generation,
+                width,
+                enabled,
+                revision,
+                sidebar_resize::Callbacks {
+                    commit,
+                    preview,
+                    begin,
+                    cancelled,
+                },
+            )
         })
         .unwrap_or(false);
         let _ = send.send(installed);
