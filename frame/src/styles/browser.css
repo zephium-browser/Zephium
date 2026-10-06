@@ -206,8 +206,15 @@
   padding: 3px;
   border-radius: var(--radius-control);
   border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: default;
 }
-.appearance-preview[data-selected="true"] {
+.appearance-preview:disabled {
+  opacity: 0.5;
+}
+.appearance-preview[aria-pressed="true"] {
   border-color: var(--color-accent);
 }
 .mini-window {

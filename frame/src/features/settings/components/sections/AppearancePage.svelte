@@ -23,6 +23,11 @@
     });
     return () => observer.disconnect();
   });
+  const schemes = [
+    { id: "light", label: m.theme_light },
+    { id: "dark", label: m.theme_dark },
+    { id: "system", label: m.theme_system },
+  ] as const;
   const tints = [
     { id: "graphite", label: m.settings_graphite },
     { id: "sky", label: m.settings_sky },
@@ -43,18 +48,22 @@
 </script>
 
 <SettingsGroup title={m.settings_theme()}>
-  <div class="appearance-previews" aria-hidden="true">
-    {#each ["light", "dark", "system"] as theme (theme)}
-      <div
+  <div class="appearance-previews" role="group" aria-label={m.settings_color_scheme()}>
+    {#each schemes as scheme (scheme.id)}
+      <button
+        type="button"
         class="appearance-preview"
-        data-preview-theme={theme}
-        data-selected={preferences.value("appearance") === theme}
+        data-preview-theme={scheme.id}
+        aria-label={scheme.label()}
+        aria-pressed={preferences.value("appearance") === scheme.id}
+        disabled={preferences.saving()}
+        onclick={() => void preferences.set("appearance", scheme.id)}
       >
         <div class="mini-window">
           <div class="mini-sidebar"><span></span><i></i><i></i><i></i></div>
           <div class="mini-page"><span></span><i></i><i></i></div>
         </div>
-      </div>
+      </button>
     {/each}
   </div>
   <SettingsRow
