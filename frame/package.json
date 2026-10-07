@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && vite build --config vite.onboarding.config.ts",
+    "budgets": "vite build --mode budgets && vite build --config vite.onboarding.config.ts --mode budgets",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run stylelint && pnpm run format:check && pnpm run knip && pnpm run test",
     "typecheck": "pnpm run i18n && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc6 --project tsconfig.node.json",
     "test": "vitest run --project unit",

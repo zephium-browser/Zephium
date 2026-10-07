@@ -1,7 +1,8 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import budgets from "./bundle-budgets.json";
-import { checkBundleBudget } from "./bundle-budget";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { checkBundleBudget, GROWTH_ALLOWANCE, type BundleSize } from "./bundle-budget";
 import type { Plugin } from "vite";
+
+const BUDGETS = new URL("./bundle-budgets.json", import.meta.url);
 
 /** A page native loads into a privileged WebView. */
 export type Page = "browser" | "panel" | "onboarding";
@@ -9,9 +10,13 @@ export type Page = "browser" | "panel" | "onboarding";
 /** Inspect emitted graphs: source folders alone cannot guarantee startup isolation. */
 export function bootstrapReport(pages: readonly Page[]): Plugin {
   const surfaceStyles = new Map<string, Set<string>>();
+  let recording = false;
   return {
     name: "zephium-bootstrap-boundaries",
     apply: "build",
+    configResolved(config) {
+      recording = config.mode === "budgets";
+    },
     generateBundle(_options, bundle) {
       for (const item of Object.values(bundle)) {
         if (item.type !== "chunk") continue;
@@ -31,10 +36,22 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           entry: string;
           staticJsBytes: number;
           staticCssBytes: number;
+          /** What is budgeted: the whole graph of a page, the addition of a lazy destination. */
+          budgeted: BundleSize;
           css: string[];
           modules: string[];
         }
       > = {};
+      const bytes = (files: Iterable<string>) => {
+        let sum = 0;
+        for (const file of files) {
+          const item = bundle[file];
+          if (item?.type === "chunk") sum += Buffer.byteLength(item.code);
+          else if (item?.type === "asset") sum += Buffer.byteLength(item.source);
+        }
+        return sum;
+      };
+      const additions = new Set<string>();
       const roots: Array<{ name: string; file: string; surface: boolean }> = [];
       for (const name of pages) {
         const root = Object.values(bundle).find(
@@ -92,6 +109,7 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
         for (const child of [...item.imports, ...item.dynamicImports]) follow(child);
       };
       if (browser) follow(browser.file);
+      const graphs = new Map<string, { visited: Set<string>; css: Set<string> }>();
       for (const root of roots) {
         const name = root.name;
         const visited = new Set<string>();
@@ -143,29 +161,80 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
         if (name === "panel" && forbidden.length)
           this.error(`Panel eagerly loads browser/tool code: ${forbidden.join(", ")}`);
 
+        graphs.set(name, { visited, css });
+        const js = bytes(visited);
+        const styles = bytes(css);
         reports[name] = {
           entry: root.file,
-          staticJsBytes: [...visited].reduce((sum, file) => {
-            const item = bundle[file];
-            return sum + (item?.type === "chunk" ? Buffer.byteLength(item.code) : 0);
-          }, 0),
-          staticCssBytes: [...css].reduce((sum, file) => {
-            const item = bundle[file];
-            return sum + (item?.type === "asset" ? Buffer.byteLength(item.source) : 0);
-          }, 0),
+          staticJsBytes: js,
+          staticCssBytes: styles,
+          budgeted: { js, css: styles },
           css: [...css],
           modules: [...modules].sort(),
         };
       }
-      const failures: string[] = [];
-      for (const [name, report] of Object.entries(reports)) {
-        const failure = checkBundleBudget(name, report, budgets);
-        if (failure)
-          failures.push(
-            `${failure} (measured JS ${report.staticJsBytes}, CSS ${report.staticCssBytes})`,
+      // A lazy destination costs only what the page that opens it has not
+      // already loaded. Counting its whole graph would charge every
+      // destination again for the page's own startup code, so any growth
+      // there would move every budget at once.
+      for (const surface of roots.filter((root) => root.surface)) {
+        const opens = new Set<string>();
+        const open = (file: string) => {
+          if (opens.has(file)) return;
+          opens.add(file);
+          const item = bundle[file];
+          if (item?.type === "chunk")
+            for (const child of [...item.imports, ...item.dynamicImports]) open(child);
+        };
+        open(surface.file);
+        const loaded = graphs.get(surface.name);
+        if (!loaded) continue;
+        for (const root of roots) {
+          if (root.surface || !opens.has(root.file)) continue;
+          const graph = graphs.get(root.name);
+          const report = reports[root.name];
+          if (!graph || !report) continue;
+          const js = bytes([...graph.visited].filter((file) => !loaded.visited.has(file)));
+          const styles = bytes([...graph.css].filter((file) => !loaded.css.has(file)));
+          const first = !additions.has(root.name);
+          additions.add(root.name);
+          report.budgeted = {
+            js: first ? js : Math.max(report.budgeted.js, js),
+            css: first ? styles : Math.max(report.budgeted.css, styles),
+          };
+        }
+      }
+      const build = pages.join("-");
+      const recordedBuilds = JSON.parse(readFileSync(BUDGETS, "utf8")) as Record<
+        string,
+        Record<string, BundleSize>
+      >;
+      if (recording) {
+        recordedBuilds[build] = Object.fromEntries(
+          Object.entries(reports)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([name, report]) => [name, report.budgeted]),
+        );
+        writeFileSync(BUDGETS, `${JSON.stringify(recordedBuilds, null, 2)}\n`);
+      } else {
+        const recorded = recordedBuilds[build] ?? {};
+        const failures: string[] = [];
+        for (const [name, report] of Object.entries(reports)) {
+          const size = Object.hasOwn(recorded, name) ? recorded[name] : undefined;
+          const failure = checkBundleBudget(name, report.budgeted, size);
+          if (failure) failures.push(failure);
+          else if (
+            size &&
+            (size.js - report.budgeted.js > GROWTH_ALLOWANCE.js ||
+              size.css - report.budgeted.css > GROWTH_ALLOWANCE.css)
+          )
+            this.warn(`${name} is well under its recorded size; run pnpm run budgets to lower it`);
+        }
+        if (failures.length)
+          this.error(
+            `${failures.join("\n")}\nShrink it, or if the growth is intended, run pnpm run budgets and say why in the commit.`,
           );
       }
-      if (failures.length) this.error(failures.join("\n"));
       // Kept out of dist: Tauri embeds all of dist into the shipped binary.
       const dir = new URL("./reports/", import.meta.url);
       mkdirSync(dir, { recursive: true });

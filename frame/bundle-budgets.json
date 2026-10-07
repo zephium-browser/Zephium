@@ -1,499 +1,382 @@
 {
-  "browser": {
-    "js": 875256,
-    "css": 270090,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "panel": {
-    "js": 400500,
-    "css": 79035,
-    "description": "Measured 138101 JS bytes: folder, link and file strings enter the shared message catalog."
-  },
-  "lazy:features/settings/components/sections/AboutPage.svelte": {
-    "js": 1276581,
-    "css": 300363,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/settings/components/sections/AccountPage.svelte": {
-    "js": 1036152,
-    "css": 277728,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/tools/components/previews/ChatView.svelte": {
-    "js": 295563,
-    "css": 19800
-  },
-  "lazy:features/settings/components/sections/DeveloperPage.svelte": {
-    "js": 900507,
-    "css": 279804,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/tools/components/previews/DownloadsView.svelte": {
-    "js": 395300,
-    "css": 110200,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365430 measured over the prior 362000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366421 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368184 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377106 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 379726 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 380700 JS and 108516 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 389731 JS and 109427 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/settings/components/sections/FocusPage.svelte": {
-    "js": 1262430,
-    "css": 303480,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/settings/components/sections/GeneralPage.svelte": {
-    "js": 1298475,
-    "css": 309003,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/tools/components/previews/HistoryView.svelte": {
-    "js": 500300,
-    "css": 114100,
-    "description": "History's header keeps one control: a menu, shared with Tasks, that opens the full page or closes the panel. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (470174 measured over the prior 466800 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471378 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473141 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482063 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484683 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485657 JS and 112502 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 494688 JS and 113413 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/settings/components/sections/KeyboardPage.svelte": {
-    "js": 1267323,
-    "css": 303480,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/settings/components/sections/LanguagesPage.svelte": {
-    "js": 1283448,
-    "css": 305115,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/tools/components/previews/NotesView.svelte": {
-    "js": 341400,
-    "css": 16900,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 328604 JS and 16195 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (330616 JS measured, 4 Oct). Update and security notice strings join the shared catalog (334421 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335822 JS and 16195 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 336467 JS and 16195 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/settings/components/sections/PasswordsPage.svelte": {
-    "js": 1064301,
-    "css": 288444,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/settings/components/sections/PerformancePage.svelte": {
-    "js": 1263141,
-    "css": 303480,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/settings/components/sections/PrivacyPage.svelte": {
-    "js": 1295037,
-    "css": 309003,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/settings/components/sections/ProfilesPage.svelte": {
-    "js": 1253325,
-    "css": 300678,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/settings/components/sections/SearchPage.svelte": {
-    "js": 1254108,
-    "css": 299136,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/settings/components/Settings.svelte": {
-    "js": 1270500,
-    "css": 310227,
-    "description": "Media cards and the media tool add to the shared Work graph and message catalog."
-  },
-  "lazy:features/settings/components/sections/TabsPage.svelte": {
-    "js": 1218300,
-    "css": 302901,
-    "description": "Note link marks and the typed document view add to the shared graph."
-  },
-  "lazy:features/tools/components/previews/TasksView.svelte": {
-    "js": 340200,
-    "css": 18000,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 327945 JS and 15957 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (329957 JS measured, 4 Oct). Update and security notice strings join the shared catalog (333762 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 335168 JS and 15957 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 335241 JS and 15957 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 335813 JS and 15957 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/tools/components/previews/TimeView.svelte": {
-    "js": 500600,
-    "css": 114100,
-    "description": "Time's header keeps one control: a menu, shared with Tasks, for the page, its settings and closing. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (470407 measured over the prior 467100 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 471685 JS and 111840 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (473448 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (482370 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 484990 JS and 112502 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 485964 JS and 112502 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 494995 JS and 113413 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/tools/components/ToolSlot.svelte": {
-    "js": 283200,
-    "css": 4500
-  },
-  "lazy:features/notes/components/Notes.svelte": {
-    "js": 317800,
-    "css": 19300,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 310704 JS and 18493 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (310863 JS measured, 4 Oct). Update and security notice strings join the shared catalog (314673 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 315862 JS and 18493 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 315925 JS and 18493 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice"
-  },
-  "lazy:features/tasks/components/Tasks.svelte": {
-    "js": 365900,
-    "css": 31800,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 357454 JS and 30346 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (357613 JS measured, 4 Oct). Update and security notice strings join the shared catalog (361429 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 362617 JS and 30346 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:app/browser/WorkWorkspace.svelte": {
-    "js": 975000,
-    "css": 270567,
-    "description": "Measured 328183 JS bytes with the agent run operation, step labels, and the agent line on the canvas card in the shared graph. Media record revisions for context selection add 0.1 KB (330153 measured)."
-  },
-  "lazy:features/work/components/WorkCanvas.svelte": {
-    "js": 1410000,
-    "css": 311655,
-    "description": "Cards add 14.3 KB JS and 8.2 KB CSS (568279 and 127517 measured on b1628da5): the Findings, File and Command cards, one card frame, and the card mode of every result renderer. Derived cluster nodes, latent relation edges and the path draw-in add 3.0 KB JS and 0.9 KB CSS (571252 and 128409 measured together). The camera following the agent adds 1.6 KB JS (572888 measured). Selection, the marquee, the arrange bar and area fit, rename and remove add 17.7 KB JS and 3.6 KB CSS (590564 and 132017 measured). The link card's Play here button adds 0.2 KB JS and 0.3 KB CSS (591458 and 132341 measured). Cards sized to what they say, plan steps as cards with their glyphs, whole subject facts, compare checks and best-value dots, and request-to-request thread handles add 11.8 KB JS and 2.0 KB CSS (603288 and 134373 measured)."
-  },
-  "lazy:features/newtab/components/NewTab.svelte": {
-    "js": 891081,
-    "css": 274842
-  },
-  "lazy:domain/resources/index.ts": {
-    "js": 237000,
-    "css": 4200
-  },
-  "lazy:features/search/components/LauncherPanel.svelte": {
-    "js": 376593,
-    "css": 18000
-  },
-  "lazy:features/search/components/NewTabSearch.svelte": {
-    "js": 375492,
-    "css": 18000
-  },
-  "lazy:features/history/components/HistoryPage.svelte": {
-    "js": 695235,
-    "css": 43077
-  },
-  "lazy:features/history/components/HistoryPanel.svelte": {
-    "js": 353283,
-    "css": 12600
-  },
-  "lazy:features/library/components/LibraryPage.svelte": {
-    "js": 388200,
-    "css": 107100,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (358338 measured over the prior 354900 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 359329 JS and 104812 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (361092 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (370014 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 372634 JS and 105474 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 373608 JS and 105474 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 382639 JS and 106385 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice"
-  },
-  "lazy:features/tasks/components/TasksPage.svelte": {
-    "js": 410300,
-    "css": 42300,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 399891 JS and 40384 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (400050 JS measured, 4 Oct). Update and security notice strings join the shared catalog (403866 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 405053 JS and 40384 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 405116 JS and 40384 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/tasks/components/TaskDetail.svelte": {
-    "js": 381300,
-    "css": 39500,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 372245 JS and 37715 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (372404 JS measured, 4 Oct). Update and security notice strings join the shared catalog (376220 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 377408 JS and 37715 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/tasks/components/TaskBoard.svelte": {
-    "js": 374900,
-    "css": 37200,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366517 JS and 35482 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (366676 JS measured, 4 Oct). Update and security notice strings join the shared catalog (370491 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 371680 JS and 35482 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 371743 JS and 35482 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/tasks/lib/capture.ts": {
-    "js": 181800,
-    "css": 4200,
-    "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (177236 measured over 174933 at 714054aa). The object renderers' message keys in the shared message chunk add under 0.1 KB JS (177441 measured). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 179552 JS and 3963 CSS."
-  },
-  "lazy:features/downloads/components/DownloadsList.svelte": {
-    "js": 397500,
-    "css": 111600,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368938 measured over the prior 365500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369929 JS and 109271 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371692 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380618 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 383238 JS and 109933 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 384212 JS and 109933 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 391867 JS and 110844 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/notes/components/editor/NoteEditor.svelte": {
-    "js": 595600,
-    "css": 16500,
-    "description": "Time and focus strings join the shared message catalog. Update and security notice strings join the shared catalog (592443 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 593632 JS and 15056 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:features/notes/components/NotesPage.svelte": {
-    "js": 340800,
-    "css": 25600,
-    "description": "Time and focus strings join the shared message catalog. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 331046 JS and 24444 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (331205 JS measured, 4 Oct). Update and security notice strings join the shared catalog (335015 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 336204 JS and 24444 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:domain/notes/index.ts": {
-    "js": 165800,
-    "css": 4200,
-    "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (161512 measured over 159209 at 714054aa). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 163828 JS and 3963 CSS."
-  },
-  "lazy:features/notes/index.ts": {
-    "js": 153600,
-    "css": 4200,
-    "description": "LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (149394 measured over 147091 at 714054aa). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 151710 JS and 3963 CSS."
-  },
-  "lazy:shared/ui/data/Chart/Chart.svelte": {
-    "js": 530000,
-    "css": 19500,
-    "description": "Measured 512177 JS and 16027 CSS bytes: Work's board loads the kit through loadChart, so this entry carries LayerChart and is bounded by WorkChart's measured graph. The shadcn-svelte chart designs (radial rings with their track, the radar web, line points, area washes, stacked areas, the headline and the overview and tile levels) add 12.5 KB JS and 2.7 KB CSS (524686 and 18703 measured)."
-  },
-  "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
-    "js": 908900,
-    "css": 152100,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (874447 measured over the prior 871000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 875651 JS and 149805 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (877414 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (886330 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 888950 JS and 150467 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 889924 JS and 150467 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 898955 JS and 151378 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions search button room beside tools"
-  },
-  "lazy:features/work/components/AgentLine.svelte": {
-    "js": 275400,
-    "css": 30000,
-    "description": "Measured 113866 JS and 8299 CSS bytes: a clipped headline opens whole, and follow-ups wait behind Next as rows in the line's panel; every ending of a run and every refused request has its own line. The local-work commits grow the shared graph to 114551 JS (measured on 236b43c4). Merged with main: 187486 JS and 12262 CSS measured. Signed-in origin grants, open tabs as context and the plain-word page budget sentence add 1.6 KB JS to the shared Work graph and catalog (190959 measured). The line's closed run facts under a finished run, Sign in to a walled site and Try again as me add 2.3 KB JS (196186 measured over 193844 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (193844 measured over 191544 at 714054aa). The sidebar's project list shares the Work environment session with the canvas, so rolldown moves that session into the chunk the line shares with Work: +15 KB in this static graph, none of it new to a Work window, which has already loaded it (211537 measured). The run's elapsed time and the docked line are under 1 KB of it. The docked capsule and the elapsed time add 0.2 KB CSS (12563 measured). Its words open in place, wrapping inside the island, instead of repeating in a panel: +0.1 KB CSS (12740 measured). The island holds the run's open asks as their cards (Confirm, site entry, sign-in, context, connections, questions) and the old account handoff is gone: 254797 measured. The shared chunk grown by the concurrent streams: 256009 measured. The ask cards bring their styles: 21021 CSS measured. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 256728 JS and 21021 CSS. The island's run mark (a ring, the loading arc while it works), its list of the parts at work and one remedy for a run that ended short replace the orb: 260462 JS measured with the concurrent streams in the tree. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 260954 JS measured. One entry question for several services names each service by its product name and shows each one's mark: 261460 JS measured. Round 4: the lead's character and its dot-sphere indicator in the island, the helpers at work beside it and in its list, with the shared presence primitives (characters, frame strips, one stillness watch): 272128 JS and 28007 CSS measured with the concurrent streams in the tree. Round 5: one working indicator, the shimmering line while it works and the lead's figures (a visor, an orbit, six looks seeded by the work): 29531 CSS measured. Round 5 words for helpers and tools in the shared catalog: 273688 JS measured. Round 5b: the Confirm card draws its page through the frame thumbnail: 274880 JS measured."
-  },
-  "lazy:features/work/components/WorkObjectiveInspector.svelte": {
-    "js": 263000,
-    "css": 34000,
-    "description": "Measured 21835 CSS bytes: the card mode of the result renderers and source glyphs on evidence chips; account-scoped approvals, the signed-in composer chip, and intervention controls add to the Work graph and message catalog. The request lift's header and its run as a timeline of steps add 10.1 KB JS and 2.4 KB CSS (168962 and 24212 measured). Merged with main: 235567 JS and 23448 CSS measured. Site marks in the lift header and evidence chips (favicon cache and FavIcon) add 3.3 KB JS (238836 measured). Diagram and table projection in the result renderer, the whole table with its sticky header and first column, and the knowledge caption add 3.4 KB JS and 1.2 KB CSS (243278 and 24974 measured). A source glyph asking native once for an icon the cache lacks adds 0.9 KB JS (244203 measured). The code kind's projection and its lazy block loader in the result renderer add 0.4 KB JS (245780 measured). The origin grant approval in the request lift adds 3.7 KB JS and 1.2 KB CSS (249506 and 26379 measured). The answer view in the result renderer adds 5.4 KB JS and 2.7 KB CSS (253708 and 29001 measured on bf0d0f03). The diagram lift's headings in the shared message catalog add under 0.1 KB JS (253801 measured over 253708 at 64a197e4). The sticky lift header and the sortable table with its best marks and CSV footer in the shared result renderer add 3.5 KB JS and 2.9 KB CSS (201146 and 31887 measured over 197656 and 29001 at a33931f7). The signed-in offer's run reply and the run facts in the shared Work graph add 1.2 KB JS (260775 measured over 259607 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (259607 measured over 257289 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (260775 measured on d9a65235). The shared DataTable's sortable headers and its plain variant with a held heading column (Work's sheet) add 1.6 KB CSS (33588 measured). The object renderers' message keys and the code block's first line number in the shared Work graph add 0.3 KB JS (262806 measured)."
-  },
-  "lazy:features/work/components/local/CommandInspector.svelte": {
-    "js": 94500,
-    "css": 6000,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (93857 measured over the prior 93600 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 94015 JS and 4741 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (94174 JS measured, 4 Oct). Update and security notice strings join the shared catalog (94202 JS measured, 4 Oct). App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/work/components/local/CommandRecord.svelte": {
-    "js": 89700,
-    "css": 4800,
-    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 89399 to 89462, CSS 3997 to 3997 bytes. Previous headroom preserved. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/work/components/WorkFileInspector.svelte": {
-    "js": 167500,
-    "css": 7700,
-    "description": "Measured 64732 JS and 5077 CSS bytes: one file record or proposed change, opened from the lift. Merged with main: 154092 JS and 5622 CSS measured. The shared lift header in place of the file lift's own adds 12.5 KB JS and 1.9 KB CSS (102297 and 6735 measured over 89752 and 4818 at a33931f7). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (163321 measured over 161015 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (163321 measured on d9a65235). CSS reconciled the same way (7539 measured on d9a65235). Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 166989 JS measured. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 167373 JS measured."
-  },
-  "lazy:features/work/components/WorkResultInspector.svelte": {
-    "js": 270400,
-    "css": 35600,
-    "description": "Measured 147677 JS and 22233 CSS bytes: the lift renders the result itself, the quiet per-cell correction and the one Accept the review state needs; the card mode of the result renderers, source glyphs on chips, and bars for numeric compare rows add 6.6 KB. Reading mode, the lift header and the collapsed sources rail add 9.3 KB JS and 2.5 KB CSS (158031 and 24772 measured). Compare check rows and best-value dots add 1.4 KB JS (159821 measured). Merged with main: 237582 JS and 24558 CSS measured. Site marks in the lift header and evidence chips add 3.9 KB JS (241532 measured). Diagram and table projection, the whole table with its sticky header and first column, and the knowledge caption in the lift header add 4.8 KB JS and 1.2 KB CSS (247665 and 26101 measured). A source glyph asking native once for an icon the cache lacks adds under 1 KB JS (248590 measured). The code kind's projection, lazy block loader, Code caption and Copy action add 2.0 KB JS (251819 measured). The answer's reading page with Copy and the answer view add 5.9 KB JS and 2.7 KB CSS (256566 and 28799 measured on bf0d0f03). The diagram lift's lazy loader adds 0.6 KB JS (257211 measured over 256566 at 64a197e4); the lift itself is its own lazy entry. The findings reading list, the sortable table with its best marks and CSV footer, the compare's 40 px headers and footer, and one reading page for documents and code add 7.3 KB JS and 6.7 KB CSS (209531 and 35485 measured over 202207 and 28799 at a33931f7). The signed-in offer's run reply and the run facts in the shared Work graph add 1.3 KB JS (268149 measured over 266886 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (266886 measured over 264577 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (268149 measured on d9a65235). Round 5 memory: pictures asked for at the width shown: 270001 JS measured. BYOK/connections release: measured 270118 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Release merge 2026-10-01: Merged shared graph measures 270,332 bytes of JS, 32 bytes over the previous ceiling; rounded to the next 100 bytes."
-  },
-  "lazy:features/work/components/DiagramLift.svelte": {
-    "js": 206000,
-    "css": 9000,
-    "description": "Measured 202469 JS and 8555 CSS bytes: the diagram lift's picture at 1.25 scale with its parts and flows lists, loaded only when a diagram is lifted; its own chunk is 6.7 KB JS and 4.0 KB CSS, the rest the shared Work graph (favicons, vendor names, the layout)."
-  },
-  "lazy:features/work/lib/diagram-worker.ts": {
-    "js": 179800,
-    "css": 4200,
-    "description": "Measured 160928 JS and 3963 CSS bytes: the ELK adapter (graph in, layout out) and the worker client, 5.8 KB of its own over the shared runtime. ELK itself is in no budgeted graph: the worker script (1.43 MB) and the in-page fallback script (elk.bundled, 1.61 MB, loaded as a plain script so no page chunk carries ELK's CommonJS wrapper) load only when a diagram is laid out. The tiered layout joins the diagram module this graph shares (167891 measured). One line for two flows between the same parts adds 0.2 KB JS (168749 measured). Ports spread over a part's side and passing rows kept apart in the tier layout add 0.6 KB JS (169598 measured at aef3a6b9, 170070 at 8f0f32ac). The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 171802 JS and 3963 CSS. Round 3's shared Work graph with the concurrent diagram work in the tree: 175475 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 178120 JS measured. Round 4: diagrams read left to right, with a column layout while the engine answers and a chain kept on one line: 179143 JS measured. Round 5 words for helpers and tools in the shared catalog: 179366 JS measured. BYOK/connections release: measured 179543 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30."
-  },
-  "lazy:features/work/components/WorkSubjectInspector.svelte": {
-    "js": 214100,
-    "css": 11000,
-    "description": "Measured 107031 JS and 7994 CSS bytes: the product view of one subject, its admitted pictures, facts with sources, and the pages behind them. The lift header and the sources rail add 7.2 KB JS and 1.1 KB CSS (117296 and 9141 measured). Sentence-case fact labels and compare best values add 1.1 KB JS (118845 measured). Merged with main: 198659 JS and 9616 CSS measured. Site marks in the lift header and source rows add 3.1 KB JS and 0.4 KB CSS (201792 and 9994 measured). A source glyph asking native once for an icon the cache lacks adds under 1 KB JS (204278 measured). The answer projection in the shared result graph adds 1.7 KB JS (205732 measured on bf0d0f03). The signed-in offer's run reply and the run facts in the shared Work graph add 1.3 KB JS (210865 measured over 209602 with the current dependencies). LayerChart's transitions bring Svelte's transition runtime into the shared runtime chunk: +2.3 KB JS (209602 measured over 207296 at 714054aa). Three concurrent rounds (lift and chrome, charts on LayerChart, sources and signed-in) each raised by its own delta from a base without the others; reconciled to the combined measurement (210865 measured on d9a65235). CSS reconciled the same way (10792 measured on d9a65235). Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 213528 JS measured. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 213925 JS measured. Release merge 2026-10-01: Merged shared graph measures 214,007 bytes of JS, 7 bytes over the previous ceiling; rounded to the next 100 bytes."
-  },
-  "lazy:features/work/components/pane/TakeoverPane.svelte": {
-    "js": 96100,
-    "css": 11000,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (95457 measured over the prior 95200 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 95615 JS and 6394 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (95774 JS measured, 4 Oct). Update and security notice strings join the shared catalog (95802 JS measured, 4 Oct). App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/settings/components/sections/WorkPage.svelte": {
-    "js": 303400,
-    "css": 84000,
-    "description": "Measured 302457 JS and 83808 CSS bytes: the Decisions control over the shared settings graph and the work-decision session. The local-work commits grow the shared graph to 303111 JS (measured on 236b43c4)."
-  },
-  "lazy:features/notes/components/NoteHost.svelte": {
-    "js": 206700,
-    "css": 8000,
-    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (197476 JS measured, 4 Oct). Update and security notice strings join the shared catalog (201286 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 202475 JS and 7574 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 202538 JS and 7574 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice tasks and notes save cadence, saving signal, retries and bounded sessions"
-  },
-  "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
-    "js": 532000,
-    "css": 19500,
-    "description": "Measured 513414 JS and 16034 CSS bytes (148822 and 9549 before): the chart kit drawn by LayerChart 2.5.0, loaded only when a chart result is shown. Its own chunk is 350179 JS and 12059 CSS bytes (59639 and 6378 before); 66981 bytes are the icon and search chunks the browser loads at startup, where the merge puts modules the kit shares, the rest the shared runtime. LayerChart is patched so pan, zoom, brush and voronoi are not bundled. The shadcn-svelte chart designs with radial and radar add 13.3 KB JS and 2.7 KB CSS (526696 and 18703 measured)."
-  },
-  "lazy:dependency/d3-quadtree/src/index.js": {
-    "js": 5200,
-    "css": 0,
-    "description": "Measured 4911 JS bytes: d3-quadtree, which LayerChart's tooltip loads only for its quadtree modes; the app's charts never ask for it."
-  },
-  "lazy:shared/ui/data/Code/CodeBlock.svelte": {
-    "js": 99300,
-    "css": 6000,
-    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 98976 to 99039, CSS 5909 to 5909 bytes. Previous headroom preserved. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/work/index.ts": {
-    "js": 149500,
-    "css": 4000,
-    "description": "Work's entry, loaded when Work is chosen so the sidebar can ask it for the project list: the shared runtime chunk and two loaders (149380 measured; the board adds a few bytes to the shared runtime)."
-  },
-  "lazy:features/work/components/parts/ComputerPart.svelte": {
-    "js": 126600,
-    "css": 8400,
-    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 126290 to 126353, CSS 7903 to 7903 bytes. Previous headroom preserved. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/work/components/parts/ConnectionPart.svelte": {
-    "js": 125800,
-    "css": 6600,
-    "description": "Measured 112647 JS and 5407 CSS bytes: a connection part's calls as rows with the service's mark, loaded only when a run has one. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 115560 JS and 5407 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 123022 JS measured. Its CSS: 6410 measured. BYOK/connections release: measured 117923 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 125694 JS measured."
-  },
-  "lazy:features/work/components/asks/AskCard.svelte": {
-    "js": 251500,
-    "css": 21500,
-    "description": "The ask card on a part's row, loaded only while a part asks (the canvas's ask slot): measured 250710 JS and 21352 CSS."
-  },
-  "lazy:features/work/components/objects/Plot.svelte": {
-    "js": 158400,
-    "css": 5000,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a chart object on its own surface: the chart kit itself loads on its own when the object comes near the view. Measured 156444 JS and 4710 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
-  },
-  "lazy:features/work/components/objects/Sheet.svelte": {
-    "js": 240000,
-    "css": 35000,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the sheet on the shared DataTable with typed cells, best marks and sorting. Measured 237059 JS and 33278 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
-  },
-  "lazy:features/work/components/objects/Picks.svelte": {
-    "js": 256200,
-    "css": 46400,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: photo-led pick cards, flight routes and, in the centre, the comparing sheet. Measured 253073 JS and 44165 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
-  },
-  "lazy:features/work/components/objects/Plan.svelte": {
-    "js": 173700,
-    "css": 10500,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the plan's timeline with Make tasks. Measured 169606 JS and 9977 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3's canvas and object work in the shared Work graph: 172298 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 172775 JS measured. Round 5: made tasks link to the Tasks panel: 173251 JS measured."
-  },
-  "lazy:features/work/components/objects/List.svelte": {
-    "js": 168100,
-    "css": 9100,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the list with each item's source and Make tasks. Measured 164228 JS and 8588 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3 (works named from their first run, runs without invented parts, the request's local reads and exchange, the calm working state), with the concurrent streams in the tree: 166667 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 167144 JS measured. Round 5: made tasks link to the Tasks panel: 167620 JS measured."
-  },
-  "lazy:features/work/components/objects/Diagram.svelte": {
-    "js": 232000,
-    "css": 10200,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the diagram object over the board's diagram and its tier layout. Measured 180423 JS and 9713 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 183264 JS and 9548 CSS. Round two lays diagrams out top to bottom with trunks, junctions and placed names, and gives every part a role glyph (about forty Hugeicons): 225972 JS and 9008 CSS."
-  },
-  "lazy:features/work/components/objects/Code.svelte": {
-    "js": 169000,
-    "css": 8700,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the code object over the shared code block. Measured 161526 JS and 8196 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The shared code scanner (calls, types, properties, tags; one pass over the whole text, shared with notes) adds about 5 KB JS at 37e62d31: measured 167298."
-  },
-  "lazy:features/work/components/objects/Diff.svelte": {
-    "js": 100600,
-    "css": 7600,
-    "description": "Time and focus strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 0.3 KB JS (99968 measured over the prior 99700 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 100126 JS and 6543 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (100285 JS measured, 4 Oct). Update and security notice strings join the shared catalog (100313 JS measured, 4 Oct). App-link and pop-up requests, page dialogs and log strings join the shared message catalog."
-  },
-  "lazy:features/work/components/objects/Document.svelte": {
-    "js": 201400,
-    "css": 27400,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: the document as a sheet of paper over the shared document view. Measured 199010 JS and 26056 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches."
-  },
-  "lazy:features/work/components/objects/Draft.svelte": {
-    "js": 186300,
-    "css": 14200,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a draft in the shape of its destination. Measured 163682 JS and 8634 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 177763 JS and 13429 CSS. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 180112 JS measured. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 185736 JS measured."
-  },
-  "lazy:features/work/components/objects/Media.svelte": {
-    "js": 164700,
-    "css": 7500,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: image, the YouTube player created on play, and the audio player. Measured 161504 JS and 7056 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. Round 3's canvas and object work in the shared Work graph: 163698 JS measured. Round 3's canvas in the shared Work graph (works named and found, need reasons, near-view drawing, frame thumbnails), with the concurrent streams in the tree: 164175 JS measured. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 164559 JS measured."
-  },
-  "lazy:features/work/components/objects/Page.svelte": {
-    "js": 172400,
-    "css": 15600,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a page's frame under its title bar. Measured 162175 JS and 5971 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The live page's one-shot hairline on a new look and the small copy a far-away page frame draws as: 6801 CSS measured. Round 4: the live page's reading orb and pages over what they gave bring the presence runtime into this graph: 170535 JS measured. Round 4 memory: frame copies kept within a byte budget and let go as their canvas leaves: 170834 JS measured. Round 5: the island's new words in the shared catalog: 171300 JS measured. The lead's figures and the shimmer bring 2.3 KB CSS: 15473 measured. Round 5 words for helpers and tools in the shared catalog: 171669 JS measured. Round 5 memory: picture copies at the width they are drawn, and the webview's picture cache asked back once their canvases are gone: 172226 JS measured. BYOK/connections release: measured 171121 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30."
-  },
-  "lazy:features/work/components/objects/Note.svelte": {
-    "js": 174800,
-    "css": 11200,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a note as text on the canvas that edits in place. Measured 86520 JS and 4572 CSS at 8f0f32ac, most of it the shared Work graph every object chunk reaches. The 28 Sep Work build (lead runtime, objects, asks, connections, memory) grows it to 168611 JS and 10171 CSS. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 174271 JS measured. Its CSS: 11008 measured."
-  },
-  "lazy:features/work/components/objects/File.svelte": {
-    "js": 104400,
-    "css": 8300,
-    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 104158 to 104221, CSS 7864 to 7864 bytes. Previous headroom preserved. App-link and pop-up requests, page dialogs and log strings join the shared message catalog."
-  },
-  "lazy:features/work/components/objects/Folder.svelte": {
-    "js": 89300,
-    "css": 5700,
-    "description": "Typed capture IPC and emitted symbol layout. Matched c884cb7 with identical dependencies: JS 88995 to 89058, CSS 4766 to 4766 bytes. Previous headroom preserved. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/work/components/objects/Project.svelte": {
-    "js": 167800,
-    "css": 9700,
-    "description": "One kind's renderer, fetched the first time the canvas shows one: a folder read as a project (stack marks, the tree with its two glyphs, scripts, git state). Measured 163102 JS and 8125 CSS, most of it the shared Work graph every object chunk reaches. Round 4: on the canvas a project is a small map (the folder, then its stack, tree and scripts as pieces on one line); the centre keeps the whole card: 167271 JS and 9653 CSS measured. BYOK/connections release: measured 167528 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 167655 JS measured."
-  },
-  "lazy:features/work/components/bar/ModelPicker.svelte": {
-    "js": 286500,
-    "css": 14000,
-    "description": "The model picker in the ask bar, loaded the first time the bar is engaged: measured 284234 JS and 13947 CSS. The shared chunk grown by the concurrent streams: 285825 measured."
-  },
-  "lazy:features/work/components/objects/ObjectCentre.svelte": {
-    "js": 172200,
-    "css": 10600,
-    "description": "An object opened in the centre, loaded with the first lift of an object: measured 164683 JS and 8899 CSS. The shared chunk grown by the concurrent streams: 165902 measured. 9316 CSS measured. Round 5: the answer on its way as the working indicator with its shimmering line, and tool calls in words with their live state, bring the presence primitives into this graph: 171635 JS measured. Its CSS: 10417 measured."
-  },
-  "lazy:features/settings/components/sections/AiPage.svelte": {
-    "js": 508200,
-    "css": 109400,
-    "description": "Measured 502078 JS and 100139 CSS bytes. Settings → AI: provider keys, the model catalogue and role defaults over the shared settings graph. The soft palette in the global tokens adds 3.3 KB CSS: 108454 measured."
-  },
-  "lazy:features/settings/components/sections/ConnectionsPage.svelte": {
-    "js": 312400,
-    "css": 20700,
-    "description": "Measured 306623 JS and 19667 CSS bytes. Settings → Connections: detected command-line tools and MCP servers with their editor. BYOK/connections release: measured 312205 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5 merge of BYOK/connections with the canvas, agent and memory streams: 312332 JS measured."
-  },
-  "lazy:features/settings/components/sections/MemoryPage.svelte": {
-    "js": 206300,
-    "css": 11700,
-    "description": "Time and focus strings join the shared message catalog. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (199264 JS measured, 4 Oct). Update and security notice strings join the shared catalog (203069 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 204258 JS and 11657 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 204321 JS and 11657 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice"
-  },
-  "lazy:features/settings/components/sections/SitesPage.svelte": {
-    "js": 172800,
-    "css": 10300,
-    "description": "Measured 170671 JS and 9760 CSS bytes. Settings → Sites: the sites the agent may work in as the person."
-  },
-  "lazy:features/settings/components/sections/SkillsPage.svelte": {
-    "js": 306500,
-    "css": 19700,
-    "description": "Measured 302801 JS and 17064 CSS bytes. Settings → Skills: built-in and personal skills with the Markdown editor. Launcher, onboarding and new tab merge 2026-10-01: 19,163 bytes of CSS measured; ceiling rounded to the next 100 bytes. Windows sidebar menu material, 2026-10-04: Select shares the menu surface graph; 19691 CSS bytes measured. Settings has no opaque marker and retains its existing appearance. Reviewed 500-byte ceiling step for the shared graph, with no new stylesheet dependency."
-  },
-  "lazy:features/work/components/start/WorkStart.svelte": {
-    "js": 193100,
-    "css": 13600,
-    "description": "A new work's first screen (workflows by what the person does), fetched only when a work is empty so the Workspace chunk does not carry it. Measured 116550 JS and 12231 CSS, most of it the shared Work graph. Round 5 memory: pictures asked for at the width shown: 116726 JS measured. BYOK/connections release: measured 116856 JS bytes after adding readiness, draft validation and OAuth cancellation IPC; Settings/connection graphs also include recovery and preview controls. Owner approved this ceiling on 2026-09-30. Round 5b: the tiles wear the real marks of the apps a workflow reads, through the canvas's site glyph and favicon cache, which the Work screen has already loaded: 192547 JS measured in this static graph. Its CSS with the glyph: 13406 measured."
-  },
-  "lazy:features/webext/components/WebExtensionManager.svelte": {
-    "js": 516200,
-    "css": 120100,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (486047 measured over the prior 482600 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 487251 JS and 117773 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (489014 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (497936 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 500556 JS and 118435 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 501530 JS and 118435 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 510561 JS and 119346 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/blocker/components/ProtectionMenu.svelte": {
-    "js": 398300,
-    "css": 111900,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (368371 measured over the prior 365000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 369362 JS and 109553 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (371125 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (380047 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 382667 JS and 110215 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 383641 JS and 110215 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 392672 JS and 111126 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
+  "browser-panel": {
+    "browser": {
+      "js": 385993,
+      "css": 107064
+    },
+    "lazy:app/browser/WorkWorkspace.svelte": {
+      "js": 37473,
+      "css": 366
+    },
+    "lazy:dependency/d3-quadtree/src/index.js": {
+      "js": 4911,
+      "css": 0
+    },
+    "lazy:domain/notes/index.ts": {
+      "js": 14747,
+      "css": 0
+    },
+    "lazy:features/blocker/components/ProtectionMenu.svelte": {
+      "js": 12233,
+      "css": 4741
+    },
+    "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
+      "js": 19572,
+      "css": 5909
+    },
+    "lazy:features/downloads/components/DownloadsList.svelte": {
+      "js": 11428,
+      "css": 4459
+    },
+    "lazy:features/history/components/HistoryPage.svelte": {
+      "js": 138969,
+      "css": 10535
+    },
+    "lazy:features/history/components/HistoryPanel.svelte": {
+      "js": 13289,
+      "css": 3102
+    },
+    "lazy:features/library/components/LibraryPage.svelte": {
+      "js": 2200,
+      "css": 0
+    },
+    "lazy:features/newtab/components/NewTab.svelte": {
+      "js": 38489,
+      "css": 5133
+    },
+    "lazy:features/notes/components/editor/NoteEditor.svelte": {
+      "js": 438366,
+      "css": 11897
+    },
+    "lazy:features/notes/components/NoteHost.svelte": {
+      "js": 23359,
+      "css": 3598
+    },
+    "lazy:features/notes/components/Notes.svelte": {
+      "js": 134505,
+      "css": 14517
+    },
+    "lazy:features/notes/components/NotesPage.svelte": {
+      "js": 157490,
+      "css": 20468
+    },
+    "lazy:features/notes/index.ts": {
+      "js": 388,
+      "css": 0
+    },
+    "lazy:features/search/components/LauncherPanel.svelte": {
+      "js": 105181,
+      "css": 10558
+    },
+    "lazy:features/search/components/NewTabSearch.svelte": {
+      "js": 98171,
+      "css": 8254
+    },
+    "lazy:features/settings/components/sections/AboutPage.svelte": {
+      "js": 18143,
+      "css": 3336
+    },
+    "lazy:features/settings/components/sections/AccountPage.svelte": {
+      "js": 114450,
+      "css": 6544
+    },
+    "lazy:features/settings/components/sections/AiPage.svelte": {
+      "js": 167586,
+      "css": 11288
+    },
+    "lazy:features/settings/components/sections/ConnectionsPage.svelte": {
+      "js": 154775,
+      "css": 13586
+    },
+    "lazy:features/settings/components/sections/FocusPage.svelte": {
+      "js": 133216,
+      "css": 8849
+    },
+    "lazy:features/settings/components/sections/GeneralPage.svelte": {
+      "js": 178599,
+      "css": 13832
+    },
+    "lazy:features/settings/components/sections/KeyboardPage.svelte": {
+      "js": 147179,
+      "css": 10773
+    },
+    "lazy:features/settings/components/sections/LanguagesPage.svelte": {
+      "js": 124384,
+      "css": 6788
+    },
+    "lazy:features/settings/components/sections/MemoryPage.svelte": {
+      "js": 16695,
+      "css": 4514
+    },
+    "lazy:features/settings/components/sections/PerformancePage.svelte": {
+      "js": 135536,
+      "css": 10483
+    },
+    "lazy:features/settings/components/sections/PrivacyPage.svelte": {
+      "js": 163060,
+      "css": 13333
+    },
+    "lazy:features/settings/components/sections/ProfilesPage.svelte": {
+      "js": 147114,
+      "css": 10756
+    },
+    "lazy:features/settings/components/sections/SearchPage.svelte": {
+      "js": 135679,
+      "css": 10240
+    },
+    "lazy:features/settings/components/sections/SitesPage.svelte": {
+      "js": 12298,
+      "css": 2218
+    },
+    "lazy:features/settings/components/sections/SkillsPage.svelte": {
+      "js": 147586,
+      "css": 13217
+    },
+    "lazy:features/settings/components/sections/TabsPage.svelte": {
+      "js": 133482,
+      "css": 8797
+    },
+    "lazy:features/settings/components/sections/WorkPage.svelte": {
+      "js": 10492,
+      "css": 3381
+    },
+    "lazy:features/settings/components/Settings.svelte": {
+      "js": 144627,
+      "css": 9353
+    },
+    "lazy:features/tabs/components/NavigationError.svelte": {
+      "js": 2043,
+      "css": 387
+    },
+    "lazy:features/tabs/components/TabCapacityState.svelte": {
+      "js": 1504,
+      "css": 340
+    },
+    "lazy:features/tasks/components/TaskBoard.svelte": {
+      "js": 264412,
+      "css": 31918
+    },
+    "lazy:features/tasks/components/TaskDetail.svelte": {
+      "js": 270795,
+      "css": 34151
+    },
+    "lazy:features/tasks/components/Tasks.svelte": {
+      "js": 255347,
+      "css": 26782
+    },
+    "lazy:features/tasks/components/TasksPage.svelte": {
+      "js": 299772,
+      "css": 36820
+    },
+    "lazy:features/tasks/lib/capture.ts": {
+      "js": 30881,
+      "css": 0
+    },
+    "lazy:features/time/components/FocusCover.svelte": {
+      "js": 4652,
+      "css": 2053
+    },
+    "lazy:features/time/components/TimePage.svelte": {
+      "js": 138847,
+      "css": 20669
+    },
+    "lazy:features/time/components/TimePanel.svelte": {
+      "js": 131458,
+      "css": 18757
+    },
+    "lazy:features/tools/components/previews/BookmarksView.svelte": {
+      "js": 9811,
+      "css": 3042
+    },
+    "lazy:features/tools/components/previews/ChatView.svelte": {
+      "js": 9795,
+      "css": 3042
+    },
+    "lazy:features/tools/components/previews/DownloadsView.svelte": {
+      "js": 9292,
+      "css": 3042
+    },
+    "lazy:features/tools/components/previews/HistoryView.svelte": {
+      "js": 114254,
+      "css": 7028
+    },
+    "lazy:features/tools/components/previews/NotesView.svelte": {
+      "js": 138109,
+      "css": 8640
+    },
+    "lazy:features/tools/components/previews/TasksView.svelte": {
+      "js": 136959,
+      "css": 8402
+    },
+    "lazy:features/tools/components/previews/TimeView.svelte": {
+      "js": 114556,
+      "css": 7028
+    },
+    "lazy:features/tools/components/ToolSlot.svelte": {
+      "js": 6952,
+      "css": 369
+    },
+    "lazy:features/updates/components/UpdateCards.svelte": {
+      "js": 6425,
+      "css": 4182
+    },
+    "lazy:features/updates/components/UpdateGlyph.svelte": {
+      "js": 3936,
+      "css": 1816
+    },
+    "lazy:features/webext/components/WebExtensionManager.svelte": {
+      "js": 130122,
+      "css": 12961
+    },
+    "lazy:features/work/components/AgentLine.svelte": {
+      "js": 129397,
+      "css": 26053
+    },
+    "lazy:features/work/components/bar/ModelPicker.svelte": {
+      "js": 130093,
+      "css": 6845
+    },
+    "lazy:features/work/components/local/CommandInspector.svelte": {
+      "js": 8672,
+      "css": 1582
+    },
+    "lazy:features/work/components/local/CommandRecord.svelte": {
+      "js": 3869,
+      "css": 838
+    },
+    "lazy:features/work/components/objects/Code.svelte": {
+      "js": 15978,
+      "css": 3697
+    },
+    "lazy:features/work/components/objects/Diagram.svelte": {
+      "js": 80023,
+      "css": 5177
+    },
+    "lazy:features/work/components/objects/Diff.svelte": {
+      "js": 14783,
+      "css": 3384
+    },
+    "lazy:features/work/components/objects/Document.svelte": {
+      "js": 11321,
+      "css": 4000
+    },
+    "lazy:features/work/components/objects/Draft.svelte": {
+      "js": 30642,
+      "css": 9492
+    },
+    "lazy:features/work/components/objects/File.svelte": {
+      "js": 18628,
+      "css": 4705
+    },
+    "lazy:features/work/components/objects/Folder.svelte": {
+      "js": 3465,
+      "css": 1607
+    },
+    "lazy:features/work/components/objects/List.svelte": {
+      "js": 16329,
+      "css": 4036
+    },
+    "lazy:features/work/components/objects/Media.svelte": {
+      "js": 12886,
+      "css": 3106
+    },
+    "lazy:features/work/components/objects/Note.svelte": {
+      "js": 19140,
+      "css": 6585
+    },
+    "lazy:features/work/components/objects/ObjectCentre.svelte": {
+      "js": 16502,
+      "css": 5994
+    },
+    "lazy:features/work/components/objects/Page.svelte": {
+      "js": 11222,
+      "css": 2715
+    },
+    "lazy:features/work/components/objects/Picks.svelte": {
+      "js": 74692,
+      "css": 21859
+    },
+    "lazy:features/work/components/objects/Plan.svelte": {
+      "js": 21960,
+      "css": 4957
+    },
+    "lazy:features/work/components/objects/Plot.svelte": {
+      "js": 5655,
+      "css": 457
+    },
+    "lazy:features/work/components/objects/Project.svelte": {
+      "js": 15983,
+      "css": 5690
+    },
+    "lazy:features/work/components/objects/Sheet.svelte": {
+      "js": 38138,
+      "css": 8731
+    },
+    "lazy:features/work/components/pane/TakeoverPane.svelte": {
+      "js": 10272,
+      "css": 3235
+    },
+    "lazy:features/work/components/parts/ComputerPart.svelte": {
+      "js": 40760,
+      "css": 4744
+    },
+    "lazy:features/work/components/parts/ConnectionPart.svelte": {
+      "js": 37023,
+      "css": 1659
+    },
+    "lazy:features/work/components/start/WorkStart.svelte": {
+      "js": 38909,
+      "css": 6945
+    },
+    "lazy:features/work/components/WorkCanvas.svelte": {
+      "js": 622028,
+      "css": 119544
+    },
+    "lazy:features/work/components/WorkEnvironmentWorkspace.svelte": {
+      "js": 522815,
+      "css": 44993
+    },
+    "lazy:features/work/components/WorkFileInspector.svelte": {
+      "js": 15706,
+      "css": 3456
+    },
+    "lazy:features/work/components/WorkObjectiveInspector.svelte": {
+      "js": 107882,
+      "css": 28174
+    },
+    "lazy:features/work/components/WorkResultInspector.svelte": {
+      "js": 120656,
+      "css": 31341
+    },
+    "lazy:features/work/components/WorkSubjectInspector.svelte": {
+      "js": 64151,
+      "css": 6709
+    },
+    "lazy:features/work/lib/diagram-worker.ts": {
+      "js": 27969,
+      "css": 0
+    },
+    "lazy:shared/ui/data/Artifact/WorkChart.svelte": {
+      "js": 379558,
+      "css": 14907
+    },
+    "lazy:shared/ui/data/Chart/Chart.svelte": {
+      "js": 377480,
+      "css": 14907
+    },
+    "lazy:shared/ui/data/Code/CodeBlock.svelte": {
+      "js": 13446,
+      "css": 2750
+    },
+    "panel": {
+      "js": 113655,
+      "css": 35642
+    }
   },
   "onboarding": {
-    "js": 200800,
-    "css": 104800,
-    "description": "Onboarding reads the preference defaults, which gain the time and focus settings. Shared numeric sidebar revision and guide commands add 60 measured JS bytes above the prior limit. Onboarding remains isolated from the browser graph; CSS is unchanged. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 200217 JS and 104576 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (200376 JS measured, 4 Oct). The automatic update check joins the preference defaults (200404 JS measured, 4 Oct). App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/bookmarks/components/BookmarksPanel.svelte": {
-    "js": 405600,
-    "css": 113000,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (375710 measured over the prior 372300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 376701 JS and 110721 CSS bytes measured. Localized camera and microphone prompt strings and the clear-history dialog add 1.8 KB JS (378464 measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (387386 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 390006 JS and 111383 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 390980 JS and 111383 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 400011 JS and 112294 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/tools/components/previews/BookmarksView.svelte": {
-    "js": 395900,
-    "css": 110200,
-    "description": "Notice, download and tool-menu strings join the shared message catalog. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (365949 measured over the prior 362500 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 366940 JS and 107854 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (368703 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (377625 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 380245 JS and 108516 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 381219 JS and 108516 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 390250 JS and 109427 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/time/components/ShutSites.svelte": {
-    "js": 356200,
-    "css": 106400,
-    "description": "Time and focus strings, the focus cover's included, join the shared message catalog."
-  },
-  "lazy:features/time/components/TimePage.svelte": {
-    "js": 524900,
-    "css": 127800,
-    "description": "The focus dial chooses its length from the menu shared with Tasks. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.5 KB JS (494754 measured over the prior 491300 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 495958 JS and 125481 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (497721 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (506637 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 509258 JS and 126143 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 510232 JS and 126143 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 519286 JS and 127054 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/time/components/TimePanel.svelte": {
-    "js": 517500,
-    "css": 125900,
-    "description": "The focus dial chooses its length from the menu shared with Tasks; shut sites are edited in place. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.4 KB JS (487373 measured over the prior 484000 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 488577 JS and 123569 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (490340 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (499262 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 501882 JS and 124231 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 502856 JS and 124231 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 511897 JS and 125142 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/time/components/FocusCover.svelte": {
-    "js": 390700,
-    "css": 109200,
-    "description": "Stands where a page focus shuts would be: the round's ring, the site, and allow or end. Tab sleeping settings and capacity strings in the shared message catalog, the sidebar-resize commands in the shared IPC bindings and guide-only sidebar resizing add 3.3 KB JS (360716 measured over the prior 357400 limit, 4 Oct). Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 361781 JS and 106865 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (363544 JS measured, 4 Oct). Update and security notices: the update status store and notice selector in the browser graph, and their strings in the shared catalog (372466 JS measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375086 JS and 107527 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376060 JS and 107527 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 385091 JS and 108438 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Address-field ellipsis styling joins the shared address graph. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/tabs/components/TabCapacityState.svelte": {
-    "js": 118900,
-    "css": 6500,
-    "description": "Measured 118060 JS and 6402 CSS bytes: the capacity notice shown while a page waits for a live-view slot, loaded only when needed. Integration of Windows Work (Jev key settings, sidebar menu material) with Time & focus and tab residency, 4 Oct: their shared catalog and IPC additions combine; 118229 JS and 6402 CSS bytes measured. Release updater, camera/microphone prompt and clear-history strings in the shared catalog and IPC bindings (118388 JS measured, 4 Oct). Update and security notice strings join the shared catalog (118416 JS measured, 4 Oct). App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
-  },
-  "lazy:features/updates/components/UpdateCards.svelte": {
-    "js": 392500,
-    "css": 111300,
-    "description": "Update notice views, loaded only while a notice or a waiting update is shown (372988 JS and 108530 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 375608 JS and 109192 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 376582 JS and 109192 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 385853 JS and 110103 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/updates/components/UpdateGlyph.svelte": {
-    "js": 390000,
-    "css": 108900,
-    "description": "Update notice views, loaded only while a notice or a waiting update is shown (370796 JS and 106628 CSS bytes measured, 4 Oct). Private windows (the band, its icon and strings), the new tab's hold until commit and the resize guide fixes join the shared graph, 6 Oct: 373416 JS and 107290 CSS bytes measured. Failed-address explanations join the shared message catalog, 6 Oct: 374390 JS and 107290 CSS bytes measured. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 383658 JS and 108201 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog. Work address and typing questions, unrestorable-session notice search button room beside tools"
-  },
-  "lazy:features/tabs/components/NavigationError.svelte": {
-    "js": 119400,
-    "css": 6500,
-    "description": "Why an address did not open and a retry, loaded only when a first load fails; measured 118960 JS and 6454 CSS bytes, 6 Oct. Hardening (capture controls, download and update states) merged with private windows and failed-address copy, 6 Oct: 119023 JS and 6454 CSS bytes measured. App-link and pop-up requests, page dialogs and log strings join the shared message catalog. Update highlights, developer-tools and private-foot strings join the shared message catalog."
+    "onboarding": {
+      "js": 200789,
+      "css": 104767
+    }
   }
 }
