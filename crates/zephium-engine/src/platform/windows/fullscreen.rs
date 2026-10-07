@@ -12,9 +12,10 @@ use wry::WebViewExtWindows;
 use crate::fullscreen::NativeFullscreen;
 
 // Element fullscreen first, then a legacy video presentation.
-const EXIT_SCRIPT: &str = "(() => { if (document.fullscreenElement) { \
-     document.exitFullscreen().catch(() => {}); } \
-     else if (document.webkitFullscreenElement) { document.webkitExitFullscreen(); } })()";
+const EXIT_SCRIPT: &str = "(async () => { if (document.fullscreenElement) { \
+     await document.exitFullscreen(); } \
+     else if (document.webkitFullscreenElement) { document.webkitExitFullscreen(); } \
+     return !document.fullscreenElement && !document.webkitFullscreenElement; })()";
 const EXIT_WORLD: &str = "zephium-fullscreen";
 
 pub struct FullscreenObserver {
@@ -92,6 +93,8 @@ pub(crate) fn exit_core(core: &ICoreWebView2) -> bool {
                 let parameters = serde_json::json!({
                     "expression": EXIT_SCRIPT,
                     "contextId": context,
+                    "awaitPromise": true,
+                    "returnByValue": true,
                 });
                 let failed = last.clone();
                 let evaluated = protocol(
@@ -99,7 +102,7 @@ pub(crate) fn exit_core(core: &ICoreWebView2) -> bool {
                     "Runtime.evaluate",
                     &parameters.to_string(),
                     move |response| {
-                        if response.is_none() {
+                        if !response.as_deref().is_some_and(exit_completed) {
                             fallback(&failed);
                         }
                     },
@@ -122,7 +125,8 @@ pub(crate) fn exit_core(core: &ICoreWebView2) -> bool {
 fn fallback(core: &ICoreWebView2) {
     let done = ExecuteScriptCompletedHandler::create(Box::new(|_, _| Ok(())));
     // SAFETY: a fixed script on the STA-owned core.
-    let _ = unsafe { core.ExecuteScript(&HSTRING::from(EXIT_SCRIPT), &done) };
+    let script = format!("{EXIT_SCRIPT}.catch(() => false)");
+    let _ = unsafe { core.ExecuteScript(&HSTRING::from(script), &done) };
 }
 
 fn protocol(
@@ -159,12 +163,32 @@ fn main_frame_id(response: &str) -> Option<String> {
 
 fn execution_context(response: &str) -> Option<i64> {
     let value: serde_json::Value = serde_json::from_str(response).ok()?;
-    value.get("executionContextId")?.as_i64()
+    value
+        .get("executionContextId")?
+        .as_i64()
+        .filter(|id| *id > 0)
+}
+
+fn exit_completed(response: &str) -> bool {
+    // A successful COM call can still carry a JavaScript exception (including
+    // a rejected exitFullscreen promise). Only its settled result proves exit.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return false;
+    };
+    value.get("exceptionDetails").is_none()
+        && value
+            .pointer("/result/type")
+            .and_then(|value| value.as_str())
+            == Some("boolean")
+        && value
+            .pointer("/result/value")
+            .and_then(|value| value.as_bool())
+            == Some(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_context, main_frame_id};
+    use super::{execution_context, exit_completed, main_frame_id};
 
     #[test]
     fn protocol_replies_are_read_strictly() {
@@ -177,5 +201,26 @@ mod tests {
         assert_eq!(main_frame_id("not json"), None);
         assert_eq!(execution_context(r#"{"executionContextId":7}"#), Some(7));
         assert_eq!(execution_context(r#"{"executionContextId":"7"}"#), None);
+        assert_eq!(execution_context(r#"{"executionContextId":0}"#), None);
+        assert_eq!(execution_context(r#"{"executionContextId":-1}"#), None);
+    }
+
+    #[test]
+    fn exit_requires_a_settled_success_without_a_script_exception() {
+        assert!(exit_completed(
+            r#"{"result":{"type":"boolean","value":true}}"#
+        ));
+        for reply in [
+            r#"{"result":{"type":"boolean","value":false}}"#,
+            r#"{"result":{"type":"boolean","value":true},"exceptionDetails":{}}"#,
+            r#"{"result":{"type":"object","subtype":"error"},"exceptionDetails":{}}"#,
+            r#"{"result":{"type":"object","className":"Promise"}}"#,
+            r#"{"result":{"type":"boolean","value":"true"}}"#,
+            r#"{"result":{"type":"undefined"}}"#,
+            "{}",
+            "not json",
+        ] {
+            assert!(!exit_completed(reply), "must fall back for {reply}");
+        }
     }
 }
