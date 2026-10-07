@@ -465,16 +465,26 @@ fn native_windows_runtime_recovery() {
     host(move |h| {
         evaluate(
             &h.windows_extensions.installs[&key].bridge.view,
-            "qaSnapshots=0;qaReports=0;const sendBroken=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){const result=Reflect.apply(sendBroken,this,args);return args[0]?.__zephiumActionSnapshot?result.catch(()=>null).then(()=>({icon:{path:'missing-qualification.png'},perTabIcons:false})):result};true",
+            "qaSnapshots=0;qaReports=0;globalThis.qaNotification=null;chrome.runtime.onMessage.addListener((message,sender)=>{qaNotification={message,senderId:sender.id}});const sendBroken=chrome.runtime.sendMessage;chrome.runtime.sendMessage=function(...args){const result=Reflect.apply(sendBroken,this,args);return args[0]?.__zephiumActionSnapshot?result.catch(()=>null).then(()=>({icon:{path:'missing-qualification.png'},perTabIcons:false})):result};true",
         );
-        evaluate(
+        assert_eq!(evaluate(
             &h.views[&tab],
-            "chrome.runtime.sendMessage({__zephiumActionChanged:true}).catch(()=>{});true",
-        );
+            "(()=>{try{globalThis.qaSignal='pending';chrome.runtime.sendMessage({__zephiumActionChanged:true}).then(()=>qaSignal='sent',error=>qaSignal=String(error));return true}catch(error){return String(error)}})()",
+        ), true, "extension notification injection failed");
     });
+    let notification_deadline = Instant::now() + Duration::from_secs(8);
     until(
         || {
             host(move |h| {
+                assert!(
+                    Instant::now() < notification_deadline,
+                    "notification was not delivered: host={}, sender={}",
+                    evaluate(
+                        &h.windows_extensions.installs[&key].bridge.view,
+                        "({qaNotification,qaError,qaReports})"
+                    ),
+                    evaluate(&h.views[&tab], "({qaSignal,id:chrome.runtime.id})")
+                );
                 evaluate(
                     &h.windows_extensions.installs[&key].bridge.view,
                     "qaReports",

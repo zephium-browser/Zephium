@@ -505,24 +505,50 @@ fn native_protection_qualification() {
                 evaluate(
                     &view,
                     r#"(() => {
-                const report = globalThis.__zephium_discard_safety_v1__;
+                const report = () => globalThis.__zephium_discard_safety_v1__() & ~(512 | 2048);
                 if (report() !== 1) return 'clean document rejected';
                 const listener = () => {};
                 addEventListener('beforeunload', listener);
-                if (!(report() & 2)) return 'bare unload handler missed';
+                if (report() !== 1) return 'unedited unload handler vetoed discard';
                 removeEventListener('beforeunload', listener);
-                if (report() !== 1) return 'removed handler retained';
                 const host = document.createElement('div'); document.body.append(host);
                 const root = host.attachShadow({mode:'closed'});
-                const input = document.createElement('input'); root.append(input); input.value = 'unsaved';
+                const input = document.createElement('input'); root.append(input);
+                globalThis.qaDiscardHost = host; globalThis.qaDiscardInput = input;
+                input.focus();
+                return 'passed';
+            })()"#
+                ),
+                "passed"
+            );
+            // Activity/edit grace bits are time-dependent. Check the durable
+            // safety facts with actual native input, not a script-filled form.
+            super::super::extensions::cdp(
+                &view.webview(),
+                "Input.insertText",
+                json!({"text":"unsaved"}),
+            )
+            .unwrap();
+            assert_eq!(
+                evaluate(
+                    &view,
+                    r#"(() => {
+                const report = () => globalThis.__zephium_discard_safety_v1__() & ~(512 | 2048);
+                const host = globalThis.qaDiscardHost, input = globalThis.qaDiscardInput;
                 if (!(report() & 4)) return 'closed shadow form missed';
+                const listener = () => {};
+                addEventListener('beforeunload', listener);
+                if (!(report() & 2)) return 'edited unload handler missed';
+                removeEventListener('beforeunload', listener);
+                if (report() & 2) return 'removed handler retained';
                 input.value = '';
                 if (report() !== 1) return 'clean shadow form rejected';
                 const fragment = document.createDocumentFragment();
-                for (let i = 0; i < 25000; i++) fragment.append(document.createElement('span'));
+                for (let i = 0; i < 50001; i++) fragment.append(document.createElement('span'));
                 host.append(fragment);
                 if (!(report() & 256)) return 'oversized document admitted';
                 host.remove();
+                delete globalThis.qaDiscardHost; delete globalThis.qaDiscardInput;
                 return 'passed';
             })()"#
                 ),

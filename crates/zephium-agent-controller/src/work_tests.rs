@@ -1526,6 +1526,25 @@ fn drive_with_schedule(
     });
     let calls = lock(&port.calls).clone();
     events.extend(std::iter::from_fn(|| handle.take_event()));
+    // An intentionally unclean shutdown may hand its OS-thread join to the
+    // reaper. Keep SERIAL until that worker really releases admission; logical
+    // controller completion alone does not let the next fixture start.
+    let work = zephium_agentic::WorkId::generate();
+    let reaped_by = Instant::now() + Duration::from_secs(2);
+    loop {
+        match zephium_agent_runtime::AgentRuntimeWorkerGroup::try_new(work, 1) {
+            Ok(reservation) => {
+                drop(reservation);
+                break;
+            }
+            Err(zephium_agent_runtime::RuntimeSpawnError::AlreadyRunning)
+                if Instant::now() < reaped_by =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("fixture worker did not release admission: {error:?}"),
+        }
+    }
     (outcome, shutdown, calls, events)
 }
 
