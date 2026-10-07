@@ -63,14 +63,15 @@ pub(crate) async fn media_import(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
     let read = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ResourceError> {
-        let metadata = std::fs::metadata(&path).map_err(|_| ResourceError::NotFound)?;
+        let file = std::fs::File::open(&path).map_err(|_| ResourceError::NotFound)?;
+        let metadata = file.metadata().map_err(|_| ResourceError::Unavailable)?;
         if !metadata.is_file() {
             return Err(ResourceError::Invalid);
         }
         if metadata.len() > u64::from(MAX_MEDIA_FILE_BYTES) {
             return Err(ResourceError::Capacity);
         }
-        std::fs::read(&path).map_err(|_| ResourceError::Unavailable)
+        read_import_bytes(file, u64::from(MAX_MEDIA_FILE_BYTES))
     })
     .await
     .map_err(|_| ())?;
@@ -103,6 +104,21 @@ pub(crate) async fn media_import(
         ResourceResponse::Error { error } => refused(error),
         _ => refused(ResourceError::Invalid),
     }
+}
+
+fn read_import_bytes(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, ResourceError> {
+    use std::io::Read;
+    // A selected file can grow after its metadata check. Bound the read itself
+    // and keep the same open file, rather than reopening a replaceable path.
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ResourceError::Unavailable)?;
+    if bytes.len() as u64 > limit {
+        return Err(ResourceError::Capacity);
+    }
+    Ok(bytes)
 }
 
 async fn media_asset(
@@ -588,6 +604,16 @@ fn kind_is_image(asset: &MediaAssetV1) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_read_stops_when_a_file_outgrows_its_admitted_size() {
+        assert_eq!(read_import_bytes(&b"data"[..], 4).unwrap(), b"data");
+        assert!(matches!(
+            read_import_bytes(std::io::repeat(b'x'), 4),
+            Err(ResourceError::Capacity)
+        ));
+        assert!(read_import_bytes(std::io::empty(), 4).unwrap().is_empty());
+    }
 
     #[test]
     fn image_sniffing_recognizes_only_admitted_raster_formats() {
