@@ -328,37 +328,6 @@ fn reclaim_generation_with_scan(
         .unwrap_or_else(|| io::Error::other("WebView2 generation deletion did not complete")))
 }
 
-fn prune_registry_orphans(generations: &Path, boot: &RegKey) -> io::Result<()> {
-    let mut keys = Vec::new();
-    for key in boot.enum_keys() {
-        let key = key?;
-        if keys.len() >= MAX_TOTAL_GENERATIONS * 2 {
-            return Err(remediation_error(
-                "the volatile WebView2 provenance registry exceeds its bounded scan",
-            ));
-        }
-        if ProfileId::parse(&key)
-            .filter(|id| id.to_string() == key)
-            .is_none()
-        {
-            return Err(remediation_error(
-                "the volatile WebView2 provenance registry contains an invalid generation",
-            ));
-        }
-        keys.push(key);
-    }
-    for generation in keys {
-        match fs::symlink_metadata(generations.join(&generation)) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                boot.delete_subkey(&generation)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
 fn maintain_generations(
     generations: &Path,
     boot: &RegKey,
@@ -472,7 +441,10 @@ impl RuntimeGeneration {
             .share_mode(0)
             .open(generations.join(LEASE_FILE))?;
         let boot = open_boot_registry(kind)?;
-        prune_registry_orphans(&generations, &boot)?;
+        // Boot markers are shared across app identities and runtime roots.
+        // Absence from this root does not prove another root's generation dead.
+        // Only an exact cleanup ticket removes a marker; otherwise Windows
+        // retires the volatile registry at reboot.
         maintain_generations(&generations, &boot, kind)?;
 
         let generation = ProfileId::generate().to_string();
@@ -530,6 +502,39 @@ impl RuntimeCleanupTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinct_runtime_roots_preserve_each_others_same_boot_generations() {
+        for kind in [
+            RuntimeGenerationKind::RawPrivate,
+            RuntimeGenerationKind::Privileged,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let first_root = temp.path().join("first");
+            let first = RuntimeGeneration::prepare(&first_root, kind).unwrap();
+            fs::write(first.root().join("owned-data"), b"keep").unwrap();
+            let first_cleanup = first.cleanup_ticket();
+            let second = RuntimeGeneration::prepare(&temp.path().join("second"), kind).unwrap();
+            let boot = open_boot_registry(kind).unwrap();
+            assert!(current_boot_contains(&boot, &first.generation).unwrap());
+            assert!(current_boot_contains(&boot, &second.generation).unwrap());
+
+            // A parent may exit before its WebView2 process. A launch using
+            // another root must not turn that same-boot residue into exit proof.
+            drop(first);
+            let restarted = RuntimeGeneration::prepare(&first_root, kind).unwrap();
+            assert_eq!(
+                fs::read(first_cleanup.root().join("owned-data")).unwrap(),
+                b"keep"
+            );
+            first_cleanup.cleanup_after_proven_exit().unwrap();
+            restarted
+                .cleanup_ticket()
+                .cleanup_after_proven_exit()
+                .unwrap();
+            second.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+        }
+    }
 
     #[test]
     fn runtime_kinds_have_non_aliasing_native_provenance() {
