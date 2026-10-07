@@ -11,10 +11,19 @@ pub(crate) enum StartupProblem {
     NewerProfile,
     DamagedProfile,
     UnsupportedSystem,
+    #[cfg(target_os = "windows")]
+    RendererFailed,
     Other,
 }
 
 impl StartupProblem {
+    fn title(self) -> &'static str {
+        #[cfg(target_os = "windows")]
+        if self == Self::RendererFailed {
+            return "Zephium needs to restart";
+        }
+        TITLE
+    }
     /// Store errors cross several boxed layers before they reach the setup
     /// boundary, so the stable SQLite and migration messages are the contract.
     pub(crate) fn classify(error: &str) -> Self {
@@ -31,6 +40,11 @@ impl StartupProblem {
 
     fn message(self, detail: &str) -> String {
         match self {
+            #[cfg(target_os = "windows")]
+            Self::RendererFailed => "Zephium couldn't restore its browser controls. \
+                Close this message and open Zephium again. Your saved browsing data is kept, \
+                but edits that hadn't been saved may be lost."
+                .to_owned(),
             Self::NewerProfile => "Your profile was last opened by a newer version of Zephium. \
                  Install the latest version from zephium.app to open it. \
                  Nothing in your profile was changed."
@@ -53,7 +67,7 @@ impl StartupProblem {
 pub(crate) fn show_blocking(problem: StartupProblem, detail: &str) {
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
-        .set_title(TITLE)
+        .set_title(problem.title())
         .set_description(problem.message(detail))
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
@@ -86,7 +100,7 @@ pub(crate) fn show_then(
     let handle = app.clone();
     app.dialog()
         .message(problem.message(detail))
-        .title(TITLE)
+        .title(problem.title())
         .kind(MessageDialogKind::Error)
         .show(move |_| {
             ALERT.store(DISMISSED, Ordering::Release);

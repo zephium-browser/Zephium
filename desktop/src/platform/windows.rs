@@ -2,11 +2,13 @@
 mod caption;
 #[path = "windows_menus.rs"]
 mod menus;
+#[path = "windows_renderer.rs"]
+pub(crate) mod renderer;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, PresentationChrome,
@@ -127,6 +129,7 @@ pub fn harden_privileged(
     let completed = installed.clone();
     let expected_user_data_folder = expected_user_data_folder.to_owned();
     let label = window.label().to_owned();
+    let app = window.app_handle().clone();
     let scheduled = window.with_webview(move |webview| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
             ICoreWebView2Environment10, ICoreWebView2Environment7, ICoreWebView2Settings3,
@@ -205,6 +208,7 @@ pub fn harden_privileged(
             // runtime predates Environment10. Refuse that runtime instead.
             let _environment10 = environment.cast::<ICoreWebView2Environment10>()?;
             let core = webview.controller().CoreWebView2()?;
+            renderer::install(&core, app, label.clone())?;
             // External URI launch interception is only exposed by
             // ICoreWebView2_18. Treat that interface as part of the mandatory
             // runtime floor instead of silently accepting a weaker runtime.
@@ -455,17 +459,20 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
 /// Hides or shows the chrome WebView while its window stays on screen, so the
 /// window shows only its material, never a document that is still loading.
 pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
-    window
+    let applied = Arc::new(AtomicBool::new(false));
+    let completed = applied.clone();
+    let dispatched = window
         .with_webview(move |webview| {
             // SAFETY: Tauri supplies the live controller for the duration of
             // this UI-thread callback.
             if unsafe { webview.controller().SetIsVisible(!hidden) }.is_err() {
-                crate::write_diagnostic(format_args!(
-                    "onboarding: chrome WebView2 visibility was refused"
-                ));
+                crate::write_diagnostic(format_args!("chrome: WebView2 visibility was refused"));
+            } else {
+                completed.store(true, Ordering::Release);
             }
         })
-        .is_ok()
+        .is_ok();
+    dispatched && applied.load(Ordering::Acquire)
 }
 
 pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {

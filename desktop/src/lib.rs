@@ -98,6 +98,8 @@ mod platform;
 mod presence;
 #[cfg(target_os = "windows")]
 mod privileged_runtime_windows;
+#[cfg(any(target_os = "windows", test))]
+mod renderer_recovery;
 mod resource_close;
 mod search_providers;
 mod startup_alert;
@@ -389,6 +391,13 @@ struct UiStartupGate {
     browser_revealed: Arc<AtomicBool>,
 }
 
+// WebView2 cold starts compete with runtime servicing and antivirus scanning.
+// Keep initialization bounded without terminating an otherwise healthy launch.
+#[cfg(target_os = "windows")]
+const UI_INITIALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(not(target_os = "windows"))]
+const UI_INITIALIZATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[derive(Clone)]
 struct Handover {
     onboarding: tauri::Url,
@@ -454,6 +463,13 @@ impl UiStartupGate {
         if !self.document_loaded.load(Ordering::Acquire)
             || !self.frontend_ready.load(Ordering::Acquire)
         {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if platform::imp::renderer::ready(window)
+            && !platform::imp::set_chrome_hidden(window, false)
+        {
+            request_startup_failure(window.app_handle(), "could not reveal recovered chrome");
             return;
         }
         if self.handed_over.load(Ordering::Acquire) {
@@ -534,7 +550,7 @@ impl UiStartupGate {
         let spawned = std::thread::Builder::new()
             .name("zephium-handover-watchdog".into())
             .spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(15));
+                std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
                 if gate.browser_revealed.load(Ordering::Acquire) {
                     return;
                 }
@@ -574,6 +590,13 @@ impl UiStartupGate {
 
     fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Acquire)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn prepare_recovery(&self, window: &WebviewWindow) -> Option<tauri::Url> {
+        self.document_loaded.store(false, Ordering::Release);
+        self.frontend_ready.store(false, Ordering::Release);
+        platform::imp::set_chrome_hidden(window, true).then(|| self.expected())
     }
 }
 
@@ -4396,7 +4419,11 @@ fn panel_ready(
     caller: WebviewWindow,
     overlay: State<'_, overlay::Overlay>,
 ) -> Option<zephium_ipc::PanelState> {
-    authorize(&caller, CallerPolicy::Panel, "panel_ready").then(|| overlay.ready())
+    authorize(&caller, CallerPolicy::Panel, "panel_ready").then(|| {
+        #[cfg(target_os = "windows")]
+        platform::imp::renderer::ready(&caller);
+        overlay.ready()
+    })
 }
 #[tauri::command]
 #[specta::specta]
@@ -5563,6 +5590,8 @@ pub fn run() {
                 UiStartupGate::new(app_url.clone())
             };
             app.manage(ui_startup_gate.clone());
+            #[cfg(target_os = "windows")]
+            app.manage(platform::imp::renderer::Renderers::default());
             let page_gate = ui_startup_gate.clone();
             #[cfg(target_os = "windows")]
             setup_privileged_environments
@@ -5608,7 +5637,7 @@ pub fn run() {
             std::thread::Builder::new()
                 .name("zephium-ui-startup-watchdog".into())
                 .spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(15));
+                    std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
                     if startup_watchdog_gate.is_visible() {
                         return;
                     }
@@ -7388,12 +7417,10 @@ mod tests {
             .find("self.reveal_browser(window)")
             .expect("browser reveal");
         assert!(facts < reveal);
-        assert_eq!(
-            production
-                .matches("set_chrome_hidden(window, false)")
-                .count(),
-            1
-        );
+        let recovery_reveal = gate
+            .find("set_chrome_hidden(window, false)")
+            .expect("recovered chrome reveal");
+        assert!(facts < recovery_reveal);
 
         for command in [
             "onboarding_play_intro",

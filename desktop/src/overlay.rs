@@ -74,6 +74,8 @@ impl State {
 pub struct Overlay {
     window: WebviewWindow,
     state: Arc<Mutex<State>>,
+    #[cfg(target_os = "windows")]
+    recovery_document: Option<tauri::Url>,
 }
 impl Overlay {
     pub fn new(window: WebviewWindow, pending_document: Option<tauri::Url>) -> Self {
@@ -96,6 +98,8 @@ impl Overlay {
         }
         let this = Self {
             window,
+            #[cfg(target_os = "windows")]
+            recovery_document: pending_document.clone(),
             state: Arc::new(Mutex::new(State {
                 model,
                 pending: None,
@@ -172,6 +176,21 @@ impl Overlay {
         self.state().model.ready = true;
         self.on_main(|this| this.present());
         self.snapshot()
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn prepare_recovery(&self) -> Option<tauri::Url> {
+        let document = self.recovery_document.clone()?;
+        {
+            let mut state = self.state();
+            state.model.ready = false;
+            state.pending = None;
+            // Recovery itself loads the fixed document. A concurrent launcher
+            // intent must not start a second navigation through present().
+            state.pending_document = None;
+        }
+        self.window.hide().ok()?;
+        self.wake();
+        Some(document)
     }
     pub fn intent(&self, intent: PanelIntent) {
         if let PanelIntent::Idle { revision } = intent {
