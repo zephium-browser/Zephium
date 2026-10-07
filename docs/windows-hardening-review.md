@@ -15,6 +15,7 @@ Review commits:
 | `3ec48edb` | Validate settled fullscreen exit and use the fallback on script failure. |
 | `345a8133` | Bound shared media imports while reading a single file handle. |
 | `8c7b12cb` | Correct Windows test fixtures and diagnose native extension delivery stalls. |
+| `58c7bba9` | Resolve four development dependency advisories with published fixes. |
 
 ## First changes
 
@@ -121,6 +122,25 @@ process. Stable queue order and retry on a freed slot are implemented in
 
 ## Validation record
 
+The approved npm dependency audit found four moderate development-tool
+advisories, resolved by pinning `fast-uri` 3.1.8, `brace-expansion` 5.0.12,
+`smol-toml` 1.9.0 and `postcss-selector-parser` 7.1.6. The repeated registry
+audit reports zero moderate/critical findings and one high finding for
+`braces` 3.0.3. That package has no published upstream fix; its existing local
+depth-bound patch remains in place. The repository's exact-byte verification
+and all four audit regression tests pass, including hostile patterns and ASTs.
+This is the existing narrowly verified development-tool exception, not a clean
+raw audit or an additional waiver. The original local installation lacked the
+patched bytes despite its patch identifier; a forced reinstall repaired it
+without changing the verifier or its expected hashes. Rust advisory scanning
+was not performed (`cargo-audit` and `cargo-deny` are not installed).
+
+Advisories: [fast-uri](https://github.com/advisories/GHSA-hrr3-gc8f-f4qj),
+[brace-expansion](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr),
+[smol-toml](https://github.com/advisories/GHSA-r4xh-jqrq-34v2),
+[selector parser](https://github.com/advisories/GHSA-rj75-hqrm-r3gf), and
+[braces](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
+
 Machine: Windows 11 Pro, build 26200; Intel i3-1115G4, two cores/four logical
 processors; 12,377,400 KiB visible RAM. Installed WebView2 folders include
 154.0.4258.53 and 154.0.4258.62. The isolated chrome recovery test reports the
@@ -135,6 +155,11 @@ These are debug correctness checks, not release performance measurements.
 - Frontend `pnpm -C frame run build`: passed, including bundle budgets. Existing
   build warnings concern initial Svelte motion state, CSS highlight parsing, and
   the onboarding wordmark reference.
+- Frontend check/build were repeated successfully after the dependency fixes;
+  logs are `target/windows-frame-check-dependencies.log` and
+  `target/windows-frame-build-dependencies.log`. The approved raw registry
+  audit reports are `target/windows-dependency-audit.json` and
+  `target/windows-dependency-audit-after.json`.
 - Isolated native chrome recovery: passed, including two `Page.crash` events,
   navigation/readiness recovery and exhausted-budget refusal. Log:
   `target/windows-renderer-native.log`.
