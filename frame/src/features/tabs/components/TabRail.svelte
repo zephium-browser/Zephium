@@ -12,12 +12,16 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
     entries,
+    closable = new Set<string>(),
     onSelect,
   }: {
     entries: TabView[];
+    /** Tabs the expanded list shows a close button for. */
+    closable?: ReadonlySet<string>;
     onSelect: (id: string) => void;
   } = $props();
 
@@ -92,6 +96,7 @@
           onpointerup={(event) => drag.up(event)}
           onpointercancel={(event) => drag.cancel(event)}
           onclick={() => !drag.swallowClick() && onSelect(tab.id)}
+          {...closable.has(tab.id) ? closeOnMiddleClick(() => tabs.close(tab.id)) : {}}
         >
           <FavIcon
             image={favicons.image(tab.icon)}
