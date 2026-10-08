@@ -54,6 +54,12 @@ updates:
       # Pinned by the agent boundary checks.
       - dependency-name: crc32fast
       - dependency-name: crossbeam-queue
+      # desktop/build.rs merges Tauri configs the way tauri-build does, so
+      # it stays on Tauri's json-patch major.
+      - dependency-name: json-patch
+        update-types: ["version-update:semver-major"]
+      # Linux-only, and CI builds no Linux target until the Linux port.
+      - dependency-name: x11rb
       # The adblock fork's runtime graph: the provenance check requires the
       # application's copy to match vendor/adblock/Cargo.lock exactly, so
       # these move together with the fork, by hand.
