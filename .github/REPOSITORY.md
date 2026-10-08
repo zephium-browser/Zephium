@@ -53,8 +53,9 @@ release build, so only a maintainer can push one.
   stays the author; maintainer PRs with curated commits use a merge commit.
 - Always suggest updating pull request branches: on.
 - Automatically delete head branches: on.
-- Limit open pull requests from users without write access: 3. Trusted
-  contributors go on the bypass list.
+- Limit open pull requests from users without write access: off for now.
+  If an account without write access starts opening many PRs at once, set
+  it (3 is a sensible limit) and put trusted contributors on the bypass list.
 
 ## Actions
 
