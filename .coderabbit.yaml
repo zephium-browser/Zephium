@@ -1,0 +1,287 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CI already enforces formatting, lints, types, tests, bundle budgets and the
+# xtask architecture checks. Reviews spend their attention on what those
+# cannot judge: whether a change belongs, and whether it is correct, fast,
+# secure and production-grade.
+
+language: en-US
+tone_instructions: >-
+  Be a direct senior reviewer. State the concrete consequence of each problem
+  and the fix. No praise, no filler, no restating the diff.
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  review_status: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  poem: false
+  in_progress_fortune: false
+  suggested_reviewers: false
+
+  # Low-effort and spam PRs from new contributors are labelled and not
+  # reviewed again; a maintainer can stop reviews on any PR with skip-review.
+  slop_detection:
+    enabled: true
+    label: slop
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    labels: ["!slop", "!skip-review"]
+    ignore_usernames: ["dependabot[bot]"]
+
+  path_filters:
+    # Generated: reviewed through the source that produces them.
+    - "!frame/src/shared/ipc/bindings.ts"
+    - "!frame/src/shared/i18n/**"
+    - "!**/Cargo.lock"
+    - "!pnpm-lock.yaml"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        rustfmt and clippy with -D warnings already run in CI; never comment on formatting or lint-level style.
+        Review for:
+        - Correctness under concurrency and lifecycle: races, ordering across lifecycle barriers, reentrancy on the main thread, cancellation, shutdown and restart. Accepted work must not reorder across barriers.
+        - Performance: blocking I/O, locks or long work on the main/UI thread; allocations and clones in hot paths; unbounded queues, caches or memory growth; quadratic work over tabs, history or filter rules; needless serialization across IPC.
+        - Error handling: no unwrap, expect or panic on IPC input, filesystem, network or page-derived data. Security decisions fail closed, and the code must not claim fail-closed when it is fail-open.
+        - `unsafe` only in engine and native adapters, each block with a SAFETY comment whose claim actually holds.
+        - Load-bearing behavior changes come with a test of the contract, including the deny or malformed-input path.
+    - path: "crates/zephium-core/**"
+      instructions: |
+        The domain stays pure: no I/O, no platform or Tauri types, no `unsafe`. Every mutation of a persistable aggregate goes through its reducer.
+    - path: "{desktop,crates/zephium-ipc}/**"
+      instructions: |
+        Privileged boundary. Only `desktop` knows Tauri. Every new or changed command needs an explicit caller policy, Rust-side validation and bounds on all input, and the smallest Tauri capability set. No content page may gain IPC, a privileged initialization object or a content-reachable custom protocol. A changed IPC type must come with regenerated bindings. Mutating IPC keeps the result-ledger semantics: admission is not success.
+    - path: "crates/zephium-engine/**"
+      instructions: |
+        Native engine adapters for WKWebView and WebView2. Check main-thread work and blocking calls, the view lifecycle watermarks and native resource ceilings, hidden and sleeping view behavior, and that page-derived strings and bytes stay tainted and bounded. Platform differences between macOS and Windows must both be handled, not only the platform the author tested.
+    - path: "crates/zephium-blocker*/**"
+      instructions: |
+        Content blocking runs on every request and page. Measure-level concerns matter: per-request cost, memory held per profile, startup cost of rule compilation, and behavior when a filter list is malformed or hostile. Protection is on by default and must not make browsing slower than protection off.
+    - path: "vendor/**"
+      instructions: |
+        Vendored security forks. Every change must be a minimal, explained patch with the fork's FORK.toml or provenance record updated to match; flag unrelated upstream drift, version bumps without a review record, and any weakening of the hardening the fork exists for.
+    - path: "{crates/zephium-agent*,crates/zephium-work*,crates/zephium-mcp,crates/zephium-app/src/work*}/**"
+      instructions: |
+        Work and agent code acts on the user's behalf. Page and tool output is untrusted input (prompt injection): it must not widen what the agent may do. Side effects need the documented approval path. User data must stay within its scope, and secrets and full URLs must not reach logs. Resource use stays bounded per run.
+    - path: "frame/**/*.{svelte,ts}"
+      instructions: |
+        Prettier, ESLint, svelte-check and Knip already run in CI; never comment on formatting or style.
+        Review for:
+        - The frame is a projection, never authority: no optimistic claims of native or durable success, and user intent goes through the generated commands.
+        - Performance: unnecessary reactivity and effect chains, work on every keystroke or scroll, layout thrash, long lists rendered without virtualization, animations on many layers, and listeners or timers that are never cleaned up.
+        - Bundle weight: new dependencies or eager imports of heavy modules (editor, charts, Work views) into startup or the launcher panel.
+        - Native boundary: menus and page-overlapping surfaces are native; a DOM popover must stay inside its chrome WebView.
+        - Production CSP: no eval, inline script, data: or blob: script sources.
+        - Accessibility of interactive controls: roles, names, keyboard operation and visible focus.
+    - path: "frame/src/styles/**"
+      instructions: |
+        Use the design tokens rather than raw colors, sizes or radii, support both dark and light, and avoid effects that are expensive to paint over large areas or during animation.
+    - path: "frame/bundle-budgets.json"
+      instructions: |
+        A recorded size that grows must be justified in the PR description by the feature that needs it. Prefer shrinking the change; never accept re-recording only to make the build pass.
+    - path: "{**/Cargo.toml,**/package.json}"
+      instructions: |
+        A new dependency needs a reason: what it replaces, its size and transitive graph, maintenance, license and supply-chain risk. Direct dependencies are pinned to exact versions on purpose.
+    - path: ".github/**"
+      instructions: |
+        Workflows: actions pinned to full commit SHAs, least-privilege `permissions`, no `pull_request_target` job that checks out or runs PR code, no untrusted `${{ }}` expressions inside `run:` scripts, and no secrets exposed to forks.
+    - path: "{docs/**,*.md}"
+      instructions: |
+        Check that statements match the code and shipped behavior; no claims the code does not back. Skip prose style and wording nits.
+
+  pre_merge_checks:
+    title:
+      mode: warning
+      requirements: >-
+        Conventional Commits: `type(scope): summary` in the imperative mood,
+        where type is one of feat, fix, perf, refactor, docs, test, build, ci,
+        chore or security.
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: One logical change
+        mode: warning
+        instructions: >-
+          Pass when every changed file serves the single purpose stated in the
+          title and description. Fail when the PR also reformats untouched
+          code, refactors unrelated modules, renames things it does not need
+          to, or bundles several independent changes.
+      - name: Linked issue for larger changes
+        mode: warning
+        instructions: >-
+          Pass when the PR is a bug fix, a documentation change or a small
+          contained fix, or when its description links an issue with Closes,
+          Fixes or Refs. Fail when it adds a feature, changes default
+          behavior or user-facing UI, or refactors across modules without
+          linking an issue.
+      - name: Tests cover changed behavior
+        mode: warning
+        instructions: >-
+          Pass when the PR changes no program behavior (docs, styling, comments),
+          or when it adds or updates tests that exercise the changed behavior,
+          including its failure or deny path. Fail when Rust or TypeScript
+          logic changes behavior with no test touching it.
+      - name: Generated files follow their source
+        mode: error
+        instructions: >-
+          Fail when frame/src/shared/ipc/bindings.ts changes without a matching
+          IPC type change in Rust, when a Cargo.lock or pnpm-lock.yaml changes
+          without a manifest change that requires it, or when generated i18n
+          output under frame/src/shared/i18n changes without a change to the
+          message catalogs. Otherwise pass.
+      - name: Privileged boundary intact
+        mode: error
+        instructions: >-
+          Fail when the PR gives content pages Tauri IPC, a Wry IPC handler, a
+          privileged initialization object or a content-reachable custom
+          protocol; relaxes the production CSP; enables devtools in release;
+          or adds a privileged command without Rust-side input validation.
+          Otherwise pass.
+      - name: Performance impact stated
+        mode: warning
+        instructions: >-
+          Pass when the PR does not touch a hot path, or when its description
+          states the performance impact or a measurement. Hot paths are the
+          engine adapters, content blocking, tab and session state, sidebar
+          and tab list rendering, startup, and code that runs per request,
+          per keystroke or per frame.
+
+  labeling_instructions:
+    - label: bug
+      instructions: Fixes incorrect behavior.
+    - label: enhancement
+      instructions: Adds a feature or improves user-facing behavior.
+    - label: performance
+      instructions: Main purpose is speed, memory, CPU, battery or bundle size.
+    - label: security
+      instructions: Main purpose is hardening, a vulnerability fix or a privileged-boundary change.
+    - label: refactor
+      instructions: Restructures code with no intended behavior change.
+    - label: documentation
+      instructions: Changes only documentation.
+    - label: "area: browse"
+      instructions: Browser chrome in frame/ or desktop/ (tabs, sidebar, address field, settings, windows).
+    - label: "area: work"
+      instructions: Work mode and agent code.
+    - label: "area: engine"
+      instructions: crates/zephium-engine or the native WebView adapters.
+    - label: "area: blocker"
+      instructions: Content blocking and filter lists.
+    - label: "area: extensions"
+      instructions: Web extension support.
+    - label: "area: notes & tasks"
+      instructions: Notes, tasks or time and focus.
+    - label: "area: build & ci"
+      instructions: Build, CI, release or repository tooling.
+    - label: "platform: macos"
+      instructions: macOS-specific code or behavior.
+    - label: "platform: windows"
+      instructions: Windows-specific code or behavior.
+    - label: "size: S"
+      instructions: Fewer than 100 changed lines, excluding generated files and lockfiles.
+    - label: "size: M"
+      instructions: 100 to 499 changed lines, excluding generated files and lockfiles.
+    - label: "size: L"
+      instructions: 500 to 1499 changed lines, excluding generated files and lockfiles.
+    - label: "size: XL"
+      instructions: 1500 or more changed lines, excluding generated files and lockfiles.
+  mutually_exclusive_groups:
+    size: ["size: S", "size: M", "size: L", "size: XL"]
+  auto_apply_labels: true
+
+  tools:
+    # CI runs the real linters with the project's configs; duplicates here
+    # would only add style noise.
+    eslint:
+      enabled: false
+    biome:
+      enabled: false
+    oxc:
+      enabled: false
+    stylelint:
+      enabled: false
+    clippy:
+      enabled: false
+    actionlint:
+      enabled: false
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+    vale:
+      enabled: false
+    yamllint:
+      enabled: false
+    swiftlint:
+      enabled: false
+    ruff:
+      enabled: false
+    pylint:
+      enabled: false
+    flake8:
+      enabled: false
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+
+chat:
+  art: false
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - CONTRIBUTING.md
+      - docs/architecture.md
+      - docs/security-model.md
+      - docs/frontend.md
+      - docs/product-system.md
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
+  labeling:
+    auto_apply_labels: true
+    labeling_instructions:
+      - label: bug
+        instructions: Reports incorrect behavior, a crash or a regression.
+      - label: enhancement
+        instructions: Requests a feature or an improvement.
+      - label: performance
+        instructions: Reports slowness, high memory, CPU or battery use.
+      - label: security
+        instructions: Concerns hardening or a security weakness that is safe to discuss publicly.
+      - label: question
+        instructions: Asks how something works rather than reporting a problem.
+      - label: "area: browse"
+        instructions: Browser chrome (tabs, sidebar, address field, settings, windows).
+      - label: "area: work"
+        instructions: Work mode and the agent.
+      - label: "area: engine"
+        instructions: Page rendering, the native WebView, loading or crashes of pages.
+      - label: "area: blocker"
+        instructions: Ad and tracker blocking.
+      - label: "area: extensions"
+        instructions: Web extensions.
+      - label: "area: notes & tasks"
+        instructions: Notes, tasks or time and focus.
+      - label: "platform: macos"
+        instructions: Happens only on macOS.
+      - label: "platform: windows"
+        instructions: Happens only on Windows.
