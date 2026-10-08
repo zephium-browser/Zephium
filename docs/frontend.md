@@ -119,7 +119,8 @@ security boundary, not a rendering optimization.
   splits code out of the browser graph; the build fails if the browser can reach
   any onboarding module, and reports to `frame/reports/bootstrap-report.onboarding.json`.
 - `frame/bundle-budgets.json` records each page's startup graph and what each
-  lazy destination adds on top of the page that opens it. The build fails only
+  lazy destination adds on top of what is already loaded when it opens: its
+  page and every destination that must have run to open it. The build fails only
   when one grows more than 16 KB JS or 8 KB CSS past its recorded size, or a new
   destination adds over 48 KB without one. Shrink it first; if the growth is
   intended, run `pnpm run budgets` and say why in the commit.

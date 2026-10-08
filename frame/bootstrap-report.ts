@@ -1,5 +1,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { checkBundleBudget, GROWTH_ALLOWANCE, type BundleSize } from "./bundle-budget";
+import {
+  checkBundleBudget,
+  GROWTH_ALLOWANCE,
+  loadedBeforeOpening,
+  type BundleSize,
+} from "./bundle-budget.ts";
 import type { Plugin } from "vite";
 
 const BUDGETS = new URL("./bundle-budgets.json", import.meta.url);
@@ -51,7 +56,6 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
         }
         return sum;
       };
-      const additions = new Set<string>();
       const roots: Array<{ name: string; file: string; surface: boolean }> = [];
       for (const name of pages) {
         const root = Object.values(bundle).find(
@@ -173,36 +177,37 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           modules: [...modules].sort(),
         };
       }
-      // A lazy destination costs only what the page that opens it has not
-      // already loaded. Counting its whole graph would charge every
-      // destination again for the page's own startup code, so any growth
-      // there would move every budget at once.
-      for (const surface of roots.filter((root) => root.surface)) {
-        const opens = new Set<string>();
-        const open = (file: string) => {
-          if (opens.has(file)) return;
-          opens.add(file);
-          const item = bundle[file];
-          if (item?.type === "chunk")
-            for (const child of [...item.imports, ...item.dynamicImports]) open(child);
+      // A lazy destination costs only what is not already loaded when it
+      // opens: its page, and every destination that must have run to open
+      // it. Charging it for code its opener already brought would count a
+      // bundler placing shared code with that opener as growth.
+      const files = (name: string) => {
+        const graph = graphs.get(name);
+        return new Set([...(graph?.visited ?? []), ...(graph?.css ?? [])]);
+      };
+      const before = loadedBeforeOpening(
+        Object.fromEntries(
+          Object.entries(bundle).flatMap(([file, item]) =>
+            item.type === "chunk"
+              ? [[file, { imports: item.imports, dynamicImports: item.dynamicImports }]]
+              : [],
+          ),
+        ),
+        roots.map((root) => ({
+          ...root,
+          files: files(root.name),
+          visited: graphs.get(root.name)?.visited ?? new Set(),
+        })),
+      );
+      for (const root of roots) {
+        const graph = graphs.get(root.name);
+        const report = reports[root.name];
+        if (root.surface || !graph || !report) continue;
+        const loaded = before.get(root.name) ?? new Set();
+        report.budgeted = {
+          js: bytes([...graph.visited].filter((file) => !loaded.has(file))),
+          css: bytes([...graph.css].filter((file) => !loaded.has(file))),
         };
-        open(surface.file);
-        const loaded = graphs.get(surface.name);
-        if (!loaded) continue;
-        for (const root of roots) {
-          if (root.surface || !opens.has(root.file)) continue;
-          const graph = graphs.get(root.name);
-          const report = reports[root.name];
-          if (!graph || !report) continue;
-          const js = bytes([...graph.visited].filter((file) => !loaded.visited.has(file)));
-          const styles = bytes([...graph.css].filter((file) => !loaded.css.has(file)));
-          const first = !additions.has(root.name);
-          additions.add(root.name);
-          report.budgeted = {
-            js: first ? js : Math.max(report.budgeted.js, js),
-            css: first ? styles : Math.max(report.budgeted.css, styles),
-          };
-        }
       }
       const build = pages.join("-");
       const recordedBuilds = JSON.parse(readFileSync(BUDGETS, "utf8")) as Record<
