@@ -154,7 +154,7 @@ version = "0.3"
 optional = true
 
 [dependencies.dirs]
-version = "6"
+version = "7"
 
 [dependencies.dunce]
 version = "1"
