@@ -21,7 +21,7 @@ tempfile.workspace = true
 rustix = { version = "=1.1.4", features = ["fs", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "=0.2.186"
+libc = "=0.2.189"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "=0.61.3", features = [
