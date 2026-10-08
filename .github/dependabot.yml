@@ -4,6 +4,11 @@ version: 2
 # week; a major version gets its own. A release must be a week old before it
 # is proposed, so a compromised publish has time to be caught upstream.
 # Security updates are not delayed.
+#
+# The vendored security forks and the versions the xtask supply-chain checks
+# pin exactly are updated by hand with a provenance review, so Dependabot
+# leaves them alone: a fork's own update also needs the root lockfile it
+# never touches, and a pinned bump also needs the check updated.
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -26,6 +31,29 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    ignore:
+      # Vendored forks, and Tauri crates that must match the forked version.
+      - dependency-name: adblock
+      - dependency-name: tauri
+      - dependency-name: tauri-build
+      - dependency-name: tauri-utils
+      - dependency-name: tauri-runtime-wry
+      - dependency-name: tauri-plugin-updater
+      - dependency-name: wry
+      # Exact versions the blocker and update supply-chain checks require.
+      - dependency-name: async-trait
+      - dependency-name: aws-lc-rs
+      - dependency-name: flate2
+      - dependency-name: futures-util
+      - dependency-name: reqwest
+      - dependency-name: rustix
+      - dependency-name: sha2
+      - dependency-name: time
+      - dependency-name: tough
+      - dependency-name: windows
+      # Pinned by the agent boundary checks.
+      - dependency-name: crc32fast
+      - dependency-name: crossbeam-queue
     groups:
       rust:
         update-types: [minor, patch]
@@ -42,27 +70,25 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    ignore:
+      # Types follow the Node major in .node-version.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
+      # Vitest and its browser provider only work at matching versions.
+      vitest:
+        patterns: ["vitest", "@vitest/*"]
       javascript:
-        update-types: [minor, patch]
-
-  - package-ecosystem: cargo
-    # The adblock security fork is excluded and owns its reviewed lock graph.
-    directory: /vendor/adblock
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    commit-message:
-      prefix: build
-      include: scope
-    groups:
-      adblock:
         update-types: [minor, patch]
 
   - package-ecosystem: cargo
     # The sanitizer harness is an independent, explicitly pinned test graph.
     directory: /crates/zephium-blocker/fuzz
+    ignore:
+      # Pinned by the blocker supply-chain check.
+      - dependency-name: flate2
+      - dependency-name: libfuzzer-sys
+      - dependency-name: sha2
     schedule:
       interval: weekly
     cooldown:
@@ -72,46 +98,4 @@ updates:
       include: scope
     groups:
       fuzz:
-        update-types: [minor, patch]
-
-  - package-ecosystem: cargo
-    # Wry is excluded from the root workspace and owns an independent lockfile.
-    directory: /vendor/wry
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    commit-message:
-      prefix: build
-      include: scope
-    groups:
-      wry:
-        update-types: [minor, patch]
-
-  - package-ecosystem: cargo
-    # Tauri's policy fork is excluded and owns an independent validation graph.
-    directory: /vendor/tauri
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    commit-message:
-      prefix: build
-      include: scope
-    groups:
-      tauri:
-        update-types: [minor, patch]
-
-  - package-ecosystem: cargo
-    # The runtime adapter is independently locked and validated on every OS.
-    directory: /vendor/tauri-runtime-wry
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    commit-message:
-      prefix: build
-      include: scope
-    groups:
-      tauri-runtime-wry:
         update-types: [minor, patch]
