@@ -113,7 +113,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 tauri-utils = "2"
 serde_json.workspace = true
-json-patch = "3"
+json-patch = "4"
 
 [dependencies]
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
