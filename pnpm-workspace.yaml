@@ -8,7 +8,7 @@ allowBuilds:
   unrs-resolver: false
 
 overrides:
-  "brace-expansion@>=4.0.0 <5.0.11": 5.0.11
+  "brace-expansion@>=4.0.0 <5.0.12": 5.0.12
   "nanoid@<3.3.18": 3.3.18
   "devalue@<5.9.3": ^5.9.3
   # Keep the parser peers and build pipeline on the same patched release.
