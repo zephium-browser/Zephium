@@ -10,7 +10,7 @@ official-https = ["zephium-blocker-update/official-https"]
 tuf = ["zephium-blocker-update/tuf"]
 
 [dependencies]
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "=0.10.9"

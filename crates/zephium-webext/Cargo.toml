@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 # zip's deflate-flate2 feature leaves the flate2 backend unselected.
-flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true

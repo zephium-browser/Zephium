@@ -106,7 +106,7 @@ wry = { workspace = true, features = ["windows-cleanup-qualification"] }
 windows = { version = "0.61", features = ["Win32_Graphics_DirectComposition", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Dxgi_Common"] }
 base64 = "0.22"
 zephium-blocker = { workspace = true, features = ["runtime"] }
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
