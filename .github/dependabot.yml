@@ -125,6 +125,11 @@ updates:
       # Types follow the Node major in .node-version.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # Vite 8.3's bundler merges shared modules into lazy view chunks, which
+      # breaks the bundle budgets; stay on 8.1 patches until the chunk
+      # groups are adapted.
+      - dependency-name: vite
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     groups:
       # Vitest and its browser provider only work at matching versions.
       vitest:
