@@ -64,9 +64,11 @@ For frontend work, start with [the frame guide](frame/README.md) and
 colocated tests, native presentation rules, and the active migration gates.
 The [documentation index](docs/README.md) lists the rest.
 
-## Where to discuss
+## Where to start
 
-Use [GitHub Discussions](https://github.com/zephium-browser/Zephium/discussions) for design discussion, scope questions, "should I work on X?", and quick feedback. Use GitHub Issues for tracking concrete bugs and features.
+1. **Open an issue** with the bug or feature template. For design questions, scope questions, "should I work on X?" and quick feedback, start a [Discussion](https://github.com/zephium-browser/Zephium/discussions) instead.
+2. **For a feature or any larger change, wait until the issue is labelled `accepted`** before writing code. Bug fixes and small, obvious fixes don't need to wait.
+3. **Open the PR and link the issue** in its description (`Closes #123`).
 
 ## What makes a good contribution
 
@@ -158,6 +160,8 @@ security(navigation): tighten top-level scheme gate
 Types: `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`, `test`, `build`, `ci`, `security`. Scope is just the area you're touching - keep it accurate, don't invent broad ones.
 
 **Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md):** what changed, why, and how you tested. "Tested manually by ..." is the bare minimum; add screenshots/GIFs for UI changes. Open a **draft PR early** if you want feedback mid-flight.
+
+Every PR gets an automated review from CodeRabbit focused on correctness, performance and security, followed by a maintainer review. Address its findings or reply with why they don't apply.
 
 ### What gets merged faster
 Clear problem statement · small, focused diff · follows existing patterns (read 2-3 nearby files first) · all checks pass · real testing notes.
