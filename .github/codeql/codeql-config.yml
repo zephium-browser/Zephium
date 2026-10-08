@@ -1,0 +1,4 @@
+# Vendored forks are upstream code under their own review records; results
+# there are not actionable in this repository.
+paths-ignore:
+  - vendor
