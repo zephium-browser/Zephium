@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { alias } from "./aliases";
+import { alias } from "./aliases.ts";
 
 export default defineConfig({
   test: {

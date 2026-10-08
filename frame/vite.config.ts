@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import { frameConfig } from "./vite.frame";
+import { frameConfig } from "./vite.frame.ts";
 
 // Onboarding has its own build, vite.onboarding.config.ts; the dev server
 // serves every page from this one.
