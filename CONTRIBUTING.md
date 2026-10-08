@@ -66,9 +66,9 @@ The [documentation index](docs/README.md) lists the rest.
 
 ## Where to start
 
-1. **Open an issue** with the bug or feature template. For design questions, scope questions, "should I work on X?" and quick feedback, start a [Discussion](https://github.com/zephium-browser/Zephium/discussions) instead.
-2. **For a feature or any larger change, wait until the issue is labelled `accepted`** before writing code. Bug fixes and small, obvious fixes don't need to wait.
-3. **Open the PR and link the issue** in its description (`Closes #123`).
+- **Small fixes and improvements** (a bug fix, a typo, a small UX polish): open a PR directly. No issue needed.
+- **A bigger feature or change**: please open an issue first, with the feature template, so we can agree on the approach before you put time into it. Then open the PR and link the issue in its description (`Closes #123`).
+- **Questions and ideas** ("should I work on X?", design or scope questions): start a [Discussion](https://github.com/zephium-browser/Zephium/discussions).
 
 ## What makes a good contribution
 
@@ -87,11 +87,11 @@ If your change is small and obvious, open a PR directly. No issue required.
 
 **One PR = one logical change.** Multi-concern PRs will be asked to split.
 
-## Discuss first (required for larger changes)
+## Discuss bigger changes first
 
-For anything beyond a small fix, **discussion is required before opening a PR**. This includes new features, UI/UX changes or changes to default behavior, refactors and "cleanup", performance rewrites, architectural changes, anything touching many systems, and anything that ships to everyone by default (default search engines, default filter lists, default settings).
+For anything beyond a small fix, **please discuss it in an issue before opening a PR**. This includes new features, UI/UX changes or changes to default behavior, refactors and "cleanup", performance rewrites, architectural changes, anything touching many systems, and anything that ships to everyone by default (default search engines, default filter lists, default settings).
 
-Pull requests with significant unsolicited changes will be closed without detailed review. This isn't to discourage you - it ensures alignment before significant work goes in. A 10-minute conversation saves a 500-line PR that doesn't fit the roadmap.
+A large PR that arrives without that conversation may be closed if it doesn't fit the direction. This isn't to discourage you - a 10-minute conversation saves a 500-line PR that doesn't fit the roadmap.
 
 ## Respect the architecture
 
@@ -182,7 +182,7 @@ Mixed-concern PRs · large architectural PRs without prior discussion · new dep
 
 **Should I ask before fixing a typo or obvious bug?** No, open a PR directly.
 
-**I have an idea for a new feature.** Open an issue or start a Discussion. Don't open a PR without prior discussion.
+**I have an idea for a new feature.** Open an issue or start a Discussion first, so we can agree on the approach before you build it.
 
 **My PR was closed without detailed feedback.** Usually it didn't align with direction, or scope was too large to review responsibly. Normal for a solo project. Reopen with a smaller scope is welcome.
 

@@ -82,8 +82,8 @@ release build, so only a maintainer can push one.
 
 Issue forms are in [`ISSUE_TEMPLATE/`](ISSUE_TEMPLATE/); blank issues are
 off and questions go to Discussions. CodeRabbit labels new issues and PRs
-from the label set below. `accepted` is applied by hand: it marks a feature
-issue as ready for a PR, as described in `CONTRIBUTING.md`.
+from the label set below. `accepted` is applied by hand to a feature issue
+once its approach is agreed.
 
 | Group | Labels |
 | --- | --- |
