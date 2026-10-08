@@ -21,7 +21,7 @@ sha2 = "=0.10.9"
 thiserror.workspace = true
 
 [dev-dependencies]
-regex = "=1.12.4"
+regex = "=1.13.1"
 flate2 = "=1.1.9"
 proptest.workspace = true
 tempfile.workspace = true
