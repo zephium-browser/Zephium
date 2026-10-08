@@ -160,7 +160,7 @@ version = "6"
 version = "1"
 
 [dependencies.getrandom]
-version = "0.3"
+version = "0.4"
 
 [dependencies.glob]
 version = "0.3"
