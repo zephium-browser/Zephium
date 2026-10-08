@@ -145,9 +145,12 @@ pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration
 // this one caller-owned deadline.
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
+// A clean shutdown joins the shell, timer and storage-reader threads, which
+// took longer than 50 ms on loaded CI runners and failed tests that expect a
+// clean outcome. Tests that wait for the deadline to expire pay this once.
 #[cfg(test)]
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
+    std::time::Duration::from_millis(500);
 
 #[cfg(feature = "agentic-browser")]
 enum AgentLifecycleOwner {
