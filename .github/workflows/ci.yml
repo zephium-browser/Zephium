@@ -20,6 +20,8 @@ env:
 jobs:
   workflows:
     name: Workflows
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.workflows == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -30,8 +32,8 @@ jobs:
         run: ruby scripts/ci/check_action_pins.rb
       - name: Test the macOS blocker seed probe policy
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
-      - name: Test which changes need the Rust jobs
-        run: bash scripts/ci/test_needs_rust.sh
+      - name: Test which changes need which jobs
+        run: bash scripts/ci/test_scope.sh
       - name: actionlint
         run: |
           set -euo pipefail
@@ -42,9 +44,12 @@ jobs:
           tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
           "${RUNNER_TEMP}/actionlint" -color
 
-  # A pull request that touches only the frame, docs or Markdown skips the
-  # Rust jobs, unless Rust reads one of those frame files. Main always runs
-  # everything: a release needs a full run for its exact commit.
+  # Decides which jobs a pull request needs: docs and repository metadata
+  # need none, frame changes skip Rust unless Rust reads the file, and a CI
+  # change runs everything. Main always runs everything: a release needs a
+  # full run for its exact commit. Skipped jobs satisfy required checks, so
+  # the classifier always comes from the base branch: a pull request cannot
+  # change the rule that decides which of its own checks run.
   changes:
     name: Changes
     runs-on: ubuntu-24.04
@@ -54,9 +59,12 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
+      frontend: ${{ steps.scope.outputs.frontend }}
+      workflows: ${{ steps.scope.outputs.workflows }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
       - id: scope
         env:
@@ -65,22 +73,33 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          rust=true
+          scope="$(printf 'rust=true\nfrontend=true\nworkflows=true')"
           if [[ "${EVENT}" == "pull_request" ]]; then
             files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
               --jq '.[] | .filename, (.previous_filename // empty)')"
             # The files API stops at 3000 entries; a list that long, or none,
-            # cannot prove the Rust jobs are unaffected.
+            # cannot prove any job is unaffected.
             count="$(grep -c . <<< "${files}" || true)"
             if (( count > 0 && count < 3000 )); then
-              rust="$(scripts/ci/needs-rust.sh <<< "${files}")"
+              classified="$(scripts/ci/scope.sh <<< "${files}" || true)"
+              # Anything but exactly one boolean per job runs everything.
+              valid=true
+              for key in rust frontend workflows; do
+                [[ "$(grep -cxE "${key}=(true|false)" <<< "${classified}")" == 1 ]] || valid=false
+              done
+              [[ "$(grep -c . <<< "${classified}")" == 3 ]] || valid=false
+              if [[ "${valid}" == true ]]; then
+                scope="${classified}"
+              fi
             fi
           fi
-          echo "rust=${rust}" >> "${GITHUB_OUTPUT}"
-          echo "Rust jobs needed: ${rust}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "${scope}" >> "${GITHUB_OUTPUT}"
+          { echo "Jobs needed:"; echo "${scope}"; } >> "${GITHUB_STEP_SUMMARY}"
 
   frontend:
     name: Frontend
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.frontend == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -109,7 +128,7 @@ jobs:
   policy:
     name: Rust policy
     needs: changes
-    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    # Runs when the scope check itself failed, so a broken check never skips a job.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -145,7 +164,7 @@ jobs:
   macos:
     name: Rust (macOS)
     needs: changes
-    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    # Runs when the scope check itself failed, so a broken check never skips a job.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: macos-15
     timeout-minutes: 45
@@ -191,7 +210,7 @@ jobs:
   windows:
     name: Rust (Windows)
     needs: changes
-    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    # Runs when the scope check itself failed, so a broken check never skips a job.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: windows-2025
     timeout-minutes: 60
