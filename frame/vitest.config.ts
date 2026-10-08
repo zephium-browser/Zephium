@@ -49,7 +49,7 @@ export default defineConfig({
             "@tiptap/pm/state",
             "@tiptap/pm/view",
             "marked",
-            "@hugeicons/core-free-icons/*",
+            "@hugeicons/core-free-icons",
           ],
         },
         test: {

@@ -72,6 +72,13 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
                 entriesAwareMergeThreshold: 0,
               },
               {
+                // The icon package ships one module per icon; unbundled, the
+                // startup icons would each add a request at launch.
+                name: "icons",
+                test: /[\\/]@hugeicons[\\/]core-free-icons[\\/]/u,
+                tags: ["$initial"],
+              },
+              {
                 name: "ui-core",
                 test: /[\\/]src[\\/]shared[\\/]ui[\\/](Icon|Button|FavIcon)[\\/]/u,
                 tags: ["$initial"],
