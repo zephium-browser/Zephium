@@ -16,6 +16,7 @@ expect() {
 }
 
 expect false docs/frontend.md README.md
+expect false .coderabbit.yaml .github/ISSUE_TEMPLATE/bug_report.yml .github/REPOSITORY.md CODEOWNERS
 expect false frame/bundle-budgets.json frame/src/features/settings/components/sections/AppearancePage.svelte
 # Compiled into desktop by frame_sources.rs.
 expect true frame/src/features/tabs/components/TabRow.svelte
