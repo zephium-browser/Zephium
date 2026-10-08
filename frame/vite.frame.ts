@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import type { UserConfig } from "vite";
-import { alias } from "./aliases";
-import { bootstrapReport, type Page } from "./bootstrap-report";
+import { alias } from "./aliases.ts";
+import { bootstrapReport, type Page } from "./bootstrap-report.ts";
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
