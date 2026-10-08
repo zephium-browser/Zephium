@@ -54,8 +54,8 @@ release build, so only a maintainer can push one.
 - Always suggest updating pull request branches: on.
 - Automatically delete head branches: on.
 - Limit open pull requests from users without write access: off for now.
-  If one account starts opening many PRs at once, set it (3 is a sensible
-  limit) and put trusted contributors on the bypass list.
+  If an account without write access starts opening many PRs at once, set
+  it (3 is a sensible limit) and put trusted contributors on the bypass list.
 
 ## Actions
 
