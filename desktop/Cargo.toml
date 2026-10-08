@@ -144,7 +144,7 @@ tauri-specta.workspace = true
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = { version = "=2.10.1", default-features = false, features = ["rustls-tls", "zip"] }
 base64.workspace = true
-minisign-verify = "=0.2.5"
+minisign-verify = "=0.3.0"
 tempfile.workspace = true
 zephium-webext = { path = "../crates/zephium-webext", version = "=0.1.0" }
 
