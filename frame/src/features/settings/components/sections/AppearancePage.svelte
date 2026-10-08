@@ -2,7 +2,6 @@
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
-  import SegmentedControl from "$shared/ui/SegmentedControl";
   import Select from "$shared/ui/Select";
   import Switch from "$shared/ui/Switch";
   import SettingsGroup from "$shared/ui/SettingsGroup";
@@ -28,6 +27,32 @@
     { id: "dark", label: m.theme_dark },
     { id: "system", label: m.theme_system },
   ] as const;
+  let schemeGroup = $state<HTMLElement>();
+  let selectedScheme = $derived(
+    Math.max(
+      0,
+      schemes.findIndex((scheme) => scheme.id === preferences.value("appearance")),
+    ),
+  );
+  const chooseScheme = (id: string) => void preferences.set("appearance", id);
+  // A radio group moves and selects with the arrow keys, in reading order.
+  function stepScheme(event: KeyboardEvent, index: number) {
+    const forward = getComputedStyle(event.currentTarget as Element).direction === "rtl" ? -1 : 1;
+    const steps: Record<string, number> = {
+      ArrowRight: forward,
+      ArrowDown: 1,
+      ArrowLeft: -forward,
+      ArrowUp: -1,
+    };
+    const step = steps[event.key];
+    if (!step || !schemeGroup) return;
+    event.preventDefault();
+    const next = (index + step + schemes.length) % schemes.length;
+    const scheme = schemes[next];
+    if (!scheme) return;
+    schemeGroup.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
+    chooseScheme(scheme.id);
+  }
   const tints = [
     { id: "graphite", label: m.settings_graphite },
     { id: "sky", label: m.settings_sky },
@@ -48,41 +73,32 @@
 </script>
 
 <SettingsGroup title={m.settings_theme()}>
-  <div class="appearance-previews" role="group" aria-label={m.settings_color_scheme()}>
-    {#each schemes as scheme (scheme.id)}
+  <div
+    bind:this={schemeGroup}
+    class="appearance-previews"
+    role="radiogroup"
+    aria-label={m.settings_color_scheme()}
+    data-setting="appearance.theme"
+  >
+    {#each schemes as scheme, index (scheme.id)}
       <button
         type="button"
+        role="radio"
         class="appearance-preview"
         data-preview-theme={scheme.id}
-        aria-label={scheme.label()}
-        aria-pressed={preferences.value("appearance") === scheme.id}
-        disabled={preferences.saving()}
-        onclick={() => void preferences.set("appearance", scheme.id)}
+        aria-checked={preferences.value("appearance") === scheme.id}
+        tabindex={index === selectedScheme ? 0 : -1}
+        onclick={() => chooseScheme(scheme.id)}
+        onkeydown={(event) => stepScheme(event, index)}
       >
         <div class="mini-window">
           <div class="mini-sidebar"><span></span><i></i><i></i><i></i></div>
           <div class="mini-page"><span></span><i></i><i></i></div>
         </div>
+        <span class="appearance-preview-label">{scheme.label()}</span>
       </button>
     {/each}
   </div>
-  <SettingsRow
-    settingId="appearance.theme"
-    title={m.settings_color_scheme()}
-    description={m.settings_color_scheme_desc()}
-  >
-    <SegmentedControl
-      label={m.settings_color_scheme()}
-      value={preferences.value("appearance")}
-      disabled={preferences.saving()}
-      options={[
-        { value: "light", label: m.theme_light() },
-        { value: "dark", label: m.theme_dark() },
-        { value: "system", label: m.theme_system() },
-      ]}
-      onchange={(v) => void preferences.set("appearance", v)}
-    />
-  </SettingsRow>
   <SettingsRow
     settingId="appearance.accent"
     title={m.settings_accent()}
