@@ -72,11 +72,13 @@ release build, so only a maintainer can push one.
 
 - Private vulnerability reporting: on (`SECURITY.md` points to it).
 - Dependency graph, Dependabot alerts and Dependabot security updates: on.
-- Secret Protection and push protection: on, so a pushed token is rejected
-  before it lands.
-- Code scanning → CodeQL analysis → *Default setup*: languages Actions,
-  JavaScript/TypeScript and Rust; query suite *Default*. It runs on pushes and
-  PRs to `main` and weekly.
+- Secret Protection and push protection: on. A push containing a supported
+  secret format is blocked; the pusher can still bypass with a stated reason,
+  which is recorded, and unsupported token formats are not detected.
+- Code scanning: *Default setup* stays off. [`workflows/codeql.yml`](workflows/codeql.yml)
+  analyses Actions and JavaScript/TypeScript, and Rust on macOS and Windows
+  runners so each platform's code is covered, after code changes reach
+  `main` and weekly. It does not run on pull requests.
 
 ## Issues and labels
 

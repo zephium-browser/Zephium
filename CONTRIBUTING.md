@@ -161,7 +161,7 @@ Types: `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`, `test`, `build`, `ci`
 
 **Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md):** what changed, why, and how you tested. "Tested manually by ..." is the bare minimum; add screenshots/GIFs for UI changes. Open a **draft PR early** if you want feedback mid-flight.
 
-Every PR gets an automated review from CodeRabbit focused on correctness, performance and security, followed by a maintainer review. Address its findings or reply with why they don't apply.
+Ready PRs get an automated review from CodeRabbit focused on correctness, performance and security, followed by a maintainer review; drafts are reviewed once they're marked ready. Address its findings or reply with why they don't apply.
 
 ### What gets merged faster
 Clear problem statement · small, focused diff · follows existing patterns (read 2-3 nearby files first) · all checks pass · real testing notes.
@@ -182,7 +182,7 @@ Mixed-concern PRs · large architectural PRs without prior discussion · new dep
 
 **Should I ask before fixing a typo or obvious bug?** No, open a PR directly.
 
-**I have an idea for a new feature.** Open an issue or start a Discussion first, so we can agree on the approach before you build it.
+**I have an idea for a new feature.** Start a Discussion if you'd like to explore it, then open an issue before the PR so we can agree on the approach before you build it.
 
 **My PR was closed without detailed feedback.** Usually it didn't align with direction, or scope was too large to review responsibly. Normal for a solo project. Reopen with a smaller scope is welcome.
 
