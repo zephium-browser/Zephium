@@ -133,7 +133,7 @@ features = [
 version = "1.0.149"
 
 [dependencies.thiserror]
-version = "1.0"
+version = "2.0"
 
 [dependencies.url]
 version = "2.5"
