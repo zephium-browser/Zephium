@@ -132,6 +132,7 @@ impl Shell {
         for opener in self.native_openers.values_mut() {
             opener.activate_when_presentable = false;
         }
+        self.end_content_fullscreen_unless(id);
         let Some(win) = self.windows.focused_mut() else {
             return Vec::new();
         };
@@ -152,6 +153,7 @@ impl Shell {
             return NativeWork::default();
         }
         self.forget_removed_tab_state(id);
+        self.forget_content_fullscreen(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
@@ -231,7 +233,11 @@ impl Shell {
         if let Some(kept) = kept {
             self.restore_kept_slot(kept);
         }
-        self.commit(fx)
+        let mut native = self.commit(fx);
+        if let Some(ended) = self.end_private_session_if_empty() {
+            native.merge(ended);
+        }
+        native
     }
 
     /// Where an Essential sits, so closing it can leave it there unloaded.
@@ -441,7 +447,7 @@ impl Shell {
         }) else {
             return false;
         };
-        self.divider = None;
+        self.drop_divider();
         let remaining = tree.remove(id);
         let replacement = failed_was_active
             .then(|| {
@@ -561,7 +567,7 @@ impl Shell {
             return;
         }
         self.record_view_creation(child);
-        self.items.set_popup_blocked(source, false);
+        self.items.clear_blocked_popup(source);
         self.project_tab(source);
         self.native_openers.insert(
             child,

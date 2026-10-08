@@ -192,9 +192,9 @@ fn validate_path(name: &str) -> Option<String> {
     let safe = !name.is_empty()
         && !name.contains('\\')
         && !name.chars().any(char::is_control)
-        && name
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..");
+        && name.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".." && crate::manifest::portable_name(part)
+        });
     safe.then(|| name.to_owned())
 }
 
@@ -276,6 +276,27 @@ mod tests {
 
     use super::*;
     use crate::crx::tests::zip_of;
+
+    #[test]
+    fn entry_names_stay_inside_the_package_on_every_platform() {
+        for name in ["manifest.json", "js/app.js", "_locales/en/messages.json"] {
+            assert!(validate_path(name).is_some(), "{name}");
+        }
+        for name in [
+            "C:/Windows/evil.dll",
+            "C:x",
+            "js/file.js:stream",
+            "CON",
+            "js/nul.txt",
+            "js/com1.js",
+            "js/trailing.",
+            "js/trailing ",
+            "../outside",
+            "/absolute",
+        ] {
+            assert!(validate_path(name).is_none(), "{name}");
+        }
+    }
 
     fn extract_to_temp(
         zip: &[u8],

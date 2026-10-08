@@ -192,6 +192,43 @@ test("pages and workers get every API fix", async () => {
   }
 });
 
+test("silent authentication fails without a native call in promise and callback forms", async () => {
+  for (const kind of ["page", "worker"]) {
+    const { chrome } = context(kind);
+    const before = chrome.runtime.sent.length;
+    for (const details of [undefined, {}, { interactive: false }, { interactive: "true" }]) {
+      await assert.rejects(chrome.identity.launchWebAuthFlow(details), /Non-interactive authentication is not supported/);
+    }
+    let callbackError;
+    let callbackResult;
+    assert.equal(chrome.identity.launchWebAuthFlow({ interactive: false }, result => {
+      callbackResult = result;
+      callbackError = chrome.runtime.lastError?.message;
+    }), undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(callbackResult, undefined);
+    assert.match(callbackError, /Non-interactive authentication is not supported/);
+    assert.equal(chrome.runtime.lastError, undefined);
+    assert.equal(chrome.runtime.sent.length, before);
+  }
+});
+
+test("interactive authentication retains the complete native redirect result", async () => {
+  const { chrome } = context("page");
+  const redirect = chrome.identity.getRedirectURL("cb") + "?code=synthetic&state=fixture#fragment";
+  let request;
+  chrome.runtime.sendNativeMessage = async (application, message) => {
+    assert.equal(application, "app.zephium.webext");
+    request = message;
+    return { url: redirect };
+  };
+  assert.equal(await chrome.identity.launchWebAuthFlow({ interactive: true, url: "https://accounts.example/login" }), redirect);
+  assert.equal(request.api, "identity.launch");
+  assert.equal(request.interactive, true);
+  assert.equal(request.url, "https://accounts.example/login");
+});
+
 test("workers present a Chrome identity and bridge WebSockets", () => {
   const g = context("worker");
   assert.match(g.navigator.userAgent, / Chrome\/\d+/);

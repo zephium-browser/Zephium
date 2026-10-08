@@ -246,12 +246,13 @@ impl EngineHost {
     }
 
     /// Delivers the refresh a dormant view skipped, once it is awake again.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub(super) fn refresh_missed_styles(&mut self, id: ItemId) {
-        if !self.dormant.contains(&id)
-            && !self.suspending.contains(&id)
-            && self.styles_missed.remove(&id)
-        {
+        #[cfg(target_os = "windows")]
+        let suspending = self.suspending.contains(&id);
+        #[cfg(target_os = "macos")]
+        let suspending = false;
+        if !self.dormant.contains(&id) && !suspending && self.styles_missed.remove(&id) {
             self.refresh_document_styles(id);
         }
     }
@@ -261,8 +262,14 @@ impl EngineHost {
         if self.shutdown_completion.is_some() {
             return;
         }
+        // A sleeping page is not woken to restyle; it is owed the refresh.
         #[cfg(target_os = "windows")]
         if self.dormant.contains(&id) || self.suspending.contains(&id) {
+            self.styles_missed.insert(id);
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if self.dormant.contains(&id) {
             self.styles_missed.insert(id);
             return;
         }

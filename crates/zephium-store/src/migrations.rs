@@ -10,6 +10,7 @@ use rusqlite::{Connection, Transaction};
 const _: [(); 128] = [(); zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
 const _: [(); 16] = [(); zephium_agentic::MAX_AGENT_AUDIT_DELIVERY_EVENTS];
 const _: [(); 262_144] = [(); crate::hub::MAX_DURABLE_AGENT_AUDIT_EVENTS];
+const _: [(); 128] = [(); crate::hub::MAX_TIME_BATCH_RECEIPTS];
 
 pub struct Migration {
     pub version: i64,
@@ -2563,6 +2564,25 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 35,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE time_batch_receipts (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     batch_id BLOB NOT NULL UNIQUE CHECK (typeof(batch_id) = 'blob' AND length(batch_id) = 16),
+                     digest BLOB NOT NULL CHECK (typeof(digest) = 'blob' AND length(digest) = 32)
+                 ) STRICT;
+                 CREATE TRIGGER time_batch_receipt_retention AFTER INSERT ON time_batch_receipts
+                 BEGIN
+                     DELETE FROM time_batch_receipts WHERE sequence IN (
+                         SELECT sequence FROM time_batch_receipts
+                         ORDER BY sequence DESC LIMIT -1 OFFSET 128
+                     );
+                 END;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2651,6 +2671,7 @@ mod tests {
         (32, 0x6323d1c7efd84e2c),
         (33, 0x101002bc7ceb482a),
         (34, 0x1a93a832df64a4a1),
+        (35, 0x3c4c67becd54e02a),
     ];
 
     #[test]
@@ -2871,7 +2892,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 34);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 35);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -2900,6 +2921,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn profile_v35_preserves_existing_time_and_adds_empty_bounded_receipts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..34]).unwrap();
+        conn.execute(
+            "INSERT INTO time_spent(hour,place,spent_ms,opens) VALUES(100,'fixture.test',1234,2)",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT spent_ms FROM time_spent", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1234
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM time_batch_receipts", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(conn
+            .execute(
+                "INSERT INTO time_batch_receipts(batch_id,digest) VALUES(x'00',zeroblob(32))",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO time_batch_receipts(batch_id,digest) VALUES(zeroblob(16),x'00')",
+                []
+            )
+            .is_err());
     }
 
     #[test]
@@ -4108,7 +4166,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(34));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(35));
     }
 
     #[test]

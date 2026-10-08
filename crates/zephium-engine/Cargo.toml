@@ -89,7 +89,7 @@ required-features = ["native-agentic-semantic-probe"]
 [dependencies]
 zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
-wry.workspace = true
+wry = { workspace = true, features = ["devtools"] }
 dirs = "6"
 serde_json.workspace = true
 sha2 = "=0.10.9"

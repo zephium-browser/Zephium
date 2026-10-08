@@ -118,6 +118,11 @@ security boundary, not a rendering optimization.
   normal launch. It is built separately (`vite.onboarding.config.ts`) so it never
   splits code out of the browser graph; the build fails if the browser can reach
   any onboarding module, and reports to `frame/reports/bootstrap-report.onboarding.json`.
+- `frame/bundle-budgets.json` records each page's startup graph and what each
+  lazy destination adds on top of the page that opens it. The build fails only
+  when one grows more than 16 KB JS or 8 KB CSS past its recorded size, or a new
+  destination adds over 48 KB without one. Shrink it first; if the growth is
+  intended, run `pnpm run budgets` and say why in the commit.
 - Theme initialization applies the system mode and subscribes to theme commands
   before its first native query. The main surface installs projection listeners,
   resolves theme/material, synchronously forces style/layout, and only then

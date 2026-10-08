@@ -26,6 +26,13 @@ pub(crate) fn handle(
 ) {
     let message = json::from_object(Some(message));
     if message.get("api").and_then(Value::as_str) == Some("identity.launch") {
+        // A silent refresh must never become an unsolicited visible login
+        // tab. Enforce this natively as well as in the compatibility layer.
+        if message.get("interactive").and_then(Value::as_bool) != Some(true) {
+            let error = error("Non-interactive authentication is not supported.");
+            reply.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+            return;
+        }
         let url = message
             .get("url")
             .and_then(Value::as_str)

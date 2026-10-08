@@ -359,7 +359,29 @@ fn failed_session_load_never_bootstraps_or_overwrites_storage() {
 }
 
 #[test]
-fn recovery_required_never_bootstraps_or_overwrites_storage() {
+fn an_unrestorable_session_is_set_aside_and_the_browser_opens_with_its_profile() {
+    let store = Arc::new(FakeStore::default());
+    *store.recovery_reason.lock().unwrap() = Some("corrupt authoritative session snapshot".into());
+    let profile = ProfileId::from(32_000);
+    *store.set_aside.lock().unwrap() = Some(SessionState {
+        profiles: vec![PersistedProfile {
+            id: profile,
+            name: "Personal".into(),
+            kind: ProfileKind::Default,
+        }],
+        ..SessionState::default()
+    });
+    let (mut shell, _engine, _screen) = setup_with(store);
+
+    shell.handle(Command::Bootstrap);
+
+    assert!(shell.bootstrapped);
+    assert!(shell.session_set_aside);
+    assert_eq!(shell.windows.focused().unwrap().profile, profile);
+}
+
+#[test]
+fn recovery_required_never_bootstraps_or_overwrites_storage_when_it_cannot_be_set_aside() {
     let store = Arc::new(FakeStore::default());
     *store.recovery_reason.lock().unwrap() = Some("snapshot is not canonical".into());
     let (mut shell, engine, screen) = setup_with(store.clone());

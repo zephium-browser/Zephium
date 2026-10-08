@@ -10,6 +10,8 @@ pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFE
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod fullscreen;
 mod host;
 mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
@@ -1097,14 +1099,18 @@ impl RetirementGate {
             | event @ EngineEvent::PresentationPending { id, .. }
             | event @ EngineEvent::PresentationReady { id, .. }
             | event @ EngineEvent::NavigationFailed { id, .. }
+            | event @ EngineEvent::NavigationFailureReported { id, .. }
             | event @ EngineEvent::ZoomSettled { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::MediaCaptureChanged { id, .. }
+            | event @ EngineEvent::FullscreenChanged { id, .. }
             | event @ EngineEvent::FaviconPixels { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
-            | event @ EngineEvent::PageOpenBlocked { id }
+            | event @ EngineEvent::PageOpenBlocked { id, .. }
+            | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
@@ -2312,6 +2318,42 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
+        if cfg!(target_os = "windows") {
+            zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
+        } else {
+            zephium_core::ports::engine::FullscreenPresentation::OwnWindow
+        }
+    }
+
+    fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn stop_media_capture(
+        &self,
+        id: ItemId,
+        navigation: zephium_core::ports::engine::NavigationPresentationId,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            self.run_for_active_item(id, move |host| host.stop_media_capture(id, navigation))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (id, navigation);
+            NativeDispatch::Unsupported
+        }
+    }
+
     fn reload(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.reload(id))
     }
@@ -2399,14 +2441,14 @@ impl Engine for WebviewEngine {
                 retirement.retire_all_profiles,
             )
         };
+        // A leaf can go inactive between the engine retiring it (a renderer
+        // crash, a failed creation) and the shell reading that event: two
+        // split panes sharing a crashed process do exactly this. Showing
+        // nothing for this layout is enough; the shell lays out again when it
+        // handles the event. It is never a reason to end the browser.
         let Some(item_tokens) = item_tokens else {
             if !already_terminal {
-                fail_native_host_admission(
-                    &self.event_delivery,
-                    &self.retirement,
-                    &self.fatal_security_failure,
-                    "content layout referenced an inactive native view",
-                );
+                eprintln!("engine: content layout named a view that already ended; skipped");
             }
             return NativeDispatch::Rejected;
         };
@@ -2685,6 +2727,22 @@ impl Engine for WebviewEngine {
 
     fn print(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.print(id))
+    }
+
+    fn open_devtools(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.open_devtools(id))
+    }
+
+    fn open_external_app(&self, url: &str) -> NativeDispatch {
+        if zephium_core::navigation::external_app_link(url).is_none() {
+            return NativeDispatch::Rejected;
+        }
+        let url = url.to_owned();
+        NativeDispatch::from_scheduled(self.run(move || {
+            if !platform::imp::open_external_app(&url) {
+                eprintln!("engine: no application opened an allowed link");
+            }
+        }))
     }
 
     fn set_user_content(
@@ -4214,7 +4272,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_referencing_an_inactive_view_is_terminal_before_dispatch() {
+    fn layout_referencing_an_ended_view_shows_nothing_and_keeps_running() {
         let retirement = Arc::new(Mutex::new(RetirementGate::default()));
         let dispatch_calls = Arc::new(AtomicUsize::new(0));
         let counted_dispatch = dispatch_calls.clone();
@@ -4249,8 +4307,8 @@ mod tests {
         );
 
         assert_eq!(dispatch_calls.load(Ordering::Relaxed), 0);
-        assert!(lock_retirement_gate(&retirement).retire_all_profiles);
-        assert_eq!(fatal_calls.load(Ordering::Relaxed), 1);
+        assert!(!lock_retirement_gate(&retirement).retire_all_profiles);
+        assert_eq!(fatal_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

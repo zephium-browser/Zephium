@@ -143,8 +143,22 @@ impl Manifest {
             .unwrap_or(0)
     }
 
+    /// Chrome's version grammar: one to four dot-separated integers up to
+    /// 65535. Anything else is refused, since the version also names the
+    /// package's folder on disk.
     pub fn version(&self) -> Option<&str> {
-        self.raw["version"].as_str()
+        let version = self.raw["version"].as_str()?;
+        let parts: Vec<&str> = version.split('.').collect();
+        (!parts.is_empty()
+            && parts.len() <= 4
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part.len() <= 5
+                    && part.bytes().all(|byte| byte.is_ascii_digit())
+                    && (part.len() == 1 || !part.starts_with('0'))
+                    && part.parse::<u32>().is_ok_and(|value| value <= 65_535)
+            }))
+        .then_some(version)
     }
 
     pub fn name(&self) -> Option<String> {
@@ -353,6 +367,7 @@ pub fn normalize_resource(path: &str) -> Option<String> {
         match part {
             "" | "." => {}
             ".." => return None,
+            part if !portable_name(part) => return None,
             part => parts.push(part),
         }
     }
@@ -360,6 +375,23 @@ pub fn normalize_resource(path: &str) -> Option<String> {
         return None;
     }
     Some(parts.join("/") + suffix)
+}
+
+/// A path part that names one file inside the package on every platform: no
+/// drive or stream separator, no Windows device name, and no trailing dot or
+/// space that Windows would strip into another name.
+pub(crate) fn portable_name(part: &str) -> bool {
+    if part.contains(':') || part.ends_with('.') || part.ends_with(' ') {
+        return false;
+    }
+    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    let device = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && stem.as_bytes()[3].is_ascii_digit());
+    !device
 }
 
 fn load_messages(dir: &Path, default_locale: Option<&str>) -> HashMap<String, Message> {
@@ -516,6 +548,41 @@ pub(crate) fn string_end(bytes: &[u8], start: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_chrome_versions_name_a_package() {
+        let version = |value: &str| {
+            super::Manifest::from_value(serde_json::json!({ "version": value }))
+                .version()
+                .map(str::to_owned)
+        };
+        for good in ["1", "1.0", "1.2.3.4", "65535.0.0.1", "0.1"] {
+            assert_eq!(version(good).as_deref(), Some(good), "{good}");
+        }
+        for bad in [
+            "",
+            "../../..",
+            "1.2.3.4.5",
+            "01.0",
+            "1..2",
+            "65536",
+            "1.a",
+            "1 ",
+        ] {
+            assert_eq!(version(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn resources_cannot_name_drives_or_devices() {
+        assert_eq!(
+            super::normalize_resource("/js/app.js").as_deref(),
+            Some("js/app.js")
+        );
+        for path in ["C:/x.js", "js/CON.js", "js/a.js:zone", "js/a."] {
+            assert_eq!(super::normalize_resource(path), None, "{path}");
+        }
+    }
+
     use serde_json::json;
 
     use super::*;

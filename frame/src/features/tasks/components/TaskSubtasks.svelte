@@ -11,11 +11,14 @@
     disabled = false,
     onchange,
     onrename,
+    onsettle,
   }: {
     steps: readonly TaskStep[];
     disabled?: boolean;
     onchange: (steps: TaskStep[]) => Promise<boolean>;
     onrename: (id: string, title: string) => void;
+    /** The reader left a step's title. */
+    onsettle?: () => void;
   } = $props();
   let value = $state("");
   let field = $state<HTMLInputElement>();
@@ -62,10 +65,12 @@
         type="text"
         class="subtask-title"
         aria-label={m.task_subtask_title()}
+        aria-invalid={!step.title.trim() || undefined}
         {disabled}
         maxlength="256"
         value={step.title}
         oninput={(event) => onrename(step.id, event.currentTarget.value)}
+        onblur={() => onsettle?.()}
         onkeydown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();

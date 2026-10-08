@@ -71,8 +71,8 @@ pub use api::AgentLifecycle;
 pub use api::{
     BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
     Command, ContentPolicyStatusQueryOutcome, EmitFn, PagePermissionPromptDecision,
-    PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
-    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
+    PageRequestDecision, PresentationChrome, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
 };
 pub use onboarding::{finish_onboarding, onboarding_due};

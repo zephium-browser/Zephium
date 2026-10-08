@@ -90,7 +90,7 @@ pub(crate) fn install(shell: &zephium_app::Handle) {
         tauri::async_runtime::spawn(async move {
             let (rgba, bytes, outcome) = probe(&client, ProbePolicy::PRODUCT, &origin).await;
             crate::work_provider::record_diagnostic(format_args!(
-                "favicon: phase=probe origin={origin} bytes={bytes} outcome={outcome:?}"
+                "favicon: phase=probe bytes={bytes} outcome={outcome:?}"
             ));
             answer(&reply, profile, origin, rgba).await;
         });

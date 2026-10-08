@@ -10,6 +10,8 @@ struct Gate {
     touched: BTreeSet<String>,
     pending: BTreeMap<String, (String, tokio::sync::oneshot::Sender<bool>)>,
     requesting: bool,
+    prepared: bool,
+    flushed: Vec<(String, String)>,
 }
 static GATE: OnceLock<Mutex<Gate>> = OnceLock::new();
 fn gate() -> &'static Mutex<Gate> {
@@ -23,7 +25,7 @@ impl Gate {
     fn touch(&mut self, label: &str, terminal_started: impl FnOnce() -> bool) -> bool {
         // Evaluate the authoritative shutdown check under the same mutex as
         // final close admission. A caller's earlier check may predate that lock.
-        if terminal_started() {
+        if self.prepared || terminal_started() {
             return false;
         }
         self.touched.insert(label.into());
@@ -68,18 +70,58 @@ pub(super) fn complete(label: &str, token: &str, success: bool) -> bool {
         .complete(label, token, success)
 }
 pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'static) {
+    if super::updates::blocks_exit(&app) {
+        return;
+    }
+    request_inner(app, true, move |saved| {
+        if saved {
+            done();
+        }
+    });
+}
+
+/// Updates must learn that a draft flush was refused before changing the bundle.
+pub(super) fn request_with_result(app: tauri::AppHandle, done: impl FnOnce(bool) + Send + 'static) {
+    request_inner(app, false, done);
+}
+
+pub(super) fn cancel_prepared(app: &tauri::AppHandle) {
+    let flushed = {
+        let mut gate = gate().lock().unwrap_or_else(|e| e.into_inner());
+        gate.prepared = false;
+        std::mem::take(&mut gate.flushed)
+    };
+    for (label, token) in flushed {
+        super::emit_to_privileged(app, &label, "zephium:resource-close-cancelled", &token);
+    }
+}
+
+fn request_inner(app: tauri::AppHandle, terminal: bool, done: impl FnOnce(bool) + Send + 'static) {
     if super::shutdown_started(&app) {
-        done();
+        done(true);
         return;
     }
     let mut gate = gate().lock().unwrap_or_else(|e| e.into_inner());
     if gate.requesting {
+        drop(gate);
+        done(false);
+        return;
+    }
+    if terminal && gate.prepared {
+        // The update's successful flush froze all resource admission. Consume
+        // that proof while publishing terminal shutdown, rather than asking
+        // frozen renderers to save a second time after bundle replacement.
+        gate.prepared = false;
+        done(true);
         return;
     }
     if gate.touched.is_empty() {
-        // Publish terminal shutdown before a concurrent first resource call
-        // can enlist another host. The callback only starts native shutdown.
-        done();
+        gate.prepared = !terminal;
+        // Terminal callers publish shutdown while admission is still locked.
+        if !terminal {
+            drop(gate);
+        }
+        done(true);
         return;
     }
     gate.requesting = true;
@@ -124,7 +166,15 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
                 // Linearize the final participant check with first resource
                 // calls from a newly initialized launcher. Native shutdown's
                 // terminal marker is published synchronously by this callback.
-                done();
+                gate.prepared = !terminal;
+                gate.flushed = requests
+                    .iter()
+                    .map(|(label, token)| ((*label).to_owned(), token.clone()))
+                    .collect();
+                if !terminal {
+                    drop(gate);
+                }
+                done(true);
                 return;
             }
             retry
@@ -132,7 +182,7 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
         if retry {
             // A cold host began using resources while the other host flushed.
             // It may now hold a draft, so request a fresh flush from both.
-            request(app, done);
+            request_inner(app, terminal, done);
         } else if !super::shutdown_started(&app) {
             for (label, token) in requests {
                 super::emit_to_privileged(&app, label, "zephium:resource-close-cancelled", &token);
@@ -143,17 +193,33 @@ pub(super) fn request(app: tauri::AppHandle, done: impl FnOnce() + Send + 'stati
                 }
             }
             app.dialog().message("Some changes in Notes, Tasks or Work could not be saved. Return to them to retry or resolve a conflict. Drafts in another profile must be saved from that profile.").title("Unsaved changes").kind(tauri_plugin_dialog::MessageDialogKind::Warning).show(|_|{});
+            done(false);
+        } else {
+            done(false);
         }
     });
 }
 
 pub(super) fn is_closing() -> bool {
-    gate().lock().unwrap_or_else(|e| e.into_inner()).requesting
+    let gate = gate().lock().unwrap_or_else(|e| e.into_inner());
+    gate.requesting || gate.prepared
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_install_refuses_new_drafts_until_cancelled() {
+        let mut gate = Gate {
+            prepared: true,
+            ..Gate::default()
+        };
+        assert!(!gate.touch(super::super::overlay::PANEL_LABEL, || false));
+        assert!(gate.participants().is_empty());
+        gate.prepared = false;
+        assert!(gate.touch(super::super::overlay::PANEL_LABEL, || false));
+    }
+
     #[test]
     fn main_resources_do_not_enlist_the_unloaded_launcher() {
         let mut gate = Gate::default();

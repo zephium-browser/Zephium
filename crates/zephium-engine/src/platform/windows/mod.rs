@@ -28,6 +28,9 @@ mod cdp;
 mod content_filter;
 mod find;
 pub(crate) use find::{find, FindReport, FindSession};
+mod fullscreen;
+pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state};
+pub use fullscreen::{install_fullscreen_observer, FullscreenObserver};
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 mod cookie_storage_diagnostic;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -46,7 +49,10 @@ mod semantic_action;
 mod semantic_runtime;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
+mod apps;
 mod native_paths;
+pub(crate) use apps::{external_app_name, open_external_app};
+mod paint;
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
 mod semantic_screenshot;
@@ -75,6 +81,7 @@ pub(crate) use content_filter::{
     prepare as prepare_content_policy, same_policy as same_content_policy,
     ContentPolicyRegistration, NativeContentPolicy,
 };
+pub(crate) use paint::PaintCover;
 pub use stage::Stage;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use timeout::schedule_content_policy_timeout;
@@ -115,7 +122,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment10,
     ICoreWebView2Environment5, ICoreWebView2Environment7, ICoreWebView2Environment8,
     ICoreWebView2Profile2, ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10,
-    ICoreWebView2_13, ICoreWebView2_18, ICoreWebView2_5,
+    ICoreWebView2_13, ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
     COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
@@ -124,16 +131,19 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
-    COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
     BrowserProcessExitedEventHandler, ClearBrowsingDataCompletedHandler,
     ClientCertificateRequestedEventHandler, HistoryChangedEventHandler,
     LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
-    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler, SourceChangedEventHandler,
+    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
+    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
+};
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
@@ -247,16 +257,34 @@ pub fn configure(
     let core18 = core.cast::<ICoreWebView2_18>()?;
     let core10 = core.cast::<ICoreWebView2_10>()?;
     let core5 = core.cast::<ICoreWebView2_5>()?;
+    let core14 = core.cast::<ICoreWebView2_14>()?;
     let mut policy = SecurityPolicy {
         core: core.clone(),
         core18: core18.clone(),
         core10: core10.clone(),
         core5: core5.clone(),
+        core14: core14.clone(),
         frame_token: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
+        certificate_error_token: None,
     };
+
+    // A certificate the system does not trust ends the navigation, as it
+    // does on macOS. WebView2's default interstitial can offer a way past.
+    let certificate_error =
+        ServerCertificateErrorDetectedEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                unsafe { args.SetAction(COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL)? };
+            }
+            Ok(())
+        }));
+    let mut certificate_error_token = 0_i64;
+    unsafe {
+        core14.add_ServerCertificateErrorDetected(&certificate_error, &mut certificate_error_token)
+    }?;
+    policy.certificate_error_token = Some(certificate_error_token);
 
     // HTTP authentication and client-certificate selection have independent
     // native default dialogs; PermissionRequested and script-dialog settings
@@ -355,9 +383,12 @@ pub fn configure(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
-            if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                .is_some_and(|uri| zephium_core::navigation::is_allowed_str(&uri))
-            {
+            if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
+                |uri| {
+                    zephium_core::navigation::is_allowed_str(&uri)
+                        || zephium_core::navigation::is_subframe_document(&uri)
+                },
+            ) {
                 args.SetCancel(false)?;
             }
         }
@@ -392,10 +423,49 @@ pub struct SecurityPolicy {
     core18: ICoreWebView2_18,
     core10: ICoreWebView2_10,
     core5: ICoreWebView2_5,
+    core14: ICoreWebView2_14,
     frame_token: Option<i64>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
+    certificate_error_token: Option<i64>,
+}
+
+impl SecurityPolicy {
+    /// Human tabs: WebView2 still never launches an app link itself; each
+    /// one goes to `request`, so the browser can ask the person first.
+    pub fn route_external_uris(
+        &mut self,
+        request: impl Fn(&str) + 'static,
+    ) -> windows_core::Result<()> {
+        let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            unsafe {
+                args.SetCancel(true)?;
+                let mut uri = PWSTR::null();
+                args.Uri(&mut uri)?;
+                if let Some(uri) =
+                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                {
+                    request(&uri);
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        // The new handler is in place before the cancel-only one goes, so no
+        // moment exists where WebView2 would fall back to launching apps.
+        unsafe {
+            self.core18
+                .add_LaunchingExternalUriScheme(&handler, &mut token)?
+        };
+        if let Some(previous) = self.external_token.replace(token) {
+            let _ = unsafe { self.core18.remove_LaunchingExternalUriScheme(previous) };
+        }
+        Ok(())
+    }
 }
 
 impl Drop for SecurityPolicy {
@@ -411,6 +481,9 @@ impl Drop for SecurityPolicy {
         }
         if let Some(token) = self.client_certificate_token.take() {
             let _ = unsafe { self.core5.remove_ClientCertificateRequested(token) };
+        }
+        if let Some(token) = self.certificate_error_token.take() {
+            let _ = unsafe { self.core14.remove_ServerCertificateErrorDetected(token) };
         }
     }
 }
@@ -1686,7 +1759,7 @@ pub fn install_accelerators(
     item: impl Fn() -> zephium_core::ids::ItemId + 'static,
 ) -> windows_core::Result<Option<AcceleratorRegistration>> {
     let controller = view.controller();
-    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_controller, args| {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |controller, args| {
         let Some(args) = args else {
             return Ok(());
         };
@@ -1703,6 +1776,19 @@ pub fn install_accelerators(
         let ctrl = down(VK_CONTROL.0 as i32);
         let shift = down(VK_SHIFT.0 as i32);
         let alt = down(VK_MENU.0 as i32);
+        // Escape always leaves fullscreen, whatever the page does with the
+        // key; the page still receives it.
+        if key == u32::from(VK_ESCAPE.0)
+            && !ctrl
+            && !shift
+            && !alt
+            && controller
+                .as_ref()
+                .and_then(|controller| unsafe { controller.CoreWebView2() }.ok())
+                .is_some_and(|core| fullscreen::exit_core(&core))
+        {
+            return Ok(());
+        }
         let hit = shortcuts
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1776,6 +1862,14 @@ pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
     if let Ok(core8) = view.webview().cast::<ICoreWebView2_8>() {
         let _ = unsafe { core8.SetIsMuted(suspended) };
     }
+}
+
+/// Permission UI belongs to the actual foreground browser window, rather
+/// than whichever logical tab was last selected while another app is active.
+pub(crate) fn permission_window_is_foreground(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    hwnd != 0 && unsafe { GetForegroundWindow() == HWND(hwnd as *mut std::ffi::c_void) }
 }
 
 /// WebView2's native audio bit cannot be overridden by page JavaScript. API

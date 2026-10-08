@@ -81,6 +81,15 @@ impl Downloads {
             }
             return;
         }
+        if let DownloadCall::Resume { id } = &call {
+            let id = DownloadId::parse(id).expect("validated download id");
+            let result = self.resume(partition, id);
+            done.finish(match result {
+                Ok(()) => DownloadResponse::Accepted,
+                Err(error) => DownloadResponse::Error { error },
+            });
+            return;
+        }
         let token = self.next_call.get();
         let Some(next) = token.checked_add(1) else {
             done.finish(DownloadResponse::Error {
@@ -193,7 +202,10 @@ impl Downloads {
                     self.ui_store(token, partition, DownloadStoreCall::Clear);
                 }
             }
-            DownloadCall::Cancel { .. } | DownloadCall::Updates | DownloadCall::RetryCleanup => {
+            DownloadCall::Cancel { .. }
+            | DownloadCall::Resume { .. }
+            | DownloadCall::Updates
+            | DownloadCall::RetryCleanup => {
                 unreachable!()
             }
         }

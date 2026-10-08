@@ -45,6 +45,7 @@
     destructive: m.work_ask_deleting,
     save: m.work_ask_saving,
     edit: m.work_ask_saving,
+    type: m.work_ask_typing,
   } as const;
   const DONE = {
     communication: m.work_ask_sent,
@@ -52,6 +53,7 @@
     destructive: m.work_ask_deleted,
     save: m.work_ask_saved,
     edit: m.work_ask_saved,
+    type: m.work_ask_typed,
   } as const;
   const DECLINED = {
     communication: m.work_ask_not_sent,
@@ -59,6 +61,7 @@
     destructive: m.work_ask_kept,
     save: m.work_ask_not_saved,
     edit: m.work_ask_not_saved,
+    type: m.work_ask_not_typed,
   } as const;
 </script>
 
@@ -68,7 +71,9 @@
     {busy}
     label={ask.headline}
     note={says ? m.work_ask_will({ action: ask.action }) : null}
-    where={m.work_ask_as_you({ site: siteName(ask.site) })}
+    where={ask.category === "type"
+      ? siteName(ask.site)
+      : m.work_ask_as_you({ site: siteName(ask.site) })}
     title={ask.headline}
   >
     {#snippet mark()}<HostGlyph host={ask.site} size={18} initial={false} />{/snippet}
@@ -125,7 +130,11 @@
     tone="done"
     status={DONE[ask.category]()}
     text={what}
-    detail={ask.allowedForRun ? m.work_ask_allowed_run({ site: ask.site }) : null}
+    detail={ask.allowedForRun
+      ? ask.category === "type"
+        ? m.work_ask_allowed_typing_run({ site: ask.site })
+        : m.work_ask_allowed_run({ site: ask.site })
+      : null}
   />
 {:else if ask.state === "declined"}
   <AskReceipt tone="declined" status={DECLINED[ask.category]()} text={what} />

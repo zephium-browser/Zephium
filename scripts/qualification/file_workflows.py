@@ -8,9 +8,11 @@ Received bodies are bounded, compared against fixed fixture bytes and discarded.
 
 import argparse
 import base64
+import gzip
 import hashlib
 import json
 import secrets
+import threading
 import time
 from email import policy
 from email.parser import BytesParser
@@ -23,6 +25,8 @@ FILES = {
     "folder/nested/third.txt": b"Nested directory fixture\n",
 }
 MAX_BODY = 1024 * 1024
+RESUME_BYTES = b"Zephium resumable fixture\n" * 32768
+GZIP_BYTES = b"Zephium decoded attachment fixture\n" * 8192
 
 
 def verify_upload(content_type, body):
@@ -96,6 +100,44 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return
             self.send_attachment("zephium-authenticated.txt", b"Cookie-authenticated fixture\n")
             return
+        if self.path == base + "/resumable":
+            value = self.headers.get("Range", "")
+            start = 0
+            if value:
+                if not value.startswith("bytes=") or not value.endswith("-") or not value[6:-1].isdigit():
+                    self.send_body(416, "text/plain", b"Invalid fixture range")
+                    return
+                start = int(value[6:-1])
+                if start >= len(RESUME_BYTES):
+                    self.send_body(416, "text/plain", b"Invalid fixture range")
+                    return
+            with self.server.resume_lock:
+                interrupt = not value and not self.server.resume_interrupted
+                self.server.resume_interrupted = True
+            self.send_response(206 if value else 200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="zephium-resumable.bin"')
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("ETag", '"zephium-resume-v1"')
+            self.send_header("Content-Length", str(len(RESUME_BYTES) - start))
+            self.send_header("Connection", "close")
+            if value:
+                self.send_header("Content-Range", f"bytes {start}-{len(RESUME_BYTES)-1}/{len(RESUME_BYTES)}")
+            self.end_headers()
+            self.wfile.write(RESUME_BYTES[start:start + 65536] if interrupt else RESUME_BYTES[start:])
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        if self.path == base + "/gzip":
+            wire = gzip.compress(GZIP_BYTES, mtime=0)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Disposition", 'attachment; filename="zephium-decoded.txt"')
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+            return
         if self.path in (base + "/download", base + "/slow", base + "/redirect"):
             if self.path.endswith("/redirect"):
                 self.send_response(302)
@@ -142,6 +184,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 <p><button id="blob">Download generated text</button> <button id="data">Download data URL</button></p>
 <p><a href="__BASE__/empty">Empty file</a> · <a href="__BASE__/unknown-length">Unknown length</a> · <a href="__BASE__/truncated">Truncated response (must fail)</a></p>
 <p><a href="__BASE__/authenticated">Cookie-authenticated text attachment</a></p>
+<p><a href="__BASE__/resumable">Interrupted download with native resume</a> · <a href="__BASE__/gzip">Gzip-encoded text attachment</a></p>
 <form method="POST" action="__BASE__/export"><input type="hidden" name="fixture" value="generated"><button>Download POST export</button></form>
 <form id="upload">
 <label>Single file <input type="file" name="single" id="single"></label>
@@ -240,8 +283,12 @@ def main():
         target.write_bytes(data)
     server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     server.token = secrets.token_hex(18)
+    server.resume_lock = threading.Lock()
+    server.resume_interrupted = False
     print(f"Fixture: http://127.0.0.1:{server.server_port}/{server.token}", flush=True)
     print(f"Select files from: {args.files.resolve()}", flush=True)
+    for label, data in (("Resumable", RESUME_BYTES), ("Decoded gzip", GZIP_BYTES)):
+        print(f"{label}: {len(data)} bytes; SHA-256 {hashlib.sha256(data).hexdigest()}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

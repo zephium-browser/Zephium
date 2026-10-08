@@ -1263,6 +1263,11 @@ impl EngineHost {
             for (id, view) in &self.views {
                 crate::platform::imp::set_background_suspension(&view.view, next.contains(id));
             }
+            let woken: Vec<ItemId> = self.dormant.difference(&next).copied().collect();
+            self.dormant = next;
+            for id in woken {
+                self.refresh_missed_styles(id);
+            }
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = ids;

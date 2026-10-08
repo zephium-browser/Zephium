@@ -7,6 +7,7 @@
   import * as m from "$shared/i18n/messages";
   import FileGlyph from "./FileGlyph.svelte";
   import { TransferRate, transferLine } from "../lib/transfer";
+  import { downloadReason } from "../lib/errors";
 
   let { profile, onopen }: { profile: string; onopen: () => void } = $props();
   let session = $state.raw(untrack(() => new DownloadSession(profile)));
@@ -36,11 +37,13 @@
   const EXIT = 140;
 
   const live = (entry: DownloadView) =>
-    ["pending", "receiving", "cancelling", "finalizing"].includes(entry.state);
+    ["pending", "receiving", "paused", "cancelling", "finalizing"].includes(entry.state);
   let active = $derived(session.entries.filter(live));
   let current = $derived(active[0] ?? session.entries[0]);
   let progress = $derived(current ? downloadProgress(current) : undefined);
-  let problem = $derived(current?.state === "failed" || current?.state === "interrupted");
+  let problem = $derived(
+    current?.state === "failed" || current?.state === "interrupted" || current?.state === "paused",
+  );
   let rate = $derived.by(() => {
     rates.retain(active.map((entry) => entry.id));
     return current?.state === "receiving"
@@ -63,11 +66,7 @@
       case "cancelled":
         return m.download_cancelled();
       default:
-        return current.error === "permission"
-          ? m.download_reason_permission()
-          : current.error === "disk_full"
-            ? m.download_reason_disk_full()
-            : m.download_failed();
+        return downloadReason(current.error, current.state === "paused");
     }
   });
   let finishedKey = $derived(
@@ -126,7 +125,7 @@
         >
       </span>
     </button>
-    {#if current.state === "pending" || current.state === "receiving"}
+    {#if current.state === "pending" || current.state === "receiving" || current.state === "paused"}
       <IconButton
         icon={Cancel01Icon}
         label={m.download_cancel()}
@@ -153,7 +152,7 @@
         onclick={dismiss}
       />
     {/if}
-    {#if active.length > 0}
+    {#if current.state === "pending" || current.state === "receiving"}
       <div
         class="track"
         role="progressbar"

@@ -221,3 +221,22 @@ Windows native context menus are opt-in and host filtered, and require a separat
 SaveAsUIShowing cancellation registration because document Save As is distinct
 from DownloadStarting. Privileged/agent defaults remain unchanged. See the
 [application qualification record](../../docs/native-links-implementation.md).
+
+### Page dialogs and failure categories (macOS)
+
+`alert`, `confirm` and `prompt` show as an `NSAlert` sheet on the view's window,
+titled by the initiating frame's security-origin host ("example.com says", or
+"An embedded page at … says"). A hidden view, or a window that already shows a
+sheet, gets the dismissed answer, as upstream's no-UI default did. From the
+second dialog within ten seconds the sheet offers to silence the page until its
+URL changes. Messages are bounded to 1,024 characters.
+
+`navigation_failure_handler` reduces a failed main-frame navigation's
+`NSURLError` code to a category the host can explain (offline, host not found,
+unreachable, timed out, insecure, other). Native error text never crosses it.
+
+On Windows the same handler is fed from `NavigationCompleted`'s
+`WebErrorStatus` (cancellation and download conversion stay silent). The
+`ContentLoading` of WebView2's built-in error page is hidden like a commit but
+not reported as one, so the failure lands on the document the person asked for
+and the host can show its own explanation.

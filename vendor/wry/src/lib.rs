@@ -867,9 +867,12 @@ struct WebViewAttributes<'a> {
   ///
   /// ## Platform-specific
   ///
-  /// - **macOS:** Requires the `fullscreen` feature and uses WebKit private
-  ///   preferences. Embedders rendering untrusted content should disable this
-  ///   per view until they own a gesture- and origin-labelled broker.
+  /// - **macOS:** WebKit's public element fullscreen preference, set for
+  ///   every view. Defaults to on only with the `fullscreen` feature; an
+  ///   embedder that enables it should observe `fullscreenState` and exit
+  ///   fullscreen whenever the view stops being the one on screen.
+  /// - **iOS:** Requires the `fullscreen` feature and uses WebKit private
+  ///   preferences.
   /// - Other platforms: Unsupported and ignored.
   pub fullscreen_enabled: bool,
 
@@ -892,6 +895,9 @@ struct WebViewAttributes<'a> {
   /// navigation sequence across redirects, overlapping loads, and failures.
   /// The identifier is scoped to this WebView and is opaque to the embedder.
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
+
+  /// Why a main-frame navigation failed, reported before its `Failed` event.
+  pub navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
 
   /// Hide the native presentation surface synchronously at each main-frame
   /// commit, before delivering its identity event. Hardened embedders can
@@ -1035,6 +1041,7 @@ impl Default for WebViewAttributes<'_> {
       picture_in_picture_enabled: false,
       on_page_load_handler: None,
       navigation_event_handler: None,
+      navigation_failure_handler: None,
       navigation_presentation_guard: None,
       proxy_config: None,
       focused: true,
@@ -1166,10 +1173,9 @@ impl<'a> WebViewBuilder<'a> {
 
   /// Enables or disables page-triggered native fullscreen media surfaces.
   ///
-  /// This is currently implemented only on macOS and requires Wry's
-  /// `fullscreen` feature. Disable it explicitly for untrusted browser views;
-  /// feature unification can otherwise enable the private WebKit preference
-  /// process-wide at compile time.
+  /// This is currently implemented only on Apple platforms. Set it per view:
+  /// feature unification can otherwise change the default for every view
+  /// at compile time.
   pub fn with_fullscreen_enabled(mut self, enabled: bool) -> Self {
     self.attrs.fullscreen_enabled = enabled;
     self
@@ -1726,6 +1732,21 @@ impl<'a> WebViewBuilder<'a> {
     handler: impl Fn(NavigationEvent) + 'static,
   ) -> Self {
     self.attrs.navigation_event_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Reports why a main-frame navigation failed, keyed by the same
+  /// [`NavigationId`] its [`NavigationEventPhase::Failed`] event carries, and
+  /// always before that event. Only the category is reported, never the
+  /// native error text.
+  ///
+  /// Supported on macOS and Windows. On Windows, WebView2's own error page
+  /// is hidden and never reported as a commit. Other platforms ignore it.
+  pub fn with_navigation_failure_handler(
+    mut self,
+    handler: impl Fn(NavigationId, NavigationFailure) + 'static,
+  ) -> Self {
+    self.attrs.navigation_failure_handler = Some(Box::new(handler));
     self
   }
 
@@ -3266,6 +3287,23 @@ pub enum NavigationEventPhase {
   Cancelled,
   /// The navigation terminated with an error.
   Failed,
+}
+
+/// Why a main-frame navigation failed, as a category safe to show a person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationFailure {
+  /// The device has no network connection.
+  Offline,
+  /// The host name did not resolve.
+  HostNotFound,
+  /// The host was found but refused or dropped the connection.
+  Unreachable,
+  /// The server did not answer in time.
+  TimedOut,
+  /// A secure connection could not be established or verified.
+  Insecure,
+  /// Any other failure.
+  Other,
 }
 
 /// Identity-bearing observation of a main-frame navigation.

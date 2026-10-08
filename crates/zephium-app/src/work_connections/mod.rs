@@ -56,44 +56,6 @@ pub trait ConnectionHost: Send + Sync {
     ) -> HostFuture<'a, Result<Option<String>, WorkError>>;
 }
 
-/// Names that commit something for the person, when a server says nothing.
-pub fn consequential_name(name: &str) -> bool {
-    const WORDS: [&str; 30] = [
-        "send", "post", "create", "delete", "remove", "update", "write", "edit", "merge", "close",
-        "reopen", "publish", "comment", "reply", "invite", "share", "pay", "purchase", "book",
-        "order", "submit", "archive", "move", "rename", "set", "add", "assign", "approve",
-        "upload", "execute",
-    ];
-    words(name)
-        .iter()
-        .any(|word| WORDS.contains(&word.as_str()))
-}
-
-/// `sendMessage`, `send_message` and `send-message` alike become words.
-fn words(name: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut previous_lower = false;
-    for c in name.chars() {
-        if !c.is_ascii_alphanumeric() {
-            previous_lower = false;
-            if !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-            continue;
-        }
-        if c.is_ascii_uppercase() && previous_lower && !word.is_empty() {
-            words.push(std::mem::take(&mut word));
-        }
-        previous_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-        word.push(c.to_ascii_lowercase());
-    }
-    if !word.is_empty() {
-        words.push(word);
-    }
-    words
-}
-
 /// Text from a service, bounded for the agent and cleaned of control bytes.
 pub fn bounded(text: &str, max: usize) -> (String, bool) {
     let cleaned: String = text
@@ -121,19 +83,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consequence_by_name() {
-        for name in [
-            "send_message",
-            "create-issue",
-            "notion_delete_page",
-            "post",
-            "addComment",
-        ] {
-            assert!(consequential_name(name), "{name}");
-        }
-        for name in ["search", "get_issue", "list_channels", "read_page", "fetch"] {
-            assert!(!consequential_name(name), "{name}");
-        }
+    fn service_text_is_bounded_and_control_safe() {
         assert_eq!(bounded("a\u{1}b", 10), ("a b".into(), false));
         assert_eq!(bounded("héllo", 2), ("h".into(), true));
     }

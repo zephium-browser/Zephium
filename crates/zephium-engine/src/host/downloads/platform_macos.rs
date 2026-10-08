@@ -32,6 +32,10 @@ pub(super) fn progress(native: &Native) -> Option<(u64, Option<u64>)> {
             .filter(|value| *value > 0),
     ))
 }
+pub(super) fn completion_bytes(_native: &Native) -> Result<Option<u64>, DownloadError> {
+    // NSProgress reports work units; WebKit does not promise decoded file bytes.
+    Ok(None)
+}
 pub(super) fn stop_timer(timer: Timer) {
     timer.invalidate();
 }
@@ -83,6 +87,13 @@ impl Source {
 }
 
 impl Downloads {
+    pub(super) fn resume(
+        &self,
+        _partition: Partition,
+        _id: DownloadId,
+    ) -> Result<(), DownloadError> {
+        Err(DownloadError::Unsupported)
+    }
     pub(super) fn ensure_timer(self: &Rc<Self>) {
         if self.timer.borrow().is_some() {
             return;
@@ -250,7 +261,7 @@ impl Downloads {
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,
-                deadline: Instant::now() + Duration::from_secs(30),
+                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
         unsafe { native.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -398,7 +409,7 @@ impl Downloads {
             transfer.panel_lease = Some(lease);
             // A person may browse the filesystem for longer than a network
             // callback deadline. Lifetime revocation still applies each tick.
-            transfer.deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
         }
         let weak = Rc::downgrade(self);
         let selected_panel = panel.clone();
@@ -567,6 +578,163 @@ pub(super) fn bounded(value: &NSString, max: usize) -> Option<String> {
     (value.len() <= max).then_some(value)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ErrorContext {
+    Unknown,
+    Transport,
+    Source,
+    Destination,
+}
+
+fn download_error(error: &NSError) -> DownloadError {
+    bounded_download_error(error, 4, ErrorContext::Unknown).unwrap_or(DownloadError::Network)
+}
+
+fn bounded_download_error(
+    error: &NSError,
+    remaining: usize,
+    inherited: ErrorContext,
+) -> Option<DownloadError> {
+    use objc2_foundation::{
+        NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+    };
+    let domain = error.domain();
+    let code = error.code();
+    let url = unsafe { domain.isEqualToString(NSURLErrorDomain) };
+    let cocoa = unsafe { domain.isEqualToString(NSCocoaErrorDomain) };
+    let context = if url {
+        match code {
+            -3005..=-3000 => ErrorContext::Destination,
+            -1104..=-1100 => ErrorContext::Source,
+            _ => ErrorContext::Transport,
+        }
+    } else if inherited != ErrorContext::Unknown {
+        inherited
+    } else if cocoa {
+        match code {
+            512..=518 | 640 | 642 => ErrorContext::Destination,
+            4 | 256..=264 => ErrorContext::Source,
+            _ => ErrorContext::Unknown,
+        }
+    } else {
+        ErrorContext::Unknown
+    };
+    let destination = context == ErrorContext::Destination;
+    let kind = if unsafe { domain.isEqualToString(NSPOSIXErrorDomain) } {
+        match i32::try_from(code).ok() {
+            Some(libc::ENODATA | libc::EPROTO | libc::EBADMSG) => Some(DownloadError::Integrity),
+            Some(
+                libc::ECONNRESET
+                | libc::ECONNABORTED
+                | libc::ENETDOWN
+                | libc::ENETRESET
+                | libc::ENOTCONN,
+            ) => Some(DownloadError::ConnectionLost),
+            Some(libc::ETIMEDOUT) => Some(DownloadError::Timeout),
+            Some(libc::ENOSPC) if destination => Some(DownloadError::DiskFull),
+            Some(libc::EACCES | libc::EPERM | libc::EROFS) if destination => {
+                Some(DownloadError::Permission)
+            }
+            Some(libc::EBUSY | libc::EMFILE | libc::ENFILE) if destination => {
+                Some(DownloadError::FileBusy)
+            }
+            Some(libc::EFBIG) if destination => Some(DownloadError::FileTooLarge),
+            Some(libc::ENOENT | libc::ENOTDIR | libc::EISDIR | libc::ENAMETOOLONG)
+                if destination =>
+            {
+                Some(DownloadError::Destination)
+            }
+            _ if context == ErrorContext::Source => Some(DownloadError::Source),
+            _ => None,
+        }
+    } else if cocoa {
+        match code {
+            640 if destination => Some(DownloadError::DiskFull),
+            257 | 513 | 642 if destination => Some(DownloadError::Permission),
+            4 | 256 | 258 | 512 | 514 | 516 | 518 if destination => {
+                Some(DownloadError::Destination)
+            }
+            4 | 256..=264 if context == ErrorContext::Source => Some(DownloadError::Source),
+            _ => None,
+        }
+    } else if url {
+        match code {
+            -999 => Some(DownloadError::Cancelled),
+            -1001 => Some(DownloadError::Timeout),
+            -1005 | -1009 => Some(DownloadError::ConnectionLost),
+            -1012 | -1013 | -1205 | -1206 => Some(DownloadError::Authentication),
+            -1204..=-1200 => Some(DownloadError::Certificate),
+            -1000 | -1002 | -1007 | -1010 | -1011 => Some(DownloadError::Server),
+            -1104..=-1100 => Some(DownloadError::Source),
+            -3005..=-3000 => Some(DownloadError::Destination),
+            -3007 | -3006 | -1015 | -1016 => Some(DownloadError::Integrity),
+            _ => None,
+        }
+    } else if unsafe { domain.isEqualToString(objc2_web_kit::WKErrorDomain) }
+        && matches!(code, 2 | 3)
+    {
+        Some(DownloadError::Runtime)
+    } else {
+        None
+    };
+    let underlying = if remaining > 0 {
+        unsafe { error.userInfo().objectForKey(NSUnderlyingErrorKey) }.and_then(|inner| {
+            inner
+                .downcast_ref::<NSError>()
+                .and_then(|inner| bounded_download_error(inner, remaining - 1, context))
+        })
+    } else {
+        None
+    };
+    match (kind, underlying) {
+        (
+            Some(
+                error @ (DownloadError::Authentication
+                | DownloadError::Certificate
+                | DownloadError::Runtime
+                | DownloadError::Cancelled),
+            ),
+            _,
+        ) => Some(error),
+        (Some(error), Some(DownloadError::Destination)) if error != DownloadError::Destination => {
+            Some(error)
+        }
+        (_, Some(error)) | (Some(error), None) => Some(error),
+        _ => None,
+    }
+}
+
+fn native_error_codes(error: &NSError) -> Vec<(&'static str, isize)> {
+    use objc2_foundation::{
+        NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+    };
+    fn append(error: &NSError, remaining: usize, out: &mut Vec<(&'static str, isize)>) {
+        let domain = error.domain();
+        let label = if unsafe { domain.isEqualToString(NSURLErrorDomain) } {
+            "url"
+        } else if unsafe { domain.isEqualToString(NSPOSIXErrorDomain) } {
+            "posix"
+        } else if unsafe { domain.isEqualToString(NSCocoaErrorDomain) } {
+            "cocoa"
+        } else if unsafe { domain.isEqualToString(objc2_web_kit::WKErrorDomain) } {
+            "webkit"
+        } else {
+            "other"
+        };
+        out.push((label, error.code()));
+        if remaining > 0 {
+            if let Some(inner) = unsafe { error.userInfo().objectForKey(NSUnderlyingErrorKey) }
+                .and_then(|inner| inner.downcast_ref::<NSError>().map(Retained::from))
+            {
+                append(&inner, remaining - 1, out);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(5);
+    append(error, 4, &mut out);
+    out
+}
+
 pub(super) struct DelegateIvars {
     manager: Weak<Downloads>,
     // Objective-C ivars on macOS cannot carry Rust's 16-byte u128 alignment.
@@ -601,14 +769,16 @@ define_class!(
             }
         }
         #[unsafe(method(download:didFailWithError:resumeData:))]
-        unsafe fn failed(
-            &self,
-            _download: &WKDownload,
-            _error: &NSError,
-            _resume: Option<&NSData>,
-        ) {
+        unsafe fn failed(&self, _download: &WKDownload, error: &NSError, _resume: Option<&NSData>) {
             if let Some(manager) = self.ivars().manager.upgrade() {
-                manager.native_failed(*self.ivars().id);
+                let cause = download_error(error);
+                // Static domain classes and numeric codes only; never descriptions,
+                // filenames, URLs, origins, paths, resume data or userInfo contents.
+                eprintln!(
+                    "downloads: native failure cause={cause:?} codes={:?}",
+                    native_error_codes(error)
+                );
+                manager.native_failed_with_error(*self.ivars().id, cause);
             }
         }
         #[unsafe(method(download:willPerformHTTPRedirection:newRequest:decisionHandler:))]
@@ -668,5 +838,149 @@ mod tests {
     #[test]
     fn objc_delegate_ivars_fit_the_native_alignment_limit() {
         assert!(std::mem::align_of::<DelegateIvars>() <= std::mem::align_of::<usize>());
+    }
+
+    #[test]
+    fn native_failures_keep_file_authentication_and_transport_causes() {
+        use objc2_foundation::{NSCocoaErrorDomain, NSPOSIXErrorDomain, NSURLErrorDomain};
+        for (domain, code, expected) in [
+            (
+                unsafe { NSURLErrorDomain },
+                -1005,
+                DownloadError::ConnectionLost,
+            ),
+            (unsafe { NSURLErrorDomain }, -1001, DownloadError::Timeout),
+            (
+                unsafe { NSURLErrorDomain },
+                -1013,
+                DownloadError::Authentication,
+            ),
+            (
+                unsafe { NSURLErrorDomain },
+                -1202,
+                DownloadError::Certificate,
+            ),
+            (
+                unsafe { NSURLErrorDomain },
+                -3003,
+                DownloadError::Destination,
+            ),
+            (unsafe { NSURLErrorDomain }, -3006, DownloadError::Integrity),
+            (
+                unsafe { NSCocoaErrorDomain },
+                513,
+                DownloadError::Permission,
+            ),
+            (unsafe { NSCocoaErrorDomain }, 640, DownloadError::DiskFull),
+            (
+                unsafe { NSPOSIXErrorDomain },
+                libc::ENOSPC as isize,
+                DownloadError::Network,
+            ),
+            (
+                unsafe { NSPOSIXErrorDomain },
+                libc::EBUSY as isize,
+                DownloadError::Network,
+            ),
+        ] {
+            let error = unsafe { NSError::errorWithDomain_code_userInfo(domain, code, None) };
+            assert_eq!(download_error(&error), expected);
+        }
+    }
+
+    #[test]
+    fn wrapped_filesystem_error_is_classified_without_description_or_url() {
+        use objc2_foundation::{
+            NSDictionary, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+        };
+        let inner = unsafe {
+            NSError::errorWithDomain_code_userInfo(NSPOSIXErrorDomain, libc::ENOSPC as isize, None)
+        };
+        let info = NSDictionary::from_slices(
+            &[unsafe { NSUnderlyingErrorKey }],
+            &[&*inner as &objc2::runtime::AnyObject],
+        );
+        let error =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -3003, Some(&info)) };
+        assert_eq!(download_error(&error), DownloadError::DiskFull);
+    }
+
+    #[test]
+    fn truncated_http_body_is_integrity_not_a_destination_failure() {
+        use objc2_foundation::{
+            NSDictionary, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+        };
+        // Exact NSError chain observed by the isolated native WKDownload probe:
+        // NSURLErrorDomain -1005 -> NSPOSIXErrorDomain ENODATA (96 on Darwin).
+        let inner = unsafe {
+            NSError::errorWithDomain_code_userInfo(NSPOSIXErrorDomain, libc::ENODATA as isize, None)
+        };
+        let info = NSDictionary::from_slices(
+            &[unsafe { NSUnderlyingErrorKey }],
+            &[&*inner as &objc2::runtime::AnyObject],
+        );
+        let error =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -1005, Some(&info)) };
+        assert_eq!(download_error(&error), DownloadError::Integrity);
+        assert_eq!(
+            native_error_codes(&error),
+            vec![("url", -1005), ("posix", libc::ENODATA as isize)]
+        );
+    }
+
+    #[test]
+    fn generic_file_wrapper_does_not_mask_a_known_transport_cause() {
+        use objc2_foundation::{
+            NSCocoaErrorDomain, NSDictionary, NSURLErrorDomain, NSUnderlyingErrorKey,
+        };
+        let inner =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSCocoaErrorDomain, 512, None) };
+        let info = NSDictionary::from_slices(
+            &[unsafe { NSUnderlyingErrorKey }],
+            &[&*inner as &objc2::runtime::AnyObject],
+        );
+        let error =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -1005, Some(&info)) };
+        assert_eq!(download_error(&error), DownloadError::ConnectionLost);
+    }
+
+    #[test]
+    fn wrapped_access_and_descriptor_errors_do_not_claim_destination_failure_for_transport() {
+        use objc2_foundation::{
+            NSDictionary, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+        };
+        for code in [libc::EPERM, libc::EACCES, libc::EMFILE] {
+            let inner = unsafe {
+                NSError::errorWithDomain_code_userInfo(NSPOSIXErrorDomain, code as isize, None)
+            };
+            let info = NSDictionary::from_slices(
+                &[unsafe { NSUnderlyingErrorKey }],
+                &[&*inner as &objc2::runtime::AnyObject],
+            );
+            let error = unsafe {
+                NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -1005, Some(&info))
+            };
+            assert_eq!(download_error(&error), DownloadError::ConnectionLost);
+        }
+    }
+
+    #[test]
+    fn source_read_denial_and_destination_write_denial_remain_distinct() {
+        use objc2_foundation::{
+            NSDictionary, NSPOSIXErrorDomain, NSURLErrorDomain, NSUnderlyingErrorKey,
+        };
+        let inner = unsafe {
+            NSError::errorWithDomain_code_userInfo(NSPOSIXErrorDomain, libc::EACCES as isize, None)
+        };
+        let info = NSDictionary::from_slices(
+            &[unsafe { NSUnderlyingErrorKey }],
+            &[&*inner as &objc2::runtime::AnyObject],
+        );
+        let source =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -1102, Some(&info)) };
+        let destination =
+            unsafe { NSError::errorWithDomain_code_userInfo(NSURLErrorDomain, -3003, Some(&info)) };
+        assert_eq!(download_error(&source), DownloadError::Source);
+        assert_eq!(download_error(&destination), DownloadError::Permission);
     }
 }

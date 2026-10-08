@@ -4,6 +4,8 @@
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
+  import CaptureControl from "$shared/ui/CaptureControl";
+  import { stopCaptureFor } from "$domain/capture";
 
   let {
     tab,
@@ -73,11 +75,29 @@
     />
     <span data-zephium-tab-label class="sr-only">{tab.title}</span>
   </button>
+  {#if tab.capture}
+    <span class="capture-badge">
+      {#key tab.capture.navigation_id}<CaptureControl
+          onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
+          site={tab.url ?? tab.title}
+          capture={tab.capture}
+        />{/key}
+    </span>
+  {/if}
 </li>
 
 <style>
   .essential {
+    position: relative;
     min-width: 0;
+  }
+
+  .capture-badge {
+    position: absolute;
+    inset-inline-end: 0;
+    inset-block-end: 0;
+    background: var(--color-raised);
+    border-radius: var(--radius-capsule);
   }
 
   /* A plate of quiet ground and nothing else. A drawn ring made every tile

@@ -317,6 +317,7 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
     shutdown_result: Mutex<Option<bool>>,
@@ -335,6 +336,9 @@ pub(crate) struct FakeEngine {
     erasure_requests: Mutex<Vec<ProfileId>>,
     held_erasures: Mutex<Vec<HeldErasure>>,
     hold_erasures: std::sync::atomic::AtomicBool,
+    fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
+    fullscreen_exits: Mutex<Vec<ItemId>>,
+    layout_regions: Mutex<Vec<Option<Rect>>>,
 }
 
 impl FakeEngine {
@@ -610,6 +614,31 @@ impl Engine for FakeEngine {
             .push((profile, item, request, settlement));
         self.native_admission()
     }
+    fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
+        if self
+            .fills_window_for_fullscreen
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
+        } else {
+            zephium_core::ports::engine::FullscreenPresentation::OwnWindow
+        }
+    }
+    fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
+        self.fullscreen_exits.lock().unwrap().push(id);
+        self.native_admission()
+    }
+    fn stop_media_capture(
+        &self,
+        item: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        self.media_capture_stops
+            .lock()
+            .unwrap()
+            .push((item, navigation));
+        self.native_admission()
+    }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {
         if self
             .reject_navigation_dispatch
@@ -661,6 +690,7 @@ impl Engine for FakeEngine {
         tree: Option<Pane>,
         region: Option<Rect>,
     ) -> NativeDispatch {
+        self.layout_regions.lock().unwrap().push(region);
         let ids: Vec<String> = match (tree, region) {
             (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
             _ => Vec::new(),
@@ -749,6 +779,10 @@ impl Engine for FakeEngine {
     fn print(&self, _id: ItemId) -> NativeDispatch {
         self.native_admission()
     }
+    fn open_external_app(&self, url: &str) -> NativeDispatch {
+        self.log(format!("open-app {url}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -822,6 +856,9 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    reject_time_clears: std::sync::atomic::AtomicBool,
+    reject_focus_records: std::sync::atomic::AtomicBool,
+    recorded_focus: Mutex<Vec<zephium_core::time::FocusRecord>>,
     pub(crate) statistics:
         Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
@@ -837,6 +874,8 @@ pub(crate) struct FakeStore {
     panic_on_shutdown: std::sync::atomic::AtomicBool,
     load_failed: Mutex<bool>,
     recovery_reason: Mutex<Option<String>>,
+    /// What `set_aside_session` restarts with; `None` cannot set aside.
+    pub(crate) set_aside: Mutex<Option<SessionState>>,
     degraded_profiles: Mutex<Vec<ProfileId>>,
     site_preferences: Mutex<Arc<zephium_core::blocker::BlockerSitePreferences>>,
     site_store_calls: std::sync::atomic::AtomicUsize,
@@ -1006,6 +1045,13 @@ impl Store for FakeStore {
             }
         })
     }
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let state = self.set_aside.lock().unwrap().take()?;
+        *self.recovery_reason.lock().unwrap() = None;
+        *self.saved.lock().unwrap() = Some(state);
+        Some((self.load_session(), None))
+    }
+
     fn load_session(&self) -> SessionLoad {
         self.load_session_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -1178,6 +1224,23 @@ impl Store for FakeStore {
         _keep_from_hour: i64,
     ) -> bool {
         self.recorded_time.lock().unwrap().push((profile, tallies));
+        true
+    }
+
+    fn clear_time(&self, _profile: ProfileId, _since_hour: Option<i64>) -> bool {
+        !self
+            .reject_time_clears
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn record_focus(&self, record: zephium_core::time::FocusRecord, _day: i64) -> bool {
+        if self
+            .reject_focus_records
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        self.recorded_focus.lock().unwrap().push(record);
         true
     }
 
@@ -1461,10 +1524,18 @@ struct AsyncChrome {
     pending: Mutex<VecDeque<(ChromePresentation, ChromePresentationCallback)>>,
     browser_returns: Mutex<VecDeque<(u64, ItemsState, ChromePresentationCallback)>>,
     reject_admission: std::sync::atomic::AtomicBool,
+    frames: Mutex<Vec<ChromeFrame>>,
+}
+
+impl AsyncChrome {
+    fn last_frame(&self) -> Option<ChromeFrame> {
+        self.frames.lock().unwrap().last().cloned()
+    }
 }
 
 impl GeometryChrome for AsyncChrome {
-    fn position(&self, _frame: ChromeFrame) -> bool {
+    fn position(&self, frame: ChromeFrame) -> bool {
+        self.frames.lock().unwrap().push(frame);
         true
     }
 }
@@ -1556,6 +1627,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::FindResult(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
+        Projection::HostFullscreen(_) => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
@@ -1831,6 +1903,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod favicons;
+mod fullscreen;
 mod history;
 #[path = "navigation.rs"]
 mod navigation_tests;
@@ -1840,6 +1913,7 @@ mod operations;
 mod page_permissions;
 mod persistence;
 mod presentation;
+mod private;
 mod profile_deletion;
 mod projections;
 mod search;

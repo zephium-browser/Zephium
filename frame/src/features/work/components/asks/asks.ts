@@ -101,6 +101,19 @@ export type FolderAsk = Base & {
   answer: string | null;
 };
 
+/** "Open this address?": one the agent wrote itself after reading the person's own data. */
+export type AddressAsk = Base & {
+  kind: "address";
+  url: string;
+  /** The host the address goes to, the part worth reading first. */
+  host: string;
+  /** Rust's option words, as they go back: open, allow the site for the request, decline. */
+  open: string;
+  allowSite: string;
+  decline: string;
+  answer: string | null;
+};
+
 export type SignInAsk = {
   kind: "sign_in";
   step: string;
@@ -112,7 +125,14 @@ export type SignInAsk = {
 };
 
 export type Ask =
-  ConfirmAsk | EntryAsk | ContextAsk | ConnectionAsk | FolderAsk | QuestionAsk | SignInAsk;
+  | ConfirmAsk
+  | EntryAsk
+  | ContextAsk
+  | ConnectionAsk
+  | FolderAsk
+  | AddressAsk
+  | QuestionAsk
+  | SignInAsk;
 
 /** Rust's fixed words for the questions it puts itself (`work_sites.rs`, `work_context_tools.rs`). */
 export const ASK_WORDS = {
@@ -165,6 +185,8 @@ export function confirmVerb(category: WorkConfirmCategoryV1, action: string): st
     case "save":
     case "edit":
       return "Save";
+    case "type":
+      return "Type";
   }
 }
 
@@ -249,6 +271,21 @@ function connectionOf(base: AskBase, { prompt, options, answer }: Words): Connec
   };
 }
 
+/** The prompt is the address itself; anything else is a plain question. */
+function addressOf(base: AskBase, { prompt, options, answer }: Words): AddressAsk | null {
+  const [open, allowSite, decline] = options;
+  if (!open || !allowSite || !decline) return null;
+  let host: string;
+  try {
+    const url = new URL(prompt);
+    if (url.protocol !== "https:") return null;
+    host = url.host;
+  } catch {
+    return null;
+  }
+  return { ...base, kind: "address", url: prompt, host, open, allowSite, decline, answer };
+}
+
 /** "Read Lunios?": the folder rides the step's local fact; its name is the path's last. */
 function folderOf(
   base: AskBase,
@@ -279,7 +316,7 @@ export const folderName = (path: string) => path.replace(/\/+$/u, "").split("/")
 function fromAsk(
   step: WorkStepFact,
   steps: readonly WorkStepFact[],
-): EntryAsk | ContextAsk | ConnectionAsk | FolderAsk | QuestionAsk | null {
+): EntryAsk | ContextAsk | ConnectionAsk | FolderAsk | AddressAsk | QuestionAsk | null {
   if (step.kind.kind !== "ask") return null;
   const { prompt, options, purpose } = step.kind;
   const answer = step.kind.answer ?? null;
@@ -296,6 +333,8 @@ function fromAsk(
       return connectionOf(base, words) ?? question;
     case "folder":
       return folderOf(base, step, words) ?? question;
+    case "address":
+      return addressOf(base, words) ?? question;
     case "question":
     case "budget":
     case "confirm":

@@ -32,6 +32,10 @@ const ATTRIBUTION: &str = "The EasyList authors (https://easylist.to/)";
 const REDISTRIBUTION: &str = "Unmodified upstream subscription; deterministic gzip packaging only";
 const LICENSE_URL: &str = "https://easylist.to/pages/licence.html";
 const SOURCE_EXPIRY_SECONDS: u64 = 4 * 24 * 60 * 60;
+/// The seed only protects the first hours, until the app fetches current lists
+/// on its own; a release may ship one up to a month old, so a hotfix never
+/// waits on a list refresh. The sources' own expiry still drives the app.
+const RELEASE_SEED_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LICENSE_BYTES: u64 = 64 * 1024;
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x02, 0xff];
@@ -287,10 +291,14 @@ fn validate_release_freshness(catalog: &CatalogManifest, now: u64) -> Result<(),
     if catalog.created_unix > now {
         return Err("blocker seed was created in the future".into());
     }
-    if catalog.expires_unix <= now {
+    if catalog
+        .created_unix
+        .saturating_add(RELEASE_SEED_MAX_AGE_SECONDS)
+        <= now
+    {
         return Err(format!(
-            "blocker sources recommended refreshing at {}; production publication requires a reviewed seed that is current at publication",
-            catalog.expires_unix
+            "blocker seed was created at {} and is older than a release may ship; refresh it with `cargo xtask update-blocker-seed`",
+            catalog.created_unix
         ));
     }
     Ok(())
@@ -1692,9 +1700,18 @@ mod tests {
         assert!(validate_release_freshness(&catalog, now).is_ok());
 
         catalog.expires_unix = now;
-        assert!(validate_release_freshness(&catalog, now)
-            .unwrap_err()
-            .contains("current at publication"));
+        assert!(
+            validate_release_freshness(&catalog, now).is_ok(),
+            "a source past its refresh hint still ships"
+        );
+        assert!(
+            validate_release_freshness(&catalog, now + RELEASE_SEED_MAX_AGE_SECONDS - 1).is_ok()
+        );
+        assert!(
+            validate_release_freshness(&catalog, now + RELEASE_SEED_MAX_AGE_SECONDS)
+                .unwrap_err()
+                .contains("older than a release may ship")
+        );
 
         catalog.expires_unix = now + 1;
         catalog.created_unix = now + 1;

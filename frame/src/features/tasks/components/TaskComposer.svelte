@@ -1,7 +1,7 @@
 <script lang="ts">
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
-  import { tick } from "svelte";
   import Icon from "$shared/ui/Icon";
+  import { fitTextarea, scrollParent } from "$shared/lib/fit";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
   import {
     Add01Icon,
@@ -58,13 +58,14 @@
       inbox: boolean;
       priority: TaskPriority;
       context: TaskContext | null;
+      /** The field as it read when submitted. */
+      draft: string;
     }) => Promise<string | null>;
     onexit?: () => void;
   } = $props();
 
   let field = $state<HTMLTextAreaElement>();
   let root = $state<HTMLElement>();
-  let busy = $state(false);
   let focused = $state(false);
   let refused = $state<Partial<Record<Refusable, string>>>({});
   let list = $derived(initialList ?? "inbox");
@@ -173,41 +174,41 @@
   }
 
   function grow(node: HTMLTextAreaElement, _value: string) {
-    const size = () => {
-      node.style.height = "auto";
-      node.style.height = `${node.scrollHeight}px`;
-    };
+    let scroller: HTMLElement | null | undefined;
+    const size = () => fitTextarea(node, (scroller ??= scrollParent(node)));
     size();
     return { update: size };
   }
 
+  /** Sends the line and empties the field in the same moment, so the next
+   *  task can be typed while this one is saved and a second press finds
+   *  nothing to send again. The field is never disabled: that would drop
+   *  focus and the keys typed meanwhile. */
   async function submit() {
     const name = title.trim();
-    if (!name || busy) return;
-    busy = true;
-    try {
-      const id = await oncreate({
-        title: name,
-        dueDate,
-        dueTime: dueDate ? dueTime : null,
-        duration: tokens.duration,
-        list: chosenList === "inbox" || chosenList === "none" ? null : chosenList,
-        inbox: chosenList === "inbox",
-        priority: chosenPriority,
-        context,
-      });
-      if (id) {
-        value = "";
-        context = null;
-        refused = {};
-        priority = "none";
-        time = null;
-      }
-    } finally {
-      busy = false;
-      await tick();
-      field?.focus();
-    }
+    if (!name) return;
+    const sent = { value, context, refused, priority, time };
+    const saving = oncreate({
+      title: name,
+      dueDate,
+      dueTime: dueDate ? dueTime : null,
+      duration: tokens.duration,
+      list: chosenList === "inbox" || chosenList === "none" ? null : chosenList,
+      inbox: chosenList === "inbox",
+      priority: chosenPriority,
+      context,
+      draft: value,
+    });
+    value = "";
+    context = null;
+    refused = {};
+    priority = "none";
+    time = null;
+    field?.focus();
+    const id = await saving.catch(() => null);
+    // Not saved: the words come back, unless new ones have been typed since.
+    if (!id && value === "" && context === null)
+      ({ value, context, refused, priority, time } = sent);
   }
 
   function keydown(event: KeyboardEvent) {
@@ -283,7 +284,6 @@
       aria-describedby={reading ? uid : undefined}
       placeholder={m.task_new_placeholder()}
       maxlength="256"
-      disabled={busy}
       {value}
       oninput={(event) => (value = event.currentTarget.value.replace(/\n/gu, " "))}
       onkeydown={keydown}></textarea>
@@ -311,7 +311,6 @@
                   ? `${m.task_date()}: ${dueLabel(dueDate, today, DUE_LABELS, dueTime)}`
                   : m.task_date()}
                 title={m.task_date()}
-                disabled={busy}
                 ><Icon icon={Calendar03Icon} size={14} />{#if dueDate}{dueLabel(
                     dueDate,
                     today,
@@ -373,7 +372,6 @@
               class="capture-refuse"
               aria-label={m.task_capture_remove_context()}
               title={m.task_capture_remove_context()}
-              disabled={busy}
               onclick={() => (context = null)}><Icon icon={Cancel01Icon} size={11} /></button
             ></span
           >{:else if page}<span class="capture-chip"
@@ -382,7 +380,6 @@
               class="capture-property"
               aria-label={m.task_attach_page()}
               title={m.task_attach_page()}
-              disabled={busy}
               onclick={() => (context = page)}
               ><Icon icon={Link01Icon} size={14} />{#if !compact}{m.task_attach_page()}{/if}</button
             ></span
@@ -395,7 +392,7 @@
         class="capture-submit"
         aria-label={m.task_add_action()}
         title={m.task_add_action()}
-        disabled={busy || !title.trim()}
+        disabled={!title.trim()}
         onclick={() => void submit()}><Icon icon={ArrowUp02Icon} size={14} /></button
       >
     </div>{/if}

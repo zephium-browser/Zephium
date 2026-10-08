@@ -18,6 +18,9 @@ pub(crate) enum Consequence {
     Save,
     /// Typing into a document that saves as it is typed.
     Edit,
+    /// Typing into any field of a site the person did not name, in a run
+    /// that holds their own data: the text could carry it to that site.
+    Type,
 }
 
 impl Consequence {
@@ -27,6 +30,7 @@ impl Consequence {
             Self::Purchase => SemanticEffectClass::Purchase,
             Self::Destructive => SemanticEffectClass::Destructive,
             Self::Save | Self::Edit => SemanticEffectClass::ExternalWrite,
+            Self::Type => SemanticEffectClass::LocalWrite,
         }
     }
     const fn declared(class: SemanticEffectClass) -> Option<Self> {
@@ -657,6 +661,7 @@ pub(crate) fn preview(
             }
         }
         Consequence::Save | Consequence::Edit => format!("Save changes on {site}?"),
+        Consequence::Type => format!("Type on {site}?"),
     };
     let action_line = match action.kind() {
         SemanticActionKind::Fill => format!(
@@ -674,7 +679,9 @@ pub(crate) fn preview(
         ),
     };
     let text = match consequence {
-        Consequence::Edit => action.fill_text().map(|text| text.as_str().to_owned()),
+        Consequence::Edit | Consequence::Type => {
+            action.fill_text().map(|text| text.as_str().to_owned())
+        }
         Consequence::Communication => (action.kind() == SemanticActionKind::Press)
             .then(|| value_text(node))
             .flatten()
@@ -794,6 +801,10 @@ pub(crate) enum Receipt {
 struct GateState {
     site: String,
     allow_edits: bool,
+    /// Typing on this site waits for the person; see `Consequence::Type`.
+    hold_typing: bool,
+    /// The person allowed typing on this site for the run.
+    allow_typing: bool,
     pending: Option<Pending>,
     /// One approved step, consumed by the first matching proposal.
     confirmed: Option<Pending>,
@@ -870,6 +881,12 @@ impl SiteGate {
         }
         self
     }
+    /// Every field typed into on this site waits for the person, until they
+    /// allow typing on it for the run.
+    pub(crate) fn holding_typing(self, hold: bool) -> Self {
+        self.state().hold_typing = hold;
+        self
+    }
     /// Which views the read went through, for the helper: nothing new in the
     /// first ones, the rows from the last.
     pub(crate) fn view_note(&self) -> Option<String> {
@@ -936,11 +953,14 @@ impl SiteGate {
             .as_ref()
             .map(|pending| pending.preview.consequence.class())
     }
-    /// The person approved the held step; `for_run` also allows later edits.
+    /// The person approved the held step; `for_run` also allows later edits,
+    /// or later typing when typing was what it held.
     pub(crate) fn approve(&self, for_run: bool) -> Option<Preview> {
         let mut state = self.state();
         let pending = state.pending.take()?;
-        if for_run {
+        if for_run && pending.preview.consequence == Consequence::Type {
+            state.allow_typing = true;
+        } else if for_run {
             state.allow_edits = true;
         }
         let preview = pending.preview.clone();
@@ -1189,10 +1209,18 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
             node,
             snapshot,
         );
+        let held_typing = matches!(
+            action.kind(),
+            SemanticActionKind::Fill | SemanticActionKind::Select
+        ) && {
+            let state = self.gate.state();
+            state.hold_typing && !state.allow_typing
+        };
         // The more consequential side wins; neither lowers the other.
         let consequence = match (observed, Consequence::declared(declared)) {
             (SiteEffect::Commit(consequence), _) => consequence,
             (_, Some(consequence)) => consequence,
+            _ if held_typing => Consequence::Type,
             (_, None) if declared == SemanticEffectClass::CapabilityBoundary => {
                 return Err(AgentWorkFailure::ActionDenied);
             }
@@ -1208,7 +1236,15 @@ impl AgentWorkLocalActionPolicy for SiteWorkPolicy {
         let digest = preview.digest();
         if let Some(confirmed) = state.confirmed.take() {
             if confirmed.fingerprint == fingerprint && confirmed.digest == digest {
-                if declared != consequence.class() {
+                let fits = if consequence == Consequence::Type {
+                    matches!(
+                        declared,
+                        SemanticEffectClass::Read | SemanticEffectClass::LocalWrite
+                    )
+                } else {
+                    declared == consequence.class()
+                };
+                if !fits {
                     state.confirmed = Some(confirmed);
                     return Err(AgentWorkFailure::EffectRequired(consequence.class()));
                 }
@@ -1703,6 +1739,71 @@ mod tests {
             policy.assess(&click(&changed, 6, SemanticEffectClass::Purchase), &changed),
             Err(AgentWorkFailure::ActionDenied)
         ));
+        assert!(gate.pending().is_none());
+    }
+
+    #[test]
+    fn typing_on_a_site_the_person_did_not_name_waits_until_allowed_for_the_run() {
+        let search = page(vec![
+            json!({"k":1,"r":"document","o":16,"fc":true}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"search","fc":true}),
+            json!({"k":3,"p":1,"r":"searchbox","n":"Search","o":2,"fc":true,
+                "v":{"k":"text","value":""},"b":{"x":1,"y":1,"w":200,"h":30}}),
+        ]);
+        let fill = |effect| {
+            let snapshot = &search.frames()[0];
+            let proposal = SemanticActionProposal::try_new(
+                SemanticActionIntent::Fill {
+                    target: snapshot.nodes()[2].reference(),
+                    value: SemanticActionText::try_new("aisle seat WAW-SFO".into()).unwrap(),
+                },
+                effect,
+                SemanticWaitCondition::Immediate,
+                SemanticVerification::TargetValueMatchesInput,
+                SemanticSettleBudget::try_new(2000).unwrap(),
+            )
+            .unwrap();
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(1).unwrap(),
+                &search,
+                &[snapshot.frame().clone()],
+                vec![proposal],
+            )
+            .unwrap()
+            .actions()[0]
+                .prepare(snapshot)
+                .unwrap()
+        };
+        // Without the hold a search is a read, as before.
+        let open = SiteWorkPolicy {
+            gate: Arc::new(SiteGate::new("example.com".into(), false, false)),
+            asks: true,
+        };
+        assert!(open
+            .assess(&fill(SemanticEffectClass::Read), &search)
+            .is_ok());
+
+        let gate = Arc::new(SiteGate::new("example.com".into(), false, false).holding_typing(true));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert!(policy
+            .assess(&fill(SemanticEffectClass::Read), &search)
+            .is_err());
+        let held = gate.pending().unwrap().preview;
+        assert_eq!(held.consequence, Consequence::Type);
+        assert_eq!(held.headline, "Type on example.com?");
+        assert_eq!(held.text.as_deref(), Some("aisle seat WAW-SFO"));
+        gate.approve(true).unwrap();
+        assert!(!gate.allow_edits());
+        // The approved fill runs as declared, and later typing needs no question.
+        assert!(policy
+            .assess(&fill(SemanticEffectClass::Read), &search)
+            .is_ok());
+        assert!(policy
+            .assess(&fill(SemanticEffectClass::LocalWrite), &search)
+            .is_ok());
         assert!(gate.pending().is_none());
     }
 

@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  // Rows past the first screenful share the last beat anyway; leaving them
+  // out of the entrance keeps launch from animating hundreds of layers.
+  const CASCADE_ROWS = 15;
+</script>
+
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
@@ -5,6 +11,9 @@
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
+  import CaptureControl from "$shared/ui/CaptureControl";
+  import { stopCaptureFor } from "$domain/capture";
+  import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
     cascade = 0,
@@ -62,7 +71,7 @@
   class={["browse-tab", grouped && "browse-tab-grouped", className]}
   data-selected={active}
   data-split-candidate={splitCandidate}
-  data-cascade
+  data-cascade={cascade < CASCADE_ROWS || undefined}
   style:--cascade={cascade}
 >
   <button
@@ -77,6 +86,7 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerCancel}
     onclick={() => onSelect(tab.id)}
+    {...closable ? closeOnMiddleClick(() => onClose(tab.id)) : {}}
   >
     <FavIcon
       image={favicons.image(tab.icon)}
@@ -88,6 +98,17 @@
     />
     <span data-zephium-tab-label class="tab-label">{tab.title}</span>
   </button>
+  {#if tab.capture}
+    <span style:margin-inline-end={closable ? "28px" : "4px"}>
+      {#key tab.capture.navigation_id}
+        <CaptureControl
+          site={tab.url ?? tab.title}
+          capture={tab.capture}
+          onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
+        />
+      {/key}
+    </span>
+  {/if}
   {#if closable}
     <button
       type="button"

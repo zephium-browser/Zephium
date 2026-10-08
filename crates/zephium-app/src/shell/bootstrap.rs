@@ -33,6 +33,7 @@ impl Shell {
                 crate::diagnostic!(
                     "bootstrap: profile deletion journal is unavailable; refusing initialization"
                 );
+                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
                 return;
             }
         };
@@ -45,6 +46,7 @@ impl Shell {
             crate::diagnostic!(
                 "bootstrap: profile deletion journal exceeds its unique bounded cohort"
             );
+            self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
             return;
         }
         let mut active_item = None;
@@ -52,7 +54,26 @@ impl Shell {
         let mut splits = None;
         let mut session_absent = false;
         let mut blocker_configs = None;
-        match self.store.load_session() {
+        let mut load = self.store.load_session();
+        if let SessionLoad::RecoveryRequired { reason } = &load {
+            // A session that cannot be restored must not keep the browser
+            // from opening at every launch. The store keeps its bytes in a
+            // file and restarts it from the profile registry, so each
+            // profile keeps its history, bookmarks and settings.
+            crate::diagnostic!(
+                "bootstrap: session cannot be restored ({reason}); setting it aside"
+            );
+            if let Some((restarted, _file)) = self.store.set_aside_session() {
+                if !matches!(
+                    restarted,
+                    SessionLoad::RecoveryRequired { .. } | SessionLoad::Failed
+                ) {
+                    self.session_set_aside = true;
+                    load = restarted;
+                }
+            }
+        }
+        match load {
             SessionLoad::Loaded {
                 state,
                 blocker_configs: loaded_blocker_configs,
@@ -106,10 +127,16 @@ impl Shell {
             }
             SessionLoad::Absent => session_absent = true,
             SessionLoad::RecoveryRequired { reason } => {
-                // The store has preserved the exact authoritative bytes and
-                // entered a sticky read-only mode. Do not construct first-run
-                // state or let a later shutdown overwrite recoverable data.
+                // Setting it aside failed: the exact bytes stay preserved in
+                // read-only mode rather than being overwritten.
                 crate::diagnostic!("bootstrap: explicit session recovery required: {reason}");
+                self.report_terminal_failure(
+                    if reason == zephium_core::ports::store::NEWER_SESSION_REASON {
+                        ShellTerminalFailure::SessionFromNewerVersion
+                    } else {
+                        ShellTerminalFailure::SessionUnavailable
+                    },
+                );
                 return;
             }
             SessionLoad::Failed => {
@@ -119,6 +146,7 @@ impl Shell {
                 crate::diagnostic!(
                     "bootstrap: session storage is unavailable; refusing initialization"
                 );
+                self.report_terminal_failure(ShellTerminalFailure::SessionUnavailable);
                 return;
             }
         }

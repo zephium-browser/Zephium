@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::dispatch::with_fullscreen_observation;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
@@ -29,6 +31,8 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use zephium_core::ports::engine::NavigationFailureReason;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
 #[cfg(target_os = "macos")]
@@ -182,6 +186,15 @@ impl EngineHost {
                     .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
                 return;
             }
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
+            #[cfg(target_os = "macos")]
+            super::webext::bind_auth_cleanup_fence(
+                partition.profile(),
+                id,
+                &spare.view.event_permit,
+                &spare.view.navigation,
+            );
             let Some(epoch) = spare.view.navigation.begin(url) else {
                 eprintln!("engine: could not establish adopted-view navigation epoch");
                 self.sink
@@ -267,6 +280,8 @@ impl EngineHost {
             return;
         }
         let cell = Rc::new(Cell::new(id));
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_flow_view(partition.profile(), id, &event_token, url);
         if let Some(view) = self.build_view(
             cell,
             partition,
@@ -654,6 +669,13 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
+        #[cfg(target_os = "macos")]
+        super::webext::bind_auth_cleanup_fence(
+            partition.profile(),
+            id.get(),
+            &event_permit,
+            &navigation,
+        );
         let title_navigation = navigation.clone();
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
@@ -681,6 +703,37 @@ impl EngineHost {
         let policy_navigation = navigation.clone();
         #[cfg(target_os = "macos")]
         let (frame_permit, frame_navigation) = (event_permit.clone(), navigation.clone());
+        // A page's link for another application never loads; it becomes a
+        // request the person answers in chrome. One per second per view, so
+        // a page cannot flood it.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let app_link = {
+            let permit = event_permit.clone();
+            let sink = self.sink.clone();
+            let item = id.clone();
+            let last = Cell::new(None::<std::time::Instant>);
+            Rc::new(move |target: &str| -> bool {
+                if zephium_core::navigation::external_app_link(target).is_none() {
+                    return false;
+                }
+                let now = std::time::Instant::now();
+                if last
+                    .get()
+                    .is_none_or(|old| now.duration_since(old) >= std::time::Duration::from_secs(1))
+                {
+                    last.set(Some(now));
+                    permit.emit(
+                        &sink,
+                        EngineEvent::ExternalAppRequested {
+                            id: item.get(),
+                            url: target.to_owned(),
+                            app: crate::platform::imp::external_app_name(target),
+                        },
+                    );
+                }
+                true
+            })
+        };
         let focus_shuts = {
             let gate = self.focus_gate.clone();
             let permit = event_permit.clone();
@@ -939,6 +992,15 @@ impl EngineHost {
             builder
         };
 
+        #[cfg(target_os = "windows")]
+        let permission_presentation = presentation_permit.clone();
+        #[cfg(target_os = "windows")]
+        let permission_window = match self.parent.0 {
+            raw_window_handle::RawWindowHandle::Win32(handle) => handle.hwnd.get(),
+            _ => 0,
+        };
+        #[cfg(target_os = "windows")]
+        let navigation_app_link = app_link.clone();
         let mut builder = builder
             .with_bounds(to_wry(bounds))
             // Construction itself may enter a native message loop. On
@@ -953,26 +1015,35 @@ impl EngineHost {
             // WebView2 warm spares; focus is granted only by explicit user
             // interaction with a presented content view.
             .with_focused(false)
-            .with_devtools(cfg!(debug_assertions))
+            // Pages a person reads can be inspected, as in any browser; the
+            // privileged chrome and agent views never can.
+            .with_devtools(true)
             .with_autoplay(false)
-            // Tauri's macos-private-api feature enables Wry's fullscreen
-            // support through Cargo feature unification. Raw child views must
-            // override both native media surfaces per view; compile-time
-            // availability is not page authority.
-            .with_fullscreen_enabled(false)
-            .with_picture_in_picture_enabled(false)
+            // A tab a person reads may take the screen for its video, as in
+            // any browser; the host observes every transition and the shell
+            // exits it whenever the tab stops being the one on screen. Other
+            // views (extensions, agents, Work) keep it off per view: Cargo
+            // feature unification makes compile-time support no page grant.
+            .with_fullscreen_enabled(true)
+            // A playing video may float above other apps; pages that play
+            // are not suspended, so it keeps going while its tab sleeps.
+            .with_picture_in_picture_enabled(true)
+            // Two-finger swipes move through history, as in Safari.
+            .with_back_forward_navigation_gestures(true)
             // WebView2 otherwise enables its address/contact suggestions by
             // default. Raw content should not silently inherit ambient form
             // data before Zephium has an explicit, profile-scoped autofill
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                #[cfg(target_os = "macos")]
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
-                }
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
+                // WebView2 may ask here before LaunchingExternalUriScheme; the
+                // shared one-per-second limit keeps that to one request.
+                #[cfg(target_os = "windows")]
+                if !admitted {
+                    navigation_app_link(&target);
+                }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
                 // the main frame is known.
@@ -990,7 +1061,15 @@ impl EngineHost {
             // Windows, camera and microphone requests go to WebView2's own
             // origin-labelled prompt; macOS replaces this handler with the
             // browser-owned broker below.
-            .with_permission_handler(raw_content_permission)
+            .with_permission_handler(move |kind| {
+                #[cfg(target_os = "windows")]
+                if !permission_presentation.load(Ordering::Acquire)
+                    || !crate::platform::imp::permission_window_is_foreground(permission_window)
+                {
+                    return wry::PermissionResponse::Deny;
+                }
+                raw_content_permission(kind)
+            })
             // This is a construction-time native policy, not a callback that
             // first materializes attacker-controlled URL/path metadata. Wry
             // installs the cancel handler before initial navigation on every
@@ -1032,12 +1111,38 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let replay = replay_safety.clone();
+            let auth_tab = id.clone();
+            let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
-                if super::webext::intercept_auth_redirect(&target) {
-                    return false;
+                // A page's own srcdoc, data: and blob: frames (challenge and
+                // payment widgets, editors) load under WebKit's origin rules;
+                // browser policy governs what a tab itself may show.
+                if action.target_is_main_frame == Some(false)
+                    && zephium_core::navigation::is_subframe_document(&target)
+                {
+                    return frame_permit.allows_navigation("about:blank")
+                        && frame_navigation.admits_target("about:blank");
                 }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
+                if !admitted && action_app_link(&target) {
+                    return false;
+                }
+                if admitted
+                    && super::webext::intercept_auth_redirect(
+                        partition.profile(),
+                        auth_tab.get(),
+                        &frame_permit,
+                        &frame_navigation,
+                        action.target_is_main_frame,
+                        &target,
+                    )
+                {
+                    return false;
+                }
+                if admitted {
+                    super::webext::note_auth_native_navigation(&frame_navigation, action);
+                }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
                 }
@@ -1083,7 +1188,11 @@ impl EngineHost {
             let burst = Cell::new((std::time::Instant::now(), 0u8));
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
+            let popup_app_link = app_link.clone();
             builder = builder.with_new_window_req_handler(move |url, features| {
+                if features.user_initiated && popup_app_link(&url) {
+                    return wry::NewWindowResponse::Deny;
+                }
                 // Bound script-triggered bursts without delaying ordinary rapid
                 // modifier-clicks. Physical controllers have a separate cap.
                 let now = std::time::Instant::now();
@@ -1094,7 +1203,10 @@ impl EngineHost {
                         last_blocked.set(Some(now));
                         permit.emit(
                             &popup_sink,
-                            EngineEvent::PageOpenBlocked { id: source.get() },
+                            EngineEvent::PageOpenBlocked {
+                                id: source.get(),
+                                url: Some(url.clone()),
+                            },
                         );
                     }
                 };
@@ -1374,6 +1486,24 @@ impl EngineHost {
 
         #[cfg(target_os = "macos")]
         let load_replay = replay_safety.clone();
+        // The engine says why a navigation failed just before its Failed
+        // event; chrome uses it to explain a failed address the person asked
+        // for, in place of WebKit's blank or WebView2's own error page.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let failure_permit = load_permit.clone();
+            let failure_sink = on_load.clone();
+            let failure_id = load_id.clone();
+            builder = builder.with_navigation_failure_handler(move |_navigation, reason| {
+                failure_permit.emit(
+                    &failure_sink,
+                    EngineEvent::NavigationFailureReported {
+                        id: failure_id.get(),
+                        reason: failure_reason(reason),
+                    },
+                );
+            });
+        }
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
@@ -1644,7 +1774,7 @@ impl EngineHost {
             return None;
         }
         #[cfg(target_os = "windows")]
-        let security_policy = match crate::platform::imp::configure(
+        let mut security_policy = match crate::platform::imp::configure(
             &view,
             12.0,
             matches!(partition, Partition::Ephemeral(_)),
@@ -1666,12 +1796,30 @@ impl EngineHost {
         };
         #[cfg(target_os = "windows")]
         {
+            let link = app_link.clone();
+            if let Err(error) = security_policy.route_external_uris(move |uri| {
+                link(uri);
+            }) {
+                eprintln!("security: content WebView2 app-link routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
             use wry::WebViewExtWindows;
             // configure() deliberately denies menus for generic/agent views.
             // Only this human-view constructor installed both the bounded
             // ContextMenuRequested filter and the SaveAsUIShowing denial hook.
+            // Tabs a person reads also get WebView2's own page dialogs, which
+            // name the origin that asks; agent views keep them denied.
             if unsafe { view.webview().Settings() }
-                .and_then(|settings| unsafe { settings.SetAreDefaultContextMenusEnabled(true) })
+                .and_then(|settings| unsafe {
+                    settings.SetAreDefaultContextMenusEnabled(true)?;
+                    settings.SetAreDefaultScriptDialogsEnabled(true)
+                })
                 .is_err()
             {
                 if report_failure {
@@ -1829,6 +1977,56 @@ impl EngineHost {
         }
 
         let observation_id = id.clone();
+        #[cfg(target_os = "macos")]
+        let capture_observer = {
+            let capture_id = id.clone();
+            let capture_permit = event_permit.clone();
+            let capture_navigation = navigation.clone();
+            let capture_sink = self.sink.clone();
+            crate::platform::macos::capture::CaptureObserver::install(&view, move |state| {
+                if let Some(epoch) = capture_navigation.resident_media_epoch() {
+                    capture_permit.emit(
+                        &capture_sink,
+                        EngineEvent::MediaCaptureChanged {
+                            id: capture_id.get(),
+                            navigation: epoch.presentation_id(),
+                            state,
+                        },
+                    );
+                }
+            })
+        };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let fullscreen_observer = {
+            let fullscreen_id = id.clone();
+            let fullscreen_permit = event_permit.clone();
+            let changed = move || {
+                if fullscreen_permit.active_token().is_none() {
+                    return;
+                }
+                let id = fullscreen_id.get();
+                let queued_permit = fullscreen_permit.clone();
+                with_fullscreen_observation(id, move |host| {
+                    host.native_fullscreen_changed(id, &queued_permit);
+                });
+            };
+            #[cfg(target_os = "macos")]
+            {
+                crate::platform::macos::fullscreen::FullscreenObserver::install(&view, changed)
+            }
+            #[cfg(target_os = "windows")]
+            match crate::platform::imp::install_fullscreen_observer(&view, changed) {
+                Ok(observer) => observer,
+                Err(error) => {
+                    eprintln!("engine: required fullscreen observer failed: {error}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
+            }
+        };
         let observation_permit = event_permit.clone();
         let observation_navigation = navigation.clone();
         let observer = match crate::platform::imp::install_navigation_observer(
@@ -1911,6 +2109,10 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(target_os = "macos")]
+            _capture_observer: capture_observer,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            _fullscreen_observer: fullscreen_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
             #[cfg(target_os = "macos")]
@@ -1939,7 +2141,7 @@ impl EngineHost {
             applied_zoom: 1.0,
             presentable: false,
             presentation_announced: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             paint_cover: None,
             title_ready: None,
             nonpresentable_bootstrap: (!report_failure && !native_popup).then_some(epoch),
@@ -2311,3 +2513,15 @@ pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::Permissi
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
+    match failure {
+        wry::NavigationFailure::Offline => NavigationFailureReason::Offline,
+        wry::NavigationFailure::HostNotFound => NavigationFailureReason::HostNotFound,
+        wry::NavigationFailure::Unreachable => NavigationFailureReason::Unreachable,
+        wry::NavigationFailure::TimedOut => NavigationFailureReason::TimedOut,
+        wry::NavigationFailure::Insecure => NavigationFailureReason::Insecure,
+        wry::NavigationFailure::Other => NavigationFailureReason::Other,
+    }
+}

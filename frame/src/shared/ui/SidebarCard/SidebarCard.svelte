@@ -20,6 +20,7 @@
     variant = "card",
     title,
     detail,
+    items = [],
     icon,
     pending = false,
     onclick,
@@ -32,6 +33,8 @@
     variant?: "pill" | "card";
     title: string;
     detail?: string;
+    /** A short list under the detail, such as a release's highlights. */
+    items?: string[];
     /** The pill's glyph, before its label. */
     icon?: IconSvgElement;
     pending?: boolean;
@@ -78,6 +81,9 @@
       <div class="copy">
         <strong id={uid}>{title}</strong>
         {#if detail}<p>{detail}</p>{/if}
+        {#if items.length > 0}<ul class="items">
+            {#each items as item, index (index)}<li>{item}</li>{/each}
+          </ul>{/if}
       </div>
       {#if ondismiss}<IconButton
           icon={Cancel01Icon}
@@ -132,6 +138,33 @@
     gap: 2px;
     min-inline-size: 0;
     padding-block: 4px 2px;
+  }
+
+  .items {
+    display: grid;
+    gap: 3px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    line-height: 1.35;
+  }
+
+  .items li {
+    position: relative;
+    padding-inline-start: 10px;
+  }
+
+  .items li::before {
+    content: "";
+    position: absolute;
+    inset-block-start: 0.6em;
+    inset-inline-start: 1px;
+    inline-size: 3px;
+    block-size: 3px;
+    border-radius: var(--radius-capsule);
+    background: currentcolor;
   }
 
   strong {

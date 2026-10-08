@@ -194,7 +194,25 @@
       (value) => callback(value),
       (error) => {
         if (Z.report) Z.report("warning", `callback API failed: ${error}`);
-        callback(undefined);
+        // Chrome exposes callback failures only during the callback. Keep the
+        // previous descriptor intact for nested calls and native WebKit APIs.
+        const previous = Object.getOwnPropertyDescriptor(runtime, "lastError");
+        let exposed = false;
+        try {
+          Object.defineProperty(runtime, "lastError", {
+            configurable: true,
+            value: { message: String((error && error.message) || error) },
+          });
+          exposed = true;
+        } catch {}
+        try {
+          callback(undefined);
+        } finally {
+          if (exposed) {
+            if (previous) Object.defineProperty(runtime, "lastError", previous);
+            else delete runtime.lastError;
+          }
+        }
       },
     );
   };
@@ -287,7 +305,9 @@
       );
       pin(target, "launchWebAuthFlow", (details, callback) =>
         withCallback(
-          native("identity.launch", {
+          !(details && details.interactive === true)
+            ? Promise.reject(new Error("Non-interactive authentication is not supported."))
+            : native("identity.launch", {
             url: String((details && details.url) || ""),
             interactive: Boolean(details && details.interactive),
           }).then((result) => {

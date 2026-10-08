@@ -7,6 +7,11 @@ pub(super) struct GrabbedDivider {
     window: WindowId,
     topology: Pane,
     divider: split::Divider,
+    /// Where the pointer took the gutter, from its leading edge, so the
+    /// divider does not jump to the pointer on pickup.
+    anchor: (f64, f64),
+    /// The ratio the guide shows; applied to the panes once, on release.
+    ratio: Option<f64>,
 }
 
 impl Shell {
@@ -29,11 +34,16 @@ impl Shell {
     /// A relayout that is one step of a deliberate change of shape, which
     /// the chrome and the content carry out as a journey.
     pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
+        let filling = self.window_filling_fullscreen();
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
         };
         let browser_page_active = self.active_browser_page().is_some();
-        let tree = if browser_page_active {
+        // A window-filling fullscreen page stands alone; the split it belongs
+        // to is untouched and returns with the next layout after it.
+        let tree = if let Some(id) = filling {
+            Some(Pane::Leaf(id))
+        } else if browser_page_active {
             self.work_pane_tree()
         } else {
             self.pane_tree()
@@ -70,6 +80,9 @@ impl Shell {
         let work_pane = self.work_pane_layout(pane_admitted && present);
         if let Some(pane) = work_pane.as_ref().filter(|pane| pane.presented) {
             l.content = Some(Rect::new(pane.x, pane.y, pane.width, pane.height));
+        }
+        if filling.is_some() {
+            l.content = Some(Rect::new(0.0, 0.0, win.size.width, win.size.height));
         }
         // Raw native children still receive their final geometry while a
         // first navigation is provisional, but macOS must not shrink the
@@ -140,13 +153,50 @@ impl Shell {
             layout::compute(win.size, win.mode, win.metrics, self.present(&tree)).content?;
         let local = Rect::new(0.0, 0.0, region.width, region.height);
         let divider = split::divider_at(&tree, local, win.metrics.gap, x - region.x, y - region.y)?;
+        let anchor = (
+            x - region.x - divider.strip.x,
+            y - region.y - divider.strip.y,
+        );
         Some(GrabbedDivider {
             window: win.id,
             topology: tree,
             divider,
+            anchor,
+            ratio: None,
         })
     }
 
+    /// Ends a divider capture without applying it, and takes its guide away.
+    pub(super) fn drop_divider(&mut self) {
+        if let Some(grabbed) = self.divider.take() {
+            if grabbed.ratio.is_some() {
+                let _ = self.engine.set_resize_guide(grabbed.window, None);
+            }
+        }
+    }
+
+    /// Applies the guided ratio to the panes in one layout, then clears the
+    /// guide. Returns false when nothing was captured.
+    pub(super) fn commit_divider(&mut self) -> bool {
+        let Some(grabbed) = self.divider.take() else {
+            return false;
+        };
+        if let Some(ratio) = grabbed.ratio {
+            let _ = self.engine.set_resize_guide(grabbed.window, None);
+            if let Some(win) = self.windows.focused_mut() {
+                if win.id == grabbed.window {
+                    if let Some(tree) = win.splits.as_mut() {
+                        tree.set_ratio(&grabbed.divider.path, ratio);
+                    }
+                }
+            }
+            let _ = self.relayout();
+        }
+        true
+    }
+
+    /// Moves the guide only: page views keep their size until release, as on
+    /// macOS, so no pane relayouts or repaints on every pointer frame.
     pub(super) fn divider_drag(&mut self, x: f64, y: f64) {
         let Some(grabbed) = self.divider.as_ref() else {
             return;
@@ -154,7 +204,7 @@ impl Shell {
         let grabbed_window = grabbed.window;
         let grabbed_path = grabbed.divider.path.clone();
         let Some(win) = self.windows.focused() else {
-            self.divider = None;
+            self.drop_divider();
             return;
         };
         let current_tree = self.pane_tree();
@@ -165,7 +215,7 @@ impl Shell {
         if !topology_is_current {
             // Focus/topology changed while the pointer was captured. The same
             // binary path may now identify a different live branch.
-            self.divider = None;
+            self.drop_divider();
             return;
         }
         let Some(region) = layout::compute(win.size, win.mode, win.metrics, true).content else {
@@ -173,23 +223,49 @@ impl Shell {
         };
         let gap = win.metrics.gap;
         let Some(tree) = current_tree.as_ref() else {
-            self.divider = None;
+            self.drop_divider();
             return;
         };
         let local = Rect::new(0.0, 0.0, region.width, region.height);
         let Some(current) = split::divider_at_path(tree, local, gap, &grabbed_path) else {
             // The split tree changed while the pointer was captured. Its old
             // path is no longer authority for any live branch.
-            self.divider = None;
+            self.drop_divider();
             return;
         };
-        let ratio = split::ratio_for(current.axis, current.rect, gap, x - region.x, y - region.y);
-        if let Some(win) = self.windows.focused_mut() {
-            if let Some(tree) = win.splits.as_mut() {
-                tree.set_ratio(&current.path, ratio);
-            }
+        let (anchor_x, anchor_y) = grabbed.anchor;
+        let ratio = split::ratio_for(
+            current.axis,
+            current.rect,
+            gap,
+            x - region.x - anchor_x,
+            y - region.y - anchor_y,
+        );
+        let mut preview = tree.clone();
+        preview.set_ratio(&grabbed_path, ratio);
+        let Some(target) = split::divider_at_path(&preview, local, gap, &grabbed_path) else {
+            return;
+        };
+        let (r, strip) = (target.rect, target.strip);
+        let guide = match target.axis {
+            Axis::Row => Rect::new(
+                region.x + strip.x + strip.width / 2.0 - 1.0,
+                region.y + r.y,
+                2.0,
+                r.height,
+            ),
+            Axis::Col => Rect::new(
+                region.x + r.x,
+                region.y + strip.y + strip.height / 2.0 - 1.0,
+                r.width,
+                2.0,
+            ),
+        };
+        let window = win.id;
+        if let Some(grabbed) = self.divider.as_mut() {
+            grabbed.ratio = Some(ratio);
         }
-        let _ = self.relayout();
+        let _ = self.engine.set_resize_guide(window, Some(guide));
     }
 
     fn present(&self, tree: &Pane) -> bool {

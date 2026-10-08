@@ -1398,3 +1398,56 @@ fn closing_other_tabs_or_those_below_keeps_the_chosen_one_in_front() {
     assert_eq!(active_id(&screen), second);
     let _ = third;
 }
+
+#[test]
+fn a_new_tab_opened_from_settings_fills_the_window_with_the_new_tab() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://example.com/".into(),
+    }));
+    present_committed(&mut shell, page, "https://example.com/");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Settings)
+    );
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    let opened = active_id(&screen);
+    assert_ne!(opened, page);
+    assert_eq!(shell.active_browser_page(), None);
+    let opened_view = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == opened.to_string())
+        .unwrap();
+    assert!(
+        !opened_view.loading && opened_view.url.is_none(),
+        "the frame shows its new tab only for an idle tab without a page: {opened_view:?}"
+    );
+    let frame = chrome.last_frame().expect("chrome was placed");
+    assert!(
+        frame.fill_width,
+        "the frame draws the new tab across the window: {frame:?}"
+    );
+    let last_layout = engine
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|call| call.starts_with("layout@"))
+        .unwrap();
+    assert!(!last_layout.contains(&page.to_string()), "{last_layout}");
+}

@@ -21,6 +21,131 @@ fn activate_extensions(shell: &mut Shell, profile: ProfileId) {
 }
 
 #[test]
+fn auth_cleanup_closes_only_its_unchanged_committed_document() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    let profile = shell.windows.focused().unwrap().profile;
+    let provider = "https://provider.example/challenge";
+    navigate_and_commit(&mut shell, tab, provider);
+    activate_extensions(&mut shell, profile);
+    let navigation = shell.presentation.presented_navigations[&tab].0;
+    shell.handle(Command::Engine(request(
+        profile,
+        101,
+        ExtensionBrowserRequestAction::CloseTabIfUnchanged {
+            tab,
+            navigation,
+            url: Arc::from(provider),
+            cleanup: zephium_core::extensions::AuthTabCleanupPermit::default(),
+        },
+    )));
+    assert!(shell.items.tab(tab).is_none());
+    assert!(matches!(
+        engine.extension_browser_settlements().last().unwrap().2,
+        ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+    ));
+}
+
+#[test]
+fn auth_cleanup_refuses_reused_or_navigating_tabs_when_the_close_is_processed() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    let profile = shell.windows.focused().unwrap().profile;
+    let provider = "https://provider.example/challenge";
+    navigate_and_commit(&mut shell, tab, provider);
+    activate_extensions(&mut shell, profile);
+    let original = shell.presentation.presented_navigations[&tab].0;
+    let stale = ExtensionBrowserRequestAction::CloseTabIfUnchanged {
+        tab,
+        navigation: original,
+        url: Arc::from(provider),
+        cleanup: zephium_core::extensions::AuthTabCleanupPermit::default(),
+    };
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://reading.example/article".into(),
+    });
+    shell.handle(Command::Engine(request(profile, 102, stale.clone())));
+    assert!(shell.items.tab(tab).is_some());
+    assert!(matches!(
+        engine.extension_browser_settlements().last().unwrap().2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::InvalidScope)
+    ));
+    // Even the same URL in a newer document is not the old sign-in document.
+    navigate_and_commit(&mut shell, tab, provider);
+    shell.handle(Command::Engine(request(profile, 103, stale)));
+    assert!(shell.items.tab(tab).is_some());
+    assert!(matches!(
+        engine.extension_browser_settlements().last().unwrap().2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::InvalidScope)
+    ));
+}
+
+#[test]
+fn auth_cleanup_revoked_after_queueing_cannot_close_the_old_url_snapshot() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    let profile = shell.windows.focused().unwrap().profile;
+    let provider = "https://provider.example/login";
+    navigate_and_commit(&mut shell, tab, provider);
+    activate_extensions(&mut shell, profile);
+    let navigation = shell.presentation.presented_navigations[&tab].0;
+    let cleanup = zephium_core::extensions::AuthTabCleanupPermit::default();
+    let queued = request(
+        profile,
+        106,
+        ExtensionBrowserRequestAction::CloseTabIfUnchanged {
+            tab,
+            navigation,
+            url: Arc::from(provider),
+            cleanup: cleanup.clone(),
+        },
+    );
+    // Native link activation relinquishes ownership before a newer URL
+    // projection reaches the actor; the old URL/epoch alone must not close it.
+    cleanup.revoke();
+    shell.handle(Command::Engine(queued));
+    assert!(shell.items.tab(tab).is_some());
+    assert!(matches!(
+        engine.extension_browser_settlements().last().unwrap().2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::InvalidScope)
+    ));
+}
+
+#[test]
+fn expired_creation_cleanup_refuses_reserved_or_pending_navigation() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+    assert!(shell.items.reserve_deferred_navigation(tab).is_some());
+    shell.handle(Command::Engine(request(
+        profile,
+        104,
+        ExtensionBrowserRequestAction::CloseTabIfPristine { tab },
+    )));
+    assert!(shell.items.tab(tab).is_some());
+    assert!(matches!(
+        engine.extension_browser_settlements().last().unwrap().2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::InvalidScope)
+    ));
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://reading.example/".into(),
+    });
+    shell.handle(Command::Engine(request(
+        profile,
+        105,
+        ExtensionBrowserRequestAction::CloseTabIfPristine { tab },
+    )));
+    assert!(shell.items.tab(tab).is_some());
+}
+
+#[test]
 fn authenticated_browser_mutations_follow_shell_scope_and_settle_exactly_once() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

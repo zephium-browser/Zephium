@@ -55,6 +55,46 @@ impl Shell {
                 ExtensionBrowserRequestAction::CloseTab { tab } => {
                     self.extension_close_tab(profile, *tab)
                 }
+                ExtensionBrowserRequestAction::CloseTabIfUnchanged {
+                    tab,
+                    navigation,
+                    url,
+                    cleanup,
+                } => {
+                    if !cleanup.is_owned()
+                        || self.items.pending_navigation_request(*tab).is_some()
+                        || self.presentation.pending_presentations.contains_key(tab)
+                        || !self
+                            .presentation
+                            .presented_navigations
+                            .get(tab)
+                            .is_some_and(|(current, _)| current == navigation)
+                        || !self.items.tab(*tab).is_some_and(|state| {
+                            state.has_view()
+                                && state
+                                    .url
+                                    .as_ref()
+                                    .is_some_and(|current| current.as_str() == url.as_ref())
+                        })
+                    {
+                        rejected(ExtensionBrowserRequestRejection::InvalidScope)
+                    } else {
+                        self.extension_close_tab(profile, *tab)
+                    }
+                }
+                ExtensionBrowserRequestAction::CloseTabIfPristine { tab } => {
+                    if self.items.pending_navigation_request(*tab).is_none()
+                        && !self.presentation.pending_presentations.contains_key(tab)
+                        && self
+                            .items
+                            .tab(*tab)
+                            .is_some_and(|state| !state.has_view() && state.url.is_none())
+                    {
+                        self.extension_close_tab(profile, *tab)
+                    } else {
+                        rejected(ExtensionBrowserRequestRejection::InvalidScope)
+                    }
+                }
                 ExtensionBrowserRequestAction::LoadTabUrl { tab, url } => {
                     self.extension_load_tab_url(profile, *tab, url)
                 }

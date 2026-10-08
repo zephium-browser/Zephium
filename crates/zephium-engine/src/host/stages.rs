@@ -207,8 +207,26 @@ impl EngineHost {
         reconciled
     }
 
-    #[cfg(target_os = "macos")]
     pub(crate) fn set_content(
+        &mut self,
+        window: WindowId,
+        tree: Option<Pane>,
+        region: Option<Rect>,
+        motion: Option<StageMotion>,
+    ) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let shown = match region {
+            Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let applied = self.apply_content(window, tree, region, motion);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.fullscreen_layout_applied(window, &shown);
+        applied
+    }
+
+    #[cfg(target_os = "macos")]
+    fn apply_content(
         &mut self,
         window: WindowId,
         tree: Option<Pane>,
@@ -339,7 +357,7 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn set_content(
+    fn apply_content(
         &mut self,
         window: WindowId,
         tree: Option<Pane>,

@@ -9,13 +9,15 @@ use windows::Win32::{
         Controls::*,
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
         Input::KeyboardAndMouse::*,
-        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+        Shell::{DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::*,
     },
 };
 const ID: usize = 0x5a434150;
 const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
+// A page filling the screen owns every pixel, the top edge included.
+static SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 struct State {
     owner: HWND,
     strip: HWND,
@@ -137,6 +139,30 @@ pub fn install(window: &WebviewWindow) -> bool {
         true
     }
 }
+/// Hides the caption and its reveal edge while page content fills the
+/// screen. Runs on the window's UI thread.
+pub fn set_suppressed(window: &WebviewWindow, suppressed: bool) {
+    SUPPRESSED.store(suppressed, std::sync::atomic::Ordering::Relaxed);
+    let Ok(owner) = window.hwnd() else {
+        return;
+    };
+    let mut data = 0usize;
+    // SAFETY: UI-thread lookup of this module's own subclass; its data is the
+    // live State pointer until WM_NCDESTROY removes the subclass.
+    unsafe {
+        if GetWindowSubclass(
+            HWND(owner.0),
+            Some(owner_proc),
+            ID,
+            Some(&mut data as *mut usize),
+        )
+        .as_bool()
+            && data != 0
+        {
+            layout(data as *mut State);
+        }
+    }
+}
 unsafe fn layout(p: *mut State) {
     if (*p).laying_out {
         return;
@@ -155,6 +181,7 @@ unsafe fn layout(p: *mut State) {
     let _ = ClientToScreen(owner, &mut origin);
     let foreground = GetForegroundWindow();
     let show = !(*p).changing_state
+        && !SUPPRESSED.load(std::sync::atomic::Ordering::Relaxed)
         && !(*p).sizing
         && IsWindowVisible(owner).as_bool()
         && !IsIconic(owner).as_bool()

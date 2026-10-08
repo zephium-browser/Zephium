@@ -546,15 +546,17 @@ fn check_engine_floors(strict: bool) {
         ));
     } else {
         eprintln!(
-        "macOS/WebKit hard floors Sonoma {} + Safari {}, Sequoia {} + Safari {}, and Tahoe {}; latest recommendations Sonoma {}, Sequoia {}, Tahoe {}, and Safari {}; reviewed through {}",
+        "macOS/WebKit hard floors Sonoma {}, Sequoia {}, Tahoe {}, macOS 27 {}, and Safari {}; latest recommendations Sonoma {} + Safari {}, Sequoia {}, Tahoe {}, macOS 27 {}, with Safari {}; reviewed through {}",
         zephium_core::macos::SONOMA_SECURITY_FLOOR_TEXT,
-        zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SEQUOIA_SECURITY_FLOOR_TEXT,
-        zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
         zephium_core::macos::TAHOE_SECURITY_FLOOR_TEXT,
+        zephium_core::macos::GOLDEN_GATE_SECURITY_FLOOR_TEXT,
+        zephium_core::macos::SAFARI_SECURITY_FLOOR_TEXT,
         zephium_core::macos::SONOMA_RECOMMENDED_TEXT,
+        zephium_core::macos::SONOMA_SAFARI_RECOMMENDED_TEXT,
         zephium_core::macos::SEQUOIA_RECOMMENDED_TEXT,
         zephium_core::macos::TAHOE_RECOMMENDED_TEXT,
+        zephium_core::macos::GOLDEN_GATE_RECOMMENDED_TEXT,
         zephium_core::macos::SAFARI_RECOMMENDED_TEXT,
         zephium_core::macos::SECURITY_FLOOR_REVIEW_BY,
     );

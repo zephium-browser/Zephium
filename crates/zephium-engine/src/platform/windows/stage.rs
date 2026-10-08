@@ -13,21 +13,23 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, DeleteDC,
-    DeleteObject, GetDC, GetSysColor, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
-    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, COLOR_HIGHLIGHT,
-    DIB_RGB_COLORS,
+    ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn, CreateSolidBrush,
+    DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC, SelectObject, SetWindowRgn, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HDC,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, RegisterClassW, SetTimer,
-    SetWindowPos, ShowWindow, UpdateLayeredWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-    SW_SHOWNA, ULW_ALPHA, USER_TIMER_MINIMUM, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect, GetWindowLongPtrW,
+    KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    UpdateLayeredWindow, GA_ROOT, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MA_NOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
+    USER_TIMER_MINIMUM, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use wry::WebViewExtWindows;
 
@@ -46,6 +48,9 @@ const INDICATOR_RADIUS: f64 = 10.0;
 const INDICATOR_BORDER: f64 = 1.5;
 const INDICATOR_FILL: f64 = 0.12;
 const INDICATOR_STROKE: f64 = 0.42;
+// The resize guide is the label colour, as on macOS, not the system accent.
+const GUIDE_ON_DARK: (u8, u8, u8) = (0xff, 0xff, 0xff);
+const GUIDE_ON_LIGHT: (u8, u8, u8) = (0x1d, 0x1d, 0x1f);
 const MAX_NATIVE_RETRIES: u8 = 2;
 
 type PhysicalRect = (i32, i32, i32, i32);
@@ -60,6 +65,8 @@ struct AppliedPlacement {
     controller_size: Option<(i32, i32)>,
     rounded: Option<(i32, i32, i32)>,
     notified_screen_origin: Option<(i32, i32)>,
+    /// Raised above every sibling for the fullscreen page it shows.
+    raised: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,6 +77,7 @@ struct PlacementDelta {
     controller_size: bool,
     rounded: bool,
     notify_parent_position: bool,
+    raise: bool,
 }
 
 impl PlacementDelta {
@@ -83,6 +91,7 @@ fn placement_delta(
     visible: bool,
     rect: Option<PhysicalRect>,
     radius: i32,
+    fullscreen: bool,
     parent_screen_origin: Option<(i32, i32)>,
 ) -> PlacementDelta {
     let mut delta = PlacementDelta {
@@ -101,6 +110,7 @@ fn placement_delta(
     delta.container_rect = applied.container_rect != rect;
     delta.controller_size = applied.controller_size != Some((width, height));
     delta.rounded = applied.rounded != Some((width, height, radius));
+    delta.raise = applied.raised != Some(fullscreen);
     delta.notify_parent_position = parent_screen_origin.is_some_and(|(parent_x, parent_y)| {
         applied.notified_screen_origin
             != Some((parent_x.saturating_add(x), parent_y.saturating_add(y)))
@@ -151,6 +161,10 @@ struct State {
     /// Motion asked of the next `apply`, and the slide it started.
     pending_motion: Option<StageMotion>,
     slide: Option<Slide>,
+    /// Paint covers by view, each with the token of the handoff that owns it.
+    covers: HashMap<ItemId, (HWND, u64)>,
+    /// The page shown fullscreen: square corners, above everything else.
+    fullscreen: Option<ItemId>,
 }
 
 /// The page travelling beside the sidebar. Child windows cannot be moved by
@@ -241,6 +255,8 @@ impl Stage {
             on_placement_failure: Rc::new(on_placement_failure),
             pending_motion: None,
             slide: None,
+            covers: HashMap::new(),
+            fullscreen: None,
         }));
         Self { state }
     }
@@ -334,6 +350,21 @@ impl Stage {
         self.state.borrow().views.contains_key(&id)
     }
 
+    /// Marks the page shown fullscreen, which the shell lays over the whole
+    /// window: it loses its rounded corners and is raised above siblings.
+    pub fn set_fullscreen(&self, id: Option<ItemId>) {
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return;
+        };
+        if state.fullscreen == id {
+            return;
+        }
+        let previous = std::mem::replace(&mut state.fullscreen, id);
+        state.dirty.extend(previous.into_iter().chain(id));
+        drop(state);
+        schedule_sync(&self.state);
+    }
+
     /// Desired visibility, including children awaiting their first paint. A
     /// re-entrant layout borrow is uncertainty: keep the view awake until the
     /// next settled layout rather than applying a background resource policy.
@@ -402,6 +433,98 @@ impl Stage {
         state.dirty.remove(&id);
         state.visibility_uncertain.remove(&id);
         state.visible.remove(&id);
+        let cover = state.covers.remove(&id);
+        drop(state);
+        if let Some((cover, _)) = cover {
+            let _ = unsafe { DestroyWindow(cover) };
+        }
+    }
+
+    /// Stacks an opaque child in the page ground over the WebView2 inside its
+    /// container. Installed while the container is still hidden, so the reveal
+    /// shows the ground instead of WebView2's white default; the container's
+    /// region clips it, it never takes focus, and it absorbs pointer input
+    /// until the page has painted. It grants no presentation authority.
+    pub fn cover(&self, id: ItemId, token: u64) -> bool {
+        // Only a page the window is about to show needs hiding until it
+        // paints; a hidden tab's navigation would poll for nothing.
+        let Some((container, parent)) = self.state.try_borrow().ok().and_then(|state| {
+            (!state.hidden && state.visible.contains(&id))
+                .then(|| Some((state.views.get(&id)?.container, state.parent)))
+                .flatten()
+        }) else {
+            return false;
+        };
+        let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
+        let Ok(cover) = (unsafe {
+            CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                cover_class(),
+                PCWSTR::null(),
+                WS_CHILD | WS_CLIPSIBLINGS,
+                0,
+                0,
+                COVER_EXTENT,
+                COVER_EXTENT,
+                Some(container),
+                None,
+                Some(module.into()),
+                None,
+            )
+        }) else {
+            return false;
+        };
+        unsafe { SetWindowLongPtrW(cover, GWLP_USERDATA, page_ground(parent).0 as isize) };
+        let _ = unsafe {
+            SetWindowPos(
+                cover,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+        let _ = unsafe { ShowWindow(cover, SW_SHOWNA) };
+        // Window creation can pump; the view may have been replaced meanwhile.
+        let previous = match self.state.try_borrow_mut() {
+            Ok(mut state)
+                if state
+                    .views
+                    .get(&id)
+                    .is_some_and(|view| view.container == container) =>
+            {
+                Ok(state.covers.insert(id, (cover, token)))
+            }
+            _ => Err(()),
+        };
+        match previous {
+            Ok(previous) => {
+                if let Some((previous, _)) = previous {
+                    let _ = unsafe { DestroyWindow(previous) };
+                }
+                true
+            }
+            Err(()) => {
+                let _ = unsafe { DestroyWindow(cover) };
+                false
+            }
+        }
+    }
+
+    pub fn uncover(&self, id: ItemId, token: u64) {
+        let cover =
+            self.state
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut state| match state.covers.get(&id) {
+                    Some(&(_, owner)) if owner == token => state.covers.remove(&id),
+                    _ => None,
+                });
+        if let Some((cover, _)) = cover {
+            let _ = unsafe { DestroyWindow(cover) };
+        }
     }
 
     /// Reveal one exact raw-view generation after privileged chrome verified
@@ -497,10 +620,16 @@ impl Stage {
                 let resized = s.indicator_size != (w, h) || s.indicator_resize != resize;
                 s.indicator_size = (w, h);
                 s.indicator_resize = resize;
+                let parent = s.parent;
                 drop(s);
                 unsafe {
                     if resized {
-                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale, resize);
+                        let guide = if dark_theme(parent) {
+                            GUIDE_ON_DARK
+                        } else {
+                            GUIDE_ON_LIGHT
+                        };
+                        draw_indicator(hwnd, top_left.x, top_left.y, w, h, scale, resize, guide);
                     }
                     let _ = SetWindowPos(
                         hwnd,
@@ -575,6 +704,96 @@ unsafe extern "system" fn plain_proc(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+/// Larger than any container; the container's client area and region clip it.
+const COVER_EXTENT: i32 = 0x4000;
+
+fn cover_class() -> PCWSTR {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        let name = wide("ZephiumPaintCover");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(cover_proc),
+            lpszClassName: PCWSTR(name.as_ptr()),
+            hInstance: unsafe { GetModuleHandleW(None) }.unwrap_or_default().into(),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default(),
+            ..Default::default()
+        };
+        unsafe { RegisterClassW(&class) };
+        name
+    });
+    PCWSTR(name.as_ptr())
+}
+
+unsafe extern "system" fn cover_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => {
+            let color = COLORREF(unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as u32);
+            let brush = unsafe { CreateSolidBrush(color) };
+            let mut rect = RECT::default();
+            if unsafe { GetClientRect(hwnd, &mut rect) }.is_ok() {
+                unsafe { FillRect(HDC(wparam.0 as _), &rect, brush) };
+            }
+            let _ = unsafe { DeleteObject(brush.into()) };
+            LRESULT(1)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// The frame's content ground for the app theme, read from the root window's
+/// dark-mode attribute, which the app sets for forced and system themes alike.
+/// The window follows the app theme through DWM; dark when unknown.
+fn dark_theme(parent: HWND) -> bool {
+    let root = unsafe { GetAncestor(parent, GA_ROOT) };
+    let mut dark = BOOL(1);
+    let read = unsafe {
+        DwmGetWindowAttribute(
+            root,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&mut dark as *mut BOOL).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+        )
+    };
+    read.is_err() || dark.as_bool()
+}
+
+fn page_ground(parent: HWND) -> COLORREF {
+    let (red, green, blue) = if dark_theme(parent) {
+        crate::platform::PAGE_GROUND_DARK
+    } else {
+        crate::platform::PAGE_GROUND_LIGHT
+    };
+    COLORREF(u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16))
+}
+
+/// WebView2 may restack its own child when it becomes visible; keep the cover
+/// above it.
+fn raise_cover(state: &Rc<RefCell<State>>, id: ItemId) {
+    let cover = state
+        .try_borrow()
+        .ok()
+        .and_then(|state| state.covers.get(&id).map(|&(cover, _)| cover));
+    if let Some(cover) = cover {
+        let _ = unsafe {
+            SetWindowPos(
+                cover,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+    }
+}
+
 unsafe extern "system" fn layout_timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
     let weak = LAYOUT_TIMERS.with(|timers| timers.borrow().get(&timer).cloned());
     let Some(weak) = weak else {
@@ -641,6 +860,7 @@ struct NativePlacement {
     rect: Option<PhysicalRect>,
     show: bool,
     radius: i32,
+    fullscreen: bool,
     screen_origin: Option<(i32, i32)>,
     applied: AppliedPlacement,
     delta: PlacementDelta,
@@ -783,7 +1003,20 @@ fn placement_may_reveal(state: &Rc<RefCell<State>>, placement: &NativePlacement)
 }
 
 fn sync(state: &Rc<RefCell<State>>) {
-    let (parent, gap, origin, size, offset, hidden, tree, ready, visible, dirty, revision) = {
+    let (
+        parent,
+        gap,
+        origin,
+        size,
+        offset,
+        hidden,
+        tree,
+        ready,
+        visible,
+        dirty,
+        revision,
+        fullscreen,
+    ) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
@@ -816,6 +1049,7 @@ fn sync(state: &Rc<RefCell<State>>) {
             state.visible.clone(),
             dirty,
             state.revision,
+            state.fullscreen,
         )
     };
     let sliding = offset != 0.0;
@@ -854,7 +1088,16 @@ fn sync(state: &Rc<RefCell<State>>) {
                     && rect.is_some()
                     && view.presentation_permit.load(Ordering::Acquire);
                 let applied = view.applied.get();
-                let mut delta = placement_delta(applied, show, rect, radius, parent_screen_origin);
+                let fullscreen = fullscreen == Some(id);
+                let radius = if fullscreen { 0 } else { radius };
+                let mut delta = placement_delta(
+                    applied,
+                    show,
+                    rect,
+                    radius,
+                    fullscreen,
+                    parent_screen_origin,
+                );
                 // WebView2 is told where it sits once the journey is over,
                 // not on every step of it.
                 if sliding {
@@ -873,6 +1116,7 @@ fn sync(state: &Rc<RefCell<State>>) {
                     rect,
                     show,
                     radius,
+                    fullscreen,
                     screen_origin: parent_screen_origin,
                     applied,
                     delta,
@@ -960,7 +1204,18 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             return;
         }
     }
-    if placement.delta.rounded {
+    if placement.delta.rounded && placement.radius == 0 {
+        // A fullscreen page is square: drop the region rather than round by zero.
+        if unsafe { SetWindowRgn(placement.container, None, true) } == 0 {
+            failed = true;
+        } else {
+            applied.rounded = Some((width, height, 0));
+        }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
+    } else if placement.delta.rounded {
         let region = unsafe {
             CreateRoundRectRgn(
                 0,
@@ -979,6 +1234,31 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             failed = true;
         } else {
             applied.rounded = Some((width, height, placement.radius));
+        }
+        if !placement_is_current(state, placement) {
+            conceal_superseded_placement(state, placement, applied);
+            return;
+        }
+    }
+    if placement.delta.raise {
+        if !placement.fullscreen {
+            applied.raised = Some(false);
+        } else if unsafe {
+            SetWindowPos(
+                placement.container,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            )
+        }
+        .is_ok()
+        {
+            applied.raised = Some(true);
+        } else {
+            failed = true;
         }
         if !placement_is_current(state, placement) {
             conceal_superseded_placement(state, placement, applied);
@@ -1042,6 +1322,7 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         } else if applied.controller_visible == Some(true) && placement.delta.window_visibility {
             let _ = unsafe { ShowWindow(placement.container, SW_SHOWNA) };
             applied.window_visible = Some(true);
+            raise_cover(state, placement.id);
         }
         if !placement_may_reveal(state, placement) {
             // Both COM visibility and ShowWindow can pump a nested native
@@ -1149,7 +1430,17 @@ fn finish_native_placement(
 
 /// Premultiplied BGRA rounded rect pushed through UpdateLayeredWindow:
 /// translucent white fill, brighter border, signed-distance antialiasing.
-fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize: bool) {
+#[allow(clippy::too_many_arguments)]
+fn draw_indicator(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    scale: f64,
+    resize: bool,
+    guide: (u8, u8, u8),
+) {
     let header = BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
@@ -1175,7 +1466,6 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize
         let radius = (INDICATOR_RADIUS * scale).min(w.min(h) as f64 / 2.0);
         let border = INDICATOR_BORDER * scale;
         let (half_w, half_h) = (w as f64 / 2.0, h as f64 / 2.0);
-        let accent = GetSysColor(COLOR_HIGHLIGHT);
         for row in 0..h as usize {
             for col in 0..w as usize {
                 let dx = (col as f64 + 0.5 - half_w).abs() - half_w + radius;
@@ -1191,9 +1481,9 @@ fn draw_indicator(hwnd: HWND, x: i32, y: i32, w: i32, h: i32, scale: f64, resize
                 };
                 let v = (alpha * 255.0).round() as u32;
                 pixels[row * w as usize + col] = if resize {
-                    let red = ((accent & 0xff) as f64 * alpha).round() as u32;
-                    let green = (((accent >> 8) & 0xff) as f64 * alpha).round() as u32;
-                    let blue = (((accent >> 16) & 0xff) as f64 * alpha).round() as u32;
+                    let red = (f64::from(guide.0) * alpha).round() as u32;
+                    let green = (f64::from(guide.1) * alpha).round() as u32;
+                    let blue = (f64::from(guide.2) * alpha).round() as u32;
                     (v << 24) | (red << 16) | (green << 8) | blue
                 } else {
                     (v << 24) | (v << 16) | (v << 8) | v
@@ -1259,6 +1549,7 @@ mod tests {
             controller_size: Some((800, 600)),
             rounded: Some((800, 600, 16)),
             notified_screen_origin: Some((110, 220)),
+            raised: Some(false),
         };
 
         assert_eq!(
@@ -1267,6 +1558,7 @@ mod tests {
                 true,
                 Some((10, 20, 800, 600)),
                 16,
+                false,
                 Some((100, 200)),
             ),
             PlacementDelta::default()
@@ -1283,10 +1575,12 @@ mod tests {
                 controller_size: Some((640, 480)),
                 rounded: Some((640, 480, 16)),
                 notified_screen_origin: Some((0, 0)),
+                raised: Some(false),
             },
             false,
             Some((500, 500, 1, 1)),
             48,
+            false,
             Some((900, 900)),
         );
 
@@ -1308,10 +1602,12 @@ mod tests {
                 controller_size: Some((800, 600)),
                 rounded: Some((800, 600, 16)),
                 notified_screen_origin: Some((110, 220)),
+                raised: Some(false),
             },
             true,
             Some((10, 20, 900, 700)),
             16,
+            false,
             Some((100, 200)),
         );
 
@@ -1324,6 +1620,60 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_squares_and_raises_the_page_once() {
+        let windowed = AppliedPlacement {
+            window_visible: Some(true),
+            controller_visible: Some(true),
+            container_rect: Some((0, 0, 1920, 1080)),
+            controller_size: Some((1920, 1080)),
+            rounded: Some((1920, 1080, 16)),
+            notified_screen_origin: Some((0, 0)),
+            raised: Some(false),
+        };
+        let entering = placement_delta(
+            windowed,
+            true,
+            Some((0, 0, 1920, 1080)),
+            0,
+            true,
+            Some((0, 0)),
+        );
+        assert_eq!(
+            entering,
+            PlacementDelta {
+                rounded: true,
+                raise: true,
+                ..PlacementDelta::default()
+            }
+        );
+        let fullscreen = AppliedPlacement {
+            rounded: Some((1920, 1080, 0)),
+            raised: Some(true),
+            ..windowed
+        };
+        assert!(placement_delta(
+            fullscreen,
+            true,
+            Some((0, 0, 1920, 1080)),
+            0,
+            true,
+            Some((0, 0)),
+        )
+        .is_empty());
+        // Leaving puts the corners back and forgets the raise without
+        // reordering siblings that never overlap it.
+        let leaving = placement_delta(
+            fullscreen,
+            true,
+            Some((256, 8, 1656, 1064)),
+            16,
+            false,
+            Some((0, 0)),
+        );
+        assert!(leaving.rounded && leaving.raise && leaving.container_rect);
+    }
+
+    #[test]
     fn parent_move_only_notifies_webview2() {
         let delta = placement_delta(
             AppliedPlacement {
@@ -1333,10 +1683,12 @@ mod tests {
                 controller_size: Some((800, 600)),
                 rounded: Some((800, 600, 16)),
                 notified_screen_origin: Some((110, 220)),
+                raised: Some(false),
             },
             true,
             Some((10, 20, 800, 600)),
             16,
+            false,
             Some((200, 300)),
         );
 

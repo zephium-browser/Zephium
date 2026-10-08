@@ -179,6 +179,9 @@ impl Overlay {
             return;
         }
         self.on_main(move |this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
             let old = this.snapshot().session_id;
             match intent {
                 PanelIntent::Idle { .. } => {
@@ -205,6 +208,9 @@ impl Overlay {
     }
     pub fn toggle(&self) {
         self.on_main(|this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
             let old = this.snapshot().session_id;
             let dismissing = this.state().model.presented;
             if dismissing {
@@ -225,6 +231,9 @@ impl Overlay {
     #[cfg(target_os = "linux")]
     pub fn toggle_with_activation(&self, activation_token: Option<String>, timestamp: Option<u32>) {
         self.on_main(move |this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
             let old = this.snapshot().session_id;
             if this.state().model.presented {
                 this.state().model.hide();

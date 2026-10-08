@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import * as m from "$shared/i18n/messages";
   import type { TaskList, TaskRow as Row, TaskStatus } from "$domain/resources";
   import { createVirtualWindow } from "$shared/lib/virtual-window.svelte";
   import { createPointerDrag } from "$shared/lib/pointer-drag.svelte";
   import { reorderKeys } from "../lib/task-order";
-  import { sections, type SectionKey, type TaskScope } from "../lib/task-sections";
+  import { createSections, type SectionKey, type TaskScope } from "../lib/task-sections";
   import { today as currentDay, watchToday } from "../lib/today.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
@@ -85,6 +85,7 @@
   $effect(() => watchToday());
 
   let searching = $derived(query.trim().length > 0);
+  const sections = createSections();
   let grouped = $derived(
     sections(rows, {
       // A search answers "where is it", which a scope must not veto.
@@ -175,6 +176,16 @@
     }
   });
   $effect(() => () => observer.disconnect());
+  // Heights of rows that have left the list would otherwise pile up for as
+  // long as the list stays open.
+  $effect(() => {
+    const live = rows;
+    untrack(() => {
+      if (measured.size <= live.length) return;
+      const ids = new Set(live.map((row) => row.id));
+      for (const id of [...measured.keys()]) if (!ids.has(id)) measured.delete(id);
+    });
+  });
 
   function measure(node: HTMLElement, id: string) {
     observed.set(node, id);

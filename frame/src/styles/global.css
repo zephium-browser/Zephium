@@ -77,6 +77,16 @@ button {
    visible plate. Tinting the window belongs to the native layer, not to us.
    The opaque tier is the exception: with no material there is nothing to
    look through, so the column has to supply its own ground. */
+
+/* The chrome WebView is only as wide as the column while a page is shown, and
+   the resize handle straddles the column's edge, so the document is a few
+   pixels wider than its view. Clipping (not hiding) leaves nothing to scroll:
+   with a scrollable overflow WebKit's focus reveal slid the whole column left
+   whenever the address field took focus. */
+.shell {
+  overflow: clip;
+}
+
 :root[data-material="none"] .browser-sidebar {
   background: var(--color-chrome);
 }
@@ -84,7 +94,6 @@ button {
 /* Only the opaque tier draws its own window edge; the others get one from the
    native material's own rounded layer. */
 :root[data-material="none"] .shell {
-  overflow: hidden;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-card);
   background: var(--color-canvas);

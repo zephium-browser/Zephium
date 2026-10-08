@@ -182,3 +182,88 @@ fn a_fresh_tab_shut_by_focus_is_covered_and_opens_when_let_through() {
         .iter()
         .any(|call| call.contains("x.com/home")));
 }
+
+#[test]
+fn refused_focus_record_is_retained_retried_once_and_blocks_false_clean_shutdown() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    store
+        .reject_focus_records
+        .store(true, std::sync::atomic::Ordering::Release);
+    shell.operation_focus(zephium_ipc::FocusControl::Start {
+        minutes: 5,
+        breaks: false,
+    });
+    pause();
+    let stopped = shell.operation_focus(zephium_ipc::FocusControl::Stop);
+    assert_eq!(stopped.outcome, zephium_ipc::OperationOutcome::Deferred);
+    assert!(shell.has_unadmitted_time_writes());
+    assert!(store.recorded_focus.lock().unwrap().is_empty());
+    let (ack, result) = std::sync::mpsc::sync_channel(1);
+    shell.shutdown_until(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+        ack,
+    );
+    assert_eq!(
+        result
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        crate::api::ShutdownOutcome::RetryableFailure
+    );
+    store
+        .reject_focus_records
+        .store(false, std::sync::atomic::Ordering::Release);
+    shell.flush_pending_focus_records(true);
+    assert!(!shell.has_unadmitted_time_writes());
+    assert_eq!(store.recorded_focus.lock().unwrap().len(), 1);
+    shell.flush_pending_focus_records(true);
+    assert_eq!(store.recorded_focus.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn focus_retry_buffer_refuses_new_sessions_at_capacity_and_preserves_every_record() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    store
+        .reject_focus_records
+        .store(true, std::sync::atomic::Ordering::Release);
+    for index in 0..8 {
+        assert_eq!(
+            shell
+                .operation_focus(zephium_ipc::FocusControl::Start {
+                    minutes: 5,
+                    breaks: false
+                })
+                .outcome,
+            if index == 0 {
+                zephium_ipc::OperationOutcome::Applied
+            } else {
+                zephium_ipc::OperationOutcome::Deferred
+            }
+        );
+        pause();
+        assert_eq!(
+            shell
+                .operation_focus(zephium_ipc::FocusControl::Stop)
+                .outcome,
+            zephium_ipc::OperationOutcome::Deferred
+        );
+    }
+    assert_eq!(
+        shell
+            .operation_focus(zephium_ipc::FocusControl::Start {
+                minutes: 5,
+                breaks: false
+            })
+            .outcome,
+        zephium_ipc::OperationOutcome::NativeAdmissionFailed
+    );
+    store
+        .reject_focus_records
+        .store(false, std::sync::atomic::Ordering::Release);
+    shell.flush_pending_focus_records(true);
+    assert_eq!(store.recorded_focus.lock().unwrap().len(), 8);
+    assert!(!shell.has_unadmitted_time_writes());
+}

@@ -28,6 +28,7 @@ fn ready_shell(
     let (mut shell, engine, screen) = setup_with(store);
     shell.page_permissions.remember_enabled = true;
     shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetWindowFocused(true));
     let item = active_id(&screen);
     navigate_and_commit(&mut shell, item, "https://media.example/call");
     let profile = shell.windows.focused().unwrap().profile;
@@ -38,6 +39,202 @@ fn ready_shell(
 
 fn empty_catalog() -> PagePermissionCatalog {
     PagePermissionCatalog::new(PagePermissionCatalogRevision::INITIAL, Vec::new()).unwrap()
+}
+
+#[test]
+fn capture_observation_and_stop_are_bound_to_the_native_document() {
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, _screen, _queue, _profile, item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    let navigation = shell.presentation.presented_navigations[&item].0;
+    let state = MediaCaptureState {
+        camera: CaptureDeviceState::Active,
+        microphone: CaptureDeviceState::Muted,
+    };
+    assert!(shell.items.tab(item).unwrap().capture.is_none());
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation,
+        state,
+    }));
+    assert_eq!(
+        shell.items.tab(item).unwrap().capture,
+        Some((navigation, state))
+    );
+    let disposition = shell.operation_stop_media_capture(item, navigation);
+    assert_eq!(disposition.outcome, OperationOutcome::Deferred);
+    assert_eq!(
+        *engine.media_capture_stops.lock().unwrap(),
+        vec![(item, navigation)]
+    );
+    // Admission is not proof that capture stopped. Only native state clears it.
+    assert!(shell.items.tab(item).unwrap().capture.is_some());
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation,
+        state: MediaCaptureState::default(),
+    }));
+    assert!(shell.items.tab(item).unwrap().capture.is_none());
+}
+
+#[test]
+fn old_document_capture_cannot_reappear_or_stop_the_replacement() {
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, _screen, _queue, _profile, item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    let old = shell.presentation.presented_navigations[&item].0;
+    let state = MediaCaptureState {
+        camera: CaptureDeviceState::Active,
+        microphone: CaptureDeviceState::None,
+    };
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation: old,
+        state,
+    }));
+    navigate_and_commit(&mut shell, item, "https://replacement.example/");
+    let replacement = shell.presentation.presented_navigations[&item].0;
+    // Native sampling after definitive commit, rather than optimistic clearing.
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation: replacement,
+        state: MediaCaptureState::default(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation: old,
+        state,
+    }));
+    assert!(shell.items.tab(item).unwrap().capture.is_none());
+    assert_eq!(
+        shell.operation_stop_media_capture(item, old).reason,
+        OperationReason::InvalidScope
+    );
+    assert!(engine.media_capture_stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn capture_does_not_disappear_while_navigation_is_provisional_or_failed() {
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, _screen, _queue, _profile, item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    let navigation = shell.presentation.presented_navigations[&item].0;
+    let state = MediaCaptureState {
+        camera: CaptureDeviceState::Active,
+        microphone: CaptureDeviceState::None,
+    };
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation,
+        state,
+    }));
+    shell.handle(Command::Navigate {
+        id: item,
+        input: "https://next.example/".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id: item,
+        loading: true,
+    }));
+    assert_eq!(
+        shell.items.tab(item).unwrap().capture,
+        Some((navigation, state))
+    );
+    shell.handle(Command::Engine(EngineEvent::NavigationFailed {
+        id: item,
+        request: *engine.navigation_requests.lock().unwrap().last().unwrap(),
+    }));
+    assert_eq!(
+        shell.items.tab(item).unwrap().capture,
+        Some((navigation, state))
+    );
+    assert_eq!(
+        shell.operation_stop_media_capture(item, navigation).outcome,
+        OperationOutcome::Deferred
+    );
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation,
+        state: MediaCaptureState::default(),
+    }));
+    assert!(shell.items.tab(item).unwrap().capture.is_none());
+}
+
+#[test]
+fn os_focus_loss_cancels_consent_without_hiding_or_suspending_content() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _screen, _queue, profile, item) = ready_shell(store);
+    shell.page_permissions.remember_enabled = false;
+    let first = request(101, PagePermissionRequestKind::CameraAndMicrophone);
+    shell.handle(Command::Engine(EngineEvent::PermissionRequested {
+        id: item,
+        profile,
+        request: first.clone(),
+    }));
+    assert!(shell.page_permissions.is_visible());
+
+    shell.handle(Command::SetWindowFocused(false));
+    assert!(shell.window_visible);
+    assert!(shell.items.tab(item).unwrap().has_view());
+    assert!(!shell.page_permissions.has_pending());
+    shell.handle(Command::Operation {
+        operation_id: "stale-after-blur".into(),
+        command: Box::new(Command::RespondToPagePermissionPrompt {
+            profile,
+            item,
+            request: first.id,
+            decision: PagePermissionPromptDecision::AllowOnce,
+        }),
+    });
+    assert_eq!(
+        engine.page_permission_settlements(),
+        vec![(
+            profile,
+            item,
+            first.id,
+            PagePermissionRequestSettlement::Deny,
+        )]
+    );
+}
+
+#[test]
+fn visible_unfocused_window_denies_requests_until_os_focus_returns() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _screen, _queue, profile, item) = ready_shell(store.clone());
+    shell.page_permissions.remember_enabled = false;
+    shell.handle(Command::SetWindowFocused(false));
+    let first = request(
+        102,
+        PagePermissionRequestKind::Single(PagePermissionKind::Camera),
+    );
+    shell.handle(Command::Engine(EngineEvent::PermissionRequested {
+        id: item,
+        profile,
+        request: first.clone(),
+    }));
+    assert!(shell.window_visible);
+    assert!(!shell.page_permissions.has_pending());
+    assert!(store.page_permission_load_calls.lock().unwrap().is_empty());
+    assert_eq!(
+        engine.page_permission_settlements(),
+        vec![(
+            profile,
+            item,
+            first.id,
+            PagePermissionRequestSettlement::Deny,
+        )]
+    );
+
+    shell.handle(Command::SetWindowFocused(true));
+    shell.handle(Command::Engine(EngineEvent::PermissionRequested {
+        id: item,
+        profile,
+        request: request(
+            103,
+            PagePermissionRequestKind::Single(PagePermissionKind::Microphone),
+        ),
+    }));
+    assert!(shell.page_permissions.is_visible());
 }
 
 fn applied_mutation_outcome() -> PagePermissionCatalogMutationOutcome {

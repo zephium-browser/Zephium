@@ -44,12 +44,24 @@ pub struct Changes {
     pub ids: Vec<String>,
     /// Notes appeared or disappeared, so listings must reload.
     pub reset: bool,
+    /// Link keys that may lead somewhere else now.
+    pub links: Vec<String>,
 }
 
 impl Changes {
     fn note(&mut self, id: &str) {
         if !self.ids.iter().any(|known| known == id) {
             self.ids.push(id.to_string());
+        }
+    }
+
+    /// A note stopped or started answering to `names`, as a title or a stem.
+    fn relink(&mut self, names: &[&str]) {
+        for name in names {
+            let key = link_key(name);
+            if !key.is_empty() && !self.links.contains(&key) {
+                self.links.push(key);
+            }
         }
     }
 
@@ -467,7 +479,8 @@ impl Library {
                 id,
                 base_revision,
                 markdown,
-            } => self.write(&request_id, &id, &base_revision, &markdown, changes)?,
+                settle,
+            } => self.write(&request_id, &id, &base_revision, &markdown, settle, changes)?,
             NoteCall::SetPinned { id, pinned } => match self.index.get(&id)? {
                 Some(row) => {
                     let row = Row { pinned, ..row };
@@ -568,6 +581,7 @@ impl Library {
         id: &str,
         base: &str,
         markdown: &str,
+        settle: bool,
         changes: &mut Changes,
     ) -> Result<NoteResponse> {
         let Some(row) = self.index.get(id)? else {
@@ -594,8 +608,13 @@ impl Library {
         if current == next {
             // Already saved, by this request's first attempt or an identical edit.
             let contents = self.folder.read(&row.path)?;
-            let row = self.store(&row, &row.path.clone(), &contents, false, 0)?;
-            return Ok(applied(row.summary()));
+            let stored = self.store(&row, &row.path.clone(), &contents, false, 0)?;
+            let stored = if settle {
+                self.follow_title(&row, stored, changes)?
+            } else {
+                stored
+            };
+            return Ok(applied(stored.summary()));
         }
         if current != base {
             let contents = self.folder.read(&row.path)?;
@@ -609,36 +628,68 @@ impl Library {
             });
         }
         let meta = self.folder.replace(&row.path, &bytes)?;
-        let mut path = row.path.clone();
-        let heading = outline(markdown).heading;
-        // The file name follows the title only while it still matches the
-        // title it was named after; a name chosen elsewhere is left alone.
-        if let Some(heading) = heading.as_deref() {
-            if follows(stem_of(&path), &row.title) && !follows(stem_of(&path), heading) {
-                let directory = directory_of(&path).to_string();
-                let stem = stem_for(heading);
-                if let Some(target) = unique_path(&directory, &stem, |candidate| {
-                    self.taken(candidate, Some(&row.path))
-                }) {
-                    if target != path && self.folder.rename(&path, &target).is_ok() {
-                        path = target;
-                        changes.reset = true;
-                    }
-                }
-            }
-        }
-        let meta = if path == row.path {
-            meta
-        } else {
-            self.folder.stat(&path)?
-        };
         let contents = Contents { bytes, meta };
-        let stored = self.store(&row, &path, &contents, false, 0)?;
+        let stored = self.store(&row, &row.path.clone(), &contents, false, 0)?;
         changes.note(id);
         // Only a new title changes where links lead; an ordinary edit is
         // news for this note alone.
-        changes.reset |= stored.title != row.title;
+        if stored.title != row.title {
+            changes.relink(&[&row.title, &stored.title]);
+        }
+        let stored = if settle {
+            self.follow_title(&row, stored, changes)?
+        } else {
+            if stored.title != row.title
+                && follows(stem_of(&row.path), &row.title)
+                && self.index.named_after(id)?.is_none()
+            {
+                self.index.remember_named_after(id, &row.title)?;
+            }
+            stored
+        };
         Ok(applied(stored.summary()))
+    }
+
+    /// Renames a file after its note's title, while the file still carries
+    /// the title it was named after: the one before this write, or the one
+    /// before a retitle that was not yet allowed to rename it. A name
+    /// chosen elsewhere is left alone.
+    fn follow_title(&mut self, before: &Row, stored: Row, changes: &mut Changes) -> Result<Row> {
+        let named = self.index.named_after(&stored.id)?;
+        if named.is_some() {
+            self.index.forget_named_after(&stored.id)?;
+        }
+        let stem = stem_of(&stored.path);
+        if !stored.headed
+            || !follows(stem, named.as_deref().unwrap_or(&before.title))
+            || follows(stem, &stored.title)
+        {
+            return Ok(stored);
+        }
+        let directory = directory_of(&stored.path).to_string();
+        let Some(target) = unique_path(&directory, &stem_for(&stored.title), |candidate| {
+            self.taken(candidate, Some(&stored.path))
+        }) else {
+            return Ok(stored);
+        };
+        if target == stored.path {
+            return Ok(stored);
+        }
+        let Ok(meta) = self.folder.rename(&stored.path, &target) else {
+            return Ok(stored);
+        };
+        let old = stem.to_string();
+        let row = Row {
+            path: target,
+            size: meta.size as i64,
+            modified: meta.modified,
+            identity: meta.identity,
+            ..stored
+        };
+        self.index.relocate(&row)?;
+        changes.note(&row.id);
+        changes.relink(&[&old, stem_of(&row.path)]);
+        Ok(row)
     }
 
     fn trash(&mut self, id: &str, now: i64, changes: &mut Changes) -> Result<NoteResponse> {

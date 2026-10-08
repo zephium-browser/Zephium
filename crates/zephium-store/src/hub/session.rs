@@ -332,38 +332,121 @@ mod qa_settings_recovery_tests {
     }
 
     #[test]
+    fn a_session_saved_under_older_canonical_rules_recovers_in_canonical_form() {
+        let (dir, mut state) = marked_directory(REASON);
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        state.active_item = Some(ItemId::from(999_999));
+        let data = serde_json::to_string(&state).unwrap();
+        meta.execute(
+            "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
+            [&data],
+        )
+        .unwrap();
+        meta.execute(
+            "UPDATE session_recovery SET data = ?1 WHERE id = 1",
+            [data.as_bytes()],
+        )
+        .unwrap();
+        drop(meta);
+
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.recovery_reason().is_none());
+        let loaded = hub.load().unwrap().expect("the session is restored");
+        assert_eq!(loaded, core_session::canonicalize(state));
+        assert_ne!(loaded.active_item, Some(ItemId::from(999_999)));
+    }
+
+    #[test]
+    fn an_unrestorable_session_is_set_aside_and_its_profile_keeps_its_data() {
+        let (dir, saved) = marked_directory("corrupt authoritative session snapshot");
+        let profile = saved.profiles[0].id;
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.load().is_err());
+
+        let file = hub
+            .set_aside_recovery()
+            .unwrap()
+            .expect("the bytes are kept");
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert!(kept.contains(&profile.to_string()), "{kept}");
+        assert_eq!(
+            file.parent().unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+
+        assert!(hub.recovery_reason().is_none());
+        let restarted = hub.load().unwrap().unwrap();
+        assert_eq!(restarted.profiles.len(), 1);
+        assert_eq!(restarted.profiles[0].id, profile);
+        assert_eq!(restarted.profiles[0].name, "QA");
+        assert_eq!(restarted.profiles[0].kind, ProfileKind::Default);
+        assert!(restarted.items.is_empty() && restarted.spaces.is_empty());
+        // The profile's history is still its own.
+        assert!(!hub.search_history(profile, "example", 10).is_empty());
+
+        // Reopening finds an ordinary session, not recovery.
+        drop(hub);
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.recovery_reason().is_none());
+        assert_eq!(hub.load().unwrap().unwrap().profiles[0].id, profile);
+    }
+
+    #[test]
+    fn a_session_from_a_newer_zephium_is_kept_for_it_rather_than_set_aside() {
+        let (dir, _saved) = marked_directory("unrelated");
+        let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+        meta.execute("DELETE FROM session_recovery", []).unwrap();
+        meta.execute(
+            "UPDATE session_snapshot SET schema_version = ?1 WHERE id = 1",
+            [SESSION_SCHEMA_VERSION + 1],
+        )
+        .unwrap();
+        drop(meta);
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert!(hub.load().is_err());
+        assert_eq!(
+            hub.recovery_reason(),
+            Some(zephium_core::ports::store::NEWER_SESSION_REASON)
+        );
+        assert!(hub.set_aside_recovery().is_err());
+        assert!(hub.recovery_reason().is_some());
+    }
+
+    #[test]
+    fn restarting_without_readable_names_still_keeps_one_default_profile() {
+        let registry: HashSet<ProfileId> = [ProfileId::from(9), ProfileId::from(4)].into();
+        let state = restarted_session(&registry, Some(b"{not json"));
+        assert_eq!(state.profiles.len(), 2);
+        assert_eq!(
+            state
+                .profiles
+                .iter()
+                .filter(|profile| profile.kind == ProfileKind::Default)
+                .count(),
+            1
+        );
+        assert!(state
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "Personal"));
+    }
+
+    #[test]
     fn unrelated_or_changed_recovery_markers_remain_read_only() {
-        for case in ["other-reason", "changed-snapshot", "still-noncanonical"] {
+        for case in ["other-reason", "changed-snapshot"] {
             let reason = if case == "other-reason" {
                 "unrelated recovery"
             } else {
                 REASON
             };
-            let (dir, mut state) = marked_directory(reason);
+            let (dir, _state) = marked_directory(reason);
             let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
-            match case {
-                "changed-snapshot" => {
-                    meta.execute(
-                        "UPDATE session_snapshot SET data = data || ' ' WHERE id = 1",
-                        [],
-                    )
-                    .unwrap();
-                }
-                "still-noncanonical" => {
-                    state.active_item = Some(ItemId::from(999_999));
-                    let data = serde_json::to_string(&state).unwrap();
-                    meta.execute(
-                        "UPDATE session_snapshot SET data = ?1 WHERE id = 1",
-                        [&data],
-                    )
-                    .unwrap();
-                    meta.execute(
-                        "UPDATE session_recovery SET data = ?1 WHERE id = 1",
-                        [data.as_bytes()],
-                    )
-                    .unwrap();
-                }
-                _ => {}
+            if case == "changed-snapshot" {
+                meta.execute(
+                    "UPDATE session_snapshot SET data = data || ' ' WHERE id = 1",
+                    [],
+                )
+                .unwrap();
             }
             drop(meta);
             let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
@@ -617,7 +700,11 @@ impl Hub {
         if let Some((version, bytes, data)) = authoritative {
             if version != SESSION_SCHEMA_VERSION {
                 self.quarantine_authoritative(
-                    "unsupported authoritative session schema",
+                    if version > SESSION_SCHEMA_VERSION {
+                        zephium_core::ports::store::NEWER_SESSION_REASON
+                    } else {
+                        "unsupported authoritative session schema"
+                    },
                     version,
                     data.as_deref().map(str::as_bytes),
                 )?;
@@ -653,17 +740,15 @@ impl Hub {
                     "authoritative snapshot does not match profile registry",
                 ));
             }
-            if core_session::canonicalize(state.clone()) != state {
-                self.quarantine_authoritative(
-                    "authoritative session is not in exact canonical form",
-                    version,
-                    Some(data.as_bytes()),
-                )?;
-                return Err(invalid_data(
-                    "authoritative session is not in exact canonical form",
-                ));
+            // Canonical form is the sanitizer, and its rules tighten between
+            // releases. A session saved by an earlier build that decodes and
+            // matches the registry is restored in today's canonical form;
+            // locking the store over it would cost the person every tab.
+            let canonical = core_session::canonicalize(state.clone());
+            if canonical != state {
+                eprintln!("store: restoring a session saved under older canonical rules");
             }
-            return Ok(Some(state));
+            return Ok(Some(canonical));
         }
 
         // One-time compatibility reader for databases created before the
@@ -795,13 +880,12 @@ impl Hub {
         self.recovery_required.as_deref()
     }
 
-    /// An earlier QA build temporarily represented Settings as a typed tab.
-    /// Its later removal made that otherwise valid snapshot fail the exact
-    /// canonicalization gate and enter read-only recovery. Clear only that
-    /// specific marker when its preserved bytes still equal the current
-    /// bounded snapshot and the complete state is canonical again. Shell
-    /// retires the legacy row after loading and saves the resulting session.
-    pub(super) fn recover_qa_settings_tab_quarantine(&mut self) -> rusqlite::Result<bool> {
+    /// Earlier builds put a valid session that was not in the then-exact
+    /// canonical form (an older QA build's Settings tab, or rules that
+    /// tightened later) into read-only recovery. Clear that specific marker
+    /// when its preserved bytes still equal the current bounded snapshot;
+    /// loading restores the canonical form and the next save publishes it.
+    pub(super) fn recover_canonical_form_quarantine(&mut self) -> rusqlite::Result<bool> {
         const REASON: &str = "authoritative session is not in exact canonical form";
         if self.recovery_required.as_deref() != Some(REASON) {
             return Ok(false);
@@ -846,20 +930,10 @@ impl Hub {
         let Some(state) = decode_authoritative_snapshot(&data) else {
             return Ok(false);
         };
-        let qa_settings = state.items.iter().any(|item| {
-            item.parent.is_none()
-                && matches!(item.placement, Placement::Space { .. })
-                && matches!(
-                    item.kind,
-                    PersistedKind::BrowserTab {
-                        page: zephium_core::item::BrowserOwnedTab::Settings
-                    }
-                )
-        });
-        if !qa_settings
-            || self.validate_authoritative_registry(&state).is_err()
-            || core_session::canonicalize(state.clone()) != state
-        {
+        // Loading now restores such a session in today's canonical form, so
+        // any quarantine for this reason alone is lifted once the preserved
+        // bytes still decode and match the registry.
+        if self.validate_authoritative_registry(&state).is_err() {
             return Ok(false);
         }
         let removed = self.meta.execute(
@@ -925,6 +999,60 @@ impl Hub {
         Ok(())
     }
 
+    /// Starts again from a session the store could not restore, without
+    /// losing what it held. The preserved bytes go to a file beside the
+    /// databases, and the session restarts from the profile registry with no
+    /// tabs, each profile named as the old snapshot still names it, so every
+    /// profile keeps its history, bookmarks and settings. A store left in
+    /// recovery could otherwise never open again.
+    pub(crate) fn set_aside_recovery(&mut self) -> rusqlite::Result<Option<PathBuf>> {
+        let Some(reason) = self.recovery_required.clone() else {
+            return Err(invalid_data("no session recovery is pending"));
+        };
+        // A newer build's session opens again once that build is back.
+        if reason == zephium_core::ports::store::NEWER_SESSION_REASON {
+            return Err(invalid_data(
+                zephium_core::ports::store::NEWER_SESSION_REASON,
+            ));
+        }
+        let preserved: Option<Vec<u8>> = self
+            .meta
+            .query_row(
+                "SELECT data FROM session_recovery WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten()
+            .or(self
+                .meta
+                .query_row(
+                    "SELECT CASE WHEN length(CAST(data AS BLOB)) <= ?1
+                            THEN CAST(data AS BLOB) END
+                     FROM session_snapshot WHERE id = 1",
+                    [MAX_SET_ASIDE_BYTES as i64],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()?
+                .flatten());
+        let file = match (&self.dir, &preserved) {
+            (Some(dir), Some(bytes)) => Some(
+                write_set_aside(dir, bytes)
+                    .map_err(|error| invalid_data(&format!("session set-aside failed: {error}")))?,
+            ),
+            _ => None,
+        };
+        let restarted = restarted_session(&self.registry, preserved.as_deref());
+        self.recovery_required = None;
+        if let Err(error) = self.save(&restarted) {
+            self.recovery_required = Some(reason);
+            return Err(error);
+        }
+        self.meta
+            .execute("DELETE FROM session_recovery WHERE id = 1", [])?;
+        Ok(file)
+    }
+
     fn validate_authoritative_registry(&self, state: &SessionState) -> rusqlite::Result<()> {
         if state.profiles.len() > MAX_SESSION_PROFILES
             || state
@@ -943,6 +1071,101 @@ impl Hub {
         }
         Ok(())
     }
+}
+
+/// The largest unreadable snapshot copied out when no recovery bytes exist.
+const MAX_SET_ASIDE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Writes `bytes` to a new private file beside the databases, durably, and
+/// returns its path.
+fn write_set_aside(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let stamp = now_secs();
+    let mut path = dir.join(format!("recovered-session-{stamp}.json"));
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("recovered-session-{stamp}-{n}.json"));
+        n += 1;
+    }
+    let temporary = path.with_extension("json.partial");
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, &path)?;
+    #[cfg(unix)]
+    if let Ok(directory) = std::fs::File::open(dir) {
+        let _ = directory.sync_all();
+    }
+    Ok(path)
+}
+
+/// A session with every registered profile and nothing else. Names and kinds
+/// come from the unreadable snapshot where it still holds them; exactly one
+/// profile is the default.
+fn restarted_session(registry: &HashSet<ProfileId>, preserved: Option<&[u8]>) -> SessionState {
+    let named: Vec<(ProfileId, String, ProfileKind)> = preserved
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|value| value.get("profiles")?.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|profile| {
+            let raw = profile.get("id")?.as_str()?;
+            let id = ProfileId::parse(raw).filter(|id| id.to_string() == raw)?;
+            let name = profile.get("name")?.as_str()?.trim();
+            let kind = match profile.get("kind")?.as_str()? {
+                "default" | "Default" => ProfileKind::Default,
+                _ => ProfileKind::Named,
+            };
+            (registry.contains(&id) && !name.is_empty() && name.len() <= MAX_NAME_BYTES)
+                .then(|| (id, name.to_owned(), kind))
+        })
+        .collect();
+    let mut ids: Vec<ProfileId> = named.iter().map(|(id, ..)| *id).collect();
+    let mut rest: Vec<ProfileId> = registry
+        .iter()
+        .filter(|id| !ids.contains(id))
+        .copied()
+        .collect();
+    rest.sort_by_key(ToString::to_string);
+    ids.dedup();
+    ids.extend(rest);
+    let mut defaulted = false;
+    let profiles = ids
+        .into_iter()
+        .map(|id| {
+            let (name, kind) = named
+                .iter()
+                .find(|(known, ..)| *known == id)
+                .map(|(_, name, kind)| (name.clone(), *kind))
+                .unwrap_or_else(|| ("Profile".to_owned(), ProfileKind::Named));
+            let kind = if kind == ProfileKind::Default && !defaulted {
+                defaulted = true;
+                kind
+            } else {
+                ProfileKind::Named
+            };
+            PersistedProfile { id, name, kind }
+        })
+        .collect::<Vec<_>>();
+    let mut profiles = profiles;
+    if !defaulted {
+        if let Some(first) = profiles.first_mut() {
+            first.kind = ProfileKind::Default;
+            if first.name == "Profile" {
+                first.name = "Personal".into();
+            }
+        }
+    }
+    core_session::canonicalize(SessionState {
+        profiles,
+        ..Default::default()
+    })
 }
 
 fn kind_to_str(kind: ProfileKind) -> Option<&'static str> {

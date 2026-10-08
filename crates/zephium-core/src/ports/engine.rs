@@ -25,6 +25,27 @@ pub enum MemoryPressure {
     Critical,
 }
 
+/// Native capture observations; page JavaScript cannot establish these facts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureDeviceState {
+    #[default]
+    None,
+    Active,
+    Muted,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MediaCaptureState {
+    pub camera: CaptureDeviceState,
+    pub microphone: CaptureDeviceState,
+}
+
+impl MediaCaptureState {
+    pub fn is_capturing(self) -> bool {
+        self.camera != CaptureDeviceState::None || self.microphone != CaptureDeviceState::None
+    }
+}
+
 /// A prepared extension package the user has consented to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebExtensionLoad {
@@ -550,6 +571,17 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// Where page content goes when it enters element fullscreen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullscreenPresentation {
+    /// The engine moves the page into a fullscreen window of its own (WebKit
+    /// on macOS). Browser layout stays as it is.
+    OwnWindow,
+    /// The page fills its own view only (WebView2). The browser makes its
+    /// window fullscreen and lays that one view over the whole of it.
+    FillHostWindow,
+}
+
 /// Exactly-once completion ownership for a per-profile native site snapshot.
 /// Dropping a refused or shutdown task reports failure rather than stranding
 /// an accepted caller. It carries no page data or native handles.
@@ -747,6 +779,14 @@ pub trait Engine {
     /// None clears the profile; this never closes an active page.
     fn forget_discarded_state(&self, _profile: ProfileId, _item: Option<ItemId>) {}
     fn print(&self, id: ItemId) -> NativeDispatch;
+    /// Opens the page's own inspector. Browser chrome is never inspectable.
+    fn open_devtools(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Rejected
+    }
+    /// Hands an application link the person allowed to the system.
+    fn open_external_app(&self, _url: &str) -> NativeDispatch {
+        NativeDispatch::Rejected
+    }
     /// Atomically replaces one ownership scope's desired injected content.
     /// Queue admission is not native application; the terminal outcome is
     /// reported as [`EngineEvent::UserContentSettled`]. `Rejected` is a
@@ -872,6 +912,24 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// How a page's element fullscreen is presented on this engine.
+    fn fullscreen_presentation(&self) -> FullscreenPresentation {
+        FullscreenPresentation::OwnWindow
+    }
+    /// Asks the page to leave element fullscreen. The result arrives as
+    /// [`EngineEvent::FullscreenChanged`]; picture in picture is unaffected.
+    fn exit_fullscreen(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Stop capture in the exact committed document. Unsupported engines
+    /// expose no live indicator or pretend to stop through page JavaScript.
+    fn stop_media_capture(
+        &self,
+        _item: ItemId,
+        _navigation: NavigationPresentationId,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives
@@ -958,6 +1016,18 @@ pub struct DiscardProbeId(pub u64);
 /// This does not describe page-load completion. Reload/history success still
 /// settles through the ordinary navigation callbacks; this enum exists so an
 /// HRESULT/native refusal is never silently discarded.
+/// Why a navigation the person asked for did not load, as a category safe
+/// to show them. Never carries native error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationFailureReason {
+    Offline,
+    HostNotFound,
+    Unreachable,
+    TimedOut,
+    Insecure,
+    Other,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeAction {
     Reload,
@@ -1175,6 +1245,13 @@ pub enum EngineEvent {
         id: ItemId,
         request: NavigationRequestId,
     },
+    /// Why the view's current main-frame navigation failed, reported before
+    /// its failure settles, only where the engine can tell (macOS; WebView2
+    /// shows its own error pages).
+    NavigationFailureReported {
+        id: ItemId,
+        reason: NavigationFailureReason,
+    },
     /// The exact native zoom invocation settled. `applied_scale` is the
     /// adapter's last successfully applied scale for this view generation, so
     /// the newest event remains authoritative even when intermediate results
@@ -1194,6 +1271,17 @@ pub enum EngineEvent {
     LoadingChanged {
         id: ItemId,
         loading: bool,
+    },
+    MediaCaptureChanged {
+        id: ItemId,
+        navigation: NavigationPresentationId,
+        state: MediaCaptureState,
+    },
+    /// The page entered or left element fullscreen. At most one view per
+    /// engine is reported active at a time.
+    FullscreenChanged {
+        id: ItemId,
+        active: bool,
     },
     FaviconPixels {
         id: ItemId,
@@ -1253,6 +1341,15 @@ pub enum EngineEvent {
     },
     PageOpenBlocked {
         id: ItemId,
+        /// The refused page, only when it is an ordinary web address.
+        url: Option<String>,
+    },
+    /// The page asked to open a link in another application. Nothing is
+    /// opened until the person allows it.
+    ExternalAppRequested {
+        id: ItemId,
+        url: String,
+        app: Option<String>,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {

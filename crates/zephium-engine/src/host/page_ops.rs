@@ -160,6 +160,12 @@ impl EngineHost {
             let _ = view.print();
         }
     }
+
+    pub(crate) fn open_devtools(&self, id: ItemId) {
+        if let Some(view) = self.views.get(&id) {
+            view.open_devtools();
+        }
+    }
 }
 
 #[cfg(test)]

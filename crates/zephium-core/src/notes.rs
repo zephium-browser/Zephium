@@ -78,6 +78,11 @@ pub enum NoteCall {
         id: String,
         base_revision: String,
         markdown: String,
+        /// The person has stopped retitling the note, or left it. Only then
+        /// does a file named after its title take the new one, so typing a
+        /// heading does not rename the file on every pause.
+        #[serde(default)]
+        settle: bool,
     },
     SetPinned {
         id: String,
@@ -167,6 +172,10 @@ pub struct NoteChanges {
     pub profile: String,
     pub notes: Vec<ChangedNote>,
     pub reset: bool,
+    /// Link keys that may now lead to a different note, because a note's
+    /// title or file name changed from or to them. A retitled note is news
+    /// for its links, not for the listing.
+    pub links: Vec<String>,
 }
 
 pub fn valid_revision(value: &str) -> bool {
@@ -204,6 +213,7 @@ impl NoteCall {
                 id,
                 base_revision,
                 markdown,
+                ..
             } => {
                 valid_request(request_id)
                     && valid_id(id)
@@ -233,10 +243,24 @@ mod tests {
             id: ID.into(),
             base_revision: base.into(),
             markdown: "# A".into(),
+            settle: false,
         };
         assert!(write(&"a".repeat(32)).validate());
         assert!(!write(&"A".repeat(32)).validate());
         assert!(!write("7").validate());
+    }
+
+    #[test]
+    fn a_write_that_does_not_say_settles_nothing() {
+        let call: NoteCall = serde_json::from_value(serde_json::json!({
+            "kind": "write",
+            "request_id": "request-0000000001",
+            "id": ID,
+            "base_revision": "a".repeat(32),
+            "markdown": "# A",
+        }))
+        .unwrap();
+        assert!(matches!(call, NoteCall::Write { settle: false, .. }));
     }
 
     #[test]

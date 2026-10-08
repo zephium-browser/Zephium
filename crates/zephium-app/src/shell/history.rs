@@ -48,11 +48,16 @@ impl Shell {
             return;
         }
         if let HistoryCall::Clear { range } = &call {
-            self.reset_blocker_statistics(expected_profile);
             let since = range
                 .window_seconds()
                 .map(|window| chrono::Utc::now().timestamp() - window);
-            self.clear_time(expected_profile, since);
+            if !self.clear_time(expected_profile, since) {
+                done.finish(HistoryResponse::Error {
+                    error: HistoryError::Unavailable,
+                });
+                return;
+            }
+            self.reset_blocker_statistics(expected_profile);
         }
         let Some(reads) = &self.store_reads else {
             done.finish(HistoryResponse::Error {
@@ -126,6 +131,14 @@ impl Shell {
     /// and the read queue will never deliver.
     pub(super) fn fail_pending_history_calls(&mut self) {
         for (_, done) in std::mem::take(&mut self.history.pending) {
+            done.finish(HistoryResponse::Error {
+                error: HistoryError::Unavailable,
+            });
+        }
+    }
+
+    pub(super) fn on_history_surface_failed(&mut self, token: u64, _profile: ProfileId) {
+        if let Some(done) = self.history.pending.remove(&token) {
             done.finish(HistoryResponse::Error {
                 error: HistoryError::Unavailable,
             });

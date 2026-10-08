@@ -187,6 +187,7 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "objc2-core-foundation",
+  "NSAlert",
   "NSApplication",
   "NSButton",
   "NSControl",
@@ -202,6 +203,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSMenu",
   "NSGraphics",
   "NSScreen",
+  "NSTextField",
 ] }
 
 [target."cfg(target_os = \"android\")".dependencies]

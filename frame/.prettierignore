@@ -12,3 +12,6 @@ dist-work-preview/
 # Inlang compiler-generated project metadata.
 project.inlang/.meta.json
 project.inlang/README.md
+
+# Generated build measurements; enforced by the bundle guard.
+reports/

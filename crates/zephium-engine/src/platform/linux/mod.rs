@@ -5,6 +5,14 @@ mod content_filter;
 mod find;
 mod stage;
 
+pub(crate) fn external_app_name(_url: &str) -> Option<String> {
+    None
+}
+
+pub(crate) fn open_external_app(_url: &str) -> bool {
+    false
+}
+
 pub(crate) use content_filter::{
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
     install_scoped_on_view as install_scoped_content_policy_on_view,

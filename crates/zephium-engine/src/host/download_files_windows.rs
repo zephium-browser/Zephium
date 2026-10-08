@@ -64,7 +64,8 @@ fn io(error: std::io::Error) -> DownloadError {
         Some(2 | 3) => DownloadError::MissingFile,
         // ERROR_ACCESS_DENIED, also raised by Controlled Folder Access.
         Some(5) => DownloadError::Permission,
-        Some(32 | 33) => DownloadError::Unavailable,
+        Some(32 | 33) => DownloadError::FileBusy,
+        Some(223) => DownloadError::FileTooLarge,
         _ => DownloadError::Destination,
     }
 }
@@ -418,10 +419,17 @@ impl Destination {
         }
         verify_private_directory(&observed)
     }
-    pub(super) fn finish(mut self, source: &str) -> Result<(PathBuf, FileIdentity), DownloadError> {
+    pub(super) fn finish(
+        mut self,
+        source: &str,
+        expected_bytes: Option<u64>,
+    ) -> Result<(PathBuf, FileIdentity), DownloadError> {
         self.verify_namespace()?;
         let initial = open_payload(&self.payload(), false)?;
         let before = identity(&initial)?;
+        if expected_bytes.is_some_and(|bytes| before.bytes != bytes) {
+            return Err(DownloadError::Integrity);
+        }
         drop(initial);
         protect(&self.payload(), source, &self.path)?;
         self.verify_namespace()?;
@@ -720,7 +728,7 @@ mod tests {
         fs::write(&output, b"existing").unwrap();
         let pending = Destination::prepare(DownloadId::generate(), output.clone(), None).unwrap();
         fs::write(pending.payload(), b"download").unwrap();
-        let (saved, receipt) = pending.finish("https://example.com").unwrap();
+        let (saved, receipt) = pending.finish("https://example.com", Some(8)).unwrap();
         assert_eq!(fs::read(output).unwrap(), b"existing");
         assert_eq!(fs::read(&saved).unwrap(), b"download");
         assert!(verify_file(&saved, &receipt).is_ok());
@@ -766,5 +774,17 @@ mod tests {
         fs::write(pending.payload(), b"keep").unwrap();
         assert!(recover_staging(&record).is_err());
         assert_eq!(fs::read(pending.payload()).unwrap(), b"keep");
+    }
+    #[test]
+    fn native_byte_mismatch_is_rejected_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("file.txt");
+        let pending = Destination::prepare(DownloadId::generate(), output.clone(), None).unwrap();
+        fs::write(pending.payload(), b"short").unwrap();
+        assert!(matches!(
+            pending.finish("https://example.com", Some(100)),
+            Err(DownloadError::Integrity)
+        ));
+        assert!(!output.exists());
     }
 }

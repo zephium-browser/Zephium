@@ -288,6 +288,15 @@ pub(super) fn configure(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// A profile database (history, icons, time, tasks) commits often. In WAL
+/// mode NORMAL still survives an app crash intact; a power loss can drop only
+/// the last commits, never corrupt the file. The meta database, which holds
+/// the session, keeps FULL.
+pub(super) fn configure_profile(conn: &Connection) -> rusqlite::Result<()> {
+    configure(conn)?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL;")
+}
+
 pub(super) fn configure_validation(conn: &Connection) -> rusqlite::Result<()> {
     use rusqlite::config::DbConfig;
 
@@ -356,7 +365,7 @@ pub(super) fn harden_registered_profile_files(
         }
         drop(validation);
 
-        let result = configure(&conn)
+        let result = configure_profile(&conn)
             .and_then(|()| migrations::apply(&mut conn, migrations::PROFILE))
             .and_then(|()| enforce_history_budget(&conn))
             .and_then(|()| {

@@ -45,6 +45,8 @@ pub struct Items {
 #[derive(Clone, Debug)]
 struct PendingNavigation {
     request: NavigationRequestId,
+    /// The address asked for, when known, so a failure can name it.
+    url: Option<Url>,
 }
 
 impl Items {
@@ -76,6 +78,24 @@ impl Items {
 
     fn tab_mut(&mut self, id: ItemId) -> Option<&mut TabState> {
         self.items.get_mut(&id).and_then(Item::tab_mut)
+    }
+
+    pub fn set_media_capture(
+        &mut self,
+        id: ItemId,
+        capture: Option<(
+            crate::ports::engine::NavigationPresentationId,
+            crate::ports::engine::MediaCaptureState,
+        )>,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        if tab.capture == capture {
+            return false;
+        }
+        tab.capture = capture;
+        true
     }
 
     pub fn roots(&self, placement: Placement) -> &[ItemId] {
@@ -365,8 +385,13 @@ impl Items {
             return Vec::new();
         }
         let request = self.mint_navigation_request();
-        self.pending_navigations
-            .insert(id, PendingNavigation { request });
+        self.pending_navigations.insert(
+            id,
+            PendingNavigation {
+                request,
+                url: Some(url.clone()),
+            },
+        );
         let Some(tab) = self.tab_mut(id) else {
             // Keep this path non-panicking even if a future mutation is added
             // between the existence check and this borrow.  A failed admission
@@ -375,6 +400,7 @@ impl Items {
             self.pending_navigations.remove(&id);
             return Vec::new();
         };
+        tab.failure = None;
         let url = url.to_string();
         if tab.view {
             vec![Effect::Navigate { id, url, request }]
@@ -396,7 +422,7 @@ impl Items {
         }
         let request = self.mint_navigation_request();
         self.pending_navigations
-            .insert(id, PendingNavigation { request });
+            .insert(id, PendingNavigation { request, url: None });
         Some(request)
     }
 
@@ -495,6 +521,7 @@ impl Items {
             return false;
         }
         tab.view = false;
+        tab.capture = None;
         tab.loading = false;
         tab.lifecycle = Lifecycle::Hibernated;
         true
@@ -513,6 +540,7 @@ impl Items {
         self.pending_navigations.remove(&id);
         if let Some(tab) = self.tab_mut(id) {
             tab.view = false;
+            tab.capture = None;
             tab.loading = false;
             tab.lifecycle = Lifecycle::Hibernated;
             tab.title = "Page failed to open".into();
@@ -531,9 +559,36 @@ impl Items {
         }
     }
 
-    pub fn set_popup_blocked(&mut self, id: ItemId, blocked: bool) {
-        if let Some(tab) = self.tab_mut(id) {
-            tab.popup_blocked = blocked;
+    pub fn set_page_request(&mut self, id: ItemId, request: crate::item::PageRequest) -> bool {
+        match self.tab_mut(id) {
+            Some(tab) if tab.content == TabContent::Web => {
+                tab.page_request = Some(Box::new(request));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn take_page_request(&mut self, id: ItemId) -> Option<crate::item::PageRequest> {
+        self.tab_mut(id)?
+            .page_request
+            .take()
+            .map(|request| *request)
+    }
+
+    /// A new tab from this page did open, so an earlier refusal is moot.
+    pub fn clear_blocked_popup(&mut self, id: ItemId) -> bool {
+        match self.tab_mut(id) {
+            Some(tab)
+                if matches!(
+                    tab.page_request.as_deref(),
+                    Some(crate::item::PageRequest::Popup { .. })
+                ) =>
+            {
+                tab.page_request = None;
+                true
+            }
+            _ => false,
         }
     }
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
@@ -542,7 +597,8 @@ impl Items {
                 return false;
             }
             tab.url = Some(url);
-            tab.popup_blocked = false;
+            tab.page_request = None;
+            tab.failure = None;
             self.pending_navigations.remove(&id);
             true
         } else {
@@ -561,6 +617,28 @@ impl Items {
             self.pending_navigations.remove(&id);
         }
         current
+    }
+
+    /// Remembers why the address the person asked for did not load, so chrome
+    /// can say so and offer it again. A page's own navigation has no pending
+    /// address and is left alone.
+    pub fn record_navigation_failure(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationFailureReason,
+    ) -> bool {
+        let Some(url) = self
+            .pending_navigations
+            .get(&id)
+            .and_then(|pending| pending.url.clone())
+        else {
+            return false;
+        };
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.failure = Some(Box::new(crate::item::NavigationFailure { url, reason }));
+        true
     }
 
     #[cfg(test)]

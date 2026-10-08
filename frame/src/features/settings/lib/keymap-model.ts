@@ -7,9 +7,12 @@ import type { KeymapEntry } from "$domain/keymap";
 const TITLES: Record<string, () => string> = {
   "browser.settings": m.command_browser_settings,
   "tab.new": m.command_tab_new,
+  "window.newPrivate": m.command_window_new_private,
+  "window.closePrivate": m.command_window_close_private,
   "note.new": m.command_note_new,
   "split.choose": m.command_split_choose,
   "page.print": m.command_page_print,
+  "page.devtools": m.command_page_devtools,
   "tab.close": m.command_tab_close,
   "page.copyLink": m.command_page_copy_link,
   "find.show": m.command_find_show,

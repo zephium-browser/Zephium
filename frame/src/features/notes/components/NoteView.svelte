@@ -110,7 +110,8 @@
               {density}
               autofocus={autofocus && note.id === null}
               linksRevision={session.linksRevision}
-              onchange={(markdown) => session.edit(markdown)}
+              onchange={(read) => session.edit(read)}
+              onleave={() => void session.settle()}
               onopenlink={openLink}
               onopennote={(target) => void openNote(target)}
               resolve={(targets) => session.resolveTargets(targets)}

@@ -26,6 +26,9 @@
   let pending = 0;
   let generation = 0;
   let guideRequested = false;
+  // Native draws the guide over pages; the renderer line is only a fallback.
+  let nativeGuide = $state(false);
+  let previousCursor = "";
 
   type Configuration = { width: number; enabled: boolean; revision: number; generation: number };
   let pendingConfiguration: Configuration | null = null;
@@ -75,6 +78,8 @@
     guide = null;
     if (guideRequested) void commands.sidebarResizeGuide(null).catch(() => {});
     guideRequested = false;
+    nativeGuide = false;
+    document.body.style.cursor = previousCursor;
   }
   function handlePointerDown(event: PointerEvent) {
     if (disabled || nativeCapture || event.button !== 0) return;
@@ -87,6 +92,9 @@
     pending = width;
     target.focus();
     target.setPointerCapture(event.pointerId);
+    // Held for the whole drag, over tab rows and pages alike.
+    previousCursor = document.body.style.cursor;
+    document.body.style.cursor = "col-resize";
     beginSidebarResize();
     updateGuide(width);
   }
@@ -101,7 +109,12 @@
       frame = 0;
       if (!resizing || !sidebarResizeActive()) return;
       guideRequested = true;
-      void commands.sidebarResizeGuide(pending).catch(() => {});
+      void commands.sidebarResizeGuide(pending).then(
+        (drawn) => {
+          if (resizing) nativeGuide = drawn;
+        },
+        () => {},
+      );
     });
   }
   function handlePointerMove(event: PointerEvent) {
@@ -113,8 +126,10 @@
     const target = event.currentTarget;
     if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId))
       target.releasePointerCapture(event.pointerId);
+    const landing = pending;
     clearGuide();
-    finishSidebarResize(startWidth + event.clientX - startX);
+    // The guide showed where release lands, snap and bounds included.
+    finishSidebarResize(landing);
   }
   function cancelPointerResize(event?: PointerEvent) {
     if (!resizing) return;
@@ -167,7 +182,9 @@
   aria-disabled={disabled}
   tabindex={disabled ? -1 : 0}
   class={[
-    "group absolute inset-y-0 right-0 z-20 w-2 cursor-col-resize touch-none outline-none",
+    // Mostly in the gap beside the column, as the native target on macOS,
+    // so the tab list's edge and scrollbar stay usable.
+    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
     // The native control owns the pointer; the tab list's edge stays usable.
     nativeCapture && "pointer-events-none",
   ]}
@@ -181,12 +198,12 @@
   {#if !disabled}<span
       aria-hidden="true"
       class={[
-        "absolute top-1/2 right-0 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
+        "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
         !nativeCapture && "group-hover:bg-text-muted",
       ]}
     ></span>{/if}
 </div>
-{#if resizing && guide !== null}
+{#if resizing && guide !== null && !nativeGuide}
   <!-- A renderer-only fallback stays inside chrome; page-overlapping guides are native. -->
   <span
     aria-hidden="true"

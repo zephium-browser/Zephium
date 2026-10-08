@@ -239,6 +239,8 @@ enum HostTaskKey {
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    Fullscreen(ItemId),
     Discard(ItemId),
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     DiscardTerminal(ItemId),
@@ -459,6 +461,12 @@ pub(crate) fn install(
             discarded_state_revision: 0,
             user_content,
             shortcuts: Arc::default(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            fullscreen: crate::fullscreen::FullscreenLedger::default(),
+            #[cfg(target_os = "macos")]
+            fullscreen_retiring: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            next_fullscreen_retirement: 0,
             stages: HashMap::new(),
             native_terminal_failure,
             #[cfg(not(target_os = "windows"))]
@@ -475,7 +483,7 @@ pub(crate) fn install(
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
@@ -485,7 +493,7 @@ pub(crate) fn install(
             suspend_failed: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             styles_missed: std::collections::HashSet::new(),
             #[cfg(not(target_os = "macos"))]
             web_contexts: HashMap::new(),
@@ -966,6 +974,20 @@ where
         Some(HostTaskKey::NavigationCommit(id)),
         f,
     )
+}
+
+/// Each callback re-reads the view's native state when it runs, so only the
+/// newest of adjacent callbacks for one view needs to survive.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn with_fullscreen_observation<F>(id: ItemId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::Fullscreen(id)),
+        f,
+    );
 }
 
 /// Native declarative compilation/cache maintenance is asynchronous and may

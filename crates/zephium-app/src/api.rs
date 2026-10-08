@@ -42,6 +42,12 @@ pub type AgentLifecycle = Box<dyn AgentBrowserLifecycle>;
 pub enum ShellTerminalFailure {
     ProfileDeletionInvariant,
     ActorExitedUnexpectedly,
+    /// The saved session or its deletion journal could not be opened. The
+    /// store kept it untouched; the person is told so instead of facing an
+    /// empty window that cannot do anything.
+    SessionUnavailable,
+    /// The saved session was written by a newer Zephium and is kept for it.
+    SessionFromNewerVersion,
 }
 
 impl std::fmt::Display for ShellTerminalFailure {
@@ -51,6 +57,8 @@ impl std::fmt::Display for ShellTerminalFailure {
                 "profile deletion violated a post-retirement invariant"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
+            Self::SessionUnavailable => "the saved session could not be opened",
+            Self::SessionFromNewerVersion => "the saved session belongs to a newer Zephium",
         })
     }
 }
@@ -197,6 +205,17 @@ pub enum TabAction {
     CloseBelow,
 }
 
+/// What the person chose for a page's request to open another application
+/// or a blocked new tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRequestDecision {
+    Allow,
+    /// Allow, and let this site open the same kind of link without asking
+    /// again until Zephium quits.
+    AlwaysAllow,
+    Dismiss,
+}
+
 #[derive(Clone, Debug)]
 pub enum Command {
     WorkDocument(crate::WorkDocumentSubmission),
@@ -296,6 +315,11 @@ pub enum Command {
         input: String,
     },
     Reload(ItemId),
+    /// The person's answer to what the tab's page asked for.
+    AnswerPageRequest {
+        id: ItemId,
+        decision: PageRequestDecision,
+    },
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {
@@ -315,6 +339,13 @@ pub enum Command {
     /// windows hide native content views so the engine can lower their memory
     /// priority and, after the normal idle grace, suspend them.
     SetWindowVisible(bool),
+    /// OS focus is separate from visibility: background pages may keep playing
+    /// audio, but they may not initiate or retain browser-owned device consent.
+    SetWindowFocused(bool),
+    StopMediaCapture {
+        item: ItemId,
+        navigation: zephium_core::ports::engine::NavigationPresentationId,
+    },
     /// The sidebar's width, and whether it changed by a deliberate change of
     /// shape — a toggle, a snap, a tool opening — that the content should
     /// travel with, rather than by a drag that it should simply follow.

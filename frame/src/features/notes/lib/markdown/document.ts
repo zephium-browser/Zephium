@@ -37,12 +37,16 @@ export class MarkdownDocument {
     });
   }
 
-  serialize(doc: Node): string {
+  /** The note as Markdown; with `blocks`, only its first few top-level
+   *  blocks, which is all a title and a preview need. */
+  serialize(doc: Node, blocks = Number.POSITIVE_INFINITY): string {
     let out = "";
     let previous: Previous = null;
     let previousOrigin: Origin | undefined;
     let count = 0;
-    doc.forEach((child) => {
+    const end = Math.min(doc.childCount, blocks);
+    for (let index = 0; index < end; index++) {
+      const child = doc.child(index);
       let origin = this.#origins.get(child);
       let text = origin?.body ?? this.#written.get(child);
       // Two lists of one kind and marker that end up adjacent would merge
@@ -57,7 +61,7 @@ export class MarkdownDocument {
       previous = emittedList(child, text);
       if (text === "") {
         previousOrigin = undefined;
-        return;
+        continue;
       }
       if (count === 0) out += origin?.index === 0 ? this.#lead : "";
       else
@@ -68,7 +72,7 @@ export class MarkdownDocument {
       out += text;
       previousOrigin = origin;
       count++;
-    });
+    }
     return count ? out + this.#tail : "";
   }
 }

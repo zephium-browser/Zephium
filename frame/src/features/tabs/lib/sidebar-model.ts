@@ -48,11 +48,37 @@ const EMPTY_TREE = (): SidebarTree => ({
  * presentation barrier can still find exactly one row and fail independently
  * on its exact revision checks.
  */
+// The last tree's tab entries, so a row whose tab, node and depth are all as
+// they were keeps its entry object and the list leaves it alone.
+let previousTabEntries = new Map<string, SidebarTabEntry>();
+
+function tabEntry(
+  node: SidebarTabEntry["node"],
+  tab: TabView,
+  depth: number,
+  next: Map<string, SidebarTabEntry>,
+): SidebarTabEntry {
+  const key = `tab:${tab.id}`;
+  const previous = previousTabEntries.get(key);
+  const entry =
+    previous !== undefined &&
+    previous.tab === tab &&
+    previous.depth === depth &&
+    previous.node.id === node.id &&
+    previous.node.parent_id === node.parent_id &&
+    previous.node.section === node.section
+      ? previous
+      : { kind: "tab" as const, key, node, tab, depth };
+  next.set(key, entry);
+  return entry;
+}
+
 export function sidebarTree(
   nodes: readonly SidebarNodeView[],
   tabs: readonly TabView[],
 ): SidebarTree {
   const tree = EMPTY_TREE();
+  const entries = new Map<string, SidebarTabEntry>();
   const tabsById = new Map(tabs.map((tab) => [tab.id, tab] as const));
   const admittedTabs = new Set<string>();
   const admittedNodes = new Map<
@@ -85,13 +111,7 @@ export function sidebarTree(
 
     const tab = tabsById.get(node.kind.tab_id);
     if (tab === undefined || admittedTabs.has(tab.id)) continue;
-    const entry: SidebarTabEntry = {
-      kind: "tab",
-      key: `tab:${tab.id}`,
-      node: node as SidebarTabEntry["node"],
-      tab,
-      depth,
-    };
+    const entry = tabEntry(node as SidebarTabEntry["node"], tab, depth, entries);
     admittedNodes.set(node.id, { depth, section: node.section, folder: false });
     admittedTabs.add(tab.id);
     tree[node.section].push(entry);
@@ -99,20 +119,16 @@ export function sidebarTree(
 
   for (const tab of tabs) {
     if (admittedTabs.has(tab.id)) continue;
-    tree.today.push({
-      kind: "tab",
-      key: `tab:${tab.id}`,
-      node: {
-        id: tab.id,
-        parent_id: null,
-        section: "today",
-        kind: { type: "tab", tab_id: tab.id },
-      },
-      tab,
-      depth: 0,
-    });
+    const node: SidebarTabEntry["node"] = {
+      id: tab.id,
+      parent_id: null,
+      section: "today",
+      kind: { type: "tab", tab_id: tab.id },
+    };
+    tree.today.push(tabEntry(node, tab, 0, entries));
   }
 
+  previousTabEntries = entries;
   return tree;
 }
 

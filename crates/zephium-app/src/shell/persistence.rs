@@ -109,14 +109,14 @@ impl Shell {
         }
         self.persistence.url_checkpoint_dirty.clear();
         self.persistence.last_url_checkpoint = std::time::Instant::now();
-        let win = self.windows.focused();
+        let (space, active, splits) = self.persisted_scope();
         let state = session::snapshot_with_recently_closed(
             &self.profiles,
             &self.spaces,
             &self.items,
-            win.map(|w| w.space),
-            win.and_then(|w| w.active),
-            win.and_then(|w| w.splits.as_ref()),
+            space,
+            active,
+            splits,
             &self.recently_closed,
         );
         self.store.save_session(state);

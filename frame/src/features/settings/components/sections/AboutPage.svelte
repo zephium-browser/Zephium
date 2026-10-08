@@ -49,7 +49,9 @@
       case "downloading":
         return m.update_status_downloading();
       case "ready":
-        return m.update_status_ready({ version: update.version });
+        return update.retry_reason ?? m.update_status_ready({ version: update.version });
+      case "manualInstall":
+        return m.update_status_manual({ version: update.version });
       case "installing":
         return m.update_installing();
       case "failed":
@@ -107,6 +109,23 @@
         pending={update.state === "installing" || updates.pendingRelaunch()}
         onclick={() => void updates.relaunch()}>{m.update_relaunch()}</Button
       >
+    {:else if update.state === "manualInstall"}
+      <Button
+        size="compact"
+        onclick={() => {
+          if (update.state === "manualInstall")
+            void commands.browserOpenUrl(releaseNotesUrl(update.version), true).catch(() => {});
+        }}>{m.update_install_manual()}</Button
+      >
+    {:else if update.state === "failed"}
+      <div class="actions">
+        <Button size="compact" onclick={() => void updates.check()}>{m.update_check_now()}</Button>
+        <Button
+          size="compact"
+          onclick={() => void commands.browserOpenUrl("https://zephium.app", true).catch(() => {})}
+          >{m.update_download_latest()}</Button
+        >
+      </div>
     {:else if updatable}
       <Button
         size="compact"
@@ -137,6 +156,11 @@
   <SettingsRow title={m.about_copy_details()} description={m.about_copy_details_help()}>
     <Button size="compact" disabled={!about} onclick={() => void copyDetails()}
       >{m.about_copy_details()}</Button
+    >
+  </SettingsRow>
+  <SettingsRow title={m.about_logs()} description={m.about_logs_help()}>
+    <Button size="compact" onclick={() => void commands.diagnosticsShowLogs().catch(() => false)}
+      >{m.about_logs_show()}</Button
     >
   </SettingsRow>
 </SettingsGroup>

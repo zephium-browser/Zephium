@@ -69,7 +69,9 @@ mod about;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
+mod content_fullscreen;
 mod default_browser;
+mod diagnostics;
 mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
@@ -1561,6 +1563,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             onboarding_finish,
             tabs_navigate,
             tabs_reload,
+            tabs_answer_page_request,
+            diagnostics_show_logs,
             tabs_back,
             tabs_forward,
             work_pane_show,
@@ -1587,6 +1591,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_credential_capability,
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
+            capture_stop,
             blocker_status,
             blocker_stats,
             blocker_set_enabled,
@@ -1639,6 +1644,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             updates::update_status,
             updates::update_check,
             updates::update_relaunch,
+            updates::update_highlights,
             updates::open_software_update,
             browser_open_url,
             keymap::keymap_entries,
@@ -2652,6 +2658,36 @@ fn tabs_navigate(
     })
 }
 
+/// Shows the folder with Zephium's local log and crash report.
+#[tauri::command]
+#[specta::specta]
+fn diagnostics_show_logs(caller: WebviewWindow) -> bool {
+    authorize(&caller, CallerPolicy::Main, "diagnostics_show_logs") && diagnostics::reveal()
+}
+
+#[tauri::command]
+#[specta::specta]
+fn tabs_answer_page_request(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    answer: zephium_ipc::PageRequestAnswer,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_answer_page_request") {
+        return rejected_operation();
+    }
+    let decision = match answer {
+        zephium_ipc::PageRequestAnswer::Allow => zephium_app::PageRequestDecision::Allow,
+        zephium_ipc::PageRequestAnswer::AlwaysAllow => {
+            zephium_app::PageRequestDecision::AlwaysAllow
+        }
+        zephium_ipc::PageRequestAnswer::Dismiss => zephium_app::PageRequestDecision::Dismiss,
+    };
+    dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
+        Command::AnswerPageRequest { id, decision }
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 fn tabs_reload(
@@ -2972,6 +3008,35 @@ fn page_permission_respond(
             request,
             decision,
         },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn capture_stop(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    item_id: String,
+    navigation_id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "capture_stop")
+        || shutdown_started(caller.app_handle())
+        || !bounded(&item_id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(item) = ItemId::parse(&item_id).filter(|item| item.to_string() == item_id) else {
+        return rejected_operation();
+    };
+    let Some(navigation) = fixed_nonzero_hex(&navigation_id)
+        .map(zephium_core::ports::engine::NavigationPresentationId::from_raw)
+    else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::StopMediaCapture { item, navigation },
     )
 }
 
@@ -3644,6 +3709,23 @@ fn resource_close_ready(caller: WebviewWindow, token: String, success: bool) -> 
         && resource_close::complete(caller.label(), &token, success)
 }
 
+/// How long a resource call waits for an admission permit. A typing pause
+/// in several views at once queues briefly instead of failing; a call that
+/// still cannot start is refused before it has touched anything.
+const RESOURCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// The whole call, admission included, inside the frame's own deadline.
+const RESOURCE_CALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+
+async fn admit(
+    admission: &'static tokio::sync::Semaphore,
+    wait: std::time::Duration,
+) -> Option<tokio::sync::SemaphorePermit<'static>> {
+    tokio::time::timeout(wait, admission.acquire())
+        .await
+        .ok()?
+        .ok()
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn resource_call(
@@ -3673,7 +3755,8 @@ async fn resource_call(
     };
     let shell = app.state::<Handle>().inner().clone();
     static RESOURCE_ADMISSION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-    let Ok(permit) = RESOURCE_ADMISSION.try_acquire() else {
+    let deadline = tokio::time::Instant::now() + RESOURCE_CALL_DEADLINE;
+    let Some(permit) = admit(&RESOURCE_ADMISSION, RESOURCE_ADMISSION_WAIT).await else {
         return failed(ResourceError::Capacity);
     };
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -3714,7 +3797,7 @@ async fn resource_call(
     }) {
         return failed(ResourceError::Unavailable);
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(8), receive).await {
+    match tokio::time::timeout_at(deadline, receive).await {
         Ok(Ok(reply)) => reply,
         _ => failed(ResourceError::OutcomeUnknown),
     }
@@ -4017,14 +4100,21 @@ fn focus_control(
 
 #[tauri::command]
 #[specta::specta]
-fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
+async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
     }
     if !SETTING_KEYS.contains(&key.as_str()) {
         return None;
     }
-    APP_STORE.get().and_then(|store| store.app_setting(&key))
+    // A synchronous command runs on the main thread, and the store may be
+    // busy for seconds (an import, a deletion); the read waits off it.
+    tauri::async_runtime::spawn_blocking(move || {
+        APP_STORE.get().and_then(|store| store.app_setting(&key))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[tauri::command]
@@ -4679,6 +4769,7 @@ fn build_menu(
         .build()?;
     let file = SubmenuBuilder::new(handle, "File")
         .item(&item("tab.new")?)
+        .item(&item("window.newPrivate")?)
         .item(&item("note.new")?)
         .item(&item("split.choose")?)
         .separator()
@@ -4721,6 +4812,7 @@ fn build_menu(
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
+        .item(&item("page.devtools")?)
         .build()?;
     let history = SubmenuBuilder::new(handle, "History")
         .item(&item("nav.back")?)
@@ -4924,6 +5016,7 @@ fn build_chrome_menu(
     let item =
         |id: &str, enabled: bool| build_command_menu_item_enabled(handle, &resolved, id, enabled);
     let new_tab = item("tab.new", true)?;
+    let new_private = item("window.newPrivate", true)?;
     let reopen = item("tab.reopen", true)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let bookmark = item("bookmark.add", page)?;
@@ -4937,8 +5030,18 @@ fn build_chrome_menu(
     Menu::with_items(
         handle,
         &[
-            &new_tab, &reopen, &first, &bookmark, &copy_link, &second, &split, &compact, &third,
-            &bookmarks, &settings,
+            &new_tab,
+            &new_private,
+            &reopen,
+            &first,
+            &bookmark,
+            &copy_link,
+            &second,
+            &split,
+            &compact,
+            &third,
+            &bookmarks,
+            &settings,
         ],
     )
 }
@@ -5046,6 +5149,7 @@ fn build_profile_menu(
     let account = MenuItemBuilder::with_id("settings.account", "Account…").build(handle)?;
     let first = PredefinedMenuItem::separator(handle)?;
     let new_tab = item("tab.new")?;
+    let new_private = item("window.newPrivate")?;
     let split = MenuItemBuilder::with_id("split.choose", "Split View…").build(handle)?;
     let second = PredefinedMenuItem::separator(handle)?;
     let notes = MenuItemBuilder::with_id("tool.notes", "Notes").build(handle)?;
@@ -5065,6 +5169,7 @@ fn build_profile_menu(
             &account,
             &first,
             &new_tab,
+            &new_private,
             &split,
             &second,
             &notes,
@@ -5112,6 +5217,10 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     let tauri::RunEvent::ExitRequested { code, api, .. } = event else {
         return;
     };
+    if code != Some(1) && updates::blocks_exit(app) {
+        api.prevent_exit();
+        return;
+    }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
         write_diagnostic(format_args!(
             "shutdown: exit requested before coordinator setup"
@@ -5305,6 +5414,8 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                #[cfg(target_os = "windows")]
+                updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
                 zephium_app::work_lead::skills::install_root(data_dir.clone());
                 #[cfg(unix)]
@@ -5321,6 +5432,16 @@ pub fn run() {
                     // schema/corruption failure is still actionable without
                     // constructing WebView2 state merely to initialize logs.
                     platform::imp::redirect_stderr(&data_dir);
+                    diagnostics::install(data_dir.clone());
+                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    // Finder-launched apps write stderr nowhere; keep it in
+                    // a private, bounded log the person can choose to share.
+                    let logs = app.path().app_log_dir()?;
+                    platform::imp::redirect_stderr(&logs);
+                    diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
                 }
 
@@ -5367,6 +5488,7 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
 
                 #[cfg(target_os = "windows")]
@@ -5790,6 +5912,7 @@ pub fn run() {
                     }
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
+                Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
                 Projection::RuntimeStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
                 }
@@ -5849,6 +5972,35 @@ pub fn run() {
             let terminal_failure_app = app.handle().clone();
             let terminal_failure_shutdown = shutdown.inner().clone();
             let shell_terminal_failure: ShellTerminalFailureCallback = Box::new(move |failure| {
+                // An unopenable session would otherwise leave an empty window
+                // that does nothing. Say so, then quit in order; the store
+                // has kept the saved data as it was.
+                if matches!(
+                    failure,
+                    zephium_app::ShellTerminalFailure::SessionUnavailable
+                        | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                ) {
+                    let app = terminal_failure_app.clone();
+                    let shutdown = terminal_failure_shutdown.clone();
+                    let explained = terminal_failure_app.run_on_main_thread(move || {
+                        #[cfg(not(target_os = "linux"))]
+                        startup_alert::show_blocking(
+                            if matches!(
+                                failure,
+                                zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                            ) {
+                                startup_alert::StartupProblem::NewerProfile
+                            } else {
+                                startup_alert::StartupProblem::DamagedProfile
+                            },
+                            "the saved tabs and settings could not be opened",
+                        );
+                        request_shell_terminal_failure(&app, &shutdown, failure);
+                    });
+                    if explained.is_ok() {
+                        return;
+                    }
+                }
                 request_shell_terminal_failure(
                     &terminal_failure_app,
                     &terminal_failure_shutdown,
@@ -5975,6 +6127,7 @@ pub fn run() {
             let initial =
                 platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
             shell.dispatch(Command::SetWindowSize(initial));
+            shell.dispatch(Command::SetWindowFocused(window.is_focused().unwrap_or(false)));
 
             let resize_shell = shell.clone();
             let resize_window = window.clone();
@@ -6035,6 +6188,7 @@ pub fn run() {
                     // shell command queued before close has been snapshotted.
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
+                        if updates::blocks_exit(&exit_handle) { return; }
                         let owner=window_shutdown.clone();
                         let app=exit_handle.clone();
                         let shell=resize_shell.clone();
@@ -6084,6 +6238,7 @@ pub fn run() {
                         }
                     }
                     tauri::WindowEvent::Focused(true) => {
+                        resize_shell.dispatch(Command::SetWindowFocused(true));
                         // Some window managers restore without a distinct
                         // resize notification. Wake content before it can be
                         // interacted with.
@@ -6094,6 +6249,7 @@ pub fn run() {
                     // background work: audio and timers must continue. Only
                     // an OS-minimized window hides all content views.
                     tauri::WindowEvent::Focused(false) => {
+                        resize_shell.dispatch(Command::SetWindowFocused(false));
                         if resize_window.is_minimized().unwrap_or(false) {
                             resize_shell.dispatch(Command::SetWindowVisible(false));
                         }
@@ -6375,7 +6531,7 @@ pub fn run() {
                 "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
             );
         }
-        updates::finish_after_exit();
+        updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
         std::process::exit(if cleanup_succeeded || exit_code != 0 {
             exit_code
         } else {
@@ -6404,6 +6560,22 @@ mod tests {
             outcome: OperationOutcome::Applied,
             reason: OperationReason::ProfileDeletionCompleted,
         }
+    }
+
+    #[tokio::test]
+    async fn a_resource_call_waits_briefly_for_admission_instead_of_failing() {
+        use std::time::Duration;
+        static GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let held = super::admit(&GATE, Duration::from_millis(10))
+            .await
+            .unwrap();
+        assert!(super::admit(&GATE, Duration::from_millis(20))
+            .await
+            .is_none());
+        let waiting = tokio::spawn(super::admit(&GATE, Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(held);
+        assert!(waiting.await.unwrap().is_some());
     }
 
     #[test]
@@ -7057,9 +7229,9 @@ mod tests {
         assert_eq!(shell.matches("data-zephium-new-tab").count(), 1);
         // The focus cover, when there is one, stands in the same chain ahead
         // of New Tab, so the two never render together.
-        assert!(
-            shell.contains("{:else if !tabs.activeTab()?.url && !tabs.activeTab()?.loading && (tabs.activeTab()?.content ?? \"web\") === \"web\" && browserPage.currentPage() === null}")
-        );
+        assert!(shell.contains("{:else if newTabShown}"));
+        assert!(shell
+            .contains(r#"if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;"#));
         assert!(shell.contains("data-zephium-surface="));
         assert!(!shell.contains("transition:"));
         assert!(!shell.contains("out:"));

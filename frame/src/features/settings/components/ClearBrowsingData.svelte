@@ -24,7 +24,11 @@
     pending = true;
     failed = false;
     try {
-      await commands.historyCall(profile, { kind: "clear", range });
+      const result = await commands.historyCall(profile, { kind: "clear", range });
+      if (result.kind !== "removed") {
+        failed = true;
+        return;
+      }
       cleared = true;
       open = false;
     } catch {

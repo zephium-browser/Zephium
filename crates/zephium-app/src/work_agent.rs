@@ -35,6 +35,9 @@ pub struct WorkAgentBrowseRequest {
     pub confirm: Option<WorkConfirmPort>,
     /// The person allowed edits on this site for the run.
     pub allow_edits: bool,
+    /// Typing on this site waits for the person: the run holds their data
+    /// and they did not name the site.
+    pub hold_typing: bool,
     /// The site's entry question waits on the start page: Rust checks it
     /// for a signed-out state before the question and before any model call.
     pub entry: bool,
@@ -465,6 +468,8 @@ impl WorkAgentService {
             lead: false,
             extends: true,
             views: Vec::new(),
+            typing_held: Vec::new(),
+            typing_allowed: Vec::new(),
         };
         if !driver.tabs.is_empty() {
             driver.report(WorkAgentDiagnostic::TabsListed {
@@ -563,6 +568,10 @@ struct Driver {
     extends: bool,
     /// Page tasks that only read what a daily app's view lists, by start page.
     views: Vec<String>,
+    /// Sites whose page tasks hold every field typed into for the person.
+    typing_held: Vec<String>,
+    /// Sites the person allowed typing on for the run, for the run to learn.
+    typing_allowed: Vec<String>,
 }
 
 enum Fetched {
@@ -2260,6 +2269,8 @@ impl WorkPartDriver {
             lead: true,
             extends: false,
             views: Vec::new(),
+            typing_held: Vec::new(),
+            typing_allowed: Vec::new(),
         })
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
@@ -2321,6 +2332,13 @@ impl WorkPartDriver {
     /// Page tasks on these start pages only read what the app's view lists.
     pub(crate) fn view_pages(&mut self, pages: Vec<String>) {
         self.0.views = pages;
+    }
+    pub(crate) fn hold_typing(&mut self, sites: Vec<String>) {
+        self.0.typing_held = sites;
+    }
+    /// Sites the person allowed typing on since this was last asked.
+    pub(crate) fn take_typing_allowed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.0.typing_allowed)
     }
     /// Records the run's entry answer for one of this driver's sites.
     pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {

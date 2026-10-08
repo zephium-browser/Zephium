@@ -27,9 +27,10 @@ jobs:
   gate:
     name: Gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 150
     permissions:
       contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       pubkey: ${{ steps.version.outputs.pubkey }}
@@ -91,14 +92,47 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "pubkey=${pubkey}" >> "${GITHUB_OUTPUT}"
 
+      - name: Require successful CI for this exact release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse HEAD)"
+          for _ in $(seq 1 270); do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${candidate}&event=push&per_page=100")"
+            # $sha is a jq variable, bound by --arg below, not a shell one.
+            # shellcheck disable=SC2016
+            main='[.workflow_runs[] | select(.head_sha == $sha and .head_branch == "main" and .event == "push")]'
+            if jq -e --arg sha "${candidate}" "${main} | any(.conclusion == \"success\")" <<< "${runs}" >/dev/null; then
+              exit 0
+            fi
+            # Every run for this commit finished and none passed: waiting
+            # cannot help. Re-run CI for the commit, then this workflow.
+            if jq -e --arg sha "${candidate}" "${main} | length > 0 and all(.status == \"completed\")" <<< "${runs}" >/dev/null; then
+              echo "::error::Main CI for release commit ${candidate} finished without success. Re-run it, then re-run this release."
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::No successful main CI run exists for release commit ${candidate}."
+          exit 1
+
       # Strict engine and advisory reviews, blocker seed freshness, and
       # outstanding vendor fixes.
       - name: Release security gate
         run: cargo xtask check-release-engine-security
 
+  # The component suite runs only on demand elsewhere, so no release ships
+  # without it.
+  components:
+    needs: gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/components.yml
+
   macos:
     name: macOS (Apple Silicon)
-    needs: gate
+    needs: [gate, components]
     runs-on: macos-latest
     timeout-minutes: 90
     permissions:
@@ -246,7 +280,7 @@ jobs:
 
   windows:
     name: Windows (x64)
-    needs: gate
+    needs: [gate, components]
     runs-on: windows-latest
     timeout-minutes: 75
     permissions:

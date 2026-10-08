@@ -109,11 +109,15 @@ extending an exception is a new security decision and requires review.
 The complete pnpm graph is intentionally checked at `high` severity:
 
 ```sh
-pnpm audit --audit-level high
+node scripts/ci/audit-dependencies.mjs
 ```
 
 This includes development dependencies because Vite, package plugins, and
-other build tools execute while producing signed artifacts. When this check
+other build tools execute while producing signed artifacts. The only local
+exception is GHSA-vfj7-8cjw-p6xm in build-only braces 3.0.3: the command verifies
+all affected installed paths against exact patched-file hashes and exercises
+hostile patterns and direct ASTs before accepting its depth-limit mitigation.
+Other high/critical advisories and registry failures remain blocking. When this check
 fails:
 
 1. Confirm the advisory and affected resolved version against the package

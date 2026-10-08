@@ -124,38 +124,69 @@ export function durationLabel(minutes: number, labels: DurationLabels): string {
 
 const RANK: Record<TaskRow["status"], number> = { blocked: 0, active: 1, open: 2, done: 3 };
 
-/** Blocked first: a delegated task that stopped needs a person more than
- *  anything else in the section does. Then pinned, then manual position, then
- *  the nearest date, and newest last so equal rows keep a stable order.
- */
-export function compareRows(left: TaskRow, right: TaskRow): number {
-  if (left.status === "done" && right.status === "done") {
-    const a = BigInt(left.completedAt ?? "0"),
-      b = BigInt(right.completedAt ?? "0");
-    if (a !== b) return a > b ? -1 : 1;
-    return left.id === right.id ? 0 : left.id < right.id ? -1 : 1;
+/** What decides a row's order, read once per sort rather than once per
+ *  comparison. */
+type Placed = {
+  row: TaskRow;
+  rank: number;
+  pinned: boolean;
+  sortKey: string | null;
+  day: string | null;
+  time: string | null;
+  /** When it was finished, for a row that counts as finished. */
+  finished: bigint | null;
+};
+
+/** `open`: placed as though it were still open, as a row just completed is. */
+function placedOf(row: TaskRow, open = false): Placed {
+  const status = open ? "open" : row.status;
+  return {
+    row,
+    rank: RANK[status],
+    pinned: row.pinned,
+    sortKey: row.sortKey,
+    day: dayDue(row),
+    time: row.dueTime,
+    finished: status === "done" ? BigInt(row.completedAt ?? "0") : null,
+  };
+}
+
+function byId(left: TaskRow, right: TaskRow): number {
+  return left.id === right.id ? 0 : left.id < right.id ? -1 : 1;
+}
+
+function comparePlaced(left: Placed, right: Placed): number {
+  if (left.finished !== null && right.finished !== null) {
+    if (left.finished !== right.finished) return left.finished > right.finished ? -1 : 1;
+    return byId(left.row, right.row);
   }
-  if (RANK[left.status] !== RANK[right.status]) return RANK[left.status] - RANK[right.status];
+  if (left.rank !== right.rank) return left.rank - right.rank;
   if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
   if (left.sortKey !== right.sortKey) {
     if (left.sortKey === null) return 1;
     if (right.sortKey === null) return -1;
     return left.sortKey < right.sortKey ? -1 : 1;
   }
-  const leftDay = dayDue(left);
-  const rightDay = dayDue(right);
-  if (leftDay !== rightDay) {
-    if (leftDay === null) return 1;
-    if (rightDay === null) return -1;
-    return leftDay < rightDay ? -1 : 1;
+  if (left.day !== right.day) {
+    if (left.day === null) return 1;
+    if (right.day === null) return -1;
+    return left.day < right.day ? -1 : 1;
   }
   // Within a day, what has an hour comes before what merely has to happen.
-  if (left.dueTime !== right.dueTime) {
-    if (left.dueTime === null) return 1;
-    if (right.dueTime === null) return -1;
-    return left.dueTime < right.dueTime ? -1 : 1;
+  if (left.time !== right.time) {
+    if (left.time === null) return 1;
+    if (right.time === null) return -1;
+    return left.time < right.time ? -1 : 1;
   }
-  return left.id === right.id ? 0 : left.id < right.id ? -1 : 1;
+  return byId(left.row, right.row);
+}
+
+/** Blocked first: a delegated task that stopped needs a person more than
+ *  anything else in the section does. Then pinned, then manual position, then
+ *  the nearest date, and newest last so equal rows keep a stable order.
+ */
+export function compareRows(left: TaskRow, right: TaskRow): number {
+  return comparePlaced(placedOf(left), placedOf(right));
 }
 
 function sectionOf(row: TaskRow, today: string): SectionKey {
@@ -208,11 +239,13 @@ export function sections(rows: readonly TaskRow[], options: SectionOptions): Tas
     else grouped.set(key, [row]);
   }
   const limit = options.completedLimit ?? Number.POSITIVE_INFINITY;
-  // A held row also keeps its place within the section until it leaves.
-  const placed = (row: TaskRow) =>
-    holding?.has(row.id) ? { ...row, status: "open" as const } : row;
   return ORDER.filter((key) => allowed.has(key) && grouped.get(key)?.length).map((key) => {
-    const rows = grouped.get(key)!.sort((left, right) => compareRows(placed(left), placed(right)));
+    // A held row also keeps its place within the section until it leaves.
+    const rows = grouped
+      .get(key)!
+      .map((row) => placedOf(row, holding?.has(row.id)))
+      .sort(comparePlaced)
+      .map((placed) => placed.row);
     return {
       key,
       label: labels[key],
@@ -220,6 +253,66 @@ export function sections(rows: readonly TaskRow[], options: SectionOptions): Tas
       rows: key === "completed" ? rows.slice(0, limit) : rows,
     };
   });
+}
+
+/** Whether two drawings of a task sit in the same place: in the same
+ *  section, in the same order. Its words decide neither. */
+function samePlace(left: TaskRow, right: TaskRow): boolean {
+  return (
+    left === right ||
+    (left.id === right.id &&
+      left.status === right.status &&
+      left.pinned === right.pinned &&
+      left.sortKey === right.sortKey &&
+      left.dueDate === right.dueDate &&
+      left.dueTime === right.dueTime &&
+      left.deadline === right.deadline &&
+      left.completedAt === right.completedAt)
+  );
+}
+
+/** `sections` for a list redrawn on every keystroke. While no row has
+ *  moved, the last grouping is kept with the new drawings put in, so typing
+ *  into a task never sorts the list again. */
+export function createSections(): (
+  rows: readonly TaskRow[],
+  options: SectionOptions,
+) => TaskSection[] {
+  let last: {
+    rows: readonly TaskRow[];
+    key: string;
+    result: TaskSection[];
+  } | null = null;
+  return (rows, options) => {
+    const key = [
+      options.scope,
+      options.today,
+      options.completedLimit ?? "",
+      ...ORDER.map((section) => options.labels[section]),
+      ...(options.holding ?? []),
+    ].join("\n");
+    const previous = last;
+    if (
+      previous &&
+      previous.key === key &&
+      previous.rows.length === rows.length &&
+      rows.every((row, index) => samePlace(row, previous.rows[index]!))
+    ) {
+      const redrawn = rows.filter((row, index) => row !== previous.rows[index]);
+      if (redrawn.length) {
+        const drawing = new Map(redrawn.map((row) => [row.id, row]));
+        previous.result = previous.result.map((section) => ({
+          ...section,
+          rows: section.rows.map((row) => drawing.get(row.id) ?? row),
+        }));
+      }
+      previous.rows = rows;
+      return previous.result;
+    }
+    const result = sections(rows, options);
+    last = { rows, key, result };
+    return result;
+  };
 }
 
 /** What a progress figure over a task set means. A row still held in its old

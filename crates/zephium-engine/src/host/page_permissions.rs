@@ -218,6 +218,23 @@ pub(super) fn queue_navigation_revocation(
 }
 
 impl EngineHost {
+    pub(crate) fn stop_media_capture(
+        &mut self,
+        item: ItemId,
+        navigation: zephium_core::ports::engine::NavigationPresentationId,
+    ) {
+        let Some(view) = self.views.get(&item) else {
+            return;
+        };
+        if view
+            .navigation
+            .resident_media_epoch()
+            .is_none_or(|epoch| epoch.presentation_id() != navigation)
+        {
+            return;
+        }
+        crate::platform::macos::capture::stop(&view.view);
+    }
     fn admit_page_permission_request(
         &mut self,
         profile: ProfileId,
@@ -228,7 +245,8 @@ impl EngineHost {
         request: PagePermissionRequest,
     ) {
         let live = self.views.get(&item).is_some_and(|view| {
-            view.event_permit.same_generation(&permit)
+            crate::platform::imp::permission_owner_is_focused(self.parent.0)
+                && view.event_permit.same_generation(&permit)
                 && view.navigation.same_generation(&navigation)
                 && view.navigation.is_current(epoch)
         }) && self
@@ -291,7 +309,8 @@ impl EngineHost {
         };
         let allow = settlement == PagePermissionRequestSettlement::Allow
             && self.views.get(&item).is_some_and(|view| {
-                view.event_permit.same_generation(&pending.permit)
+                crate::platform::imp::permission_owner_is_focused(self.parent.0)
+                    && view.event_permit.same_generation(&pending.permit)
                     && view.navigation.same_generation(&pending.navigation)
                     && view.navigation.is_current(pending.epoch)
             });

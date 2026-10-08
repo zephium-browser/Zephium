@@ -38,6 +38,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 const clear: RuntimeStatus = {
   restart_required: false,
+  session_set_aside: false,
   user_content_degraded_scope_count: 0,
   security_advisories: [],
 };
@@ -188,4 +189,19 @@ test("the rail's one glyph relaunches an update, or hands a notice to About", as
   await screen.getByRole("button", { name: "Relaunch to update" }).click();
   expect(native.relaunch).toHaveBeenCalledOnce();
   expect(onabout).toHaveBeenCalledOnce();
+});
+
+test("manual installation remains actionable in the sidebar and compact rail", async () => {
+  await start({ state: "manualInstall", version: "1.0.2" }, { "notice.seen-version": "1.0.1" });
+  const screen = await render(UpdateCards);
+  await screen.getByRole("button", { name: "Download and install manually" }).click();
+  expect(native.openUrl).toHaveBeenCalledWith(
+    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.2",
+    true,
+  );
+  await screen.unmount();
+  const rail = await render(UpdateGlyph, { props: { onabout: vi.fn() } });
+  await rail.getByRole("button", { name: "Download and install manually" }).click();
+  expect(native.openUrl).toHaveBeenCalledTimes(2);
+  expect(native.relaunch).not.toHaveBeenCalled();
 });

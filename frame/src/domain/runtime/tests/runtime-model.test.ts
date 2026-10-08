@@ -4,6 +4,7 @@ import { runtimeNotifications } from "../runtime-model";
 
 const clear: RuntimeStatus = {
   restart_required: false,
+  session_set_aside: false,
   user_content_degraded_scope_count: 0,
   security_advisories: [],
 };
@@ -49,6 +50,7 @@ describe("runtime notifications", () => {
     expect(
       runtimeNotifications({
         restart_required: true,
+        session_set_aside: false,
         user_content_degraded_scope_count: 0,
         security_advisories: [
           {
@@ -72,6 +74,7 @@ describe("runtime notifications", () => {
     expect(
       runtimeNotifications({
         restart_required: false,
+        session_set_aside: false,
         user_content_degraded_scope_count: 0,
         security_advisories: [notification, notification],
       }),

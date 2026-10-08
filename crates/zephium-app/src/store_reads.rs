@@ -67,13 +67,20 @@ pub enum StoreReadResult {
         next: Option<i64>,
         removed: Option<u32>,
     },
+    HistorySurfaceFailed {
+        token: u64,
+        profile: ProfileId,
+    },
     Bookmarks {
         token: u64,
         profile: ProfileId,
         reply: BookmarkSurfaceReply,
     },
     /// How many an import added, or None when the profile could not take it.
-    Imported { token: u64, added: Option<u32> },
+    Imported {
+        token: u64,
+        added: Option<u32>,
+    },
 }
 
 /// Data read from another browser. Bookmarks and history are written in one
@@ -197,6 +204,11 @@ pub(crate) struct StoreReadQueue {
 }
 
 impl StoreReadQueue {
+    #[cfg(test)]
+    pub(crate) fn pending_surface_calls_for_test(&self) -> usize {
+        self.inner.state.lock().unwrap().surface_calls.len()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -779,12 +791,15 @@ fn run_with(
                 },
                 zephium_ipc::HistoryCall::Clear { range } => {
                     let since = range.window_seconds().map(|window| now_secs() - window);
-                    StoreReadResult::HistorySurface {
-                        token,
-                        profile,
-                        visits: Vec::new(),
-                        next: None,
-                        removed: Some(store.clear_history(profile, since)),
+                    match store.clear_history_checked(profile, since) {
+                        Some(removed) => StoreReadResult::HistorySurface {
+                            token,
+                            profile,
+                            visits: Vec::new(),
+                            next: None,
+                            removed: Some(removed),
+                        },
+                        None => StoreReadResult::HistorySurfaceFailed { token, profile },
                     }
                 }
             },
@@ -890,6 +905,30 @@ fn run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_checked_history_clear_delivers_failure_instead_of_removed_zero() {
+        let store: SharedStore = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let profile = ProfileId::from(777); // No authoritative profile exists.
+        let queue = StoreReadQueue::new();
+        assert!(queue.request_history_call(
+            42,
+            profile,
+            zephium_ipc::HistoryCall::Clear {
+                range: zephium_ipc::HistoryRange::Everything,
+            }
+        ));
+        let mut result = None;
+        let stop = queue.clone();
+        run_with(store, queue, |reply| {
+            result = Some(reply);
+            stop.stop();
+            false
+        });
+        assert!(
+            matches!(result, Some(StoreReadResult::HistorySurfaceFailed { token: 42, profile: owner }) if owner == profile)
+        );
+    }
 
     #[test]
     fn latest_search_replaces_pending_without_growing_a_fifo() {

@@ -117,6 +117,15 @@ describe("which width changes the page travels with", () => {
     expect(native.width.mock.calls.length).toBe(before);
   });
 
+  it("lands an overshooting release on the nearest bound instead of dropping it", () => {
+    beginSidebarResize();
+    finishSidebarResize(MAX_EXPANDED_WIDTH + 200);
+    expect(expanded()).toBe(MAX_EXPANDED_WIDTH);
+    expect(last()).toEqual([MAX_EXPANDED_WIDTH, false]);
+    beginSidebarResize();
+    finishSidebarResize(315);
+  });
+
   it("adopts a native selection without dispatching a second width change", () => {
     const before = native.width.mock.calls.length;
     adoptResizeWidth(320);

@@ -248,6 +248,7 @@ impl WorkLeadService {
             folders::ask_in_place(&run, &objective).await
         };
         run.allow_links_in(&objective);
+        run.trust_sites_in(&objective);
         for body in &bodies {
             run.allow_links_in(&body.text);
         }

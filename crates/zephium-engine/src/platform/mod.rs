@@ -38,3 +38,10 @@ pub mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux as imp;
 pub(crate) mod content_pause;
+
+/// The frame's content ground in each theme (`--color-page`); native covers
+/// paint it so a page that has not painted yet reads as the empty pane.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) const PAGE_GROUND_DARK: (u8, u8, u8) = (0x1a, 0x1a, 0x1d);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) const PAGE_GROUND_LIGHT: (u8, u8, u8) = (0xf1, 0xf1, 0xf3);

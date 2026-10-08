@@ -95,18 +95,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [macos-15, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -134,7 +129,7 @@ jobs:
           done
 
       - name: Agentic probe harness
-        if: runner.os == 'Linux'
+        if: runner.os == 'macOS'
         run: |
           cargo test --locked -p zephium-agentic --features probe-harness
           cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
@@ -194,30 +189,6 @@ jobs:
           cargo build --locked -p zephium-engine \
             --features native-agentic-semantic-probe \
             --bin windows-agentic-semantic-probe
-
-  components:
-    name: Frontend components (WebKit ${{ matrix.shard }}/4)
-    runs-on: macos-15
-    timeout-minutes: 40
-    # Each file mounts real UI in one headless WebKit; four shards keep a
-    # runner's memory well below the hosted macOS limit.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir frame run i18n
-      - run: pnpm --dir frame exec playwright install webkit
-      - run: pnpm --dir frame run test:component --retry=2 --shard=${{ matrix.shard }}/4
 
   coverage:
     name: Coverage

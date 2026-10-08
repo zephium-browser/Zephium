@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone)]
 pub(super) struct Native {
     operation: ICoreWebView2DownloadOperation,
-    permit: EventPermit,
+    pub(super) permit: EventPermit,
 }
 pub(super) struct Delegate {
     operation: ICoreWebView2DownloadOperation,
@@ -263,14 +263,60 @@ fn foreground_window() -> Option<HWND> {
 }
 fn interrupt_error(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> DownloadError {
     match reason {
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_FAILED => DownloadError::Destination,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_LARGE => DownloadError::FileTooLarge,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TRANSIENT_ERROR => DownloadError::FileBusy,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NO_SPACE => DownloadError::DiskFull,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_ACCESS_DENIED => DownloadError::Permission,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_NAME_TOO_LONG => DownloadError::Destination,
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_BLOCKED_BY_POLICY
         | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_SECURITY_CHECK_FAILED
         | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_MALICIOUS => DownloadError::Protection,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED => {
+            DownloadError::ConnectionLost
+        }
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_TIMEOUT => DownloadError::Timeout,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN => DownloadError::Authentication,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CERTIFICATE_PROBLEM => {
+            DownloadError::Certificate
+        }
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_INVALID_REQUEST
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FAILED
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_BAD_CONTENT
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNEXPECTED_RESPONSE
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT => {
+            DownloadError::Server
+        }
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH => {
+            DownloadError::Integrity
+        }
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_DOWNLOAD_PROCESS_CRASHED
+        | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_SHUTDOWN => DownloadError::Runtime,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED => DownloadError::Cancelled,
         _ => DownloadError::Network,
     }
+}
+fn resumable_reason(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> bool {
+    matches!(
+        reason,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_FAILED
+            | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_TIMEOUT
+            | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED
+            | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_SERVER_DOWN
+            | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TRANSIENT_ERROR
+            | COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH
+    )
+}
+
+pub(super) fn completion_bytes(native: &Native) -> Result<Option<u64>, DownloadError> {
+    let mut received = 0;
+    // Native BytesReceived counts bytes written to its file, unlike the
+    // HTTP-derived total, which may describe an encoded response body.
+    unsafe { native.operation.BytesReceived(&mut received) }.map_err(|_| DownloadError::Runtime)?;
+    u64::try_from(received)
+        .map(Some)
+        .map_err(|_| DownloadError::Integrity)
 }
 fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> bool {
     matches!(
@@ -421,8 +467,17 @@ impl Downloads {
                     }
                     return Ok(());
                 }
-                // These interruptions do not automatically restart. No resume
-                // control or native download dialog is exposed by this host.
+                let mut can_resume = windows::core::BOOL::default();
+                if resumable_reason(reason)
+                    && unsafe { operation.CanResume(&mut can_resume) }.is_ok()
+                    && can_resume.as_bool()
+                    && manager.pause(id, interrupt_error(reason))
+                {
+                    return Ok(());
+                }
+                // Preserve the original reason before Cancel can pump a
+                // second StateChanged event reporting USER_CANCELED.
+                manager.note_native_error(id, interrupt_error(reason));
                 unsafe {
                     let _ = operation.Cancel();
                 }
@@ -487,7 +542,7 @@ impl Downloads {
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,
-                deadline: Instant::now() + Duration::from_secs(30),
+                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
         (self.notify)(partition.profile());
@@ -561,7 +616,7 @@ impl Downloads {
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
             transfer.panel = Some(dialog.clone());
             transfer.panel_lease = Some(lease);
-            transfer.deadline = Instant::now() + Duration::from_secs(24 * 60 * 60);
+            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
         }
         self.ensure_timer();
         let result = unsafe { dialog.Show(Some(window)) };
@@ -631,6 +686,67 @@ impl Downloads {
         } else if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
             self.terminal(id, DownloadState::Cancelled, None);
         }
+    }
+
+    pub(super) fn resume(
+        self: &Rc<Self>,
+        partition: Partition,
+        id: DownloadId,
+    ) -> Result<(), DownloadError> {
+        if self.work.get() >= MAX_BACKGROUND_WORK {
+            return Err(DownloadError::Capacity);
+        }
+        let operation = self
+            .active
+            .borrow()
+            .get(&id)
+            .filter(|transfer| {
+                transfer.partition == partition
+                    && transfer.record.state == DownloadState::Paused
+                    && !transfer.deadline.expired(Instant::now())
+                    && retry_source_alive(&transfer.native.permit)
+                    && !transfer.cancelling
+                    && transfer.destination.is_some()
+            })
+            .map(|transfer| transfer.native.operation.clone())
+            .ok_or(DownloadError::Invalid)?;
+        let mut can_resume = windows::core::BOOL::default();
+        let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
+        let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+        unsafe {
+            operation
+                .State(&mut state)
+                .and_then(|_| operation.InterruptReason(&mut reason))
+                .and_then(|_| operation.CanResume(&mut can_resume))
+        }
+        .map_err(|_| DownloadError::Unavailable)?;
+        if state != COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
+            || !resumable_reason(reason)
+            || !can_resume.as_bool()
+        {
+            return Err(DownloadError::Unavailable);
+        }
+        // No RefCell borrow crosses a COM call. Resume retains the original
+        // native operation, its cookies/body, and the admitted staging path.
+        if let Some(transfer) = self.active.borrow_mut().get_mut(&id).filter(|transfer| {
+            transfer.record.state == DownloadState::Paused
+                && !transfer.cancelling
+                && !transfer.deadline.expired(Instant::now())
+                && retry_source_alive(&transfer.native.permit)
+        }) {
+            transfer.record.state = DownloadState::Receiving;
+            transfer.record.error = None;
+            transfer.record.revision += 1;
+        } else {
+            return Err(DownloadError::Invalid);
+        }
+        if unsafe { operation.Resume() }.is_err() {
+            self.pause(id, DownloadError::Unavailable);
+            return Err(DownloadError::Unavailable);
+        }
+        self.ensure_timer();
+        (self.notify)(partition.profile());
+        Ok(())
     }
 
     pub(super) fn choose_directory(
@@ -709,9 +825,29 @@ impl Downloads {
         &self,
         view: super::super::ObservedView,
     ) -> Option<super::super::ObservedView> {
+        let paused: Vec<_> = self
+            .active
+            .borrow()
+            .iter()
+            .filter(|(_, transfer)| {
+                transfer.record.state == DownloadState::Paused
+                    && transfer.native.permit.same_generation(&view.event_permit)
+            })
+            .map(|(id, transfer)| {
+                (
+                    *id,
+                    transfer.record.error.unwrap_or(DownloadError::Unavailable),
+                )
+            })
+            .collect();
+        for (id, cause) in paused {
+            self.cancel(id, Some(cause));
+        }
         if self.stopping.get()
             || !self.active.borrow().values().any(|transfer| {
-                transfer.authorized && transfer.native.permit.same_generation(&view.event_permit)
+                transfer.authorized
+                    && !transfer.record.writer_released
+                    && transfer.native.permit.same_generation(&view.event_permit)
             })
         {
             return Some(view);
@@ -748,6 +884,7 @@ impl Downloads {
             .active
             .borrow()
             .values()
+            .filter(|transfer| !transfer.record.writer_released)
             .map(|transfer| transfer.native.permit.clone())
             .collect();
         let removed = {
@@ -781,7 +918,8 @@ impl Downloads {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.native_failed(id);
+            self.note_native_error(id, DownloadError::Runtime);
+            self.native_failed_with_error(id, DownloadError::Runtime);
         }
     }
     pub(in crate::host) fn runtime_exit_notifier(&self) -> Box<dyn FnOnce(bool) + Send> {
@@ -794,7 +932,8 @@ impl Downloads {
         let ids: Vec<_> = self.active.borrow().keys().copied().collect();
         for id in ids {
             if clean {
-                self.native_failed(id);
+                self.note_native_error(id, DownloadError::Runtime);
+                self.native_failed_with_error(id, DownloadError::Runtime);
                 continue;
             }
             self.persistence_failed.set(true);
@@ -821,6 +960,82 @@ impl Downloads {
                 destination.abandon();
             }
             self.persist(id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interruption_reasons_do_not_mislabel_file_authentication_or_process_errors() {
+        for (reason, expected) in [
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_FAILED,
+                DownloadError::Destination,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TRANSIENT_ERROR,
+                DownloadError::FileBusy,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_TOO_LARGE,
+                DownloadError::FileTooLarge,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED,
+                DownloadError::Authentication,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_FORBIDDEN,
+                DownloadError::Authentication,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CERTIFICATE_PROBLEM,
+                DownloadError::Certificate,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT,
+                DownloadError::Server,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_DOWNLOAD_PROCESS_CRASHED,
+                DownloadError::Runtime,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED,
+                DownloadError::ConnectionLost,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_TIMEOUT,
+                DownloadError::Timeout,
+            ),
+            (
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                DownloadError::Integrity,
+            ),
+        ] {
+            assert_eq!(interrupt_error(reason), expected);
+        }
+    }
+
+    #[test]
+    fn native_retry_never_retries_authentication_certificate_or_policy_rejection() {
+        assert!(resumable_reason(
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NETWORK_DISCONNECTED
+        ));
+        assert!(resumable_reason(
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH
+        ));
+        for reason in [
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_UNAUTHORIZED,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CERTIFICATE_PROBLEM,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_BLOCKED_BY_POLICY,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CROSS_ORIGIN_REDIRECT,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED,
+        ] {
+            assert!(!resumable_reason(reason));
         }
     }
 }

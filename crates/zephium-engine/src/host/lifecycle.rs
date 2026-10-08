@@ -92,6 +92,8 @@ impl EngineHost {
                 );
             }
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.forget_fullscreen(id);
         let removed = self.views.remove(&id);
         self.navigation_snapshots.remove(&id);
         self.partitions.remove(&id);
@@ -103,6 +105,11 @@ impl EngineHost {
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
             self.suspend_uncertain.remove(&id);
+            self.styles_missed.remove(&id);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.dormant.remove(&id);
             self.styles_missed.remove(&id);
         }
         for stage in self.stages.values() {
@@ -129,7 +136,18 @@ impl EngineHost {
                 self.retain_windows_cleanup_debt(profile, debt);
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        match removed {
+            Some(view)
+                if crate::platform::macos::fullscreen::in_transition(
+                    &crate::platform::imp::native_webview(&view.view),
+                ) =>
+            {
+                self.retire_fullscreen_view(view)
+            }
+            removed => drop(removed),
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
         drop(removed);
         if let Some(profile) = profile {
             self.close_idle_spare(profile);
@@ -261,6 +279,7 @@ impl EngineHost {
     fn shutdown_common(&mut self) {
         #[cfg(target_os = "macos")]
         {
+            self.webext.cancel_auth_flows();
             self.discarded_states.clear();
             self.prepared_discard_states.clear();
         }
@@ -292,6 +311,9 @@ impl EngineHost {
         for id in ids {
             self.close(id);
         }
+        // Shutdown cannot wait for WebKit to animate a fullscreen page home.
+        #[cfg(target_os = "macos")]
+        self.fullscreen_retiring.clear();
         self.spare = None;
         self.begin_content_policy_shutdown();
         self.navigation_snapshots.clear();

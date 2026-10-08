@@ -134,8 +134,9 @@ impl Shell {
         if missing.is_empty() {
             return;
         }
+        // A private page's icon comes only from the page itself: a probe is
+        // a request from outside its private partition.
         if self.incognito_profile(profile) {
-            self.queue_favicon_probes(profile, missing);
             return;
         }
         self.lookup_stored_favicons(profile, missing);

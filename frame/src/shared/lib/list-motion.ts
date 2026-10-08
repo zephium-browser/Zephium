@@ -32,6 +32,8 @@ type Departure = { ghost: HTMLElement; icon: HTMLElement | null };
 type Arrival = { element: HTMLElement; enter: "rise" | "grow" };
 
 const running = new WeakMap<Element, Animation[]>();
+const VIEW_MARGIN = 120;
+const MAX_MOVES = 40;
 let departures = new Map<string, Departure>();
 let arrivals = new Map<string, Arrival>();
 let scheduled = false;
@@ -266,7 +268,17 @@ export class ListMotion {
     // profile or a space changed — and arrives without ceremony.
     if (before.size > 0 && shared === 0) return;
 
-    for (const [element, dx, dy] of moves) {
+    // Only rows that are, or were, in view travel; each one animating gets
+    // its own layer, and hundreds sliding unseen would cost frames for
+    // nothing. A reshuffle that big settles in place.
+    const view = (container.closest("[data-glide-scroller]") ?? container).getBoundingClientRect();
+    const seen = (top: number, bottom: number) =>
+      bottom >= view.top - VIEW_MARGIN && top <= view.bottom + VIEW_MARGIN;
+    const visibleMoves = moves.filter(([element, , dy]) => {
+      const rect = element.getBoundingClientRect();
+      return seen(rect.top, rect.bottom) || seen(rect.top + dy, rect.bottom + dy);
+    });
+    for (const [element, dx, dy] of visibleMoves.length > MAX_MOVES ? [] : visibleMoves) {
       track(
         element,
         element.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {

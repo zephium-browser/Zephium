@@ -144,6 +144,7 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            session_set_aside: self.session_set_aside,
             user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
             security_advisories: self
                 .engine
@@ -277,6 +278,9 @@ impl Shell {
             })
         });
         self.record_tab_projection_revisions(&sidebar.tabs);
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.retain(|id, _| self.items.tab(*id).is_some());
+        }
         Some(ItemsState {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             profile: Some(profile_view),
@@ -414,7 +418,31 @@ impl Shell {
             view.icon = None;
             view.availability = None;
         }
+        self.stable_revision(id, view)
+    }
+
+    /// Keeps the revision of a tab whose view did not change since it was
+    /// last offered; a changed view keeps its new revision and is remembered.
+    fn stable_revision(&self, id: ItemId, view: TabView) -> TabView {
+        if let Ok(views) = self.presentation.last_tab_views.try_borrow() {
+            if let Some(previous) = views.get(&id) {
+                let unchanged = TabView {
+                    projection_revision: previous.projection_revision.clone(),
+                    ..view.clone()
+                };
+                if unchanged == *previous {
+                    return unchanged;
+                }
+            }
+        }
+        self.remember_tab_view(id, &view);
         view
+    }
+
+    pub(super) fn remember_tab_view(&self, id: ItemId, view: &TabView) {
+        if let Ok(mut views) = self.presentation.last_tab_views.try_borrow_mut() {
+            views.insert(id, view.clone());
+        }
     }
 
     pub(super) fn presentation_tab_view(
@@ -561,10 +589,62 @@ fn tab_view(
             }
         },
         loading: tab.loading,
-        popup_blocked: tab.popup_blocked,
+        page_request: tab.page_request.as_deref().map(|request| match request {
+            zephium_core::item::PageRequest::ExternalApp { url, app } => {
+                zephium_ipc::PageRequestView::ExternalApp {
+                    site: tab
+                        .url
+                        .as_ref()
+                        .and_then(|url| url.host_str())
+                        .map(str::to_owned),
+                    scheme: url.scheme().to_owned(),
+                    app: app.clone(),
+                }
+            }
+            zephium_core::item::PageRequest::Popup { url } => zephium_ipc::PageRequestView::Popup {
+                host: url
+                    .as_ref()
+                    .and_then(|url| url.host_str())
+                    .map(str::to_owned),
+            },
+        }),
         availability: None,
+        failure: tab.failure.as_ref().map(|failure| {
+            use zephium_core::ports::engine::NavigationFailureReason as Reason;
+            zephium_ipc::TabFailure {
+                url: failure.url.to_string(),
+                reason: match failure.reason {
+                    Reason::Offline => zephium_ipc::TabFailureReason::Offline,
+                    Reason::HostNotFound => zephium_ipc::TabFailureReason::HostNotFound,
+                    Reason::Unreachable => zephium_ipc::TabFailureReason::Unreachable,
+                    Reason::TimedOut => zephium_ipc::TabFailureReason::TimedOut,
+                    Reason::Insecure => zephium_ipc::TabFailureReason::Insecure,
+                    Reason::Other => zephium_ipc::TabFailureReason::Other,
+                },
+            }
+        }),
         can_go_back: tab.can_go_back,
         can_go_forward: tab.can_go_forward,
         icon,
+        capture: tab.capture.filter(|(_, state)| state.is_capturing()).map(
+            |(navigation, state)| {
+                let device = |value| match value {
+                    zephium_core::ports::engine::CaptureDeviceState::None => {
+                        zephium_ipc::CaptureDeviceStateView::None
+                    }
+                    zephium_core::ports::engine::CaptureDeviceState::Active => {
+                        zephium_ipc::CaptureDeviceStateView::Active
+                    }
+                    zephium_core::ports::engine::CaptureDeviceState::Muted => {
+                        zephium_ipc::CaptureDeviceStateView::Muted
+                    }
+                };
+                zephium_ipc::MediaCaptureView {
+                    navigation_id: format!("{:016x}", navigation.into_raw()),
+                    camera: device(state.camera),
+                    microphone: device(state.microphone),
+                }
+            },
+        ),
     }
 }

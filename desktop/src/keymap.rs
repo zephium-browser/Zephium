@@ -156,13 +156,17 @@ impl Keymap {
         if self.work_pane_shown.swap(shown, Ordering::AcqRel) == shown {
             return;
         }
+        // Off the main thread a menu setter waits for the main thread, which
+        // may itself be waiting for this lock in adopt_work_menu_items; take
+        // the items out before touching them.
         #[cfg(target_os = "macos")]
-        for item in self
+        let items = self
             .work_menu_items
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-        {
+            .clone();
+        #[cfg(target_os = "macos")]
+        for item in &items {
             if item.set_enabled(shown).is_err() {
                 write_diagnostic(format_args!(
                     "menu: work pane binding state was not applied"

@@ -87,6 +87,10 @@ pub struct ManagedBlocker {
     shutdown_serial: Mutex<()>,
     shutdown_result: Mutex<Option<BlockerShutdownOutcome>>,
     sealed: AtomicBool,
+    /// Present while a downloaded list compiles. A release build aborts on a
+    /// panic, so a marker left at launch names a list that crashed the
+    /// browser; it is refused instead of compiled again on every start.
+    compile_marker: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,6 +133,13 @@ enum SourceMaterialRepair {
         operation: u64,
     },
     RetryPending(CatalogIdentity),
+}
+
+/// Names the downloaded list compiling right now, inside the source cache.
+const COMPILE_MARKER: &str = "compiling";
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 struct SourceMaterialSignal {
@@ -257,6 +268,7 @@ impl ManagedBlocker {
             shutdown_serial: Mutex::new(()),
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
+            compile_marker: None,
         }))
     }
 
@@ -306,6 +318,7 @@ impl ManagedBlocker {
             shutdown_serial: Mutex::new(()),
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
+            compile_marker: None,
         }))
     }
 
@@ -323,6 +336,9 @@ impl ManagedBlocker {
             catalog: seed.catalog.clone(),
         };
         let fallback_manifest = fallback.identity.manifest_sha256;
+        let compile_marker = source_cache.join(COMPILE_MARKER);
+        let crashed_compile = std::fs::read_to_string(&compile_marker).ok();
+        let _ = std::fs::remove_file(&compile_marker);
         let updater = match CatalogUpdateWorker::start_official(source_cache, fallback) {
             Ok(updater) => updater,
             Err(_) => {
@@ -366,7 +382,21 @@ impl ManagedBlocker {
             official_verification: None,
         };
         if let Some(candidate) = candidate {
-            state.admit_activation(candidate, now_unix());
+            if crashed_compile.as_deref().map(str::trim)
+                == Some(hex_digest(&candidate.identity.manifest_sha256).as_str())
+            {
+                eprintln!(
+                    "blocker: a downloaded list stopped the browser while compiling; it is refused"
+                );
+                state.candidate = Some(candidate.identity.clone());
+                state.transition = Some(CatalogTransition::ReadyToReject(
+                    candidate.identity,
+                    FailureKind::Catalog,
+                    CandidateRejectionReason::CompilerPolicy,
+                ));
+            } else {
+                state.admit_activation(candidate, now_unix());
+            }
         }
         state.recompute_schedule(&initial_status, now_unix());
         state.publish_with_supply(
@@ -388,6 +418,7 @@ impl ManagedBlocker {
             shutdown_serial: Mutex::new(()),
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
+            compile_marker: Some(compile_marker),
         }))
     }
 
@@ -454,6 +485,7 @@ impl ManagedBlocker {
             shutdown_serial: Mutex::new(()),
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
+            compile_marker: None,
         }))
     }
 
@@ -626,12 +658,19 @@ impl ManagedBlocker {
             Action::Prepare(candidate) => {
                 let identity = candidate.identity.clone();
                 let callback_identity = identity.clone();
+                let marker = self.compile_marker.clone();
+                if let Some(marker) = marker.as_ref() {
+                    let _ = std::fs::write(marker, hex_digest(&identity.manifest_sha256));
+                }
                 let completion = Arc::clone(&self.transition_completion);
                 let native_validation = self.native_validation.clone();
                 let dispatch = self.compiler.prepare_catalog_rules(
                     identity.manifest_sha256,
                     candidate.catalog,
                     Box::new(move |outcome| {
+                        if let Some(marker) = marker.as_ref() {
+                            let _ = std::fs::remove_file(marker);
+                        }
                         let publish=move |value| {completion.lock().unwrap_or_else(|p|p.into_inner()).replace(value);};
                         match outcome {
                             Err(failure)=>publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(failure))),

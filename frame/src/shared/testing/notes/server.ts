@@ -58,9 +58,11 @@ type Stored = { summary: NoteSummary; markdown: string };
  *  writes, idempotent creation, trash, and change events. */
 export function notesTestServer(
   profile: string,
-  emit?: (notes: ChangedNote[], reset: boolean) => void,
+  emit?: (notes: ChangedNote[], reset: boolean, links: string[]) => void,
 ) {
   const notes = new Map<string, Stored>();
+  /** The title each file was named after, which only a settling write moves on. */
+  const named = new Map<string, string>();
   const receipts = new Map<string, string>();
   let clock = 1_800_000_000_000;
   const calls: NoteCall[] = [];
@@ -88,11 +90,22 @@ export function notesTestServer(
     };
     const stored = { summary, markdown };
     notes.set(identity, stored);
+    if (!existing) named.set(identity, heading);
     return stored;
   }
 
-  function changed(id: string, reset = true) {
-    emit?.([{ id, revision: notes.get(id)?.summary.revision ?? null }], reset);
+  function changed(id: string, reset = true, links: string[] = []) {
+    emit?.([{ id, revision: notes.get(id)?.summary.revision ?? null }], reset, links);
+  }
+
+  /** A settling write lets a file named after its old title take the new one. */
+  function follow(stored: Stored, settle: boolean): string[] {
+    const before = named.get(stored.summary.id) ?? "";
+    const title = stored.summary.title;
+    if (!settle || before === title || stored.summary.path !== `${before}.md`) return [];
+    stored.summary = { ...stored.summary, path: `${title}.md` };
+    named.set(stored.summary.id, title);
+    return [before.toLowerCase(), title.toLowerCase()];
   }
 
   function respond(call: NoteCall): NoteResponse {
@@ -138,13 +151,22 @@ export function notesTestServer(
         if (!note) return { kind: "error", error: "not_found" };
         if (note.summary.trashed || !note.summary.editable)
           return { kind: "error", error: "read_only" };
-        if (note.summary.revision === revision(call.markdown))
+        if (note.summary.revision === revision(call.markdown)) {
+          const links = follow(note, call.settle ?? false);
+          if (links.length) changed(call.id, false, links);
           return { kind: "applied", request_id: call.request_id, summary: note.summary };
+        }
         if (note.summary.revision !== call.base_revision)
           return { kind: "conflict", current: structuredClone(note) as NoteRecord };
         const title = note.summary.title;
         const stored = store(note, call.markdown);
-        changed(call.id, stored.summary.title !== title);
+        const links = [
+          ...(stored.summary.title !== title
+            ? [title.toLowerCase(), stored.summary.title.toLowerCase()]
+            : []),
+          ...follow(stored, call.settle ?? false),
+        ];
+        changed(call.id, false, [...new Set(links)]);
         return { kind: "applied", request_id: call.request_id, summary: stored.summary };
       }
       case "set_pinned": {
@@ -207,6 +229,8 @@ export function notesTestServer(
       store(notes.get(id), markdown);
       changed(id, false);
     },
+    /** The title a note's file is currently named after. */
+    namedAfter: (id: string) => named.get(id),
     removeOnDisk(id: string): void {
       notes.delete(id);
       changed(id);

@@ -11,13 +11,16 @@
   import * as m from "$shared/i18n/messages";
   let session = $state.raw<WorkEnvironmentSession | null>(null);
   let navigationError = $state(false);
-  $effect(() => {
+  // Tab state changes with every page load in any tab; the session follows
+  // only the profile and space, which are strings and compare by value.
+  let workProfile = $derived.by(() => {
     const profile = tabs.profile();
-    const space = tabs.activeSpaceId();
-    const current =
-      profile && profile.kind !== "incognito" && space
-        ? untrack(() => environmentSession(profile.id, space))
-        : null;
+    return profile && profile.kind !== "incognito" ? profile.id : null;
+  });
+  let space = $derived(tabs.activeSpaceId());
+  $effect(() => {
+    const profile = workProfile;
+    const current = profile && space ? untrack(() => environmentSession(profile, space)) : null;
     session = current;
     void current?.start(m.work_env_default_title());
     return () => current?.stopObserving();

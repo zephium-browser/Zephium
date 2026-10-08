@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import { commands } from "$shared/ipc/bindings";
-  import type { TaskContext, TaskSession } from "$domain/resources";
+  import type { TaskContext, TaskRow, TaskSession } from "$domain/resources";
   import EmptyState from "$shared/ui/EmptyState";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
@@ -52,6 +52,14 @@
   let opened = $state(false);
   let selected = $derived(session.rows.find((row) => row.id === session.selectedId) ?? null);
   let searching = $derived(query.trim().length > 0);
+  let concealed = $derived(inlineDetail && opened && selected !== null);
+  // Hidden behind the open task, the list keeps the rows it last drew rather
+  // than grouping them again for every key typed into that task.
+  let drawn: readonly TaskRow[] = [];
+  let listed = $derived.by(() => {
+    if (!concealed) drawn = session.rows;
+    return drawn;
+  });
 
   $effect(() => watchToday());
   $effect(() => {
@@ -122,7 +130,7 @@
   onkeydown={keydown}
 >
   <TaskFailure {session} />
-  <div class="task-list-view" class:concealed={inlineDetail && opened && selected !== null}>
+  <div class="task-list-view" class:concealed>
     {#if !session.trash && scope !== "completed"}<TaskComposer
         bind:this={composer}
         bind:value={session.captureDraft}
@@ -173,7 +181,7 @@
       </EmptyState>
     {:else}
       <TaskList
-        rows={session.rows}
+        rows={listed}
         {scope}
         {density}
         {query}
@@ -185,7 +193,11 @@
         trashed={session.trash}
         ontoggle={(id, status) => session.setStatus(id, status)}
         onschedule={(id, day, time) => void session.schedule(id, day, time)}
-        onrename={(id, title) => session.rename(id, title)}
+        onrename={(id, title) => {
+          // A row commits its new title once, on Enter or leaving it.
+          session.rename(id, title);
+          session.commitText(id);
+        }}
         onpin={(id, pinned) => void session.setPinned(id, pinned)}
         ondelete={(id) => session.setTrashed(id, true)}
         onrestore={(id) => session.setTrashed(id, false)}
@@ -209,6 +221,7 @@
       retryLabel={m.surface_retry()}
       >{#snippet children(TaskDetail)}<TaskDetail
           task={selected}
+          saving={session.saving(selected.id)}
           today={today()}
           lists={session.lists}
           compact
@@ -224,6 +237,7 @@
           onsteprename={(id, step, title) => session.renameStep(id, step, title)}
           onrename={(id, title) => session.rename(id, title)}
           ondescribe={(id, text) => session.describe(id, text)}
+          oncommit={(id) => session.commitText(id)}
           onpin={(id, pinned) => void session.setPinned(id, pinned)}
           onremove={(id) => {
             opened = false;

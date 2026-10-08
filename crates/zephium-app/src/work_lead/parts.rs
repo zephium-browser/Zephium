@@ -451,6 +451,9 @@ where
             if !pages.is_empty() {
                 brief.push_str("Results pages with the search already in them, the part's own site first; browse the first as start, its goal to read the results shown as records (open an item only for a field the list lacks). If it will not load, use the next one before any form:\n");
                 for (name, url) in pages {
+                    // Built by Rust from a fixed template on a known store,
+                    // not an address the model wrote.
+                    self.run.allow_url(&url);
                     brief.push_str(&format!("- {name}: {url}\n"));
                 }
             }
@@ -647,6 +650,7 @@ where
                                 part: Some(part),
                             };
                             let outcome = set.call(context, tool_call.clone()).await;
+                            self.run.mark_private();
                             if !outcome.is_error {
                                 if let Some(id) = outcome
                                     .content

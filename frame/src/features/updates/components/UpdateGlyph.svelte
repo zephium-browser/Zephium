@@ -3,10 +3,9 @@
   a notice hands its words to Settings › About, which keeps them.
 -->
 <script lang="ts">
-  import { updates } from "$domain/updates";
   import Icon from "$shared/ui/Icon";
   import * as notices from "../lib/notices.svelte";
-  import { PILL_ICON, cardView, pillLabel } from "../lib/present";
+  import { PILL_ICON, activatePill, cardView, pillLabel } from "../lib/present";
 
   let { onabout }: { onabout: () => void } = $props();
 
@@ -17,7 +16,7 @@
 
   function open() {
     if (pill) {
-      void updates.relaunch();
+      activatePill(pill);
       return;
     }
     card?.dismiss();

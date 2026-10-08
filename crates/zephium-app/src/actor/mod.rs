@@ -1170,6 +1170,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::Close(_)
             | Command::Navigate { .. }
             | Command::Reload(_)
+            | Command::AnswerPageRequest { .. }
             | Command::GoBack(_)
             | Command::GoForward(_)
             | Command::SplitWith { .. }
@@ -1182,6 +1183,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
             | Command::RespondToPagePermissionPrompt { .. }
+            | Command::StopMediaCapture { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::Focus(_)

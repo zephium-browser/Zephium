@@ -15,6 +15,9 @@ pub(crate) const WAIT_PATIENCE: Duration = Duration::from_secs(30 * 60);
 const POLL: Duration = Duration::from_millis(500);
 const MAX_UNREADABLE_POLLS: u8 = 12;
 pub(crate) const MAX_SOURCES: usize = 160;
+/// The address question's option words; the frame sends them back as given.
+const ADDRESS_OPEN: &str = "Open";
+const ADDRESS_DECLINE: &str = "Don\u{2019}t open";
 
 /// A page, search result, file or command output an object may cite by key.
 #[derive(Clone)]
@@ -54,6 +57,12 @@ struct State {
     /// Links the run was given outside its sources: the request, context,
     /// and addresses pages showed.
     allowed: Vec<String>,
+    /// The run has read something of the person's own: their tabs, history,
+    /// notes, memory, files, connected services or a signed-in page.
+    private: bool,
+    /// Sites the person named in the request or while it ran, and sites they
+    /// let the run open addresses on.
+    trusted_sites: Vec<String>,
     waits: usize,
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
@@ -125,6 +134,8 @@ impl LeadRun {
                 sources: Vec::new(),
                 next_source: 0,
                 allowed: Vec::new(),
+                private: false,
+                trusted_sites: Vec::new(),
                 waits: 0,
                 waiting_since: None,
                 stopped: None,
@@ -377,6 +388,9 @@ impl LeadRun {
             .map(|_| ())
     }
     pub(crate) async fn input(&self, input: WorkInputFactV1) {
+        if input.kind != WorkInputKindV1::Skill {
+            self.mark_private();
+        }
         if let Err(error) = self
             .probe
             .commit_step(WorkRuntimeUpdate::Input {
@@ -619,7 +633,7 @@ impl LeadRun {
         if url::Url::parse(url).is_ok_and(|u| u.scheme() == "https") {
             let mut state = self.state();
             if !state.allowed.iter().any(|known| known == url) {
-                if state.allowed.len() >= MAX_SOURCES * 2 {
+                if state.allowed.len() >= MAX_SOURCES * 4 {
                     state.allowed.remove(0);
                 }
                 state.allowed.push(url.to_owned());
@@ -637,4 +651,121 @@ impl LeadRun {
             }
         }
     }
+
+    /// Trusts the sites the person named in their own words: the request and
+    /// what they add while it runs, never attached text, which can quote
+    /// anyone's links.
+    pub(crate) fn trust_sites_in(&self, text: &str) {
+        for word in
+            text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
+        {
+            let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            if let Some(site) = named_site(word) {
+                let mut state = self.state();
+                if !state.trusted_sites.contains(&site) {
+                    state.trusted_sites.push(site);
+                }
+            }
+        }
+    }
+
+    /// Whether the person named this site or let the run work on it.
+    pub(crate) fn trusts(&self, site: &str) -> bool {
+        self.state().trusted_sites.iter().any(|known| known == site)
+    }
+    pub(crate) fn trust_site(&self, site: &str) {
+        let mut state = self.state();
+        if !state.trusted_sites.iter().any(|known| known == site) {
+            state.trusted_sites.push(site.to_owned());
+        }
+    }
+
+    /// From here on an address the model writes itself may carry what it
+    /// read, so `admit_address` holds the ones nobody gave it.
+    pub(crate) fn mark_private(&self) {
+        self.state().private = true;
+    }
+    pub(crate) fn is_private(&self) -> bool {
+        let private = self.state().private;
+        private || self.folders().grant.is_some()
+    }
+
+    /// Lets a page address through, or asks the person first when the model
+    /// wrote it itself after reading something of theirs: a prompt injection
+    /// could otherwise have it carry that into a URL. Addresses the person
+    /// gave, links pages showed, sites the person named and a site's bare
+    /// home page need no question. `Err` is the model's answer.
+    pub(crate) async fn admit_address(
+        &self,
+        url: &str,
+        part: Option<WorkPartId>,
+    ) -> Result<(), String> {
+        if !self.is_private() || self.known_url(url) {
+            return Ok(());
+        }
+        let Some(site) = crate::work_sites::site_of(url) else {
+            return Err("that address is not a public web page".into());
+        };
+        if self.state().trusted_sites.contains(&site) || home_page(url, &site) {
+            return Ok(());
+        }
+        let open = ADDRESS_OPEN.to_owned();
+        let for_run = format!("Allow {site} for this request");
+        let answer = self
+            .ask(
+                WorkAskPurposeV1::Address,
+                url.to_owned(),
+                vec![open.clone(), for_run.clone(), ADDRESS_DECLINE.into()],
+                part,
+            )
+            .await
+            .map_err(|_| "the person could not be asked".to_owned())?;
+        match answer {
+            Some(answer) if answer == open => {
+                self.allow_url(url);
+                Ok(())
+            }
+            Some(answer) if answer == for_run => {
+                let mut state = self.state();
+                if !state.trusted_sites.contains(&site) {
+                    state.trusted_sites.push(site);
+                }
+                Ok(())
+            }
+            Some(_) => Err(format!(
+                "The person chose not to open {url}. Continue with what you have, or use a link a page showed."
+            )),
+            None => Err(self.stop_note().to_owned()),
+        }
+    }
+}
+
+/// The registrable site a word of the person's names: a link, or a bare
+/// domain such as "airbnb.com" or "www.lego.com".
+fn named_site(word: &str) -> Option<String> {
+    let word = word.trim_matches(|c: char| matches!(c, '\'' | '`' | '*'));
+    if word.starts_with("https://") || word.starts_with("http://") {
+        return crate::work_sites::site_of(word);
+    }
+    if !word.contains('.') || word.contains('@') || word.contains('/') {
+        return None;
+    }
+    crate::work_sites::site_of(&format!("https://{}/", word.to_ascii_lowercase()))
+}
+
+/// A site's front door: no path, query or credentials, on the registrable
+/// domain itself or its www host. Nothing in it can carry what a run read.
+fn home_page(url: &str, site: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or_default();
+    parsed.scheme() == "https"
+        && matches!(parsed.path(), "" | "/")
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none()
+        && (host == site || host.strip_prefix("www.") == Some(site))
 }

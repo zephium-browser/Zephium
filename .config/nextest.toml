@@ -1,0 +1,4 @@
+# CI keeps a JUnit report so tests that passed only on a retry are listed in
+# the job summary instead of disappearing into a green run.
+[profile.ci.junit]
+path = "junit.xml"

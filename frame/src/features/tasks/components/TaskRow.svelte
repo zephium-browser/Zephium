@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "$shared/ui/Icon";
+  import { fitTextarea, scrollParent } from "$shared/lib/fit";
   import { untrack } from "svelte";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
@@ -120,10 +121,8 @@
   }
 
   function grow(node: HTMLTextAreaElement) {
-    const size = () => {
-      node.style.height = "auto";
-      node.style.height = `${node.scrollHeight}px`;
-    };
+    let scroller: HTMLElement | null | undefined;
+    const size = () => fitTextarea(node, (scroller ??= scrollParent(node)));
     size();
     node.addEventListener("input", size);
     return { destroy: () => node.removeEventListener("input", size) };

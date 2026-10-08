@@ -2,7 +2,7 @@ import { SvelteDate, SvelteMap, SvelteSet } from "svelte/reactivity";
 import { registerCloseTask } from "$shared/lib/close";
 import { events } from "$shared/ipc/native-events";
 import { resourceCall } from "./transport";
-import { mergePage, newerRevision } from "./resource-model";
+import { mergePage, newerRevision, settleInto } from "./resource-model";
 import type {
   ResourceCall_Deserialize as ResourceCall,
   ResourceDraft_Deserialize as ResourceDraft,
@@ -25,10 +25,16 @@ import type {
 const PAGE_SIZE = 100;
 const SEARCH_DEBOUNCE_MS = 180;
 const REFRESH_DEBOUNCE_MS = 100;
-/** Long enough that ordinary typing commits once, short enough that closing the
- *  panel mid-sentence has almost always already saved. */
-const TEXT_DEBOUNCE_MS = 400;
+/** A pause long enough to be the end of a thought rather than of a word.
+ *  Leaving the field, the task or the window saves at once, so closing
+ *  mid-sentence never waits on it. */
+const TEXT_DEBOUNCE_MS = 1000;
 const UNDO_DEPTH = 16;
+/** A busy or unanswered write is sent again after each of these. Short, so a
+ *  closing window still sees it settle. */
+const RETRY_DELAYS = [500, 1500, 4000];
+/** The fields whose change can move a task between views, lists or counts. */
+const COUNTED = new Set<TaskField["field"]>(["status", "schedule", "deadline", "organization"]);
 /** A row drawn for a task native has not created yet. It has no id to act on. */
 const PLACEHOLDER = "pending:";
 
@@ -77,6 +83,9 @@ export type TaskInput = {
   list?: string | null;
   inbox?: boolean;
   priority?: TaskPriority;
+  /** The capture field as it read when this was submitted, when it has been
+   *  emptied since. */
+  draft?: string;
 };
 
 /** What a reversible action did, so a surface can offer to take it back. */
@@ -255,6 +264,22 @@ function current(row: TaskRow, field: TaskField): TaskField | null {
   }
 }
 
+function byId<T extends { id: string }>(items: readonly T[]): ReadonlyMap<string, T> {
+  return new Map(items.map((item) => [item.id, item]));
+}
+
+function sameSteps(left: readonly TaskStep[], right: readonly TaskStep[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (step, index) =>
+        step.id === right[index]!.id &&
+        step.title === right[index]!.title &&
+        step.completed === right[index]!.completed,
+    )
+  );
+}
+
 /** A host owns a query and transient edits. Rust owns task identity and outcomes.
  * Jobs keep their request identity until settlement; failed drafts survive hiding
  * the host. An earlier reply only removes its own overlay, never newer input. */
@@ -285,7 +310,9 @@ export class TaskSession {
   #jobs = new SvelteMap<string, Job[]>();
   #chain = new SvelteMap<string, Promise<boolean>>();
   #textTimers = new SvelteMap<string, ReturnType<typeof setTimeout>>();
-  #commit = new SvelteMap<string, () => void>();
+  /** A text field's pending save. `settle` is the reader leaving the field,
+   *  which may tidy what they typed; a pause in typing may not. */
+  #commit = new SvelteMap<string, (settle: boolean) => void>();
   #undo = $state.raw<Undoable[]>([]);
   #serial = 0;
   #creation = $state.raw<{
@@ -327,6 +354,8 @@ export class TaskSession {
     }
   >();
 
+  #index = $derived(byId(this.items));
+
   rows: TaskRow[] = $derived.by(() => {
     const rows = this.items.flatMap((item) => {
       const meta = this.#metadata.get(item.id);
@@ -363,6 +392,13 @@ export class TaskSession {
       [...this.#jobs.values()].flat().find((job) => job.error)?.error ??
       this.error,
   );
+  /** Whether a write to this task is on its way to native. */
+  saving(id: string): boolean {
+    return this.#chain.has(id);
+  }
+  get active(): boolean {
+    return this.#active;
+  }
   get undoable() {
     return this.#undo.length > 0;
   }
@@ -422,15 +458,13 @@ export class TaskSession {
     this.#observed.clear();
     this.#stop?.();
     this.#stop = null;
+    // The rows stay, so a host shown again draws them while they are read
+    // afresh instead of flashing empty; the registry lets go of a clean,
+    // stopped session once others need the room.
     void this.flush().then((saved) => {
       if (epoch !== this.#epoch) return;
       this.loading = false;
-      if (!saved || this.retained) return;
-      this.items = [];
-      this.#bodies.clear();
-      this.#metadata.clear();
-      this.next = null;
-      this.error = null;
+      if (saved && !this.retained) this.error = null;
     });
   }
 
@@ -439,7 +473,7 @@ export class TaskSession {
     this.#textTimers.clear();
     const commits = [...this.#commit.values()];
     this.#commit.clear();
-    for (const commit of commits) commit();
+    for (const commit of commits) commit(true);
     await Promise.allSettled([
       ...this.#chain.values(),
       ...(this.#creating ? [this.#creating] : []),
@@ -575,6 +609,7 @@ export class TaskSession {
     );
     this.items = more ? mergePage(this.items, page.items) : mergePage(page.items, retained);
     this.next = page.next;
+    if (!more) this.#prune();
     const selected = this.items.find((item) => item.id === this.selectedId);
     if (selected && this.#bodies.get(selected.id)?.revision !== selected.revision)
       void this.load(selected.id);
@@ -634,7 +669,7 @@ export class TaskSession {
     };
     this.#creation = {
       input: { ...input, title },
-      draft: this.captureDraft,
+      draft: input.draft ?? this.captureDraft,
       error: null,
       command: { version: 1, request_id: crypto.randomUUID(), intent: { kind: "create", draft } },
     };
@@ -646,7 +681,7 @@ export class TaskSession {
     const creation = this.#creation;
     if (!creation) return Promise.resolve(null);
     this.#creating = (async () => {
-      const response = await this.#call({ kind: "mutate", command: creation.command });
+      const response = await this.#mutate(creation.command);
       if (response.kind !== "applied" || response.request_id !== creation.command.request_id) {
         const error = response.kind === "error" ? response.error : "outcome_unknown";
         this.#creation = { ...creation, error };
@@ -736,60 +771,100 @@ export class TaskSession {
 
   #edit(id: string, field: "title" | "description", value: string) {
     const key = `${field}:${id}`;
-    const base = this.#row(id)?.[field] ?? null;
     this.#drafts.set(id, { ...this.#drafts.get(id), [field]: value });
     clearTimeout(this.#textTimers.get(key));
-    // Keep the first edit's base value across the whole typing interval.
-    if (!this.#commit.has(key))
-      this.#commit.set(key, () => {
-        const patch = this.#drafts.get(id);
-        const raw = patch?.[field];
+    // The base is what this typing replaces, taken when it began and never from
+    // a draft: a draft is not what native holds, so expecting it would conflict.
+    if (!this.#commit.has(key)) {
+      const base = this.#settled(id)?.[field] ?? null;
+      const commit = (settle: boolean) => {
+        const raw = this.#drafts.get(id)?.[field];
         if (raw === undefined || raw === null) return;
-        const text = field === "title" ? raw.trim() : raw;
-        if (field === "title" && !text) {
-          this.error = "invalid";
+        if (field === "title" && !raw.trim()) {
+          // A blank title is a word being retyped, not a save; leaving it
+          // blank gives the old title back.
+          if (settle) this.#dropDraft(id, field);
+          else this.#commit.set(key, commit);
           return;
         }
-        const remaining = { ...patch };
-        delete remaining[field];
-        if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
-        else this.#drafts.delete(id);
+        this.#dropDraft(id, field);
+        // Trimming while the field is in use would rewrite it under the
+        // caret, so a trailing space is kept until the reader leaves.
+        const text = field === "title" && settle ? raw.trim() : raw;
+        if (text === base) return;
         void this.#update(id, [{ field, value: text }], {
           reversible: false,
           expect: base === null ? [] : [{ field, value: base }],
         });
-      });
+      };
+      this.#commit.set(key, commit);
+    }
     this.#debounce(key);
   }
 
   renameStep(id: string, stepId: string, title: string) {
-    const base = this.#row(id)?.steps;
+    const base = this.#settled(id)?.steps;
     if (!base) return;
-    const steps = base.map((step) =>
+    const steps = (this.#drafts.get(id)?.steps ?? base).map((step) =>
       step.id === stepId ? { ...step, title: title.slice(0, 256) } : step,
     );
     this.#drafts.set(id, { ...this.#drafts.get(id), steps });
     const key = `steps:${id}`;
     clearTimeout(this.#textTimers.get(key));
-    if (!this.#commit.has(key))
-      this.#commit.set(key, () => {
-        const draft = this.#drafts.get(id);
-        const value = draft?.steps;
-        if (!value) return;
-        if (value.some((step) => !step.title.trim())) {
-          this.error = "invalid";
+    if (!this.#commit.has(key)) {
+      const commit = (settle: boolean) => {
+        const draft = this.#drafts.get(id)?.steps;
+        if (!draft) return;
+        if (!settle && draft.some((step) => !step.title.trim())) {
+          this.#commit.set(key, commit);
           return;
         }
-        const remaining = { ...draft };
-        delete remaining.steps;
-        if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
-        else this.#drafts.delete(id);
+        this.#dropDraft(id, "steps");
+        // A step left blank keeps the title it had.
+        const value = settle
+          ? draft.flatMap((step) => {
+              const title = step.title.trim() || base.find((old) => old.id === step.id)?.title;
+              return title ? [{ ...step, title }] : [];
+            })
+          : draft;
+        if (sameSteps(value, base)) return;
         void this.#update(id, [{ field: "steps", value }], {
           reversible: false,
           expect: [{ field: "steps", value: base }],
         });
-      });
+      };
+      this.#commit.set(key, commit);
+    }
     this.#debounce(key);
+  }
+
+  /** Saves whatever is being typed into a task now, as leaving its fields
+   *  does; every task's when no id is given. */
+  commitText(id?: string) {
+    for (const [key, commit] of [...this.#commit]) {
+      if (id !== undefined && key.slice(key.indexOf(":") + 1) !== id) continue;
+      clearTimeout(this.#textTimers.get(key));
+      this.#textTimers.delete(key);
+      this.#commit.delete(key);
+      commit(true);
+    }
+  }
+
+  #dropDraft(id: string, field: keyof Patch) {
+    const remaining = { ...this.#drafts.get(id) };
+    delete remaining[field];
+    if (Object.keys(remaining).length) this.#drafts.set(id, remaining);
+    else this.#drafts.delete(id);
+  }
+
+  /** What native holds plus writes on their way, without anything still
+   *  being typed. */
+  #settled(id: string): TaskRow | undefined {
+    const item = this.#index.get(id);
+    if (!item) return undefined;
+    let row = toRow(item, this.#metadata.get(id), this.#bodies.get(id));
+    for (const job of this.#jobs.get(id) ?? []) row = { ...row, ...job.patch };
+    return row;
   }
 
   async updateSteps(id: string, steps: TaskStep[]) {
@@ -853,7 +928,7 @@ export class TaskSession {
         this.#textTimers.delete(key);
         const commit = this.#commit.get(key);
         this.#commit.delete(key);
-        commit?.();
+        commit?.(false);
       }, TEXT_DEBOUNCE_MS),
     );
   }
@@ -893,6 +968,7 @@ export class TaskSession {
     const running = this.#chain.get(id);
     if (running) return running;
     const run = (async () => {
+      let counted = false;
       while (this.#jobs.get(id)?.length) {
         const job = this.#jobs.get(id)![0]!;
         if (job.error) return false;
@@ -913,7 +989,7 @@ export class TaskSession {
           }
           job.command = { version: 1, request_id: crypto.randomUUID(), intent };
         }
-        const response = await this.#call({ kind: "mutate", command: job.command });
+        const response = await this.#mutate(job.command);
         if (response.kind !== "applied" || response.request_id !== job.command.request_id) {
           this.#fail(id, job, response.kind === "error" ? response.error : "outcome_unknown");
           return false;
@@ -924,8 +1000,10 @@ export class TaskSession {
         if (rest.length) this.#jobs.set(id, rest);
         else this.#jobs.delete(id);
         if (job.undo) this.#remember(job.undo);
+        counted ||= !job.set || job.set.some((field) => COUNTED.has(field.field));
       }
-      this.#scheduleOverview();
+      // Totals only move with what places a task; typing a title moves none.
+      if (counted) this.#scheduleOverview();
       return true;
     })().finally(() => this.#chain.delete(id));
     this.#chain.set(id, run);
@@ -942,11 +1020,14 @@ export class TaskSession {
     // A session nobody is viewing, such as the launcher's capture, keeps no
     // projection: it would only grow with every task it saves.
     if (task.kind !== "task" || !this.#active) return;
-    const old = this.items.find((item) => item.id === record.id);
+    const old = this.#index.get(record.id);
     if (old && BigInt(old.revision) > BigInt(record.revision)) return;
-    if (record.trashed !== this.trash)
+    if (record.trashed !== this.trash) {
       this.items = this.items.filter((item) => item.id !== record.id);
-    else this.items = mergePage(this.items, [summarize(record)]);
+      this.#prune();
+      return;
+    }
+    this.items = settleInto(this.items, summarize(record));
     this.#metadata.set(record.id, metadataOf(record.id, task));
     this.#bodies.set(record.id, {
       steps: detailsOf(task).steps,
@@ -959,9 +1040,15 @@ export class TaskSession {
   /** Another host or actor changed a task. Fetch just that task rather than
    *  reloading every loaded page; a search needs native's matching, so reloads. */
   #observe(id: string, revision: string) {
-    const known = this.items.find((item) => item.id === id);
+    const known = this.#index.get(id);
     if (known && !newerRevision(revision, known.revision)) return;
     if (this.#chain.has(id)) return;
+    // A task created here is announced before its reply arrives, and the reply
+    // carries the record; only what is still unknown after it needs reading.
+    if (!known && this.#creating) {
+      void this.#creating.then(() => this.#observe(id, revision));
+      return;
+    }
     if (!known && this.query.trim()) {
       this.#scheduleRefresh();
       return;
@@ -979,10 +1066,19 @@ export class TaskSession {
       const found = await this.#call({ kind: "get", id });
       if (epoch !== this.#epoch) return;
       if (found.kind === "record") this.#accept(found.record);
-      else if (found.kind === "error" && found.error === "not_found")
+      else if (found.kind === "error" && found.error === "not_found") {
         this.items = this.items.filter((item) => item.id !== id);
+        this.#prune();
+      }
     }
     this.#scheduleOverview();
+  }
+
+  /** Lets go of what was read for tasks no longer listed. */
+  #prune() {
+    const listed = this.#index;
+    for (const id of [...this.#metadata.keys()]) if (!listed.has(id)) this.#metadata.delete(id);
+    for (const id of [...this.#bodies.keys()]) if (!listed.has(id)) this.#bodies.delete(id);
   }
 
   async saveList(title: string, id?: string): Promise<TaskList | null> {
@@ -1022,7 +1118,7 @@ export class TaskSession {
     const command = this.#listMutation;
     if (!command) return Promise.resolve(null);
     this.#listBusy = (async () => {
-      const response = await this.#call({ kind: "mutate", command });
+      const response = await this.#mutate(command);
       if (response.kind !== "task_list_applied" || response.request_id !== command.request_id) {
         this.#listFailure = response.kind === "error" ? response.error : "outcome_unknown";
         return null;
@@ -1038,6 +1134,22 @@ export class TaskSession {
       return response.list;
     })().finally(() => (this.#listBusy = null));
     return this.#listBusy;
+  }
+
+  /** A busy or unanswered write is sent again as the same request, which
+   *  native settles once however often it arrives. */
+  async #mutate(command: ResourceCommand) {
+    for (let attempt = 0; ; attempt++) {
+      const response = await this.#call({ kind: "mutate", command });
+      const delay = RETRY_DELAYS[attempt];
+      if (
+        delay === undefined ||
+        response.kind !== "error" ||
+        (response.error !== "capacity" && response.error !== "outcome_unknown")
+      )
+        return response;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 
   #ack(request: string) {
@@ -1082,20 +1194,58 @@ export async function taskLists(profile: string, today: string): Promise<TaskLis
   return response.kind === "task_overview" ? response.lists : [];
 }
 
-const sessions = new SvelteMap<string, TaskSession>();
+/** Sessions kept for hosts to come back to, beyond which the one used least
+ *  recently is let go. One that is showing, or that holds anything unsaved,
+ *  is never let go to make room. */
+const MAX_SESSIONS = 6;
+type Kept = { session: TaskSession; dispose: () => void; used: number };
+const sessions = new SvelteMap<string, Kept>();
+let uses = 0;
+let watching = false;
+/** A hidden window may be closed or suspended without another chance to
+ *  save, so what is being typed is saved as it hides. */
+function watchVisibility() {
+  if (watching || typeof document === "undefined") return;
+  watching = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden") return;
+    for (const { session } of sessions.values()) session.commitText();
+  });
+}
+function makeRoom() {
+  while (sessions.size >= MAX_SESSIONS) {
+    let oldest: [string, Kept] | undefined;
+    for (const entry of sessions)
+      if (
+        !entry[1].session.active &&
+        !entry[1].session.retained &&
+        (!oldest || entry[1].used < oldest[1].used)
+      )
+        oldest = entry;
+    if (!oldest) return;
+    const [key, { session, dispose }] = oldest;
+    sessions.delete(key);
+    session.removeCloseTask();
+    dispose();
+  }
+}
 export function taskSession(profile: string, host: string): TaskSession {
   const key = `${profile}:${host}`;
   const existing = sessions.get(key);
-  if (existing) return existing;
-  // Never evict an active session or an unresolved user edit to satisfy a cache cap.
+  if (existing) {
+    existing.used = ++uses;
+    return existing.session;
+  }
+  watchVisibility();
+  makeRoom();
   // Built under its own root: a session outlives the view that first asked for
   // it, and deriveds created during that view's setup would die with it.
   let built: TaskSession | undefined;
-  $effect.root(() => {
+  const dispose = $effect.root(() => {
     built = new TaskSession(profile);
   });
   // Without a DOM there is no reactive owner to escape, and no root either.
   const session = built ?? new TaskSession(profile);
-  sessions.set(key, session);
+  sessions.set(key, { session, dispose, used: ++uses });
   return session;
 }

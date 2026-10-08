@@ -50,15 +50,26 @@ describe("tab projection admission", () => {
     expect(state.split_group).toBeNull();
   });
 
+  it("keeps the object of a tab whose revision did not change", () => {
+    const model = new TabProjectionModel();
+    model.applySnapshot(snapshot(3, [tab("a", 1), tab("b", 2)], "a"));
+    const [a, b] = model.value.tabs;
+    model.applySnapshot(snapshot(4, [tab("a", 1), tab("b", 4, { title: "Changed" })], "b"));
+    expect(model.value.tabs[0]).toBe(a);
+    expect(model.value.tabs[1]).not.toBe(b);
+    expect(model.value.tabs[1]?.title).toBe("Changed");
+    expect(model.value.active).toBe("b");
+  });
+
   it("accepts only strictly newer full snapshots", () => {
     const model = new TabProjectionModel();
     const current = snapshot(3, [tab("a", 1)], "a");
 
     expect(model.applySnapshot(current)).toBe(true);
-    expect(model.value).toBe(current);
+    expect(model.value).toStrictEqual(current);
     expect(model.applySnapshot({ ...current, active: null })).toBe(false);
     expect(model.applySnapshot(snapshot(2, [tab("b", 2)], "b"))).toBe(false);
-    expect(model.value).toBe(current);
+    expect(model.value).toStrictEqual(current);
   });
 
   it("patches one row while preserving unrelated tab identity", () => {
@@ -122,14 +133,14 @@ describe("tab projection admission", () => {
     };
 
     expect(model.applySnapshot(replacement)).toBe(true);
-    expect(model.value).toBe(replacement);
+    expect(model.value).toStrictEqual(replacement);
     expect(
       model.applySnapshot({
         ...snapshot(5, [tab("a", 4)], "a"),
         profile: { id: "stale", name: "Stale", kind: "incognito" },
       }),
     ).toBe(false);
-    expect(model.value).toBe(replacement);
+    expect(model.value).toStrictEqual(replacement);
   });
 
   it("lets an exact presentation update its tab and active id", () => {

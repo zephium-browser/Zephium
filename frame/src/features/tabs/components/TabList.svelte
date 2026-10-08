@@ -120,6 +120,17 @@
     if (drag.swallowClick()) return;
     onSelect(id);
   }
+
+  // A folded folder still shows as open while one of its own rows is shown;
+  // only its subtree is looked at, which ends at the next row as shallow.
+  function showsChild(position: number, depth: number): boolean {
+    for (let next = position + 1; next < displayUnits.length; next++) {
+      const child = displayUnits[next]!;
+      if (child.depth <= depth) return false;
+      if (!hiddenUnits.has(child.key)) return true;
+    }
+    return false;
+  }
 </script>
 
 <!--
@@ -145,13 +156,7 @@
       {#if unit.kind === "folder"}
         <FolderRow
           motionKey={unit.key}
-          expanded={!folded.has(unit.key) ||
-            displayUnits.some(
-              (child, index) =>
-                index > displayUnits.indexOf(unit) &&
-                child.depth > unit.depth &&
-                !hiddenUnits.has(child.key),
-            )}
+          expanded={!folded.has(unit.key) || showsChild(index, unit.depth)}
           ontoggle={() => toggleFolder(unit.key)}
           name={unit.node.kind.name}
           depth={unit.depth}

@@ -244,6 +244,7 @@ fn patch_for_decision(
 impl Shell {
     fn page_permission_request_is_foreground(&self, profile: ProfileId, item: ItemId) -> bool {
         self.window_visible
+            && self.window_focused
             && self.windows.focused().is_some_and(|window| {
                 window.profile == profile
                     && (window.active == Some(item) || self.work_pane_shows(item))

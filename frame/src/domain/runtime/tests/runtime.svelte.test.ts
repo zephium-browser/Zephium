@@ -48,6 +48,7 @@ describe("runtime status projection state", () => {
 
     native.emit({
       restart_required: false,
+      session_set_aside: false,
       user_content_degraded_scope_count: 0,
       security_advisories: [
         {
@@ -63,6 +64,7 @@ describe("runtime status projection state", () => {
     expect(native.stop).toHaveBeenCalledOnce();
     expect(runtime.status()).toEqual({
       restart_required: false,
+      session_set_aside: false,
       user_content_degraded_scope_count: 0,
       security_advisories: [],
     });

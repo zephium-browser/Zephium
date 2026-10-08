@@ -187,6 +187,9 @@ impl Driver {
                     allow_edits: task
                         && crate::work_sites::site_of(url)
                             .is_some_and(|site| self.sites.edits_allowed(&site)),
+                    hold_typing: task
+                        && crate::work_sites::site_of(url)
+                            .is_some_and(|site| self.typing_held.contains(&site)),
                 };
                 let future = Box::pin(browser(self.probe.clone(), request.clone()));
                 pending.push(PendingRead {
@@ -298,6 +301,8 @@ struct OpenConfirm {
     ask: u32,
     step: WorkStepId,
     site: String,
+    /// It holds typing rather than a commit.
+    typing: bool,
     decided: bool,
 }
 
@@ -374,12 +379,14 @@ impl Driver {
                     self.report(WorkAgentDiagnostic::SiteSignedOut);
                 }
                 while let Some((ask, confirmation)) = port.take_ask() {
+                    let typing = confirmation.category == WorkConfirmCategoryV1::Type;
                     let step = self.confirm_step(page, &site, confirmation).await?;
                     open.push(OpenConfirm {
                         port: port.clone(),
                         ask,
                         step,
                         site: site.clone(),
+                        typing,
                         decided: false,
                     });
                 }
@@ -460,6 +467,11 @@ impl Driver {
                         confirm.ask,
                         match decision {
                             WorkConfirmDecisionV1::Approved => WorkSiteDecision::Approve,
+                            WorkConfirmDecisionV1::AllowedForRun if confirm.typing => {
+                                self.typing_held.retain(|site| *site != confirm.site);
+                                self.typing_allowed.push(confirm.site.clone());
+                                WorkSiteDecision::AllowForRun
+                            }
                             WorkConfirmDecisionV1::AllowedForRun => {
                                 self.sites.allow_edits(&confirm.site);
                                 WorkSiteDecision::AllowForRun

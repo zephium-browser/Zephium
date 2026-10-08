@@ -975,3 +975,66 @@ fn a_deadline_places_a_task_by_whichever_day_comes_first() {
     };
     assert_eq!((overview.today, overview.all), (3, 5));
 }
+
+#[test]
+fn a_new_run_keeps_only_the_newest_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(43);
+    let open = || {
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        hub.meta
+            .execute(
+                "INSERT OR IGNORE INTO profiles(id, name, kind, position) VALUES (?1, 'Fixture', 'named', 0)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.load_registry().unwrap();
+        hub
+    };
+    let mutate = |hub: &mut Hub, command: ResourceCommand| {
+        applied(hub.resource_call(
+            profile,
+            ResourceCall::Mutate {
+                command: Box::new(command),
+            },
+        ))
+    };
+    let mut hub = open();
+    let first = mutate(
+        &mut hub,
+        command("first", ResourceIntent::Create { draft: task() }),
+    );
+    let conn = hub.profile_conn(profile).unwrap();
+    for n in 0..(KEPT_RECEIPTS + 4) {
+        conn.execute(
+            "INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES(?1,zeroblob(32),?2,1,?3)",
+            params![format!("filler-{n:0>12}"), first.id, n % 2],
+        )
+        .unwrap();
+    }
+    let last = command("last", ResourceIntent::Create { draft: task() });
+    let made = mutate(&mut hub, last.clone());
+    drop(hub);
+
+    let mut hub = open();
+    let count = |hub: &mut Hub| -> i64 {
+        hub.profile_conn(profile)
+            .unwrap()
+            .query_row("SELECT count(*) FROM user_resource_receipts", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(count(&mut hub), KEPT_RECEIPTS);
+    // The newest write is still answered from its receipt, not applied twice.
+    assert_eq!(mutate(&mut hub, last).id, made.id);
+    // The oldest is gone, so replaying it would make a second task.
+    assert_ne!(
+        mutate(
+            &mut hub,
+            command("first", ResourceIntent::Create { draft: task() })
+        )
+        .id,
+        first.id
+    );
+}

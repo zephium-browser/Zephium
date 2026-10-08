@@ -21,8 +21,10 @@ use zephium_core::ids::ItemId;
 use super::{ContentPolicyTimeout, ContentStage};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
-const MAX_COVER_TIME: Duration = Duration::from_millis(250);
-const FIRST_FRAME: &str = "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true;";
+// Animation frames fire on a blank canvas; the cover holds until the page
+// has painted content (or the bound passes) so no empty white frame shows.
+const MAX_COVER_TIME: Duration = Duration::from_millis(600);
+const FIRST_FRAME: &str = "await new Promise(resolve => { const settle = () => requestAnimationFrame(() => resolve()); try { if (performance.getEntriesByName('first-contentful-paint').length) return settle(); const observer = new PerformanceObserver(list => { if (list.getEntriesByName('first-contentful-paint').length) { observer.disconnect(); settle(); } }); observer.observe({type: 'paint', buffered: true}); } catch (_) { requestAnimationFrame(settle); } }); return true;";
 // A restored page reloads from cache under its last frame. Hold that frame
 // until the document has parsed and painted twice, within a short bound.
 const MAX_RESTORE_COVER_TIME: Duration = Duration::from_millis(1500);
@@ -179,10 +181,10 @@ impl PaintCover {
         let page = view.webview();
         // SAFETY: the view and world are retained on WebKit's main thread;
         // WebKit copies the completion block. The script returns a primitive,
-        // touches no DOM and installs no persistent page observer. It runs in
-        // the page's own world: a named world would build a second realm in
-        // every document for its lifetime, and a page that delays or forges
-        // this hint only moves the bounded cover's removal.
+        // touches no DOM, and its paint observer disconnects at first paint.
+        // It runs in the page's own world: a named world would build a second
+        // realm in every document for its lifetime, and a page that delays or
+        // forges this hint only moves the bounded cover's removal.
         unsafe {
             let world = WKContentWorld::pageWorld(mtm);
             page.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(

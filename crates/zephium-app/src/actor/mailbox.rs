@@ -30,6 +30,7 @@ enum CoalescedKey {
     Presentation(ItemId),
     ChromePresentation(ItemId),
     PresentationFallback(ItemId),
+    Fullscreen(ItemId),
     DiscardProbeTimeout(ItemId),
     ViewCapacityRetry(ItemId),
     BlockerReady(ProfileId),
@@ -55,6 +56,7 @@ enum CoalescedKey {
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
+    MediaCapture(ItemId),
     MemoryPressure,
     SidebarWidth,
     SidebarGuide,
@@ -79,14 +81,15 @@ impl CoalescedKey {
             | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
-            EngineEvent::NativeActionFailed { id, .. } | EngineEvent::PageOpenBlocked { id } => {
-                Self::NativeAction(*id)
-            }
+            EngineEvent::NativeActionFailed { id, .. }
+            | EngineEvent::PageOpenBlocked { id, .. } => Self::NativeAction(*id),
             EngineEvent::ExtensionActionsInvalidated { profile } => {
                 Self::ExtensionActions(*profile)
             }
             EngineEvent::ExtensionPageClosed { id, .. } => Self::ExtensionPageClosed(*id),
             EngineEvent::ExtensionPageChanged { id, .. } => Self::ExtensionPageChanged(*id),
+            EngineEvent::MediaCaptureChanged { id, .. } => Self::MediaCapture(*id),
+            EngineEvent::FullscreenChanged { id, .. } => Self::Fullscreen(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
                 profile, requested, ..
@@ -104,14 +107,14 @@ impl CoalescedKey {
 // burst.
 const NORMAL_COMMAND_CAPACITY: usize = 960;
 // Each tracked tab can have one latest URL, presentation, navigation failure,
-// terminal view-state, zoom settlement, and native-action failure fact. Each
-// profile can independently have one process-exit fact, compiler-result wake,
-// preference-store wake, native-policy settlement, and durable-deletion
-// callback wakeup. The current
-// single-window shell can have one native split fact, and the process can have
-// one sticky runtime-update fact. Reserve all of those independently of the
+// terminal view-state, zoom settlement, native-action failure, media-capture
+// and fullscreen fact. Each profile can independently have one process-exit
+// fact, compiler-result wake, preference-store wake, native-policy settlement,
+// and durable-deletion callback wakeup. The current single-window shell can
+// have one native split fact, and the process can have one sticky
+// runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
-const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 9
+const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 10
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
@@ -231,6 +234,8 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
+    MediaCapture(ItemId),
+    Fullscreen(ItemId),
     RuntimeRestart,
     MemoryPressure,
     SidebarGuideEnd,
@@ -252,6 +257,12 @@ enum RecoveryKey {
 
 fn recovery_key(command: &Command) -> Option<RecoveryKey> {
     match command {
+        Command::Engine(EngineEvent::MediaCaptureChanged { id, .. }) => {
+            Some(RecoveryKey::MediaCapture(*id))
+        }
+        Command::Engine(EngineEvent::FullscreenChanged { id, .. }) => {
+            Some(RecoveryKey::Fullscreen(*id))
+        }
         Command::Engine(EngineEvent::RuntimeRestartRequired) => Some(RecoveryKey::RuntimeRestart),
         Command::SetMemoryPressure(_) => Some(RecoveryKey::MemoryPressure),
         Command::SidebarResizeGuide(None) => Some(RecoveryKey::SidebarGuideEnd),
@@ -1141,7 +1152,8 @@ fn command_is_critical(command: &Command) -> bool {
     }
     matches!(
         command,
-        Command::BlockerReady(_)
+        Command::SetWindowFocused(false)
+            | Command::BlockerReady(_)
             | Command::SetMemoryPressure(_)
             | Command::SidebarResizeGuide(None)
             | Command::BlockerStoreReady(_)
@@ -1166,6 +1178,8 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionPageClosed { .. }
                     | EngineEvent::ExtensionPageChanged { .. }
                     | EngineEvent::PermissionRequested { .. }
+                    | EngineEvent::MediaCaptureChanged { .. }
+                    | EngineEvent::FullscreenChanged { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }

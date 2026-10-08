@@ -10,14 +10,14 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
-    NSWindowOrderingMode, NSWorkspace,
+    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSCursor,
+    NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWorkspace,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSValue,
+    ns_string, MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSNumber,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSValue,
 };
 use objc2_quartz_core::{
     kCAFillModeForwards, CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction,
@@ -635,8 +635,7 @@ impl ContentStage {
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
         view.setFrame(host.view.frame());
         if let Some(layer) = view.layer() {
-            let color = NSColor::windowBackgroundColor();
-            layer.setBackgroundColor(Some(&color.CGColor()));
+            layer.setBackgroundColor(Some(&page_ground(self).CGColor()));
             if let Some(image) = image {
                 let contents: &AnyObject = image.as_ref();
                 // SAFETY: a CGImage is valid layer contents; the layer retains it.
@@ -784,10 +783,15 @@ impl ContentStage {
         if self.ivars().stage_retry_terminal.get() {
             return false;
         }
+        // A page WebKit is showing fullscreen is registered but left where it
+        // is; `adopt_after_fullscreen` brings it in once WebKit lets go.
+        let presenting = super::fullscreen::in_transition(&view);
         // `addSubview:` may paint synchronously. Hide before attaching so a
         // new WKWebView cannot expose its default white backing store between
         // construction and the first attributed, chrome-verified document.
-        view.setHidden(true);
+        if !presenting {
+            view.setHidden(true);
+        }
         let Ok(mut ready) = self.ivars().ready.try_borrow_mut() else {
             return false;
         };
@@ -807,7 +811,9 @@ impl ContentStage {
         self.bump_layout_epoch();
         // `addSubview:` can synchronously enter AppKit callbacks. Native work
         // happens only after the view registry borrow has been released.
-        self.addSubview(&view);
+        if !presenting {
+            self.addSubview(&view);
+        }
         if self.ivars().stage_retry_terminal.get() {
             return false;
         }
@@ -838,8 +844,54 @@ impl ContentStage {
             .and_then(|mut views| views.remove(&id));
         if let Some(view) = view {
             self.bump_layout_epoch();
-            view.view.removeFromSuperview();
+            // Pulling a page out of WebKit's fullscreen window would strand
+            // that window; the host lets WebKit hand it back before teardown.
+            if !super::fullscreen::webkit_owns(&view.view, self) {
+                view.view.removeFromSuperview();
+            }
         }
+    }
+
+    /// Takes a page back after WebKit's fullscreen window let go of it and
+    /// lays it out again. WebKit normally returns it to this stage itself.
+    pub fn adopt_after_fullscreen(&self, id: ItemId) -> bool {
+        if self.ivars().stage_retry_terminal.get() {
+            return false;
+        }
+        let Some(view) = self
+            .ivars()
+            .views
+            .try_borrow()
+            .ok()
+            .and_then(|views| views.get(&id).map(|view| view.view.clone()))
+        else {
+            return true;
+        };
+        if super::fullscreen::in_transition(&view) {
+            return true;
+        }
+        // SAFETY: retained parent access on the AppKit main thread.
+        let home = unsafe { view.superview() }
+            .as_deref()
+            .is_some_and(|parent| std::ptr::eq(parent, &**self));
+        if !home {
+            view.setHidden(true);
+            let cover = self
+                .ivars()
+                .covers
+                .try_borrow()
+                .ok()
+                .and_then(|covers| covers.get(&id).map(|cover| cover.view.clone()));
+            self.addSubview_positioned_relativeTo(
+                &view,
+                NSWindowOrderingMode::Below,
+                cover.as_deref(),
+            );
+        }
+        self.bump_layout_epoch();
+        let _ = self.position_panes();
+        let _ = self.sync_visibility();
+        !self.ivars().stage_retry_terminal.get()
     }
 
     pub fn set_visible(&self, visible: &[ItemId]) -> bool {
@@ -1088,7 +1140,7 @@ impl ContentStage {
             if created || changed_mode {
                 let paint = block2::RcBlock::new(|| {
                     let color = if dragging {
-                        NSColor::controlAccentColor()
+                        NSColor::labelColor()
                     } else {
                         NSColor::secondaryLabelColor()
                     };
@@ -1379,6 +1431,9 @@ impl ContentStage {
                     if rounded_native_size(backing.width, backing.height, 1.0).is_some() {
                         paintable.insert(id);
                     }
+                    if super::fullscreen::webkit_owns(&view.view, self) {
+                        continue;
+                    }
                     let current = view.view.frame();
                     if !self.layout_epoch_is_current(epoch) {
                         continue 'attempt;
@@ -1471,6 +1526,9 @@ impl ContentStage {
                     || !paintable.contains(id)
                     || !view.presentation_permit.load(Ordering::Acquire)
             }) {
+                if super::fullscreen::webkit_owns(&view.view, self) {
+                    continue;
+                }
                 if !view.view.isHidden() {
                     view.view.setHidden(true);
                 }
@@ -1508,6 +1566,9 @@ impl ContentStage {
                 if !still_current {
                     superseded = true;
                     break;
+                }
+                if super::fullscreen::webkit_owns(&view.view, self) {
+                    continue;
                 }
                 let hidden = view.view.isHidden();
                 if !self.layout_epoch_is_current(epoch)
@@ -1564,6 +1625,7 @@ impl ContentStage {
         if let Ok(views) = self.ivars().views.try_borrow() {
             for (id, view) in views.iter() {
                 if !view.view.isHidden()
+                    && !super::fullscreen::webkit_owns(&view.view, self)
                     && (!visible.contains(id)
                         || !ready.contains(id)
                         || !paintable.contains(id)
@@ -1832,6 +1894,28 @@ fn translation(from: f64, to: f64, seconds: f64) -> Retained<CABasicAnimation> {
     animation.setDuration(seconds);
     animation.setTimingFunction(Some(&emphasized()));
     animation
+}
+
+/// The frame's content ground (`--color-page` in frame/src/styles/tokens.css),
+/// so a cover reads as the empty content pane, not a step to another grey.
+fn page_ground(view: &NSView) -> Retained<NSColor> {
+    // SAFETY: immutable framework constants.
+    let (aqua, dark) = unsafe { (NSAppearanceNameAqua, NSAppearanceNameDarkAqua) };
+    let is_dark = view
+        .effectiveAppearance()
+        .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&[aqua, dark]))
+        .is_some_and(|name| name.isEqualToString(dark));
+    let (red, green, blue) = if is_dark {
+        crate::platform::PAGE_GROUND_DARK
+    } else {
+        crate::platform::PAGE_GROUND_LIGHT
+    };
+    NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(red) / 255.0,
+        f64::from(green) / 255.0,
+        f64::from(blue) / 255.0,
+        1.0,
+    )
 }
 
 fn fade_out(view: &Retained<NSView>) {

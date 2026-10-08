@@ -7,6 +7,7 @@
   import ContextCard from "./ContextCard.svelte";
   import EntryCard from "./EntryCard.svelte";
   import FolderCard from "./FolderCard.svelte";
+  import AddressCard from "./AddressCard.svelte";
   import QuestionCard from "./QuestionCard.svelte";
   import SignInCard from "./SignInCard.svelte";
 
@@ -78,6 +79,8 @@
       onanswer={answer}
       onchoose={actions.chooseFolder ? () => void choose(ask.path) : undefined}
     />
+  {:else if ask.kind === "address"}
+    <AddressCard {ask} {placement} {busy} onanswer={answer} />
   {:else if ask.kind === "sign_in"}
     <SignInCard
       {ask}

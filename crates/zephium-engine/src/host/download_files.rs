@@ -102,7 +102,11 @@ impl Destination {
         Ok(())
     }
 
-    pub(super) fn finish(mut self, source: &str) -> Result<(PathBuf, FileIdentity), DownloadError> {
+    pub(super) fn finish(
+        mut self,
+        source: &str,
+        expected_bytes: Option<u64>,
+    ) -> Result<(PathBuf, FileIdentity), DownloadError> {
         self.verify_namespace()?;
         // SAFETY: both the directory descriptor and the fixed NUL-terminated
         // leaf are owned here. O_NOFOLLOW prevents replacing payload with a link.
@@ -120,6 +124,9 @@ impl Destination {
         let metadata = file.metadata().map_err(map_io)?;
         if !metadata.is_file() || metadata.nlink() != 1 {
             return Err(DownloadError::ChangedFile);
+        }
+        if expected_bytes.is_some_and(|bytes| metadata.len() != bytes) {
+            return Err(DownloadError::Integrity);
         }
         quarantine(&self.payload(), source)?;
         self.verify_namespace()?;
@@ -306,7 +313,9 @@ fn map_io(error: std::io::Error) -> DownloadError {
         Some(libc::ENOSPC) => DownloadError::DiskFull,
         // EPERM is what macOS privacy consent returns for Downloads, Desktop
         // and Documents; EACCES is an ordinary permission denial.
-        Some(libc::EPERM | libc::EACCES) => DownloadError::Permission,
+        Some(libc::EPERM | libc::EACCES | libc::EROFS) => DownloadError::Permission,
+        Some(libc::EBUSY | libc::EMFILE | libc::ENFILE) => DownloadError::FileBusy,
+        Some(libc::EFBIG) => DownloadError::FileTooLarge,
         _ => DownloadError::Destination,
     }
 }
@@ -452,7 +461,7 @@ mod tests {
             Destination::prepare(DownloadId::generate(), output.clone(), None).unwrap();
         fs::write(destination.payload(), b"download bytes").unwrap();
         let stage = destination.staging_path.clone();
-        let (published, identity) = destination.finish("https://example.com").unwrap();
+        let (published, identity) = destination.finish("https://example.com", None).unwrap();
         assert_eq!(fs::read(output).unwrap(), b"existing user data");
         assert_eq!(published.file_name().unwrap(), "report (1).txt");
         assert_eq!(fs::read(&published).unwrap(), b"download bytes");
@@ -476,8 +485,77 @@ mod tests {
         )
         .unwrap();
         std::os::unix::fs::symlink(&victim, destination.payload()).unwrap();
-        assert!(destination.finish("https://example.com").is_err());
+        assert!(destination.finish("https://example.com", None).is_err());
         assert_eq!(fs::read(victim).unwrap(), b"keep");
         assert!(!directory.path().join("download").exists());
+    }
+
+    #[test]
+    fn repeated_multidot_and_unicode_downloads_keep_numbered_names() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["archive.tar.gz", "Résumé.pdf", "download"] {
+            fs::write(root.path().join(name), b"existing").unwrap();
+            for suffix in 1..=2 {
+                let destination =
+                    Destination::prepare(DownloadId::generate(), root.path().join(name), None)
+                        .unwrap();
+                fs::write(destination.payload(), b"new").unwrap();
+                let (path, receipt) = destination.finish("https://example.com", Some(3)).unwrap();
+                assert_eq!(
+                    path.file_name().unwrap(),
+                    collision_name(name, suffix).as_str()
+                );
+                verify_file(&path, &receipt).unwrap();
+            }
+            assert_eq!(fs::read(root.path().join(name)).unwrap(), b"existing");
+        }
+    }
+
+    #[test]
+    fn concurrent_same_name_downloads_publish_distinct_files() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("report.txt");
+        fs::write(&output, b"existing").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|index| {
+                let destination =
+                    Destination::prepare(DownloadId::generate(), output.clone(), None).unwrap();
+                let bytes = format!("worker {index}");
+                fs::write(destination.payload(), &bytes).unwrap();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let (path, receipt) = destination
+                        .finish("https://example.com", Some(bytes.len() as u64))
+                        .unwrap();
+                    assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
+                    verify_file(&path, &receipt).unwrap();
+                    path
+                })
+            })
+            .collect();
+        let published: std::collections::HashSet<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(published.len(), 8);
+        assert_eq!(fs::read(output).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 9);
+    }
+
+    #[test]
+    fn native_file_byte_mismatch_never_publishes_a_partial_file() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("file.txt");
+        let destination =
+            Destination::prepare(DownloadId::generate(), output.clone(), None).unwrap();
+        fs::write(destination.payload(), b"short").unwrap();
+        assert!(matches!(
+            destination.finish("https://example.com", Some(100)),
+            Err(DownloadError::Integrity)
+        ));
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

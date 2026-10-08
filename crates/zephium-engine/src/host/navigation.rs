@@ -143,6 +143,8 @@ impl EngineHost {
             view.presentation_permit.store(false, Ordering::Release);
             view.title_ready = None;
         }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.fullscreen_document_committed(id);
         let mut stages_pending = true;
         for stage in self.stages.values() {
             // Do not short-circuit: every retained stage must lose the old
@@ -384,6 +386,26 @@ impl EngineHost {
             );
             self.refresh_document_styles(id);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(view) = self
+            .views
+            .get(&id)
+            .filter(|view| view.navigation.current_committed() == Some(epoch))
+        {
+            let state = crate::platform::macos::capture::sample(
+                &crate::platform::macos::native_webview(&view.view),
+            );
+            if view.navigation.current_committed() == Some(epoch) {
+                event_permit.emit(
+                    &self.sink,
+                    EngineEvent::MediaCaptureChanged {
+                        id,
+                        navigation: epoch.presentation_id(),
+                        state,
+                    },
+                );
+            }
+        }
         self.navigation_snapshots
             .get(&id)
             .and_then(|snapshot| snapshot.url.as_deref())
@@ -505,10 +527,22 @@ impl EngineHost {
                     snapshot,
                 )
             });
+        #[cfg(target_os = "windows")]
+        let cover = self
+            .views
+            .get(&id)
+            .filter(|view| !view.presentable)
+            .and_then(|view| {
+                crate::platform::imp::PaintCover::begin(
+                    id,
+                    &view.view,
+                    self.stages.values().cloned(),
+                )
+            });
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
             return;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let previous = self.views.get_mut(&id).and_then(|view| {
                 if view.presentable {
@@ -519,9 +553,9 @@ impl EngineHost {
                     std::mem::replace(&mut view.paint_cover, cover)
                 }
             });
-            // Removing an old native cover may re-enter AppKit. Do not hold a
-            // view borrow or publish a permit until exact attribution is
-            // rechecked after that cleanup.
+            // Removing an old native cover may re-enter the platform UI. Do
+            // not hold a view borrow or publish a permit until exact
+            // attribution is rechecked after that cleanup.
             drop(previous);
         }
         if !self.navigation_is_attributed(id, source_permit, source_navigation, epoch) {
@@ -722,9 +756,10 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
         };
-        if let Err(error) = view.load_url(url) {
+        if view.load_url(url).is_err() {
             view.navigation.fail_synchronous(epoch);
-            eprintln!("engine: navigation failed: {error}");
+            // The engine's error text can carry the address.
+            eprintln!("engine: navigation could not start");
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
         }
@@ -744,6 +779,7 @@ impl EngineHost {
             return;
         }
         if let Some(view) = self.views.get(&id) {
+            view.navigation.release_auth_cleanup();
             crate::platform::imp::stop_loading(view);
         }
     }
@@ -766,6 +802,9 @@ impl EngineHost {
 
     fn invoke_navigation_action(&mut self, id: ItemId, action: NativeAction) {
         let Some((permit, navigation, failed)) = self.views.get(&id).map(|view| {
+            // The user has taken control of this tab even if the native
+            // reload/history call fails. Auth cleanup cannot take it back.
+            view.navigation.release_auth_cleanup();
             let result = match action {
                 NativeAction::Reload => view.reload(),
                 NativeAction::GoBack => view.go_back(),

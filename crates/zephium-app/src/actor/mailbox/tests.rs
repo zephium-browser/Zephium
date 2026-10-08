@@ -581,9 +581,17 @@ fn overloaded_queue_never_blocks_and_reserves_lifecycle_capacity() {
             .ok()
             .unwrap();
     }
+    // A crash for an already retained physical item replaces its earlier
+    // failure fact even at the hard ceiling, without consuming another slot.
+    assert!(queue
+        .try_push(Command::Engine(EngineEvent::Crashed {
+            id: ItemId::from(100),
+        }))
+        .is_ok());
     assert!(matches!(
         queue.try_push(Command::Engine(EngineEvent::Crashed {
-            id: ItemId::from(9999),
+            // Stay outside the synthetic cohort as capacity changes.
+            id: ItemId::from(u128::MAX),
         })),
         Err(TryPushError::Full(_))
     ));

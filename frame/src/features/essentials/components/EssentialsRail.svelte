@@ -9,6 +9,8 @@
   import { tabs } from "$domain/tabs";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
+  import CaptureControl from "$shared/ui/CaptureControl";
+  import { stopCaptureFor } from "$domain/capture";
   import { favicons } from "$domain/favicons";
 
   let {
@@ -93,6 +95,15 @@
         />
         <span data-zephium-tab-label class="sr-only">{tab.title}</span>
       </button>
+      {#if tab.capture}
+        <span class="capture-badge">
+          {#key tab.capture.navigation_id}<CaptureControl
+              onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
+              site={tab.url ?? tab.title}
+              capture={tab.capture}
+            />{/key}
+        </span>
+      {/if}
     </li>
   {/each}
   <!-- With nothing kept yet, a drag still needs somewhere to keep it: one
@@ -108,6 +119,18 @@
   />{/if}
 
 <style>
+  .rail-sites > li {
+    position: relative;
+  }
+
+  .capture-badge {
+    position: absolute;
+    inset-inline-end: -6px;
+    inset-block-end: -4px;
+    background: var(--color-raised);
+    border-radius: var(--radius-capsule);
+  }
+
   .rail-sites {
     display: flex;
     flex-direction: column;

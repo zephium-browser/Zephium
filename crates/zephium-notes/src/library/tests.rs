@@ -39,12 +39,33 @@ fn write(
     note: &NoteSummary,
     markdown: &str,
 ) -> (NoteResponse, Changes) {
+    save(library, n, note, markdown, false)
+}
+
+/// A write made as the person leaves the note, or stops retitling it.
+fn settle(
+    library: &mut Library,
+    n: u32,
+    note: &NoteSummary,
+    markdown: &str,
+) -> (NoteResponse, Changes) {
+    save(library, n, note, markdown, true)
+}
+
+fn save(
+    library: &mut Library,
+    n: u32,
+    note: &NoteSummary,
+    markdown: &str,
+    settle: bool,
+) -> (NoteResponse, Changes) {
     library.call(
         NoteCall::Write {
             request_id: request(n),
             id: note.id.clone(),
             base_revision: note.revision.clone(),
             markdown: markdown.into(),
+            settle,
         },
         NOW,
     )
@@ -131,9 +152,68 @@ fn only_a_new_title_is_news_beyond_the_note_itself() {
     let (response, changes) = write(&mut library, 2, &note, "# Plans\n\nTwo");
     assert_eq!(changes.ids, std::slice::from_ref(&note.id));
     assert!(!changes.reset);
+    assert!(changes.links.is_empty());
     let saved = applied((response, changes));
-    let (_, changes) = write(&mut library, 3, &saved, "# Roadmap\n\nTwo");
-    assert!(changes.reset);
+    // A retitle changes where links lead, not which notes there are.
+    let (_, changes) = write(&mut library, 3, &saved, "# Road  Map\n\nTwo");
+    assert!(!changes.reset);
+    assert_eq!(changes.links, ["plans", "road map"]);
+}
+
+#[test]
+fn typing_a_new_title_renames_the_file_once_it_settles() {
+    let (_base, mut library) = library();
+    let note = create(&mut library, 1, "# G");
+    assert_eq!(note.path, "G.md");
+    let note = applied(write(&mut library, 2, &note, "# Gr"));
+    let (response, changes) = write(&mut library, 3, &note, "# Groceries");
+    assert!(!changes.reset);
+    let note = applied((response, changes));
+    assert_eq!(
+        (note.path.as_str(), note.title.as_str()),
+        ("G.md", "Groceries")
+    );
+    // Leaving the note writes nothing new and gives the file its name.
+    let (response, changes) = settle(&mut library, 4, &note, "# Groceries");
+    assert_eq!(changes.ids, std::slice::from_ref(&note.id));
+    assert_eq!(changes.links, ["g", "groceries"]);
+    assert!(!changes.reset);
+    let settled = applied((response, changes));
+    assert_eq!(settled.path, "Groceries.md");
+    assert_eq!(settled.revision, note.revision);
+    assert!(library.root().join("Groceries.md").exists());
+    assert!(!library.root().join("G.md").exists());
+    // Settling again has nothing left to do.
+    let (_, changes) = settle(&mut library, 5, &settled, "# Groceries");
+    assert!(changes.ids.is_empty() && changes.links.is_empty());
+}
+
+#[test]
+fn a_retitle_not_yet_settled_survives_a_restart() {
+    let base = tempfile::tempdir().unwrap();
+    let mut library = Library::open(base.path(), "profile").unwrap();
+    let note = create(&mut library, 1, "# Draft");
+    let note = applied(write(&mut library, 2, &note, "# Final"));
+    drop(library);
+    let mut library = Library::open(base.path(), "profile").unwrap();
+    let note = applied(settle(&mut library, 3, &note, "# Final\n\nDone"));
+    assert_eq!(note.path, "Final.md");
+}
+
+#[test]
+fn a_file_renamed_elsewhere_mid_retitle_keeps_its_name() {
+    let (_base, mut library) = library();
+    let note = create(&mut library, 1, "# Ideas");
+    applied(write(&mut library, 2, &note, "# Better ideas"));
+    fs::rename(
+        library.root().join("Ideas.md"),
+        library.root().join("Keep me.md"),
+    )
+    .unwrap();
+    library.reconcile(NOW).unwrap();
+    let note = list(&mut library, "", false).remove(0);
+    let note = applied(settle(&mut library, 3, &note, "# Best ideas"));
+    assert_eq!(note.path, "Keep me.md");
 }
 
 #[test]
@@ -142,9 +222,9 @@ fn the_file_name_follows_the_title_until_someone_renames_it() {
     create(&mut library, 1, "# Ideas");
     let note = create(&mut library, 2, "# Ideas");
     assert_eq!(note.path, "Ideas 2.md");
-    let note = applied(write(&mut library, 3, &note, "# Groceries\n\nMilk"));
+    let note = applied(settle(&mut library, 3, &note, "# Groceries\n\nMilk"));
     assert_eq!(note.path, "Groceries.md");
-    let note = applied(write(&mut library, 4, &note, "# groceries\n\nMilk"));
+    let note = applied(settle(&mut library, 4, &note, "# groceries\n\nMilk"));
     assert_eq!(note.path, "groceries.md");
     fs::rename(
         library.root().join("groceries.md"),
@@ -157,7 +237,7 @@ fn the_file_name_follows_the_title_until_someone_renames_it() {
         .find(|n| n.id == note.id)
         .unwrap();
     assert_eq!(note.path, "Shopping list.md");
-    let note = applied(write(&mut library, 5, &note, "# Weekly shop\n\nMilk"));
+    let note = applied(settle(&mut library, 5, &note, "# Weekly shop\n\nMilk"));
     assert_eq!(note.path, "Shopping list.md");
     assert_eq!(note.title, "Weekly shop");
 }

@@ -53,6 +53,14 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var weakSetAdd = WeakSet.prototype.add;
   var weakSetHas = WeakSet.prototype.has;
   var arrayPush = Array.prototype.push;
+  // A hook is the native function behind a proxy: its name, length and
+  // source text stay native, so pages and anti-bot checks that inspect
+  // built-ins see nothing changed.
+  function disguise(original, call) {
+    return new Proxy(original, {
+      apply: function(target, self, args) { return call(self, args); }
+    });
+  }
 
   function captureGetter(proto, name) {
     try {
@@ -128,11 +136,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     if (typeof originalAttachShadow !== 'function' || !createTreeWalker || !walkerNext || !elementMatches || !weakDeref || !shadowRootGetter) {
       uncertain = true;
     } else {
-      wrappedAttachShadow = function() {
-        var root = apply(originalAttachShadow, this, arguments);
+      wrappedAttachShadow = disguise(originalAttachShadow, function(self, args) {
+        var root = apply(originalAttachShadow, self, args);
         rememberShadowRoot(root);
         return root;
-      };
+      });
       elementProto.attachShadow = wrappedAttachShadow;
     }
   } catch (_) { uncertain = true; }
@@ -238,8 +246,9 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     return options === true || (!!options && typeof options === 'object' && options.capture === true);
   }
   try {
-    wrappedAdd = function(type, listener, options) {
-      if ((this === undefined || this === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
+    wrappedAdd = disguise(originalAdd, function(self, args) {
+      var type = args[0], listener = args[1], options = args[2];
+      if ((self === undefined || self === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
         var capture = captureOption(options);
         var found = false;
         for (var i = 0; i < beforeUnload.length; i++) {
@@ -250,11 +259,12 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
           else incomplete = true;
         }
       }
-      return apply(originalAdd, this, arguments);
-    };
-    wrappedRemove = function(type, listener, options) {
-      var result = apply(originalRemove, this, arguments);
-      if ((this === undefined || this === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
+      return apply(originalAdd, self, args);
+    });
+    wrappedRemove = disguise(originalRemove, function(self, args) {
+      var type = args[0], listener = args[1], options = args[2];
+      var result = apply(originalRemove, self, args);
+      if ((self === undefined || self === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
         var capture = captureOption(options);
         for (var i = 0; i < beforeUnload.length; i++) {
           if (beforeUnload[i][0] === listener && beforeUnload[i][1] === capture) {
@@ -263,7 +273,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
         }
       }
       return result;
-    };
+    });
     eventTarget.addEventListener = wrappedAdd;
     eventTarget.removeEventListener = wrappedRemove;
   } catch (_) { uncertain = true; }
@@ -282,10 +292,10 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     try {
       if (!proto || typeof proto[name] !== 'function') return;
       var original = proto[name];
-      var wrapped = function() {
-        var result = apply(original, this, arguments);
+      var wrapped = disguise(original, function(self, args) {
+        var result = apply(original, self, args);
         return Promise.resolve(result).then(observeStream);
-      };
+      });
       proto[name] = wrapped;
       return [proto, name, wrapped];
     } catch (_) { uncertain = true; return null; }
@@ -747,7 +757,8 @@ struct ProtectedScriptSpec {
 }
 
 const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
-    4 + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
+    3 + cfg!(not(target_os = "macos")) as usize
+        + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
     ProtectedScriptSpec {
         id: 6,
         source: include_str!("content_style.js"),
@@ -763,6 +774,9 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         source: EXTRACT_HTML_BOOTSTRAP_JS,
         all_frames: false,
     },
+    // WKWebView has no page-initiated print surface, so only WebView2 needs
+    // the guard; on macOS it would only mark built-ins as altered.
+    #[cfg(not(target_os = "macos"))]
     ProtectedScriptSpec {
         id: 3,
         source: crate::PAGE_PRINT_DENY_SCRIPT,

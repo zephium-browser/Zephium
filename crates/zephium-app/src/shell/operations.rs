@@ -5,6 +5,9 @@ use super::*;
 impl Shell {
     pub(super) fn handle_operation(&mut self, command: Command) -> OperationDisposition {
         match command {
+            Command::StopMediaCapture { item, navigation } => {
+                self.operation_stop_media_capture(item, navigation)
+            }
             Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
             Command::WorkPaneShow { target, rect } => self.operation_work_pane_show(target, rect),
             Command::WorkPaneHide => self.operation_work_pane_hide(),
@@ -20,6 +23,9 @@ impl Shell {
             Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
+            Command::AnswerPageRequest { id, decision } => {
+                self.operation_answer_page_request(id, decision)
+            }
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
             Command::SplitWith { other, axis } => self.operation_split(other, axis),
@@ -59,6 +65,32 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::UnsupportedCommand,
             ),
+        }
+    }
+
+    pub(super) fn operation_stop_media_capture(
+        &mut self,
+        item: ItemId,
+        navigation: NavigationPresentationId,
+    ) -> OperationDisposition {
+        if !self.item_in_focused_scope(item)
+            || !self.items.tab(item).is_some_and(|tab| {
+                tab.capture
+                    .is_some_and(|(current, state)| current == navigation && state.is_capturing())
+            })
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if self.engine.stop_media_capture(item, navigation) == NativeDispatch::Scheduled {
+            operation_result(
+                OperationOutcome::Deferred,
+                OperationReason::NativeWorkPending,
+            )
+        } else {
+            operation_result(
+                OperationOutcome::NativeAdmissionFailed,
+                OperationReason::NativeDispatchRejected,
+            )
         }
     }
 
@@ -189,7 +221,7 @@ impl Shell {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
         win.splits = tree.remove(id).filter(|rest| rest.tabs().len() > 1);
-        self.divider = None;
+        self.drop_divider();
         mutation_result(self.commit(Vec::new()))
     }
 
@@ -343,6 +375,11 @@ impl Shell {
             let room = limit.saturating_sub(self.pending_external.len());
             self.pending_external.extend(urls.into_iter().take(room));
             return;
+        }
+        // Another application's link is not a private page: it opens with
+        // the regular tabs, the way a private window leaves it to another.
+        if self.private_shown() {
+            let _ = self.operation_leave_private();
         }
         for url in urls.into_iter().take(limit) {
             if zephium_core::navigation::external_target(&url).is_some() {
@@ -723,7 +760,7 @@ impl Shell {
         if let Some((x, y)) = final_pointer {
             self.divider_drag(x, y);
         }
-        if self.divider.take().is_none() {
+        if !self.commit_divider() {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         self.schedule_persist();
@@ -782,6 +819,8 @@ impl Shell {
         };
         match id {
             "tab.new" => self.operation_open(),
+            "window.newPrivate" => self.operation_enter_private(),
+            "window.closePrivate" => self.operation_close_private(),
             "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
@@ -835,6 +874,14 @@ impl Shell {
                 |id| {
                     let mut native = NativeWork::default();
                     native.record(self.engine.print(id));
+                    mutation_result(native)
+                },
+            ),
+            "page.devtools" => active.map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
+                |id| {
+                    let mut native = NativeWork::default();
+                    native.record(self.engine.open_devtools(id));
                     mutation_result(native)
                 },
             ),

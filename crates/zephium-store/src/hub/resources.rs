@@ -10,8 +10,27 @@ use zephium_core::work::{
     artifact::WorkArtifactDataV1, WorkArtifactId, WorkError, WorkExecutionId, WorkId,
 };
 
+/// Receipts carried into a new run, newest first. Every caller keeps its
+/// request IDs in memory, so an older receipt can only answer a replay from
+/// an earlier run; past this many they would only creep toward the receipt
+/// cap and lengthen the count every write makes.
+const KEPT_RECEIPTS: i64 = 1000;
+
 fn error(error: ResourceError) -> ResourceResponse {
     ResourceResponse::Error { error }
+}
+
+/// Runs when a profile's database is opened, before any write of this run.
+pub(super) fn prune_receipts(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["user_resource_receipts", "task_list_receipts"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE rowid <= (SELECT rowid FROM {table} ORDER BY rowid DESC LIMIT 1 OFFSET ?1)"
+            ),
+            [KEPT_RECEIPTS],
+        )?;
+    }
+    Ok(())
 }
 fn kind(value: ResourceKind) -> &'static str {
     match value {

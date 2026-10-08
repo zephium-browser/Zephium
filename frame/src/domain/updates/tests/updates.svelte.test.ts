@@ -17,6 +17,9 @@ vi.mock("$shared/ipc/bindings", async () => {
 vi.mock("$domain/preferences", () => ({
   preferences: { value: () => native.autoCheck },
 }));
+vi.mock("$shared/ipc/native-events", () => ({
+  events: { uiCommand: { listen: async () => () => {} } },
+}));
 
 const HOUR = 60 * 60 * 1000;
 let page: EventTarget & { visibilityState: DocumentVisibilityState };
@@ -164,4 +167,33 @@ describe("update check", () => {
     expect(updates.pendingRelaunch()).toBe(false);
     updates.dispose();
   });
+});
+
+it("observes an asynchronous installation failure and stops polling", async () => {
+  native.status.mockResolvedValueOnce({ state: "ready", version: "1.0.1" });
+  const updates = await load();
+  await updates.init();
+  native.relaunch.mockResolvedValueOnce(true);
+  native.status.mockResolvedValueOnce({ state: "installing" });
+  await updates.relaunch();
+  native.status.mockResolvedValueOnce({ state: "failed" });
+  await vi.advanceTimersByTimeAsync(1500);
+  expect(updates.status()).toEqual({ state: "failed" });
+  const calls = native.status.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(native.status).toHaveBeenCalledTimes(calls);
+  updates.dispose();
+});
+
+it("disposal cancels installation status polling", async () => {
+  native.status.mockResolvedValueOnce({ state: "ready", version: "1.0.1" });
+  const updates = await load();
+  await updates.init();
+  native.relaunch.mockResolvedValueOnce(true);
+  native.status.mockResolvedValue({ state: "installing" });
+  await updates.relaunch();
+  updates.dispose();
+  const calls = native.status.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(native.status).toHaveBeenCalledTimes(calls);
 });

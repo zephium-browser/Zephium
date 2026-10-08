@@ -103,8 +103,10 @@ export function beginSidebarResize() {
 export function finishSidebarResize(value: number) {
   if (!drag) return;
   drag = null;
+  const before = mode;
   adoptResizeWidth(value);
-  void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
+  // Only a change of shape travels; the column animates its width then too.
+  void commands.sidebarSetWidth(effectiveWidth(), mode !== before, resizeRevision);
 }
 
 export function cancelSidebarResize() {
@@ -114,8 +116,9 @@ export function cancelSidebarResize() {
 /** Native has admitted one final width; adopt its display shape without another layout command. */
 export function adoptResizeWidth(value: number, revision = resizeRevision) {
   if (revision !== resizeRevision) return;
-  if (!Number.isFinite(value) || value < COMPACT_WIDTH || value > MAX_EXPANDED_WIDTH) return;
-  const next = resolveDragWidth(value);
+  if (!Number.isFinite(value)) return;
+  // A fast drag overshoots the bounds; it lands on the nearest one.
+  const next = resolveDragWidth(Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
   const changed = next.mode !== mode;
   mode = next.mode;
   desiredMode = mode;

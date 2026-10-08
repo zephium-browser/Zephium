@@ -1,14 +1,58 @@
 //! Time per site in local hours, and focus sessions.
 
 use super::*;
+use sha2::{Digest, Sha256};
 
 use zephium_core::time::{
     BucketTime, FocusDay, FocusRecord, HourTally, Place, SiteTime, TimeQuery, TimeReport,
-    HIGHLIGHTED_SITES, MAX_REPORT_BUCKETS, MAX_REPORT_SITES, MAX_SITE_BYTES,
+    HIGHLIGHTED_SITES, MAX_PENDING_TALLIES, MAX_REPORT_BUCKETS, MAX_REPORT_SITES, MAX_SITE_BYTES,
 };
 
 /// Focus sessions kept, about four years of a few a day.
 const MAX_FOCUS_SESSIONS: i64 = 4096;
+pub(crate) const MAX_TIME_BATCH_RECEIPTS: usize = 128;
+
+/// An internal identity minted once at admission and retained with the batch
+/// across every retry. It has no IPC or native authority representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TimeBatchId(ulid::Ulid);
+
+impl TimeBatchId {
+    pub(crate) fn generate() -> Self {
+        Self(ulid::Ulid::new())
+    }
+
+    fn bytes(self) -> [u8; 16] {
+        self.0 .0.to_be_bytes()
+    }
+}
+
+fn time_batch_digest(
+    profile: ProfileId,
+    tallies: &[HourTally],
+    keep_from_hour: i64,
+) -> rusqlite::Result<[u8; 32]> {
+    if tallies.len() > MAX_PENDING_TALLIES {
+        return Err(invalid_data("time batch exceeds tally capacity"));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"zephium:time-batch:v1\0");
+    hash.update(profile.bytes());
+    hash.update(keep_from_hour.to_be_bytes());
+    hash.update((tallies.len() as u64).to_be_bytes());
+    for tally in tallies {
+        let place = place_key(&tally.place);
+        if place.len() > MAX_SITE_BYTES {
+            return Err(invalid_data("time batch site exceeds capacity"));
+        }
+        hash.update(tally.hour.to_be_bytes());
+        hash.update((place.len() as u32).to_be_bytes());
+        hash.update(place.as_bytes());
+        hash.update(tally.tally.spent_ms.to_be_bytes());
+        hash.update(tally.tally.opens.to_be_bytes());
+    }
+    Ok(hash.finalize().into())
+}
 
 fn place_key(place: &Place) -> &str {
     match place {
@@ -28,13 +72,42 @@ impl Hub {
         self.profile_conn(profile)
     }
 
+    #[cfg(test)]
     pub(crate) fn record_time(
         &mut self,
         profile: ProfileId,
         tallies: &[HourTally],
         keep_from_hour: i64,
     ) -> rusqlite::Result<()> {
+        self.record_time_batch(profile, TimeBatchId::generate(), tallies, keep_from_hour)
+    }
+
+    pub(crate) fn record_time_batch(
+        &mut self,
+        profile: ProfileId,
+        batch: TimeBatchId,
+        tallies: &[HourTally],
+        keep_from_hour: i64,
+    ) -> rusqlite::Result<()> {
+        let digest = time_batch_digest(profile, tallies, keep_from_hour)?;
         let tx = self.time_profile(profile)?.transaction()?;
+        let retained: Option<Option<Vec<u8>>> = tx
+            .query_row(
+                "SELECT CASE WHEN typeof(digest) = 'blob' AND length(digest) = 32 THEN digest END
+             FROM time_batch_receipts WHERE batch_id = ?1",
+                [batch.bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(retained) = retained {
+            return if retained.as_deref() == Some(digest.as_slice()) {
+                Ok(())
+            } else {
+                Err(invalid_data(
+                    "time batch identity conflicts with retained receipt",
+                ))
+            };
+        }
         {
             let mut add = tx.prepare_cached(
                 "INSERT INTO time_spent(hour, place, spent_ms, opens) VALUES (?1, ?2, ?3, ?4)
@@ -56,7 +129,37 @@ impl Hub {
             }
         }
         tx.execute("DELETE FROM time_spent WHERE hour < ?1", [keep_from_hour])?;
-        tx.commit()
+        // The receipt and additive updates share the exact commit boundary.
+        // Its insertion trigger retains the newest bounded receipt cohort.
+        // The actor's per-profile FIFO cannot commit a later activity batch past
+        // an ambiguous head; its newest receipt therefore cannot be pruned
+        // while its original admitted ID is still awaiting retry.
+        tx.execute(
+            "INSERT INTO time_batch_receipts(batch_id, digest) VALUES(?1, ?2)",
+            params![batch.bytes().as_slice(), digest.as_slice()],
+        )?;
+        tx.commit()?;
+        #[cfg(test)]
+        if std::mem::take(&mut self.ambiguous_time_commit_once) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some("fixture time batch committed before acknowledgement failed".into()),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_time_commit_as_ambiguous(&mut self) {
+        self.ambiguous_time_commit_once = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn immediate_time_lock_failures_for_test(&mut self, profile: ProfileId) {
+        self.time_profile(profile)
+            .unwrap()
+            .busy_timeout(std::time::Duration::ZERO)
+            .unwrap();
     }
 
     pub(crate) fn time_report(
@@ -249,6 +352,143 @@ mod tests {
         let profile = ProfileId::from(1);
         hub.registry.insert(profile);
         (hub, profile)
+    }
+
+    #[test]
+    fn time_batch_replay_is_idempotent_and_distinct_batches_remain_additive() {
+        let (mut hub, profile) = hub();
+        let first = TimeBatchId::generate();
+        let values = [tally(100, site("example.test"), 1_000, 1)];
+        hub.record_time_batch(profile, first, &values, 0).unwrap();
+        hub.record_time_batch(profile, first, &values, 0).unwrap();
+        hub.record_time_batch(profile, TimeBatchId::generate(), &values, 0)
+            .unwrap();
+        let conn = hub.time_profile(profile).unwrap();
+        let result: (i64, i64, i64) = conn.query_row(
+            "SELECT spent_ms, opens, (SELECT count(*) FROM time_batch_receipts) FROM time_spent",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(result, (2_000, 2, 2));
+        assert!(hub
+            .record_time_batch(
+                profile,
+                first,
+                &[tally(100, site("example.test"), 2_000, 1)],
+                0
+            )
+            .is_err());
+        assert!(hub.record_time_batch(profile, first, &values, 1).is_err());
+    }
+
+    #[test]
+    fn time_batch_receipt_and_tallies_commit_atomically() {
+        let (mut hub, profile) = hub();
+        let first = TimeBatchId::generate();
+        let values = [tally(100, site("example.test"), 1_000, 1)];
+        let conn = hub.time_profile(profile).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_time_receipt BEFORE INSERT ON time_batch_receipts
+             BEGIN SELECT RAISE(ABORT, 'fixture receipt failure'); END;",
+        )
+        .unwrap();
+        assert!(hub.record_time_batch(profile, first, &values, 0).is_err());
+        let conn = hub.time_profile(profile).unwrap();
+        let rows: (i64, i64) = conn.query_row(
+            "SELECT (SELECT count(*) FROM time_spent), (SELECT count(*) FROM time_batch_receipts)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(rows, (0, 0));
+        conn.execute_batch("DROP TRIGGER fail_time_receipt")
+            .unwrap();
+        hub.record_time_batch(profile, first, &values, 0).unwrap();
+        hub.record_time_batch(profile, first, &values, 0).unwrap();
+        assert_eq!(
+            hub.time_profile(profile)
+                .unwrap()
+                .query_row("SELECT spent_ms FROM time_spent", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1_000
+        );
+    }
+
+    #[test]
+    fn time_batch_receipts_are_bounded_and_replay_cannot_undo_a_clear() {
+        let (mut hub, profile) = hub();
+        let values = [tally(100, site("example.test"), 1, 1)];
+        for _ in 0..MAX_TIME_BATCH_RECEIPTS + 8 {
+            hub.record_time_batch(profile, TimeBatchId::generate(), &values, 0)
+                .unwrap();
+        }
+        let newest = TimeBatchId::generate();
+        hub.record_time_batch(profile, newest, &values, 0).unwrap();
+        let conn = hub.time_profile(profile).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM time_batch_receipts", [], |row| row
+                .get::<_, usize>(
+                0
+            ))
+            .unwrap(),
+            MAX_TIME_BATCH_RECEIPTS
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM time_batch_receipts WHERE batch_id=?1",
+                [newest.bytes().as_slice()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        hub.clear_time(profile, None).unwrap();
+        hub.record_time_batch(profile, newest, &values, 0).unwrap();
+        assert_eq!(
+            hub.time_profile(profile)
+                .unwrap()
+                .query_row("SELECT count(*) FROM time_spent", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn time_batch_replay_remains_exact_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(1);
+        let batch = TimeBatchId::generate();
+        let values = [tally(100, site("example.test"), 1_000, 1)];
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        hub.save(&SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "Fixture".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![PersistedSpace {
+                id: SpaceId::from(2),
+                profile,
+                name: "Fixture".into(),
+            }],
+            active_space: Some(SpaceId::from(2)),
+            ..SessionState::default()
+        })
+        .unwrap();
+        hub.record_time_batch(profile, batch, &values, 0).unwrap();
+        drop(hub);
+        let mut reopened = Hub::open(dir.path().to_path_buf()).unwrap();
+        reopened
+            .record_time_batch(profile, batch, &values, 0)
+            .unwrap();
+        assert_eq!(
+            reopened
+                .time_profile(profile)
+                .unwrap()
+                .query_row("SELECT spent_ms FROM time_spent", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1_000
+        );
     }
 
     #[test]

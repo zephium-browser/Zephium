@@ -29,8 +29,10 @@ let profiles = 0;
 function server() {
   profiles++;
   const profile = `01J9ZQ3V6Q4M8Y2K7T5R1N0D${String(profiles).padStart(2, "0")}`;
-  const notes = notesTestServer(profile, (changed, reset) =>
-    queueMicrotask(() => emitNativeEvent("notesChanged", { profile, notes: changed, reset })),
+  const notes = notesTestServer(profile, (changed, reset, links) =>
+    queueMicrotask(() =>
+      emitNativeEvent("notesChanged", { profile, notes: changed, reset, links }),
+    ),
   );
   native.call.mockImplementation(notes.call);
   const now = Date.now();

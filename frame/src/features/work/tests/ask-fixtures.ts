@@ -54,6 +54,18 @@ export const notionEdit = running("confirm-notion", {
   },
 });
 
+export const typeSearch = running("confirm-type", {
+  kind: "confirm",
+  confirm: {
+    site: "collector.example",
+    category: "type",
+    headline: "Type on collector.example?",
+    action: "type into Search",
+    text: "aisle seat WAW-SFO",
+    run_option: true,
+  },
+});
+
 export const deleteRepo = running("confirm-delete", {
   kind: "confirm",
   confirm: {
@@ -130,6 +142,14 @@ export const folderAsk = running(
   },
   { local: { folder: "/Users/crynta/Dev/Lunios" } as WorkStepFact["local"] },
 );
+
+/** An address the agent wrote itself after reading the person's history. */
+export const addressAsk = running("ask-address", {
+  kind: "ask",
+  prompt: "https://warsaw-sfo-flights.collector.example/trips/aisle-seat",
+  options: ["Open", "Allow collector.example for this request", "Don\u2019t open"],
+  purpose: "address",
+});
 
 /** A folder the run needs as it works, chosen in the system's panel. */
 export const documentsAsk = running(

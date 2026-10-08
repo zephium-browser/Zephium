@@ -112,6 +112,9 @@ export const commands = {
 	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
+	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
+	/**  Shows the folder with Zephium's local log and crash report. */
+	diagnosticsShowLogs: () => __TAURI_INVOKE<boolean>("diagnostics_show_logs"),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
 	/**
@@ -196,6 +199,7 @@ export const commands = {
 	 *  but cannot mint or alter authority.
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
+	captureStop: (itemId: string, navigationId: string) => __TAURI_INVOKE<OperationAdmission>("capture_stop", { itemId, navigationId }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -315,18 +319,19 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
-	updateStatus: () => __TAURI_INVOKE<
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_status"),
+	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;
 	 *  a check already in flight, or an update already waiting, is reported as is.
 	 */
-	updateCheck: () => __TAURI_INVOKE<
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" } | null>("update_check"),
+	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  What the release now running brought, when it arrived as an update. */
+	updateHighlights: () => __TAURI_INVOKE<{
+	version: string,
+	items: string[],
+} | null>("update_highlights"),
 	/**  Opens the system's own update settings for an outdated macOS or Safari. */
 	openSoftwareUpdate: () => __TAURI_INVOKE<boolean>("open_software_update"),
 	/**
@@ -664,6 +669,8 @@ export type BrowserCredentialCapabilityView = {
 
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
+export type CaptureDeviceStateView = "none" | "active" | "muted";
+
 /**
  *  A note that changed, and the revision it now has on disk, or `None` when
  *  it no longer exists.
@@ -766,14 +773,14 @@ export type DocumentNode_Serialize = {
 
 export type DoubleTap = "off" | "command" | "option";
 
-export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "resume"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
 export type DownloadCleanup = {
 	running: boolean,
 	error: DownloadError | null,
 };
 
-export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "permission" | "network" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
+export type DownloadError = "invalid" | "unavailable" | "unsupported" | "capacity" | "storage" | "destination" | "permission" | "network" | "connection_lost" | "timeout" | "authentication" | "certificate" | "server" | "source" | "file_busy" | "file_too_large" | "integrity" | "runtime" | "disk_full" | "protection" | "missing_file" | "changed_file" | "cancelled";
 
 /**
  *  The default saves straight to the system Downloads folder, as other
@@ -789,7 +796,7 @@ export type DownloadPreferences = {
 
 export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[]; cleanup: DownloadCleanup } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean; cleanup: DownloadCleanup } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean; site_downloads_require_confirmation: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
 
-export type DownloadState = "pending" | "receiving" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+export type DownloadState = "pending" | "receiving" | "paused" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
 
 export type DownloadView = {
 	id: string,
@@ -1168,6 +1175,12 @@ export type MediaAssetV1_Serialize = {
 	height?: number | null,
 };
 
+export type MediaCaptureView = {
+	navigation_id: string,
+	camera: CaptureDeviceStateView,
+	microphone: CaptureDeviceStateView,
+};
+
 /**  Outcome of a native file import into the profile's media store. */
 export type MediaImportV1 = MediaImportV1_Serialize | MediaImportV1_Deserialize;
 
@@ -1190,7 +1203,13 @@ export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: s
  *  Replaces the file only if it still holds `base_revision`. Replaying the
  *  same write after an unknown outcome succeeds without a second change.
  */
-{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
+{ kind: "write"; request_id: string; id: string; base_revision: string; markdown: string; 
+/**
+ *  The person has stopped retitling the note, or left it. Only then
+ *  does a file named after its title take the new one, so typing a
+ *  heading does not rename the file on every pause.
+ */
+settle?: boolean } | { kind: "set_pinned"; id: string; pinned: boolean } | { kind: "trash"; id: string } | { kind: "restore"; id: string } | 
 /**  Permanent. Only a note already in the trash can be deleted. */
 { kind: "delete"; id: string } | { kind: "resolve"; targets: string[] } | { kind: "backlinks"; id: string } | 
 /**  Shows the note, or the folder when `id` is absent, in the system file manager. */
@@ -1204,6 +1223,12 @@ export type NoteChanges = {
 	profile: string,
 	notes: ChangedNote[],
 	reset: boolean,
+	/**
+	 *  Link keys that may now lead to a different note, because a note's
+	 *  title or file name changed from or to them. A retitled note is news
+	 *  for its links, not for the listing.
+	 */
+	links: string[],
 };
 
 export type NoteDocument = NoteDocument_Serialize | NoteDocument_Deserialize;
@@ -1365,6 +1390,17 @@ export type PagePermissionPromptView = {
 	projection_revision: string,
 	prompt: PagePermissionPromptEntryView | null,
 };
+
+export type PageRequestAnswer = "allow" | "always_allow" | "dismiss";
+
+export type PageRequestView = 
+/**
+ *  Open a link in another application. `app` is its name when the system
+ *  knows one; `scheme` names the kind of link otherwise.
+ */
+{ kind: "external_app"; site: string | null; scheme: string; app: string | null } | 
+/**  A new tab the page tried to open; `host` is set when it can be opened. */
+{ kind: "popup"; host: string | null };
 
 export type PanelIntent = 
 /**  The hidden renderer has settled its asynchronous work. */
@@ -1711,6 +1747,11 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
 export type RuntimeStatus = {
 	restart_required: boolean,
 	/**
+	 *  The saved session could not be restored this launch: its bytes were
+	 *  kept in a file and the browser started with fresh tabs.
+	 */
+	session_set_aside: boolean,
+	/**
 	 *  Bounded fail-closed aggregate of ownership scopes whose latest native
 	 *  user-content observation was not exactly applied. An impossible
 	 *  over-capacity observation contributes at most one sentinel. No script,
@@ -1827,6 +1868,13 @@ export type TabChanged = TabView;
  */
 export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
 
+export type TabFailure = {
+	url: string,
+	reason: TabFailureReason,
+};
+
+export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" | "other";
+
 /**
  *  What the tab menu can offer for the tab it opens on, as the sidebar sees
  *  it. Only availability: the shell checks every action again.
@@ -1856,15 +1904,22 @@ export type TabView = {
 	/**  Explicit content owner. Internal pages never carry a navigable URL. */
 	content?: TabContentView,
 	loading: boolean,
-	popup_blocked?: boolean,
+	/**  What the page asked for that waits on the person. */
+	page_request?: PageRequestView | null,
 	/**
 	 *  Transient native residency state. It never replaces the committed URL
 	 *  or title, and an explicit retry remains a fresh navigation intent.
 	 */
 	availability?: TabAvailability | null,
+	/**
+	 *  The last navigation the person asked for that did not load, until the
+	 *  next attempt or commit. Never carries native error text.
+	 */
+	failure?: TabFailure | null,
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,
+	capture?: MediaCaptureView | null,
 };
 
 /**
@@ -1999,9 +2054,16 @@ export type UiInfo = {
 	material: Material,
 };
 
-export type UpdateStatus = 
-/**  Development and unsupported builds never update themselves. */
-{ state: "unavailable" } | { state: "idle" } | { state: "checking" } | { state: "upToDate" } | { state: "downloading" } | { state: "ready"; version: string } | { state: "installing" } | { state: "failed" };
+export type UpdateHighlights = {
+	version: string,
+	items: string[],
+};
+
+export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
+
+export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+
+export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {
@@ -2479,7 +2541,12 @@ export type WorkAskPurposeV1 =
  *  Whether the agent may read a folder on this Mac the request named;
  *  the step's local fact carries the folder.
  */
-"folder";
+"folder" | 
+/**
+ *  Whether to open a page address the agent wrote itself after reading
+ *  the person's own information; the prompt is the address.
+ */
+"address";
 
 export type WorkAttemptFact = {
 	id: WorkAttemptId,
@@ -2877,7 +2944,9 @@ export type WorkConfirmCategoryV1 =
 /**  Save or submit a change. */
 "save" | 
 /**  Type into a document that saves as it is typed. */
-"edit";
+"edit" | 
+/**  Type into a site the person did not name, in a run holding their data. */
+"type";
 
 export type WorkConfirmDecisionV1 = "approved" | 
 /**  Approved, and later edits on this site in this run need no question. */

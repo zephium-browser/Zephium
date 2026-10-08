@@ -21,8 +21,8 @@ use objc2_web_kit::WKWebView;
 
 use crate::{
   native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT},
-  AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase, NavigationId,
-  PageLoadEvent,
+  AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
+  NavigationFailure, NavigationId, PageLoadEvent,
 };
 
 use super::class::wry_navigation_delegate::WryNavigationDelegate;
@@ -628,6 +628,25 @@ fn navigation_error_phase(domain: Option<&str>, code: isize) -> NavigationEventP
   }
 }
 
+/// The category a person can be told; never the native error text.
+fn navigation_failure(domain: Option<&str>, code: isize) -> NavigationFailure {
+  if domain != Some("NSURLErrorDomain") {
+    return NavigationFailure::Other;
+  }
+  match code {
+    // Not connected, international roaming off, cellular data not allowed.
+    -1009 | -1018 | -1020 => NavigationFailure::Offline,
+    // Cannot find host, DNS lookup failed.
+    -1003 | -1006 => NavigationFailure::HostNotFound,
+    // Cannot connect to host, connection lost.
+    -1004 | -1005 => NavigationFailure::Unreachable,
+    -1001 => NavigationFailure::TimedOut,
+    // Secure connection failed and the certificate errors that follow it.
+    -1206..=-1200 => NavigationFailure::Insecure,
+    _ => NavigationFailure::Other,
+  }
+}
+
 pub(crate) fn did_fail_navigation(
   this: &WryNavigationDelegate,
   webview: &WKWebView,
@@ -676,6 +695,16 @@ pub(crate) fn did_fail_navigation(
       "view-create: WebKit navigation failure stage={stage} domain={domain_kind} code={}",
       error.code()
     );
+  }
+  // Reported before the update applies, so the reason is known whether the
+  // Failed event is emitted now or from a deferred flush.
+  if phase == NavigationEventPhase::Failed {
+    if let Some(handler) = &this.ivars().navigation_failure_handler {
+      handler(
+        NavigationId::from_raw(navigation_key(navigation) as u64),
+        navigation_failure(domain.as_deref(), error.code()),
+      );
+    }
   }
   let update = with_navigation_state(&this.ivars().navigation_event_state, |state| {
     state.terminal(navigation_key(navigation), phase)
@@ -1373,6 +1402,27 @@ mod attachment_tests {
 #[cfg(test)]
 mod cancellation_tests {
   use super::*;
+
+  #[test]
+  fn failures_reduce_to_categories_a_person_can_act_on() {
+    let url = Some("NSURLErrorDomain");
+    assert_eq!(navigation_failure(url, -1009), NavigationFailure::Offline);
+    assert_eq!(
+      navigation_failure(url, -1003),
+      NavigationFailure::HostNotFound
+    );
+    assert_eq!(
+      navigation_failure(url, -1004),
+      NavigationFailure::Unreachable
+    );
+    assert_eq!(navigation_failure(url, -1001), NavigationFailure::TimedOut);
+    assert_eq!(navigation_failure(url, -1202), NavigationFailure::Insecure);
+    assert_eq!(navigation_failure(url, -1100), NavigationFailure::Other);
+    assert_eq!(
+      navigation_failure(Some("WebKitErrorDomain"), -1009),
+      NavigationFailure::Other
+    );
+  }
   #[test]
   fn native_cancellation_is_domain_scoped_and_never_a_commit() {
     assert_eq!(

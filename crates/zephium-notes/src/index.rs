@@ -9,6 +9,7 @@ use zephium_core::notes::NoteSummary;
 const SCHEMA: i64 = 1;
 const MAX_RECEIPTS: i64 = 512;
 const MAX_BACKLINKS: i64 = 100;
+const NAMED_AFTER: &str = "named-after:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
@@ -206,6 +207,24 @@ impl Index {
         Ok(())
     }
 
+    /// The title a note's file was named after, kept while a retitle has
+    /// not yet been allowed to rename it.
+    pub fn named_after(&self, id: &str) -> rusqlite::Result<Option<String>> {
+        self.setting(&format!("{NAMED_AFTER}{id}"))
+    }
+
+    pub fn remember_named_after(&self, id: &str, title: &str) -> rusqlite::Result<()> {
+        self.set_setting(&format!("{NAMED_AFTER}{id}"), title)
+    }
+
+    pub fn forget_named_after(&self, id: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM settings WHERE key=?1",
+            [format!("{NAMED_AFTER}{id}")],
+        )?;
+        Ok(())
+    }
+
     pub fn rows(&self) -> rusqlite::Result<Vec<Row>> {
         let mut statement = self.conn.prepare(&format!("SELECT {COLUMNS} FROM notes"))?;
         let rows = statement.query_map([], row)?.collect();
@@ -335,6 +354,10 @@ impl Index {
         }
         tx.execute("DELETE FROM notes WHERE id=?1", [id])?;
         tx.execute("DELETE FROM receipts WHERE id=?1", [id])?;
+        tx.execute(
+            "DELETE FROM settings WHERE key=?1",
+            [format!("{NAMED_AFTER}{id}")],
+        )?;
         tx.commit()
     }
 

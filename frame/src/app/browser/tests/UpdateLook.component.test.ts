@@ -39,6 +39,14 @@ vi.mock("$shared/ipc/bindings", async () => {
         : { kind: "page" as const, entries: [receiving], next: null, supported: true, cleanup },
     runCommand: async () => ({ accepted: true, operation_id: null }),
     toolsMenuPopup: async () => true,
+    updateHighlights: async () => ({
+      version: "1.0.1",
+      items: [
+        "Links to Zoom, Teams and Slack open in their apps",
+        "Page dialogs show instead of answering for you",
+        "Private windows close from one place",
+      ],
+    }),
   });
 });
 
@@ -52,6 +60,7 @@ async function start(advisory: boolean) {
   await runtime.init();
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: advisory
       ? [{ kind: "update_recommended", update_target: "operating_system" }]
@@ -78,6 +87,10 @@ test("the card and the pill sit between a download and the dock", async () => {
   await page.viewport(420, 520);
   const screen = await render(UpdateLook, { props: { download: true } });
   await expect.element(screen.getByText("Zephium updated to 1.0.1")).toBeVisible();
+  await expect
+    .element(screen.getByText("Page dialogs show instead of answering for you"))
+    .toBeVisible();
+  await expect.element(screen.getByText("Something broke? Tell us")).toBeVisible();
   await expect.element(screen.getByText("Zephium-1.0.2.dmg")).toBeVisible();
   const stack = screen.container.querySelector<HTMLElement>(".update-stack")!;
   const card = stack.querySelector("[data-variant='card']")!;

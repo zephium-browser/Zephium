@@ -6,6 +6,8 @@ mod download;
 #[cfg(target_os = "macos")]
 mod drag_drop;
 mod navigation;
+#[cfg(target_os = "macos")]
+mod script_dialog;
 #[cfg(feature = "mac-proxy")]
 mod proxy;
 #[cfg(target_os = "macos")]
@@ -639,7 +641,12 @@ impl InnerWebView {
         }
       }
 
-      #[cfg(feature = "fullscreen")]
+      // <https://developer.apple.com/documentation/webkit/wkpreferences/iselementfullscreenenabled>
+      // Available: macOS 12.3+. Set per view either way, so a view that must
+      // not go fullscreen is not left on WebKit's or a sibling's default.
+      #[cfg(target_os = "macos")]
+      _preference.setElementFullscreenEnabled(attributes.fullscreen_enabled);
+      #[cfg(all(feature = "fullscreen", target_os = "ios"))]
       // NOTE: Private API — `fullScreenEnabled` is a private KVC key on WKPreferences.
       _preference.setValue_forKey(
         Some(&NSNumber::numberWithBool(attributes.fullscreen_enabled)),
@@ -865,6 +872,7 @@ impl InnerWebView {
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,
+        attributes.navigation_failure_handler,
         attributes.navigation_presentation_guard,
         pl_attrs.on_web_content_process_terminate_handler,
         mtm,
@@ -1936,7 +1944,9 @@ mod security_policy_tests {
   fn native_media_kvc_values_come_from_per_view_attributes() {
     let source = include_str!("mod.rs");
     assert!(source.contains("attributes.picture_in_picture_enabled"));
-    assert!(source.contains("attributes.fullscreen_enabled"));
+    assert!(
+      source.contains("_preference.setElementFullscreenEnabled(attributes.fullscreen_enabled)")
+    );
     assert!(!source
       .contains("_preference.setValue_forKey(Some(&_yes), ns_string!(\"fullScreenEnabled\"))"));
   }

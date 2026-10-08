@@ -488,6 +488,9 @@ where
                                 part: None,
                             };
                             let outcome = set.call(context, tool_call).await;
+                            // Personal, project, computer and connection tools
+                            // all answer with the person's own data.
+                            self.run.mark_private();
                             vec![(index, outcome.content, outcome.is_error)]
                         }))
                     }
@@ -1058,6 +1061,8 @@ where
             }
         }
         for text in said {
+            self.run.allow_links_in(&text);
+            self.run.trust_sites_in(&text);
             messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(format!(
                 "The person adds, while you work: {text}"
             ))]));

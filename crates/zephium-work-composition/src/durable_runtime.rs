@@ -493,7 +493,8 @@ impl NativeWorkComposition {
             },
             request.allow_edits,
             request.entry,
-        );
+        )
+        .holding_typing(request.hold_typing);
         let gate = std::sync::Arc::new(match &request.step {
             WorkStepKindV1::Read {
                 url,
@@ -2399,6 +2400,7 @@ fn effect_word(class: SemanticEffectClass) -> &'static str {
         SemanticEffectClass::Communication => "communication",
         SemanticEffectClass::Purchase => "purchase",
         SemanticEffectClass::Destructive => "destructive",
+        SemanticEffectClass::LocalWrite => "local_write",
         _ => "external_write",
     }
 }
@@ -2414,6 +2416,7 @@ fn confirmation(pending: &crate::open_objective::site_work::Pending) -> WorkSite
             Consequence::Destructive => WorkConfirmCategoryV1::Destructive,
             Consequence::Save => WorkConfirmCategoryV1::Save,
             Consequence::Edit => WorkConfirmCategoryV1::Edit,
+            Consequence::Type => WorkConfirmCategoryV1::Type,
         },
         headline: preview.headline.clone(),
         action: preview.action.clone(),
@@ -2426,7 +2429,7 @@ fn confirmation(pending: &crate::open_objective::site_work::Pending) -> WorkSite
                 value: value.clone(),
             })
             .collect(),
-        run_option: preview.consequence == Consequence::Edit,
+        run_option: matches!(preview.consequence, Consequence::Edit | Consequence::Type),
     }
 }
 async fn load_resume_credential() -> Result<AgentProviderCredential, WorkError> {

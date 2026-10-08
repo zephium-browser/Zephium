@@ -19,6 +19,7 @@
   import FolderOpenIcon from "@hugeicons/core-free-icons/FolderOpenIcon";
   import PinOffIcon from "@hugeicons/core-free-icons/PinOffIcon";
   import * as m from "$shared/i18n/messages";
+  import { lagging } from "$shared/lib/lag.svelte";
   import NoteList from "./NoteList.svelte";
   import NoteView from "./NoteView.svelte";
   import NoteNotice from "./NoteNotice.svelte";
@@ -73,10 +74,14 @@
     return `${noteCount(count)}${more}`;
   });
 
+  // Typing saves on every pause; only a save that is taking its time, or one
+  // being retried, is worth a word.
+  const writing = lagging(() => session?.saveState === "saving");
+  let retrying = $derived(session?.saveState === "retrying");
   let status = $derived.by(() => {
     if (!session || !note?.summary) return "";
-    if (session.saveState === "retrying") return m.note_retrying();
-    if (session.saveState === "saving" || session.saveState === "unsaved") return m.note_saving();
+    if (retrying) return m.note_retrying();
+    if (writing.current) return m.note_saving();
     return edited(modified, now);
   });
 
@@ -245,7 +250,8 @@
               >{/if}
           </div>
           <div class="stage-heading">
-            <span class="stage-status" class:away={scrolled} aria-live="polite">{status}</span>
+            <span class="stage-status" class:away={scrolled}>{status}</span>
+            <span class="sr-only" aria-live="polite">{retrying ? m.note_retrying() : ""}</span>
             <span class="stage-title" class:away={!scrolled} aria-hidden={!scrolled}
               >{note.summary?.title || m.note_untitled()}</span
             >

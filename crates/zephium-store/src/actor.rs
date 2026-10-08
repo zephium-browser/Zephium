@@ -4,6 +4,7 @@
 //! one per event; visits and loads are immediate. Loads and shutdown flush
 //! pending state first.
 
+mod activity;
 mod agent_audit;
 #[cfg(feature = "work-execution")]
 mod agent_work;
@@ -47,6 +48,7 @@ use crate::hub::{
 #[cfg(test)]
 use crate::migrations;
 
+use activity::{ActivityWrite, ActivityWritePermit, PendingActivityWrites};
 use agent_audit::AgentAuditDeliveryPermit;
 #[cfg(test)]
 use agent_audit::MAX_PENDING_AGENT_AUDIT_DELIVERIES;
@@ -270,7 +272,7 @@ impl Drop for ResourcePermit {
 enum Cmd {
     WorkDocument(
         ProfileId,
-        zephium_core::work::port::WorkRequest,
+        Box<zephium_core::work::port::WorkRequest>,
         work_document::Permit,
         zephium_core::work::port::WorkCompletion,
     ),
@@ -304,6 +306,8 @@ enum Cmd {
     VisitWake,
     SettingWake,
     Load(Sender<SessionLoad>),
+    /// Sets an unrestorable session aside and loads the restarted one.
+    SetAsideSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
     UpdateProfileBlockerConfig(
         ProfileId,
         BlockerConfigRevision,
@@ -312,14 +316,12 @@ enum Cmd {
     ),
     LoadProfileBlockerConfig(ProfileId, BlockerConfigLoadDone),
     LoadProfileBlockerSites(ProfileId, BlockerSiteLoadDone),
-    RecordTime(ProfileId, Vec<zephium_core::time::HourTally>, i64),
+    Activity(ActivityWrite, ActivityWritePermit),
     TimeReport(
         ProfileId,
         zephium_core::time::TimeQuery,
         Box<dyn FnOnce(Option<zephium_core::time::TimeReport>) + Send>,
     ),
-    ClearTime(ProfileId, Option<i64>),
-    RecordFocus(zephium_core::time::FocusRecord, i64),
     FocusDays(
         i64,
         u32,
@@ -386,7 +388,7 @@ enum Cmd {
         zephium_core::bookmarks::BookmarkRequest,
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
-    ClearHistory(ProfileId, Option<i64>, Sender<u32>),
+    ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     AmendVisitTitle(ProfileId, String, String),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
@@ -426,6 +428,7 @@ pub struct SqliteStore {
     pending_settings: Arc<Mutex<PendingSettings>>,
     userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
     page_permission_mutation_admission: Arc<Mutex<PagePermissionMutationAdmission>>,
+    activity_admission: Arc<Mutex<activity::ActivityAdmission>>,
     agent_audit_delivery_admission: OnceLock<Arc<AtomicUsize>>,
     lifecycle: RwLock<ActorLifecycle>,
     shutdown_clean: AtomicBool,
@@ -435,6 +438,23 @@ impl SqliteStore {
     fn admits_writes(&self) -> bool {
         let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
         !lifecycle.terminal_admitted && !self.shutdown_clean.load(Ordering::Acquire)
+    }
+
+    fn queue_activity(&self, write: ActivityWrite) -> bool {
+        // Keep acceptance ordered with terminal shutdown without ever waiting
+        // for SQLite or a shutdown writer on the caller/UI thread.
+        let lifecycle = match self.lifecycle.try_read() {
+            Ok(lifecycle) => lifecycle,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(permit) = ActivityWritePermit::acquire(&self.activity_admission, &write) else {
+            return false;
+        };
+        self.tx.try_send(Cmd::Activity(write, permit)).is_ok()
     }
 
     /// `dir` is the app data directory; the hub lays out `meta.sqlite` plus
@@ -527,6 +547,7 @@ impl SqliteStore {
             pending_settings,
             userscript_mutation_admission,
             page_permission_mutation_admission,
+            activity_admission: Arc::new(Mutex::new(activity::ActivityAdmission::default())),
             agent_audit_delivery_admission: OnceLock::new(),
             lifecycle: RwLock::new(ActorLifecycle {
                 join: Some(join),
@@ -802,6 +823,12 @@ impl Store for SqliteStore {
             .unwrap_or(SessionLoad::Failed)
     }
 
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.try_send(Cmd::SetAsideSession(tx)).ok()?;
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn update_profile_blocker_config(
         &self,
         profile: ProfileId,
@@ -872,11 +899,12 @@ impl Store for SqliteStore {
         tallies: Vec<zephium_core::time::HourTally>,
         keep_from_hour: i64,
     ) -> bool {
-        self.admits_writes()
-            && self
-                .tx
-                .try_send(Cmd::RecordTime(profile, tallies, keep_from_hour))
-                .is_ok()
+        self.queue_activity(ActivityWrite::RecordTime(
+            profile,
+            hub::TimeBatchId::generate(),
+            tallies,
+            keep_from_hour,
+        ))
     }
     fn time_report(
         &self,
@@ -891,14 +919,10 @@ impl Store for SqliteStore {
                 .is_ok()
     }
     fn clear_time(&self, profile: ProfileId, since_hour: Option<i64>) -> bool {
-        self.admits_writes()
-            && self
-                .tx
-                .try_send(Cmd::ClearTime(profile, since_hour))
-                .is_ok()
+        self.queue_activity(ActivityWrite::ClearTime(profile, since_hour))
     }
     fn record_focus(&self, record: zephium_core::time::FocusRecord, day: i64) -> bool {
-        self.admits_writes() && self.tx.try_send(Cmd::RecordFocus(record, day)).is_ok()
+        self.queue_activity(ActivityWrite::RecordFocus(record, day))
     }
     fn focus_days(
         &self,
@@ -1315,15 +1339,20 @@ impl Store for SqliteStore {
     }
 
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.clear_history_checked(profile, since)
+            .unwrap_or_default()
+    }
+
+    fn clear_history_checked(&self, profile: ProfileId, since: Option<i64>) -> Option<u32> {
         let (tx, rx) = mpsc::channel();
         if self
             .tx
             .try_send(Cmd::ClearHistory(profile, since, tx))
             .is_err()
         {
-            return 0;
+            return None;
         }
-        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
@@ -1495,6 +1524,7 @@ fn actor(
     let mut pending: Option<PendingSession> = None;
     let mut visit_retry = WriteRetry::default();
     let mut setting_retry = WriteRetry::default();
+    let mut activity = PendingActivityWrites::default();
     loop {
         let deadline = pending
             .as_ref()
@@ -1502,6 +1532,7 @@ fn actor(
             .into_iter()
             .chain(visit_retry.retry_at)
             .chain(setting_retry.retry_at)
+            .chain(activity.deadline())
             .min();
         let cmd = if let Some(deadline) = deadline {
             let wait = deadline.saturating_duration_since(Instant::now());
@@ -1530,6 +1561,7 @@ fn actor(
                     &mut visit_retry,
                     false,
                 );
+                let _ = activity.flush(&mut hub, &mut pending, false);
             }
         }
         match cmd {
@@ -1548,6 +1580,7 @@ fn actor(
                     &mut visit_retry,
                     false,
                 );
+                let _ = activity.flush(&mut hub, &mut pending, false);
             }
             Some(Cmd::SaveWake) => {}
             Some(Cmd::VisitWake) => {}
@@ -1562,35 +1595,18 @@ fn actor(
                         false,
                     );
                 }
-                let loaded = match hub.load_authoritative() {
-                    Ok(Some(authoritative)) => {
-                        let profiles = hub.degraded_profile_ids();
-                        if profiles.is_empty() {
-                            SessionLoad::Loaded {
-                                state: authoritative.state,
-                                blocker_configs: authoritative.blocker_configs,
-                            }
-                        } else {
-                            SessionLoad::LoadedWithDegradedProfiles {
-                                state: authoritative.state,
-                                profiles,
-                                blocker_configs: authoritative.blocker_configs,
-                            }
-                        }
-                    }
-                    Ok(None) => SessionLoad::Absent,
-                    Err(_) if hub.recovery_reason().is_some() => SessionLoad::RecoveryRequired {
-                        reason: hub
-                            .recovery_reason()
-                            .unwrap_or("authoritative session requires recovery")
-                            .to_owned(),
-                    },
+                let loaded = session_load(&mut hub);
+                let _ = reply.send(loaded);
+            }
+            Some(Cmd::SetAsideSession(reply)) => {
+                let restarted = match hub.set_aside_recovery() {
+                    Ok(file) => Some((session_load(&mut hub), file)),
                     Err(error) => {
-                        eprintln!("store: session load failed: {error}");
-                        SessionLoad::Failed
+                        eprintln!("store: setting the unrestorable session aside failed: {error}");
+                        None
                     }
                 };
-                let _ = reply.send(loaded);
+                let _ = reply.send(restarted);
             }
             Some(Cmd::UpdateProfileBlockerConfig(profile, expected, next, done)) => {
                 let outcome = match hub.update_profile_blocker_config(profile, expected, next) {
@@ -1604,35 +1620,26 @@ fn actor(
                 };
                 done(outcome);
             }
-            Some(Cmd::RecordTime(profile, tallies, keep_from_hour)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
-                    continue;
-                }
-                if let Err(error) = hub.record_time(profile, &tallies, keep_from_hour) {
-                    eprintln!("store: profile {profile} time write failed: {error}");
-                }
+            Some(Cmd::Activity(write, permit)) => {
+                activity.push(write, permit);
+                let _ = activity.flush(&mut hub, &mut pending, false);
             }
             Some(Cmd::TimeReport(profile, query, done)) => {
+                if !activity.flush_profile(profile, &mut hub, &mut pending, false) {
+                    done(None);
+                    continue;
+                }
                 if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
                     done(None);
                     continue;
                 }
                 done(hub.time_report(profile, &query).ok());
             }
-            Some(Cmd::ClearTime(profile, since_hour)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+            Some(Cmd::FocusDays(from_day, days, done)) => {
+                if !activity.flush_focus(&mut hub, &mut pending) {
+                    done(None);
                     continue;
                 }
-                if let Err(error) = hub.clear_time(profile, since_hour) {
-                    eprintln!("store: profile {profile} time clear failed: {error}");
-                }
-            }
-            Some(Cmd::RecordFocus(record, day)) => {
-                if let Err(error) = hub.record_focus(&record, day) {
-                    eprintln!("store: focus session write failed: {error}");
-                }
-            }
-            Some(Cmd::FocusDays(from_day, days, done)) => {
                 done(hub.focus_days(from_day, days).ok());
             }
             Some(Cmd::LoadBlockerStatistics(profile, done)) => {
@@ -1801,7 +1808,17 @@ fn actor(
                 let _ = reply.send(hub.bookmarks(profile, request));
             }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
-                let _ = reply.send(hub.clear_history(profile, since));
+                let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);
+                let visits_durable = session_durable
+                    && flush_profile_visits(&mut hub, &pending_visits, &mut visit_retry, profile);
+                let activity_durable =
+                    activity.flush_profile(profile, &mut hub, &mut pending, true);
+                let result = if session_durable && visits_durable && activity_durable {
+                    hub.clear_history_checked(profile, since)
+                } else {
+                    None
+                };
+                let _ = reply.send(result);
             }
             Some(Cmd::AmendVisitTitle(profile, url, title)) => {
                 hub.amend_visit_title(profile, &url, &title);
@@ -1831,6 +1848,10 @@ fn actor(
             Some(Cmd::PendingProfileDeletions(reply)) => {
                 let result = match hub.reconcile_profile_deletion_journal() {
                     Ok(deletions) => {
+                        activity.reconciled_authorizations();
+                        for deletion in &deletions {
+                            activity.forget_profile(deletion.profile);
+                        }
                         if deletions.is_empty() {
                             if flush(&mut hub, &mut pending) {
                                 ProfileDeletionLoad::Loaded(deletions)
@@ -1896,6 +1917,9 @@ fn actor(
                     // This synchronous snapshot supersedes every coalesced
                     // save observed before the authorization command.
                     pending = None;
+                    activity.forget_profile(profile);
+                } else if result == ProfileDeletionAuthorizeOutcome::OutcomeUnknown {
+                    activity.quarantine_profile(profile);
                 }
                 let _ = reply.send(result);
             }
@@ -1915,7 +1939,7 @@ fn actor(
                 let _ = reply.send(result);
             }
             Some(Cmd::WorkDocument(profile, request, _permit, completion)) => {
-                let result = hub.work_document(profile, request);
+                let result = hub.work_document(profile, *request);
                 let _ =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
             }
@@ -1940,6 +1964,7 @@ fn actor(
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
                 let session_durable = flush(&mut hub, &mut pending);
+                let activity_durable = activity.flush(&mut hub, &mut pending, true);
                 let visits_durable = session_durable
                     && flush_visits(
                         &mut hub,
@@ -1948,12 +1973,23 @@ fn actor(
                         &mut visit_retry,
                         true,
                     );
-                let _ = ack.send(settings_durable && session_durable && visits_durable);
+                let _ = ack.send(
+                    settings_durable && session_durable && visits_durable && activity_durable,
+                );
             }
             Some(Cmd::Shutdown(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
                 let session_durable = flush(&mut hub, &mut pending);
+                let activity_durable = activity.flush(&mut hub, &mut pending, true) || {
+                    let lost = activity.only_unrecoverable_records();
+                    if lost {
+                        eprintln!(
+                            "store: shutting down with time or focus records that keep failing"
+                        );
+                    }
+                    lost
+                };
                 let visits_durable = session_durable
                     && flush_visits(
                         &mut hub,
@@ -1962,7 +1998,8 @@ fn actor(
                         &mut visit_retry,
                         true,
                     );
-                let durable = settings_durable && session_durable && visits_durable;
+                let durable =
+                    settings_durable && session_durable && visits_durable && activity_durable;
                 let _ = ack.send(durable);
                 if durable {
                     // Returning drops Hub and every SQLite connection before
@@ -1992,6 +2029,7 @@ fn actor(
     // used its caller-owned deadline barrier. On an unexpected sender drop,
     // this detached actor gets one best-effort terminal durability attempt.
     let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
+    let _ = activity.flush(&mut hub, &mut pending, true);
     if flush(&mut hub, &mut pending) {
         let _ = flush_visits(
             &mut hub,
@@ -2068,6 +2106,45 @@ fn flush_settings(
     } else {
         retry.clear();
         true
+    }
+}
+
+/// An intentional profile clear settles only its own pending visits. A failed
+/// foreign visit remains in the bounded mailbox without holding this clear.
+fn flush_profile_visits(
+    hub: &mut Hub,
+    mailbox: &Mutex<PendingVisits>,
+    retry: &mut WriteRetry,
+    profile: ProfileId,
+) -> bool {
+    let visits: PendingVisits = {
+        let mut mailbox = mailbox.lock().unwrap_or_else(|p| p.into_inner());
+        let (visits, kept) = std::mem::take(&mut *mailbox)
+            .into_iter()
+            .partition(|((owner, _), _)| *owner == profile);
+        *mailbox = kept;
+        visits
+    };
+    if visits.is_empty() {
+        return true;
+    }
+    match hub.record_visits(
+        visits
+            .into_iter()
+            .map(|((profile, url), title)| (profile, url, title)),
+    ) {
+        Ok(()) => true,
+        Err(failed) => {
+            requeue_visits(
+                mailbox,
+                failed
+                    .into_iter()
+                    .map(|(profile, url, title)| ((profile, url), title))
+                    .collect(),
+            );
+            retry.failed(Instant::now());
+            false
+        }
     }
 }
 
@@ -2196,6 +2273,38 @@ fn flush(hub: &mut Hub, pending: &mut Option<PendingSession>) -> bool {
             save.failed(Instant::now());
             *pending = Some(save);
             false
+        }
+    }
+}
+
+/// The session the hub holds, as the shell receives it.
+fn session_load(hub: &mut Hub) -> SessionLoad {
+    match hub.load_authoritative() {
+        Ok(Some(authoritative)) => {
+            let profiles = hub.degraded_profile_ids();
+            if profiles.is_empty() {
+                SessionLoad::Loaded {
+                    state: authoritative.state,
+                    blocker_configs: authoritative.blocker_configs,
+                }
+            } else {
+                SessionLoad::LoadedWithDegradedProfiles {
+                    state: authoritative.state,
+                    profiles,
+                    blocker_configs: authoritative.blocker_configs,
+                }
+            }
+        }
+        Ok(None) => SessionLoad::Absent,
+        Err(_) if hub.recovery_reason().is_some() => SessionLoad::RecoveryRequired {
+            reason: hub
+                .recovery_reason()
+                .unwrap_or("authoritative session requires recovery")
+                .to_owned(),
+        },
+        Err(error) => {
+            eprintln!("store: session load failed: {error}");
+            SessionLoad::Failed
         }
     }
 }

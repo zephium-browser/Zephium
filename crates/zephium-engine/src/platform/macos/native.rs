@@ -291,7 +291,9 @@ pub fn configure(
         }
     }
 
-    unsafe { wk.setInspectable(cfg!(debug_assertions)) };
+    unsafe { wk.setInspectable(true) };
+    // Pinch magnifies the page the way Safari's does; page zoom stays separate.
+    unsafe { wk.setAllowsMagnification(true) };
     let view: &NSView = &wk;
     // Fill the assigned region and follow window resize in AppKit's layout pass.
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
@@ -358,6 +360,22 @@ pub fn stop_loading(view: &wry::WebView) {
 /// lifted, so a covered page cannot start sound behind the focus surface.
 pub fn set_media_suspended(view: &wry::WebView, suspended: bool) {
     unsafe { webkit(view).setAllMediaPlaybackSuspended_completionHandler(suspended, None) };
+}
+
+/// Validate the real OS owner again at native consent admission/settlement.
+pub(crate) fn permission_owner_is_focused(parent: raw_window_handle::RawWindowHandle) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let raw_window_handle::RawWindowHandle::AppKit(parent) = parent else {
+        return false;
+    };
+    // SAFETY: EngineHost owns the composition root's live main-window handle
+    // throughout each child's lifetime. A consent modal deliberately detaches
+    // the page from its stage, so focus belongs to this main-window owner.
+    let view = unsafe { &*parent.ns_view.as_ptr().cast::<objc2_app_kit::NSView>() };
+    objc2_app_kit::NSApplication::sharedApplication(mtm).isActive()
+        && view.window().is_some_and(|window| window.isKeyWindow())
 }
 
 /// Cross-check renderer heuristics with WebKit's public media playback and

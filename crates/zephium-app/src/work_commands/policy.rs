@@ -290,7 +290,10 @@ fn classify_posix(line: &str, cwd: &Path, roots: &[PathBuf]) -> (Class, Reason) 
             if args.is_empty() {
                 return (Class::Ask, Reason::ShellSyntax);
             }
-            let next = simple(&args);
+            let mut next = simple(&args);
+            if args[0] == "git" && next.0 == Class::Read && repository_runs_programs(&current) {
+                next = (Class::Ask, Reason::ShellSyntax);
+            }
             if next.0 > result.0 {
                 result = next;
             }
@@ -396,7 +399,37 @@ fn simple(args: &[String]) -> (Class, Reason) {
     {
         return ask(Reason::Network);
     }
+    // Reading tools that follow symbolic links read past a granted folder
+    // through any link inside it, and a list of paths read from a file can
+    // name anything; jq can print the command's whole environment.
+    if a.iter()
+        .any(|s| s.starts_with("--files0-from") || s.starts_with("--files-from"))
+        || (p == "grep" && (short_flag(&['R']) || a.contains(&"--dereference-recursive")))
+        || (p == "rg" && (short_flag(&['L']) || a.contains(&"--follow")))
+        || (p == "find" && (short_flag(&['L']) || a.contains(&"-follow")))
+        || (p == "tree" && short_flag(&['l']))
+        || (p == "du" && short_flag(&['L']))
+        || (p == "jq" && a.iter().any(|s| jq_reads_environment(s)))
+    {
+        return ask(Reason::ShellSyntax);
+    }
     if p == "gh" {
+        // A repository named with a host sends the request, and whatever the
+        // host name carries, somewhere other than GitHub.
+        if a.iter().enumerate().any(|(i, s)| {
+            let value = match *s {
+                "-R" | "--repo" | "--hostname" => a.get(i + 1).copied(),
+                _ => s
+                    .strip_prefix("--repo=")
+                    .or_else(|| s.strip_prefix("--hostname="))
+                    .or_else(|| s.strip_prefix("-R").filter(|rest| !rest.is_empty())),
+            };
+            *s == "--hostname"
+                || s.starts_with("--hostname=")
+                || value.is_some_and(|value| value.matches('/').count() != 1 || value.contains(':'))
+        }) {
+            return ask(Reason::Network);
+        }
         let read = matches!(
             a.as_slice(),
             ["pr", "view" | "list" | "diff", ..]
@@ -478,6 +511,16 @@ fn simple(args: &[String]) -> (Class, Reason) {
     ) && a == ["--version"]
     {
         return (Class::Read, Reason::Inspection);
+    }
+    // Inline code is a program nobody reviewed; the folder approval for
+    // builds and tests does not extend to it.
+    if (matches!(p, "python" | "python3" | "ruby" | "perl")
+        && a.iter().any(|s| matches!(*s, "-c" | "-e" | "-E")))
+        || (matches!(p, "node" | "bun" | "deno")
+            && a.iter()
+                .any(|s| matches!(*s, "-e" | "-p" | "--eval" | "--print")))
+    {
+        return ask(Reason::ShellSyntax);
     }
     if matches!(
         p,
@@ -571,12 +614,153 @@ fn simple(args: &[String]) -> (Class, Reason) {
     if matches!(p, "mkdir" | "cp" | "mv" | "touch" | "cd") {
         return write(Reason::FileChange);
     }
-    write(Reason::UnknownProgram)
+    ask(Reason::UnknownProgram)
+}
+
+/// Whether the repository around `cwd` names programs in its own
+/// configuration that even read-only git commands run: a file-system monitor,
+/// diff drivers, clean/smudge filters, an ssh command. A downloaded or shared
+/// repository can carry these, so git there asks first.
+fn repository_runs_programs(cwd: &Path) -> bool {
+    const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+    let Some(dot_git) = cwd
+        .ancestors()
+        .take(64)
+        .map(|dir| dir.join(".git"))
+        .find(|path| path.exists())
+    else {
+        return false;
+    };
+    let read = |path: &Path| -> Option<String> {
+        let size = std::fs::metadata(path).ok()?.len();
+        if size > MAX_CONFIG_BYTES {
+            return Some("[include]".into());
+        }
+        std::fs::read_to_string(path).ok()
+    };
+    let mut configs = Vec::new();
+    if dot_git.is_dir() {
+        configs.push(dot_git.join("config"));
+        configs.push(dot_git.join("config.worktree"));
+    } else {
+        // A linked worktree: `.git` names its own folder, which names the
+        // shared one.
+        let Some(gitdir) = read(&dot_git)
+            .as_deref()
+            .and_then(|text| text.trim().strip_prefix("gitdir:"))
+            .map(|path| dot_git.parent().unwrap_or(cwd).join(path.trim()))
+        else {
+            return true;
+        };
+        let common = read(&gitdir.join("commondir"))
+            .map(|path| gitdir.join(path.trim()))
+            .unwrap_or_else(|| gitdir.clone());
+        configs.push(gitdir.join("config.worktree"));
+        configs.push(common.join("config"));
+    }
+    configs
+        .iter()
+        .filter_map(|path| read(path))
+        .any(|text| config_runs_programs(&text))
+}
+
+fn config_runs_programs(text: &str) -> bool {
+    let mut section = String::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let name = header.split([']', ' ', '"', '.']).next().unwrap_or("");
+            section = name.to_ascii_lowercase();
+            if section.starts_with("include") {
+                return true;
+            }
+            continue;
+        }
+        let key = line
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let runs = match section.as_str() {
+            "core" => matches!(key.as_str(), "fsmonitor" | "sshcommand" | "hookspath"),
+            "diff" => matches!(key.as_str(), "external" | "textconv" | "command"),
+            "filter" => matches!(key.as_str(), "clean" | "smudge" | "process"),
+            "gpg" => key == "program",
+            _ => false,
+        };
+        if runs {
+            return true;
+        }
+    }
+    false
+}
+
+fn jq_reads_environment(arg: &str) -> bool {
+    arg.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .any(|word| matches!(word, "env" | "$ENV" | "input_filename" | "$__loc__"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_programs_make_git_ask() {
+        assert!(!config_runs_programs(
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:o/external.git\n"
+        ));
+        for config in [
+            "[core]\n\tfsmonitor = ./run.sh\n",
+            "[diff \"img\"]\n\ttextconv = ./show\n",
+            "[diff]\n\texternal = ./x\n",
+            "[filter \"lfs\"]\n\tclean = ./x %f\n",
+            "[include]\n\tpath = other\n",
+            "[core]\n\tsshCommand = ./x\n",
+        ] {
+            assert!(config_runs_programs(config), "{config}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let roots = std::slice::from_ref(&root);
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "[core]\n\tbare = false\n").unwrap();
+        assert_eq!(classify("git status", &root, roots).0, Class::Read);
+        std::fs::write(root.join(".git/config"), "[core]\n\tfsmonitor = ./hook\n").unwrap();
+        assert_eq!(classify("git status", &root, roots).0, Class::Ask);
+    }
+
+    #[test]
+    fn reads_that_leave_the_folder_or_github_ask_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let roots = std::slice::from_ref(&root);
+        for line in [
+            "gh pr view 1 -R secret.evil.example/o/r",
+            "gh pr view 1 --repo=evil.example/o/r",
+            "gh issue list --hostname evil.example",
+            "gh pr list -Revil.example/o/r",
+            "jq -n env",
+            "jq -n $ENV",
+            "grep -R KEY .",
+            "grep -rR KEY .",
+            "rg -L KEY",
+            "rg --follow KEY",
+            "find -L . -name x",
+            "tree -l",
+            "du -L .",
+            "wc --files0-from=list",
+        ] {
+            assert_ne!(classify(line, &root, roots).0, Class::Read, "{line}");
+        }
+        for line in [
+            "gh pr view 1 -R owner/repo",
+            "jq .name package.json",
+            "grep -r KEY .",
+            "rg KEY",
+        ] {
+            assert_eq!(classify(line, &root, roots).0, Class::Read, "{line}");
+        }
+    }
 
     #[test]
     fn windows_shell_expansion_and_aliases_require_exact_approval() {
@@ -678,7 +862,6 @@ mod tests {
             "cat < a",
         ];
         let writes = [
-            "env",
             "cargo check",
             "cargo test",
             "cargo build",
@@ -724,7 +907,8 @@ mod tests {
             "mv a b",
             "touch a",
             "sed -i s/a/b/ a",
-            "custom",
+            "python3 script.py",
+            "node build.js",
             "echo hi > a",
             "cat a >> b",
             "sort -o b a",
@@ -736,6 +920,12 @@ mod tests {
             "cargo test || echo failed",
         ];
         let asks = [
+            "custom",
+            "env",
+            "python3 -c 'import os'",
+            "node -e 'fetch(1)'",
+            "node --eval x",
+            "perl -e x",
             "curl example.com",
             "wget example.com",
             "ssh host",

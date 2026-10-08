@@ -27,6 +27,10 @@ struct NavigationEpochState {
     // even if the same committed epoch becomes visible again.
     activity: Option<NavigationActivity>,
     revoked: bool,
+    // Provider redirects may advance epochs. Explicit browser actions and
+    // native main-frame link/history/reload navigation relinquish cleanup.
+    auth_cleanup_owned: bool,
+    auth_cleanup_fence: Option<zephium_core::extensions::AuthTabCleanupPermit>,
 }
 
 // Presentation identities cross the shell timer boundary, where an old wake
@@ -92,6 +96,8 @@ impl NavigationEpochTracker {
                 current: None,
                 activity: None,
                 revoked: false,
+                auth_cleanup_owned: true,
+                auth_cleanup_fence: None,
             })),
         }
     }
@@ -149,10 +155,19 @@ impl NavigationEpochTracker {
             // navigation indistinguishable from the newest one. Permanently
             // retire this tracker instead of panicking in a native callback.
             state.revoked = true;
+            if let Some(fence) = &state.auth_cleanup_fence {
+                fence.revoke();
+            }
             state.current = None;
             return None;
         };
         let epoch = NavigationEpoch(next);
+        if request.is_some() {
+            state.auth_cleanup_owned = false;
+            if let Some(fence) = &state.auth_cleanup_fence {
+                fence.revoke();
+            }
+        }
         state.activity = Some(NavigationActivity(next));
         state.current = Some(CurrentNavigation {
             epoch,
@@ -388,6 +403,88 @@ impl NavigationEpochTracker {
             .flatten()
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn auth_cleanup_is_owned(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.revoked && state.auth_cleanup_owned
+    }
+
+    pub(crate) fn release_auth_cleanup(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.auth_cleanup_owned = false;
+        if let Some(fence) = &state.auth_cleanup_fence {
+            fence.revoke();
+        }
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn attach_auth_cleanup_fence(
+        &self,
+        fence: zephium_core::extensions::AuthTabCleanupPermit,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked || !state.auth_cleanup_owned {
+            fence.revoke();
+        }
+        if let Some(previous) = state.auth_cleanup_fence.replace(fence.clone()) {
+            if previous != fence {
+                previous.revoke();
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn resident_document_snapshot(&self) -> Option<(NavigationEpoch, String)> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return None;
+        }
+        let current = state.current.as_ref()?;
+        if current.phase == TrackedNavigationPhase::Committed {
+            Some((current.epoch, current.target.clone()))
+        } else {
+            current
+                .previous_committed
+                .as_ref()
+                .map(|previous| (previous.epoch, previous.target.clone()))
+        }
+    }
+
+    /// Native media state still belongs to the previous resident document
+    /// during a provisional load. This observation/stop identity grants no
+    /// permission, presentation, scripting or navigation authority.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn resident_media_epoch(&self) -> Option<NavigationEpoch> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return None;
+        }
+        let current = state.current.as_ref()?;
+        if current.phase == TrackedNavigationPhase::Committed {
+            Some(current.epoch)
+        } else {
+            current
+                .previous_committed
+                .as_ref()
+                .map(|previous| previous.epoch)
+        }
+    }
+
     pub(crate) fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
         let state = self
             .state
@@ -496,6 +593,9 @@ impl NavigationEpochTracker {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.revoked = true;
+        if let Some(fence) = &state.auth_cleanup_fence {
+            fence.revoke();
+        }
         state.current = None;
     }
 }
@@ -522,6 +622,86 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_provider_redirects_keep_auth_cleanup_but_user_navigation_releases_it() {
+        let tracker = NavigationEpochTracker::new();
+        commit(
+            &tracker,
+            91,
+            "https://provider.example/login",
+            "https://provider.example/login",
+        );
+        assert!(tracker.auth_cleanup_is_owned());
+        commit(
+            &tracker,
+            92,
+            "https://sso.example/challenge",
+            "https://sso.example/challenge",
+        );
+        assert!(tracker.auth_cleanup_is_owned());
+        let user = tracker
+            .begin_request("https://provider.example/article", NavigationRequestId(71))
+            .unwrap();
+        assert!(!tracker.auth_cleanup_is_owned());
+        tracker.fail_synchronous(user);
+        assert!(!tracker.auth_cleanup_is_owned());
+        commit(
+            &tracker,
+            93,
+            "https://provider.example/login",
+            "https://provider.example/login",
+        );
+        assert!(!tracker.auth_cleanup_is_owned());
+    }
+
+    #[test]
+    fn history_or_reload_intent_releases_auth_cleanup_even_before_native_outcome() {
+        let tracker = NavigationEpochTracker::new();
+        commit(
+            &tracker,
+            94,
+            "https://provider.example/login",
+            "https://provider.example/login",
+        );
+        tracker.release_auth_cleanup();
+        assert!(!tracker.auth_cleanup_is_owned());
+    }
+
+    #[test]
+    fn media_observation_keeps_the_resident_document_during_failed_provisional_load() {
+        let tracker = NavigationEpochTracker::new();
+        let resident = commit(
+            &tracker,
+            81,
+            "https://call.example/",
+            "https://call.example/",
+        );
+        tracker.begin("https://next.example/").unwrap();
+        tracker.observe_navigation(&event(
+            82,
+            NavigationEventPhase::Started,
+            "https://next.example/",
+        ));
+        assert!(tracker.current_committed().is_none());
+        assert_eq!(tracker.resident_media_epoch(), Some(resident));
+        tracker.observe_navigation(&event(
+            82,
+            NavigationEventPhase::Failed,
+            "https://next.example/",
+        ));
+        assert_eq!(tracker.resident_media_epoch(), Some(resident));
+        let replacement = commit(
+            &tracker,
+            83,
+            "https://next.example/",
+            "https://next.example/",
+        );
+        assert_eq!(tracker.resident_media_epoch(), Some(replacement));
+        assert_ne!(replacement, resident);
+        tracker.revoke();
+        assert!(tracker.resident_media_epoch().is_none());
+    }
 
     #[test]
     fn policy_cancellation_restores_previous_document_without_committing_download_url() {

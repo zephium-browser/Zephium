@@ -324,7 +324,7 @@ impl Control {
         if let Some(layer) = view.layer() {
             let paint = block2::RcBlock::new(|| {
                 let color = if dragging {
-                    NSColor::controlAccentColor()
+                    NSColor::labelColor()
                 } else {
                     NSColor::secondaryLabelColor()
                 };

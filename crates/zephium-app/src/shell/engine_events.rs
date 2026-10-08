@@ -86,10 +86,22 @@ impl Shell {
             | EngineEvent::PresentationPending { id, .. }
             | EngineEvent::PresentationReady { id, .. }
             | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ViewCreationFailed { id }
             | EngineEvent::Crashed { id }
             | EngineEvent::ViewDiscarded { id, .. } => {
                 self.cancel_page_permission_for_item(*id);
+                let capture_invalidated = matches!(
+                    &event,
+                    EngineEvent::ViewCreationFailed { .. }
+                        | EngineEvent::Crashed { .. }
+                        | EngineEvent::ViewDiscarded { .. }
+                );
+                if capture_invalidated {
+                    self.items.set_media_capture(*id, None);
+                    // A replacement view starts out of fullscreen.
+                    self.forget_content_fullscreen(*id);
+                }
             }
             EngineEvent::ProfileProcessExited { profile, .. } => {
                 self.cancel_page_permission_for_profile(*profile);
@@ -354,9 +366,19 @@ impl Shell {
                 adoption,
             } => self.adopt_linked_native_tab(id, child, foreground, adoption),
             EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
-            EngineEvent::PageOpenBlocked { id } => {
-                self.items.set_popup_blocked(id, true);
-                self.project_tab(id);
+            EngineEvent::PageOpenBlocked { id, url } => {
+                let url = url
+                    .and_then(|url| url::Url::parse(&url).ok())
+                    .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
+                if self
+                    .items
+                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
+                {
+                    self.project_tab(id);
+                }
+            }
+            EngineEvent::ExternalAppRequested { id, url, app } => {
+                self.on_external_app_requested(id, url, app)
             }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
@@ -391,6 +413,31 @@ impl Shell {
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }
+            EngineEvent::MediaCaptureChanged {
+                id,
+                navigation,
+                state,
+            } => {
+                let current_document = self
+                    .presentation
+                    .pending_presentations
+                    .get(&id)
+                    .map(|pending| pending.navigation)
+                    .or_else(|| {
+                        self.presentation
+                            .presented_navigations
+                            .get(&id)
+                            .map(|(current, _)| *current)
+                    });
+                if current_document == Some(navigation)
+                    && self
+                        .items
+                        .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
+                {
+                    self.project_tab(id);
+                }
+            }
+            EngineEvent::FullscreenChanged { id, active } => self.on_fullscreen_changed(id, active),
             EngineEvent::PermissionRequested {
                 id,
                 profile,
@@ -414,6 +461,11 @@ impl Shell {
                 // URL was never changed optimistically, so a stale native
                 // rejection cannot roll chrome or persistence forward or back.
                 if self.items.navigation_failed(id, request) {
+                    self.project_tab(id);
+                }
+            }
+            EngineEvent::NavigationFailureReported { id, reason } => {
+                if self.items.record_navigation_failure(id, reason) {
                     self.project_tab(id);
                 }
             }
@@ -603,6 +655,7 @@ impl Shell {
             | EngineEvent::PresentationPending { id, .. }
             | EngineEvent::PresentationReady { id, .. }
             | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ZoomSettled { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }
@@ -610,7 +663,8 @@ impl Shell {
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
-            | EngineEvent::PageOpenBlocked { id }
+            | EngineEvent::PageOpenBlocked { id, .. }
+            | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
@@ -621,6 +675,8 @@ impl Shell {
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. }
             | EngineEvent::FindResult { id, .. } => self.profile_of_item(*id),
+            EngineEvent::MediaCaptureChanged { id, .. }
+            | EngineEvent::FullscreenChanged { id, .. } => self.profile_of_item(*id),
             EngineEvent::PermissionRequested { profile, .. }
             | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),

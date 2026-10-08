@@ -203,7 +203,8 @@ mod tests {
                 2,
                 54,
                 1,
-                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
+                SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+                    + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS,
             ),
             Ok(RuntimeSecurityAdvisories::from_advisory(
                 RuntimeSecurityAdvisory::review_overdue(),
@@ -220,7 +221,13 @@ mod tests {
             ))
         );
 
-        let combined = runtime_advisories([2, 56, 0], [2, 54], [2, 54, 1], 20, 20);
+        let combined = runtime_advisories(
+            [2, 56, 0],
+            [2, 54],
+            [2, 54, 1],
+            20 + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS,
+            20,
+        );
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }

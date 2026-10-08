@@ -7,6 +7,7 @@
 //! work and cannot defeat the browser's native-view residency policy.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::ids::{ItemId, ProfileId, WindowId};
@@ -53,6 +54,32 @@ pub struct ExtensionBrowserRequest {
     profile: ProfileId,
     id: ExtensionBrowserRequestId,
     action: ExtensionBrowserRequestAction,
+}
+
+/// Process-local cancellation fence for automatic sign-in cleanup. It is
+/// neither persisted nor accepted from extension JavaScript. A native user
+/// navigation can revoke an already queued close before the Shell applies it.
+#[derive(Clone, Debug)]
+pub struct AuthTabCleanupPermit(Arc<AtomicBool>);
+
+impl Default for AuthTabCleanupPermit {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+impl PartialEq for AuthTabCleanupPermit {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for AuthTabCleanupPermit {}
+impl AuthTabCleanupPermit {
+    pub fn is_owned(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+    pub fn revoke(&self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl ExtensionBrowserRequest {
@@ -105,6 +132,18 @@ pub enum ExtensionBrowserRequestAction {
     CloseTab {
         tab: ItemId,
     },
+    /// Native sign-in cleanup; a queued terminal must not close a tab that
+    /// has since acquired another document or a newer user navigation.
+    CloseTabIfUnchanged {
+        tab: ItemId,
+        navigation: crate::ports::engine::NavigationPresentationId,
+        url: Arc<str>,
+        cleanup: AuthTabCleanupPermit,
+    },
+    /// A cancelled tabs.create reply may only remove its unused marker.
+    CloseTabIfPristine {
+        tab: ItemId,
+    },
     LoadTabUrl {
         tab: ItemId,
         url: Arc<str>,
@@ -125,9 +164,11 @@ impl ExtensionBrowserRequestAction {
         match self {
             Self::CreateTab { url, .. } => url.as_deref(),
             Self::LoadTabUrl { url, .. } => Some(url),
+            Self::CloseTabIfUnchanged { url, .. } => Some(url),
             Self::OpenExtensionPage
             | Self::ActivateTab { .. }
             | Self::CloseTab { .. }
+            | Self::CloseTabIfPristine { .. }
             | Self::ReloadTab { .. }
             | Self::GoBack { .. }
             | Self::GoForward { .. } => None,

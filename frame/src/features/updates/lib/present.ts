@@ -1,5 +1,7 @@
 import type { IconSvgElement } from "@hugeicons/svelte";
 import {
+  Alert02Icon,
+  Bug01Icon,
   News01Icon,
   RefreshIcon,
   Shield01Icon,
@@ -10,24 +12,38 @@ import * as m from "$shared/i18n/messages";
 import { commands } from "$shared/ipc/bindings";
 import { IS_MAC } from "$shared/platform";
 import type { SidebarCardAction } from "$shared/ui/SidebarCard";
-import { releaseNotesUrl } from "$domain/updates";
+import { releaseNotesUrl, updates } from "$domain/updates";
 import * as notices from "./notices.svelte";
 import type { UpdateCard, UpdatePill } from "./select";
+
+const REPORT_URL = "https://github.com/zephium-browser/Zephium/issues/new?template=bug_report.yml";
 
 export type CardView = {
   key: string;
   title: string;
   detail?: string;
+  items?: string[];
   icon: IconSvgElement;
   actions: SidebarCardAction[];
   dismiss: () => void;
 };
 
 export function cardView(card: UpdateCard): CardView {
+  if (card.kind === "session") {
+    return {
+      key: "session",
+      title: m.session_set_aside_title(),
+      detail: m.session_set_aside_detail(),
+      icon: Alert02Icon,
+      actions: [],
+      dismiss: notices.dismissSession,
+    };
+  }
   if (card.kind === "updated") {
     return {
       key: `updated:${card.version}`,
       title: m.update_done_title({ version: card.version }),
+      items: notices.highlights(card.version),
       icon: SparklesIcon,
       actions: [
         {
@@ -36,6 +52,11 @@ export function cardView(card: UpdateCard): CardView {
           dismisses: true,
           onclick: () =>
             void commands.browserOpenUrl(releaseNotesUrl(card.version), true).catch(() => {}),
+        },
+        {
+          label: m.update_report_problem(),
+          icon: Bug01Icon,
+          onclick: () => void commands.browserOpenUrl(REPORT_URL, true).catch(() => {}),
         },
       ],
       dismiss: notices.acknowledgeUpdate,
@@ -72,4 +93,14 @@ export function cardView(card: UpdateCard): CardView {
 export const PILL_ICON = RefreshIcon;
 
 export const pillLabel = (pill: UpdatePill) =>
-  pill.kind === "ready" ? m.update_relaunch() : m.update_installing();
+  pill.kind === "manual"
+    ? m.update_install_manual()
+    : pill.kind === "ready"
+      ? m.update_relaunch()
+      : m.update_installing();
+
+export function activatePill(pill: UpdatePill) {
+  if (pill.kind === "manual")
+    void commands.browserOpenUrl(releaseNotesUrl(pill.version), true).catch(() => {});
+  else if (pill.kind === "ready") void updates.relaunch();
+}

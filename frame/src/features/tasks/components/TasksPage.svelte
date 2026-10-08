@@ -256,6 +256,7 @@
           >{#snippet children(TaskDetail)}{#key selected.id}
               <TaskDetail
                 task={selected}
+                saving={session.saving(selected.id)}
                 today={today()}
                 lists={session.lists}
                 compact={!wide.current}
@@ -271,6 +272,7 @@
                 onsteprename={(id, step, title) => session.renameStep(id, step, title)}
                 onrename={(id, title) => session.rename(id, title)}
                 ondescribe={(id, text) => session.describe(id, text)}
+                oncommit={(id) => session.commitText(id)}
                 onpin={(id, pinned) => void session.setPinned(id, pinned)}
                 onremove={(id) => {
                   session.selectedId = null;

@@ -60,6 +60,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.slackSend,
     f.airbnbBook,
     f.notionEdit,
+    f.typeSearch,
     f.deleteRepo,
     f.historyAsk,
     f.notesAsk,
@@ -67,6 +68,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.githubAsk,
     f.folderAsk,
     f.documentsAsk,
+    f.addressAsk,
     f.budgetAsk,
     f.notionTask,
     f.settled(f.decided(f.slackSend, "approved", "succeeded"), { id: "sent" }),
@@ -84,6 +86,7 @@ test("every ask, open and decided, on the canvas and in the island, in both them
     f.settled(f.answered(f.slackEntry, "Always for Slack"), { id: "entry-always" }),
     f.settled(f.answered(f.historyAsk, "Allow"), { id: "history-allowed" }),
     f.settled(f.answered(f.folderAsk, "Allow for this work"), { id: "folder-allowed" }),
+    f.settled(f.answered(f.addressAsk, "Don\u2019t open"), { id: "address-declined" }),
     f.settled(f.answered(f.documentsAsk, "/Users/crynta/Documents/Notes"), {
       id: "documents-chosen",
     }),

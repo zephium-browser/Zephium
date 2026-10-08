@@ -59,6 +59,59 @@ const MAX_UI_CALLS: usize = 4;
 const MAX_BACKGROUND_WORK: usize = 32;
 const RECENT_LIMIT: usize = 64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecisionPhase {
+    Admission,
+    NativePicker,
+    PreparingDestination,
+    PersistingDestination,
+    #[cfg(any(target_os = "windows", test))]
+    ResumableInterruption,
+}
+
+#[derive(Clone, Copy)]
+struct DecisionDeadline {
+    phase: DecisionPhase,
+    expires: Instant,
+}
+impl DecisionDeadline {
+    fn new(phase: DecisionPhase, now: Instant) -> Self {
+        let duration = match phase {
+            // Filesystem calls can synchronously wait for native TCC/target
+            // consent, just as a picker can wait for a person's choice.
+            DecisionPhase::NativePicker | DecisionPhase::PreparingDestination => {
+                Duration::from_secs(24 * 60 * 60)
+            }
+            DecisionPhase::Admission | DecisionPhase::PersistingDestination => {
+                Duration::from_secs(30)
+            }
+            #[cfg(any(target_os = "windows", test))]
+            DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
+        };
+        Self {
+            phase,
+            expires: now + duration,
+        }
+    }
+    fn expired(self, now: Instant) -> bool {
+        now > self.expires
+    }
+    fn prepared(
+        self,
+        state: DownloadState,
+        cancelling: bool,
+        terminal: bool,
+        now: Instant,
+    ) -> Option<Self> {
+        (self.phase == DecisionPhase::PreparingDestination
+            && state == DownloadState::Pending
+            && !cancelling
+            && !terminal
+            && !self.expired(now))
+        .then(|| Self::new(DecisionPhase::PersistingDestination, now))
+    }
+}
+
 /// One native, user-admitted initial navigation may download before its child
 /// is presented. Dropping an unconsumed admission also retires its empty tab.
 pub(in crate::host) struct InitialDownload {
@@ -88,7 +141,7 @@ struct Transfer {
     authorized: bool,
     cancelling: bool,
     persisting_terminal: bool,
-    deadline: Instant,
+    deadline: DecisionDeadline,
 }
 
 enum Message {
@@ -221,7 +274,8 @@ impl Downloads {
             }
             transfer.authorized = true;
             transfer.source = None;
-            transfer.deadline = Instant::now() + Duration::from_secs(30);
+            transfer.deadline =
+                DecisionDeadline::new(DecisionPhase::PreparingDestination, Instant::now());
         }
         self.work.set(self.work.get() + 1);
         let sender = self.sender.clone();
@@ -308,12 +362,23 @@ impl Downloads {
                     destination,
                     transfer.record.source.clone(),
                     transfer.partition.profile(),
+                    transfer.native.clone(),
                 )
             })
         };
-        let Some((destination, source, profile)) = work else {
-            self.cancel(id, Some(DownloadError::Destination));
+        let Some((destination, source, profile, native)) = work else {
+            self.terminal(id, DownloadState::Failed, Some(DownloadError::Destination));
             return;
+        };
+        // Native getters can pump callbacks. Finalizing is set before this
+        // call, so a reentrant completion cannot start another publication.
+        let expected_bytes = match platform::completion_bytes(&native) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.cleanup(destination);
+                self.terminal(id, DownloadState::Failed, Some(error));
+                return;
+            }
         };
         (self.notify)(profile);
         self.work.set(self.work.get() + 1);
@@ -321,7 +386,10 @@ impl Downloads {
         if std::thread::Builder::new()
             .name("zephium-download-publish".into())
             .spawn(move || {
-                let _ = sender.send(Message::Finalized(id, destination.finish(&source)));
+                let _ = sender.send(Message::Finalized(
+                    id,
+                    destination.finish(&source, expected_bytes),
+                ));
             })
             .is_err()
         {
@@ -330,8 +398,46 @@ impl Downloads {
         }
     }
 
+    #[cfg(target_os = "windows")]
     fn native_failed(&self, id: DownloadId) {
         self.native_failed_with_error(id, DownloadError::Network);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn pause(&self, id: DownloadId, error: DownloadError) -> bool {
+        let profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active.get_mut(&id).filter(|transfer| {
+                transfer.record.state == DownloadState::Receiving
+                    && !transfer.cancelling
+                    && !transfer.persisting_terminal
+                    && transfer.destination.is_some()
+                    && retry_source_alive(&transfer.native.permit)
+            }) else {
+                return false;
+            };
+            transfer.record.state = DownloadState::Paused;
+            transfer.record.error = Some(error);
+            transfer.deadline =
+                DecisionDeadline::new(DecisionPhase::ResumableInterruption, Instant::now());
+            transfer.record.revision += 1;
+            transfer.partition.profile()
+        };
+        self.persist(id);
+        (self.notify)(profile);
+        true
+    }
+
+    #[cfg(target_os = "windows")]
+    fn note_native_error(&self, id: DownloadId, error: DownloadError) {
+        if let Some(transfer) = self.active.borrow_mut().get_mut(&id).filter(|transfer| {
+            !transfer.record.state.terminal()
+                && transfer.record.state != DownloadState::Finalizing
+                && !transfer.persisting_terminal
+                && !transfer.cancelling
+        }) {
+            latch_native_error(&mut transfer.record.error, error);
+        }
     }
 
     fn native_failed_with_error(&self, id: DownloadId, error: DownloadError) {
@@ -339,6 +445,11 @@ impl Downloads {
             native_terminal_transition(transfer.record.state, transfer.cancelling, false)
         });
         if let Some(state) = transition {
+            let state = if state == DownloadState::Failed && error == DownloadError::Cancelled {
+                DownloadState::Cancelled
+            } else {
+                state
+            };
             self.terminal(
                 id,
                 state,
@@ -361,13 +472,8 @@ impl Downloads {
                 return;
             }
             transfer.record.writer_released = true;
-            transfer.record.error = transfer.record.error.or(error);
-            transfer.record.state =
-                if state == DownloadState::Cancelled && transfer.record.error.is_some() {
-                    DownloadState::Failed
-                } else {
-                    state
-                };
+            (transfer.record.state, transfer.record.error) =
+                terminal_outcome(state, transfer.record.error, error);
             transfer.record.revision += 1;
             transfer.persisting_terminal = true;
             (transfer.destination.take(), transfer.on_started.take())
@@ -409,15 +515,19 @@ impl Downloads {
         }
         for (id, transfer) in self.active.borrow().iter() {
             if transfer.record.state == DownloadState::Pending
-                && (Instant::now() > transfer.deadline
+                && (transfer.deadline.expired(Instant::now())
                     || (!transfer.authorized
                         && !transfer.source.as_ref().is_some_and(Source::live)))
             {
-                cancel.push(*id);
+                cancel.push((*id, DownloadError::Unavailable));
+            } else if transfer.record.state == DownloadState::Paused
+                && transfer.deadline.expired(Instant::now())
+            {
+                cancel.push((*id, transfer.record.error.unwrap_or(DownloadError::Timeout)));
             }
         }
-        for id in cancel {
-            self.cancel(id, Some(DownloadError::Unavailable));
+        for (id, error) in cancel {
+            self.cancel(id, Some(error));
         }
         changed.sort();
         changed.dedup();
@@ -515,13 +625,34 @@ impl Downloads {
             Message::Prepared(id, result) => match result {
                 Ok(destination) => {
                     let mut active = self.active.borrow_mut();
-                    let Some(transfer) =
-                        active.get_mut(&id).filter(|transfer| !transfer.cancelling)
-                    else {
+                    let now = Instant::now();
+                    let Some(transfer) = active.get_mut(&id) else {
                         drop(active);
                         self.cleanup(destination);
                         return;
                     };
+                    let Some(deadline) = transfer
+                        .deadline
+                        .prepared(
+                            transfer.record.state,
+                            transfer.cancelling,
+                            transfer.persisting_terminal,
+                            now,
+                        )
+                        .filter(|_| {
+                            transfer.authorized
+                                && transfer.destination_reply.is_some()
+                                && transfer.destination.is_none()
+                        })
+                    else {
+                        // Consent/work can finish after cancellation, failure,
+                        // profile retirement or expiry. Never revive that request
+                        // or create a new cleanup receipt from a stale result.
+                        drop(active);
+                        self.cleanup(destination);
+                        return;
+                    };
+                    transfer.deadline = deadline;
                     transfer.record.filename = destination
                         .path
                         .file_name()
@@ -642,6 +773,30 @@ impl Downloads {
     }
 }
 
+fn terminal_outcome(
+    state: DownloadState,
+    recorded: Option<DownloadError>,
+    native: Option<DownloadError>,
+) -> (DownloadState, Option<DownloadError>) {
+    let error = recorded.or(native);
+    let state = if state == DownloadState::Cancelled && error.is_some() {
+        DownloadState::Failed
+    } else {
+        state
+    };
+    (state, error)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn latch_native_error(recorded: &mut Option<DownloadError>, error: DownloadError) {
+    recorded.get_or_insert(error);
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn retry_source_alive(permit: &EventPermit) -> bool {
+    permit.active_token().is_some()
+}
+
 fn native_terminal_transition(
     state: DownloadState,
     cancelling: bool,
@@ -706,5 +861,115 @@ mod state_tests {
         })
         .finish(Some(PathBuf::from("selected")));
         assert_eq!(replies.get(), 2);
+    }
+
+    #[test]
+    fn paused_transfers_remain_cancellable_and_cannot_publish_without_resuming() {
+        assert!(!DownloadState::Paused.terminal());
+        assert_eq!(
+            native_terminal_transition(DownloadState::Paused, true, false),
+            Some(DownloadState::Cancelled)
+        );
+        assert_eq!(
+            native_terminal_transition(DownloadState::Paused, false, true),
+            Some(DownloadState::Failed)
+        );
+    }
+
+    #[test]
+    fn cancelling_an_interrupted_native_operation_cannot_replace_its_original_failure() {
+        assert_eq!(
+            terminal_outcome(
+                DownloadState::Cancelled,
+                Some(DownloadError::Permission),
+                None
+            ),
+            (DownloadState::Failed, Some(DownloadError::Permission))
+        );
+        assert_eq!(
+            terminal_outcome(
+                DownloadState::Failed,
+                Some(DownloadError::Certificate),
+                Some(DownloadError::Cancelled)
+            ),
+            (DownloadState::Failed, Some(DownloadError::Certificate))
+        );
+        assert_eq!(
+            terminal_outcome(DownloadState::Cancelled, None, None),
+            (DownloadState::Cancelled, None)
+        );
+    }
+
+    #[test]
+    fn native_folder_consent_can_outlast_admission_and_restores_a_short_persistence_deadline() {
+        let started = Instant::now();
+        let after_consent = started + Duration::from_secs(45);
+        assert!(DecisionDeadline::new(DecisionPhase::Admission, started).expired(after_consent));
+        let preparation = DecisionDeadline::new(DecisionPhase::PreparingDestination, started);
+        assert!(!preparation.expired(after_consent));
+        let persisted = preparation
+            .prepared(DownloadState::Pending, false, false, after_consent)
+            .unwrap();
+        assert_eq!(persisted.phase, DecisionPhase::PersistingDestination);
+        assert!(!persisted.expired(after_consent + Duration::from_secs(29)));
+        assert!(persisted.expired(after_consent + Duration::from_secs(31)));
+    }
+
+    #[test]
+    fn late_destination_success_cannot_revive_cancelled_failed_or_expired_work() {
+        let started = Instant::now();
+        let preparation = DecisionDeadline::new(DecisionPhase::PreparingDestination, started);
+        let after_consent = started + Duration::from_secs(45);
+        assert!(preparation
+            .prepared(DownloadState::Cancelling, true, false, after_consent)
+            .is_none());
+        assert!(preparation
+            .prepared(DownloadState::Failed, false, true, after_consent)
+            .is_none());
+        assert!(preparation
+            .prepared(DownloadState::Cancelled, false, true, after_consent)
+            .is_none());
+        assert!(preparation
+            .prepared(
+                DownloadState::Pending,
+                false,
+                false,
+                started + Duration::from_secs(24 * 60 * 60 + 1)
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn reentrant_cancellation_latches_the_first_native_failure() {
+        let mut error = None;
+        latch_native_error(&mut error, DownloadError::Integrity);
+        latch_native_error(&mut error, DownloadError::Cancelled);
+        assert_eq!(
+            terminal_outcome(DownloadState::Cancelled, error, None),
+            (DownloadState::Failed, Some(DownloadError::Integrity))
+        );
+    }
+
+    #[test]
+    fn resumable_native_interruption_has_a_five_minute_bound() {
+        let now = Instant::now();
+        let deadline = DecisionDeadline::new(DecisionPhase::ResumableInterruption, now);
+        assert!(!deadline.expired(now + Duration::from_secs(299)));
+        assert!(deadline.expired(now + Duration::from_secs(301)));
+    }
+
+    #[test]
+    fn closing_the_source_view_revokes_native_retry_even_when_receiving_can_finish() {
+        let token = Arc::new(AtomicBool::new(true));
+        let permit = EventPermit::bound(&token);
+        assert!(retry_source_alive(&permit));
+        assert!(permit.retire_for_download());
+        assert!(!retry_source_alive(&permit));
+        // The admitted receiving operation may still complete independently;
+        // retirement prevents a new paused/retry lifetime from retaining it.
+        assert_eq!(
+            native_terminal_transition(DownloadState::Receiving, false, true),
+            Some(DownloadState::Finalizing)
+        );
     }
 }

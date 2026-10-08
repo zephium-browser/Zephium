@@ -3,6 +3,7 @@ import type { TaskRow } from "$domain/resources";
 import {
   compareRows,
   completion,
+  createSections,
   matchRange,
   dayKey,
   daysUntil,
@@ -240,4 +241,38 @@ test("a task completed a moment ago keeps its place until it leaves", () => {
     holding: new Set(["a"]),
   });
   expect(grouped[0]!.rows.map((task) => task.id)).toEqual(["a", "b"]);
+});
+
+test("typing into a task keeps the list's grouping and puts in the new words", () => {
+  const sectioned = createSections();
+  const rows = [
+    row({ id: "a", dueDate: TODAY, title: "Write" }),
+    row({ id: "b", dueDate: TODAY, pinned: true }),
+    row({ id: "c" }),
+  ];
+  const options = { scope: "all" as const, today: TODAY, labels: LABELS };
+  const first = sectioned(rows, options);
+  expect(sectioned(rows, { ...options, labels: { ...LABELS } })).toBe(first);
+  const typed = { ...rows[0]!, title: "Write the report", description: "Draft" };
+  const second = sectioned([typed, rows[1]!, rows[2]!], options);
+  expect(second.map((section) => section.rows.map((entry) => entry.id))).toEqual(
+    first.map((section) => section.rows.map((entry) => entry.id)),
+  );
+  expect(second[0]!.rows.find((entry) => entry.id === "a")).toBe(typed);
+});
+
+test("a task that moves is placed again", () => {
+  const sectioned = createSections();
+  const rows = [row({ id: "a", dueDate: TODAY }), row({ id: "b", dueDate: TODAY })];
+  const options = { scope: "all" as const, today: TODAY, labels: LABELS };
+  expect(sectioned(rows, options)[0]!.rows.map((entry) => entry.id)).toEqual(["a", "b"]);
+  const pinned = [rows[0]!, { ...rows[1]!, pinned: true }];
+  expect(sectioned(pinned, options)[0]!.rows.map((entry) => entry.id)).toEqual(["b", "a"]);
+  const later = [rows[0]!, { ...rows[1]!, dueDate: "2026-09-30" }];
+  expect(sectioned(later, options).map((section) => section.key)).toEqual(["today", "upcoming"]);
+  const held = sectioned([{ ...rows[0]!, status: "done" as const }, rows[1]!], {
+    ...options,
+    holding: new Set(["a"]),
+  });
+  expect(held.map((section) => section.key)).toEqual(["today"]);
 });

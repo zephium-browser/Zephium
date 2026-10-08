@@ -145,6 +145,13 @@ describe("an untouched note", () => {
     const { document, doc } = load("");
     expect(document.serialize(doc)).toBe("");
   });
+
+  test("its first blocks read the same as the start of the whole", () => {
+    const markdown = "# Title\n\nFirst paragraph.\n\n- one\n- two\n\nLast paragraph.\n";
+    const { document, doc } = load(markdown);
+    expect(document.serialize(doc, 2)).toBe("# Title\n\nFirst paragraph.\n");
+    expect(document.serialize(doc, 99)).toBe(markdown);
+  });
 });
 
 describe("a rewritten block", () => {

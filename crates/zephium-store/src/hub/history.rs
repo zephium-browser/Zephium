@@ -59,6 +59,9 @@ impl Hub {
             .unwrap_or(0);
         let mut failed = Vec::new();
         for (profile, visits) in grouped {
+            let since = self.visits_since_prune.entry(profile).or_insert(0);
+            *since = since.saturating_add(u32::try_from(visits.len()).unwrap_or(u32::MAX));
+            let prune_rows = *since >= ROW_CAP_PRUNE_EVERY;
             let result = self.profile_conn(profile).and_then(|conn| {
                 let tx = conn.transaction()?;
                 {
@@ -69,19 +72,26 @@ impl Hub {
                         insert.execute(params![url, title, now])?;
                     }
                 }
-                // Bound page-controlled disk growth once per batch. The
-                // visited_at index and FTS triggers keep pruning deterministic.
-                tx.execute(
-                    "DELETE FROM history WHERE id IN (
-                         SELECT id FROM history
-                         ORDER BY visited_at DESC, id DESC
-                         LIMIT -1 OFFSET 50000
-                     )",
-                    [],
-                )?;
+                // Bound page-controlled disk growth. The row cap walks up to
+                // the cap in visit order, so it runs every few hundred visits
+                // and history may briefly hold that many more rows; the byte
+                // budget is cheap and holds on every batch.
+                if prune_rows {
+                    tx.execute(
+                        "DELETE FROM history WHERE id IN (
+                             SELECT id FROM history
+                             ORDER BY visited_at DESC, id DESC
+                             LIMIT -1 OFFSET 50000
+                         )",
+                        [],
+                    )?;
+                }
                 enforce_history_budget(&tx)?;
                 tx.commit()
             });
+            if result.is_ok() && prune_rows {
+                self.visits_since_prune.insert(profile, 0);
+            }
             if let Err(e) = result {
                 eprintln!("store: record_visits failed for profile {profile}: {e}");
                 failed.extend(visits.into_iter().map(|(url, title)| (profile, url, title)));
@@ -359,12 +369,22 @@ impl Hub {
     }
 
     /// Clears visits at or after `since`, or all of them when it is absent.
+    #[cfg(test)]
     pub(crate) fn clear_history(&mut self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.clear_history_checked(profile, since)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn clear_history_checked(
+        &mut self,
+        profile: ProfileId,
+        since: Option<i64>,
+    ) -> Option<u32> {
         if !self.registry.contains(&profile)
             || self.degraded_profiles.contains(&profile)
             || self.recovery_required.is_some()
         {
-            return 0;
+            return None;
         }
         let result = self.profile_conn(profile).and_then(|conn| {
             let tx = conn.transaction()?;
@@ -383,10 +403,10 @@ impl Hub {
             Ok(removed)
         });
         match result {
-            Ok(removed) => u32::try_from(removed).unwrap_or(u32::MAX),
+            Ok(removed) => Some(u32::try_from(removed).unwrap_or(u32::MAX)),
             Err(e) => {
                 eprintln!("store: clear_history failed for profile {profile}: {e}");
-                0
+                None
             }
         }
     }
@@ -474,6 +494,8 @@ impl Hub {
             .unwrap();
     }
 }
+
+const ROW_CAP_PRUNE_EVERY: u32 = 256;
 
 pub(super) fn enforce_history_budget(conn: &Connection) -> rusqlite::Result<()> {
     enforce_history_budget_to(conn, MAX_HISTORY_BYTES)

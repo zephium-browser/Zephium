@@ -2,10 +2,13 @@ import type { RuntimeSecurityAdvisory, UpdateStatus } from "$shared/ipc/bindings
 import { compareVersions, systemUpdateTarget, type SystemUpdateTarget } from "$domain/updates";
 
 /** The update itself, waiting on a relaunch; never dismissed. */
-export type UpdatePill = { kind: "ready"; version: string } | { kind: "installing" };
+export type UpdatePill =
+  { kind: "ready"; version: string } | { kind: "manual"; version: string } | { kind: "installing" };
 /** A notice to read once. */
 export type UpdateCard =
-  { kind: "security"; target: SystemUpdateTarget } | { kind: "updated"; version: string };
+  | { kind: "session" }
+  | { kind: "security"; target: SystemUpdateTarget }
+  | { kind: "updated"; version: string };
 
 export type NoticeFacts = {
   status: UpdateStatus;
@@ -16,11 +19,14 @@ export type NoticeFacts = {
   seen: string | null;
   securityDismissed: string | null;
   advisories: readonly RuntimeSecurityAdvisory[];
+  /** The saved session could not be restored this launch, and was not yet dismissed. */
+  sessionSetAside: boolean;
 };
 
 export type Notices = { pill: UpdatePill | null; card: UpdateCard | null };
 
 function pillFor(status: UpdateStatus, relaunching: boolean): UpdatePill | null {
+  if (status.state === "manualInstall") return { kind: "manual", version: status.version };
   if (status.state === "installing") return { kind: "installing" };
   if (status.state !== "ready") return null;
   return relaunching ? { kind: "installing" } : { kind: "ready", version: status.version };
@@ -35,9 +41,12 @@ function securityDue(dismissed: string, version: string) {
 }
 
 export function selectNotices(facts: NoticeFacts): Notices {
-  // A build that cannot update (development, unsupported) shows none of this.
-  if (facts.status.state === "unavailable") return { pill: null, card: null };
+  // Lost tabs matter more than any update, and in every build.
+  const session: UpdateCard | null = facts.sessionSetAside ? { kind: "session" } : null;
+  // A build that cannot update (development, unsupported) shows none of the rest.
+  if (facts.status.state === "unavailable") return { pill: null, card: session };
   const pill = pillFor(facts.status, facts.relaunching);
+  if (session) return { pill, card: session };
   const { version, seen, securityDismissed } = facts;
   if (version === null) return { pill, card: null };
   const target = systemUpdateTarget(facts.advisories);

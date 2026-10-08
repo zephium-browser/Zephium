@@ -156,6 +156,7 @@ fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
         statuses.lock().unwrap().as_slice(),
         &[RuntimeStatus {
             restart_required: false,
+            session_set_aside: false,
             user_content_degraded_scope_count: 0,
             security_advisories: vec![
                 RuntimeSecurityAdvisory {

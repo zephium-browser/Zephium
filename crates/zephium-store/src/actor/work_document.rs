@@ -36,10 +36,12 @@ impl SqliteStore {
                 .map_err(|_| WorkError::Capacity)?;
             let permit = Permit(counter);
             let callback = completion.take().ok_or(WorkError::Unavailable)?;
-            match self
-                .tx
-                .try_send(Cmd::WorkDocument(profile, request, permit, callback))
-            {
+            match self.tx.try_send(Cmd::WorkDocument(
+                profile,
+                Box::new(request),
+                permit,
+                callback,
+            )) {
                 Ok(()) => Ok(()),
                 Err(error) => {
                     let (error, command) = match error {

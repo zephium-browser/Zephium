@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { Editor, type Node, type NodeViewRendererProps } from "@tiptap/core";
   import { Add01Icon, Note01Icon } from "@hugeicons/core-free-icons";
-  import type { NoteSummary } from "$domain/notes";
+  import type { NoteReader, NoteSummary } from "$domain/notes";
   import * as m from "$shared/i18n/messages";
   import { MarkdownDocument } from "../../lib/markdown/document";
   import { noteSchemaExtensions } from "../../lib/markdown/schema";
@@ -20,6 +20,7 @@
     autofocus = false,
     linksRevision = 0,
     onchange,
+    onleave,
     onopenlink,
     onopennote,
     resolve,
@@ -32,7 +33,10 @@
     /** Puts the caret in the title, for a note that has just been made. */
     autofocus?: boolean;
     linksRevision?: number;
-    onchange: (markdown: string) => void;
+    /** The text changed; `read` gives it as Markdown when it is wanted. */
+    onchange: (read: NoteReader) => void;
+    /** Focus left the note's text for somewhere outside the editor. */
+    onleave?: () => void;
     onopenlink: (href: string) => void;
     onopennote: (target: string) => void;
     resolve: (targets: string[]) => Promise<Record<string, NoteSummary | null>>;
@@ -200,7 +204,10 @@
         },
       },
       onUpdate: ({ editor: current }) => {
-        onchange(document.serialize(current.state.doc));
+        // A document never changes once made, so reading it later, after
+        // more typing or after this editor is gone, still gives this text.
+        const doc = current.state.doc;
+        onchange((blocks) => document.serialize(doc, blocks));
         clearTimeout(linkTimer);
         // Only a link drawn since the last pass has no state yet; without
         // one there is nothing to look up.
@@ -218,6 +225,7 @@
         if (!(event.relatedTarget as HTMLElement | null)?.closest(".note-format, .note-float")) {
           focused = false;
           linking = false;
+          onleave?.();
         }
       },
     });

@@ -20,6 +20,7 @@ sha2 = "=0.10.9"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 serde_json = { workspace = true, features = ["unbounded_depth"] }
 url.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

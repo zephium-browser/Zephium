@@ -662,6 +662,21 @@ fn essentials_cross_the_tracked_operation_admission_boundary() {
 }
 
 #[test]
+fn a_brief_os_focus_loss_is_not_coalesced_away_by_focus_return() {
+    let queue = CommandQueue::new();
+    assert!(queue.try_push(Command::SetWindowFocused(false)).is_ok());
+    assert!(queue.try_push(Command::SetWindowFocused(true)).is_ok());
+    assert!(matches!(
+        queue.try_recv(),
+        Some(Command::SetWindowFocused(false))
+    ));
+    assert!(matches!(
+        queue.try_recv(),
+        Some(Command::SetWindowFocused(true))
+    ));
+}
+
+#[test]
 fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
     let queue = CommandQueue::new();
     let handle = Handle::new(queue.clone());

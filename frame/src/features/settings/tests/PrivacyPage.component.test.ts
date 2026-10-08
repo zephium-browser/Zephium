@@ -66,3 +66,13 @@ test("a failed clear keeps the dialog open and says so", async () => {
   await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't clear history");
   await expect.element(page.getByRole("dialog")).toBeVisible();
 });
+
+test("a native storage rejection never reports that history was cleared", async () => {
+  native.history.mockResolvedValue({ kind: "error", error: "unavailable" });
+  const screen = await render(PrivacyPage);
+  await screen.getByRole("button", { name: "Clear…" }).click();
+  await page.getByRole("button", { name: "Clear history" }).click();
+  await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't clear history");
+  await expect.element(page.getByRole("dialog")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("History cleared.");
+});

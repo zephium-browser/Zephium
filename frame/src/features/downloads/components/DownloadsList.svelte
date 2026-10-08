@@ -22,6 +22,7 @@
   import * as m from "$shared/i18n/messages";
   import FileGlyph from "./FileGlyph.svelte";
   import { TransferRate, transferLine } from "../lib/transfer";
+  import { downloadDetail, downloadErrors, downloadReason } from "../lib/errors";
 
   let { profile }: { profile: string } = $props();
   let session = $state.raw(untrack(() => new DownloadSession(profile)));
@@ -35,6 +36,7 @@
   const labels: Record<DownloadState, () => string> = {
     pending: m.download_pending,
     receiving: m.download_receiving,
+    paused: m.download_paused,
     cancelling: m.download_cancelling,
     finalizing: m.download_finalizing,
     completed: m.download_completed,
@@ -42,42 +44,12 @@
     interrupted: m.download_interrupted,
     failed: m.download_failed,
   };
-  /** Sentences for a failed list or action, shown once above the rows. */
-  const errors: Record<DownloadError, () => string> = {
-    invalid: m.download_error_invalid,
-    unavailable: m.download_error_unavailable,
-    unsupported: m.download_error_unsupported,
-    capacity: m.download_error_capacity,
-    storage: m.download_error_storage,
-    destination: m.download_error_destination,
-    permission: m.download_error_permission,
-    network: m.download_error_network,
-    disk_full: m.download_error_disk_full,
-    protection: m.download_error_protection,
-    missing_file: m.download_error_missing,
-    changed_file: m.download_error_changed,
-    cancelled: m.download_cancelled,
-  };
-  /** A failed row says why in a few words; the fix sits beside it. */
-  function reason(error: DownloadError | null): string {
-    switch (error) {
-      case "permission":
-        return m.download_reason_permission();
-      case "destination":
-        return m.download_reason_destination();
-      case "disk_full":
-        return m.download_reason_disk_full();
-      case "network":
-        return m.download_reason_network();
-      case "protection":
-        return m.download_reason_protection();
-      default:
-        return m.download_reason_other();
-    }
-  }
   /** Only a folder problem has a fix here; anything else is the site's to retry. */
   const folderProblem = (error: DownloadError | null) =>
-    error === "permission" || error === "destination" || error === "disk_full";
+    error === "permission" ||
+    error === "destination" ||
+    error === "disk_full" ||
+    error === "file_too_large";
 
   const rates = new TransferRate();
   const day = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
@@ -119,8 +91,10 @@
       const rate = rates.observe(entry.id, Number(entry.received));
       return transferLine(entry, rate) || labels.receiving();
     }
-    if (entry.state === "failed" || entry.state === "interrupted")
-      return entry.error ? reason(entry.error) : labels[entry.state]();
+    if (entry.state === "failed" || entry.state === "interrupted" || entry.state === "paused")
+      return entry.error
+        ? downloadReason(entry.error, entry.state === "paused")
+        : labels[entry.state]();
     const where = entry.source_is_context
       ? m.download_source_context({ origin: entry.source })
       : hostOf(entry.source);
@@ -146,7 +120,7 @@
 >
   {#if session.error}
     <div class="notice" role="alert">
-      <p>{errors[session.error]()}</p>
+      <p>{downloadErrors[session.error]()}</p>
       <Button size="compact" variant="ghost" onclick={() => void session.retry()}
         >{m.surface_retry()}</Button
       >
@@ -186,7 +160,8 @@
     <ul>
       {#each group.entries as entry (entry.id)}
         {@const progress = downloadProgress(entry)}
-        {@const problem = entry.state === "failed" || entry.state === "interrupted"}
+        {@const problem =
+          entry.state === "failed" || entry.state === "interrupted" || entry.state === "paused"}
         <li data-state={entry.state}>
           {#if entry.state === "completed"}<button
               type="button"
@@ -200,7 +175,12 @@
             </button>{:else}<div class="body">
               <FileGlyph filename={entry.filename} alert={problem} />
               <span class="copy"
-                >{@render name(entry)}<span class="line">{line(entry)}</span>
+                >{@render name(entry)}<span
+                  class="line"
+                  title={entry.error
+                    ? downloadDetail(entry.error, entry.state === "paused")
+                    : undefined}>{line(entry)}</span
+                >
                 {#if entry.state === "receiving" || entry.state === "pending"}<span
                     class="track"
                     role="progressbar"
@@ -229,7 +209,14 @@
               >
             </div>{/if}
           <div class="actions">
-            {#if entry.state === "pending" || entry.state === "receiving"}<IconButton
+            {#if entry.state === "paused"}<Button
+                size="compact"
+                variant="secondary"
+                disabled={session.busy}
+                onclick={() => void session.perform({ kind: "resume", id: entry.id })}
+                >{m.download_resume()}</Button
+              >{/if}
+            {#if entry.state === "pending" || entry.state === "receiving" || entry.state === "paused"}<IconButton
                 icon={Cancel01Icon}
                 label={m.download_cancel()}
                 size={14}

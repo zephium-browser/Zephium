@@ -20,6 +20,7 @@ const DEFAULT_RETENTION_DAYS: i64 = 90;
 /// Fresh tabs whose first load focus shut, remembered so they can open once
 /// the site is let through.
 const MAX_SHUT_LOADS: usize = 64;
+const MAX_PENDING_FOCUS_RECORDS: usize = 8;
 
 pub(super) struct TimeState {
     tracker: Tracker,
@@ -37,6 +38,9 @@ pub(super) struct TimeState {
     /// The gate the engine holds, so an unchanged one is not sent again.
     gate: Option<FocusGate>,
     shut_loads: std::collections::HashMap<ItemId, String>,
+    pending_focus_records: std::collections::VecDeque<FocusRecord>,
+    focus_retry_at: Option<std::time::Instant>,
+    focus_retry_failures: u32,
 }
 
 impl TimeState {
@@ -57,6 +61,9 @@ impl TimeState {
             stilled: std::collections::HashSet::new(),
             gate: None,
             shut_loads: std::collections::HashMap::new(),
+            pending_focus_records: std::collections::VecDeque::new(),
+            focus_retry_at: None,
+            focus_retry_failures: 0,
         };
         for key in ["time.track", "time.retention", "focus.blocked"] {
             state.apply_setting(key, &setting(key));
@@ -181,6 +188,7 @@ impl Shell {
 
     /// Writes what has been counted, up to now, for every profile or one.
     pub(super) fn flush_time(&mut self, only: Option<ProfileId>) {
+        self.flush_pending_focus_records(false);
         let wall = local_ms(utc_now_ms());
         if let Some(segment) = self
             .time
@@ -231,15 +239,18 @@ impl Shell {
     }
 
     /// Clearing history clears the time spent over the same span.
-    pub(super) fn clear_time(&mut self, profile: ProfileId, since_seconds: Option<i64>) {
+    pub(super) fn clear_time(&mut self, profile: ProfileId, since_seconds: Option<i64>) -> bool {
         let since_hour =
             since_seconds.map(|since| local_ms(since.saturating_mul(1000)).div_euclid(HOUR_MS));
         self.flush_time(Some(profile));
+        if !self.store.clear_time(profile, since_hour) {
+            return false;
+        }
         self.time.tracker.forget(profile);
         self.time
             .ledger
             .forget(profile, since_hour.map(|hour| hour * HOUR_MS));
-        let _ = self.store.clear_time(profile, since_hour);
+        true
     }
 
     pub(super) fn time_call(
@@ -396,8 +407,25 @@ impl Shell {
         let now = utc_now_ms();
         match control {
             FocusControl::Start { minutes, breaks } => {
+                self.flush_pending_focus_records(false);
+                // Reserve capacity for both a replaced running session and
+                // the new session's eventual completion before changing it.
+                if self.time.pending_focus_records.len() + usize::from(self.time.focus.is_some())
+                    >= MAX_PENDING_FOCUS_RECORDS
+                {
+                    return operation_result(
+                        OperationOutcome::NativeAdmissionFailed,
+                        OperationReason::StoreAdmissionRejected,
+                    );
+                }
                 if let Some(running) = self.time.focus.take() {
-                    self.record_focus(running.stop(now));
+                    if !self.record_focus(running.clone().stop(now)) {
+                        self.time.focus = Some(running);
+                        return operation_result(
+                            OperationOutcome::NativeAdmissionFailed,
+                            OperationReason::StoreAdmissionRejected,
+                        );
+                    }
                 }
                 let plan = FocusPlan {
                     minutes: u16::try_from(minutes).unwrap_or(25),
@@ -412,7 +440,13 @@ impl Shell {
                         OperationReason::StateUnchanged,
                     );
                 };
-                self.record_focus(running.stop(now));
+                if !self.record_focus(running.clone().stop(now)) {
+                    self.time.focus = Some(running);
+                    return operation_result(
+                        OperationOutcome::NativeAdmissionFailed,
+                        OperationReason::StoreAdmissionRejected,
+                    );
+                }
             }
             FocusControl::Allow { site } => {
                 let Some(site) = zephium_core::time::normalize_site(&site) else {
@@ -455,17 +489,26 @@ impl Shell {
             }
         }
         self.focus_changed();
-        operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+        if self.time.pending_focus_records.is_empty() {
+            operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+        } else {
+            operation_result(
+                OperationOutcome::Deferred,
+                OperationReason::StoreWorkPending,
+            )
+        }
     }
 
     /// Runs the focus clock to now: phases that ended move on, and a single
     /// round that ran out is kept and closed.
     pub(super) fn focus_wake(&mut self) {
+        self.flush_pending_focus_records(false);
         let Some(session) = self.time.focus.as_mut() else {
             self.schedule_focus_wake();
             self.sync_focus_gate();
             return;
         };
+        let original = session.clone();
         let (events, finished) = session.advance(utc_now_ms());
         if events.is_empty() {
             // An allowance may have run out.
@@ -475,7 +518,13 @@ impl Shell {
         }
         if let Some(record) = finished {
             self.time.focus = None;
-            self.record_focus(record);
+            if !self.record_focus(record) {
+                self.time.focus = Some(original);
+                self.time.focus_retry_at =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+                self.schedule_focus_wake();
+                return;
+            }
         }
         if let Some(last) = events.last() {
             let alert = match last {
@@ -491,12 +540,48 @@ impl Shell {
         self.focus_changed();
     }
 
-    fn record_focus(&mut self, record: FocusRecord) {
-        if record.focused_ms > 0 {
-            let _ = self
-                .store
-                .record_focus(record, local_day(record.started_ms));
+    fn record_focus(&mut self, record: FocusRecord) -> bool {
+        if record.focused_ms <= 0 {
+            return true;
         }
+        if self.time.pending_focus_records.len() >= MAX_PENDING_FOCUS_RECORDS {
+            return false;
+        }
+        self.time.pending_focus_records.push_back(record);
+        self.flush_pending_focus_records(false);
+        true
+    }
+
+    pub(super) fn flush_pending_focus_records(&mut self, force: bool) {
+        if !force
+            && self
+                .time
+                .focus_retry_at
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        while let Some(record) = self.time.pending_focus_records.front().copied() {
+            if !self
+                .store
+                .record_focus(record, local_day(record.started_ms))
+            {
+                let delay =
+                    std::time::Duration::from_secs(1_u64 << self.time.focus_retry_failures.min(5))
+                        .min(std::time::Duration::from_secs(30));
+                self.time.focus_retry_failures = self.time.focus_retry_failures.saturating_add(1);
+                self.time.focus_retry_at = Some(std::time::Instant::now() + delay);
+                self.schedule_focus_wake();
+                return;
+            }
+            self.time.pending_focus_records.pop_front();
+        }
+        self.time.focus_retry_at = None;
+        self.time.focus_retry_failures = 0;
+    }
+
+    pub(super) fn has_unadmitted_time_writes(&self) -> bool {
+        !self.time.pending_focus_records.is_empty() || !self.time.ledger.profiles().is_empty()
     }
 
     fn focus_changed(&mut self) {
@@ -652,12 +737,17 @@ impl Shell {
         let Some(queue) = &self.self_queue else {
             return;
         };
-        let deadline = self.time.focus.as_ref().map(|session| {
-            let wait = (session.next_change_ms() - utc_now_ms()).max(0);
-            std::time::Instant::now()
-                + std::time::Duration::from_millis(u64::try_from(wait).unwrap_or(0))
-        });
-        queue.schedule_focus(deadline);
+        let deadline = self
+            .time
+            .focus
+            .as_ref()
+            .filter(|_| self.time.pending_focus_records.len() < MAX_PENDING_FOCUS_RECORDS)
+            .map(|session| {
+                let wait = (session.next_change_ms() - utc_now_ms()).max(0);
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(u64::try_from(wait).unwrap_or(0))
+            });
+        queue.schedule_focus(deadline.into_iter().chain(self.time.focus_retry_at).min());
     }
 
     /// A shut site's icon, as held for the site or its `www.` host. Anything

@@ -66,10 +66,25 @@ test("a native blocked-popup projection is visible without changing the address"
   emitNativeEvent("tabChanged", {
     ...tab,
     projection_revision: revision(Date.now() + 1),
-    popup_blocked: true,
+    page_request: { kind: "popup", host: "example.com" },
   });
-  await expect
-    .element(screen.getByRole("status"))
-    .toHaveTextContent("A popup or new-tab request was blocked.");
+  const card = screen.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("Pop-up blocked");
+  await expect.element(card).toHaveTextContent("example.com");
+  await expect.element(card.getByRole("button", { name: "Open" })).toBeVisible();
   expect(input.value).toBe("www.wikipedia.org");
+});
+
+test("a page's link for another app asks before it opens", async () => {
+  const { screen } = await field();
+  const tab = tabs.activeTab()!;
+  emitNativeEvent("tabChanged", {
+    ...tab,
+    projection_revision: revision(Date.now() + 1),
+    page_request: { kind: "external_app", site: "zoom.us", scheme: "zoommtg", app: "zoom.us" },
+  });
+  const card = screen.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("Open zoom.us?");
+  await expect.element(card.getByRole("checkbox")).not.toBeChecked();
+  await expect.element(card.getByRole("button", { name: "Cancel" })).toBeVisible();
 });

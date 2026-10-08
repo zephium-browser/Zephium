@@ -1,7 +1,7 @@
 //! MCP servers as a connection part's tools. Each server's tools are named
 //! `<server>__<tool>`; the first use in a work asks "Use Linear?"; a tool that
-//! may change something (by the server's annotations or by its name) stops for
-//! a Confirm showing its exact arguments. Results reach the model as data.
+//! call stops for a Confirm showing its arguments. Server-provided names and
+//! annotations do not establish read-only authority. Results reach the model as data.
 use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
@@ -14,13 +14,13 @@ use zephium_ipc::work::{
 use zephium_mcp::oauth::{HttpAuth, HttpServer};
 use zephium_mcp::{keychain, Endpoint, McpError, McpSession, McpTool, StdioServer};
 
-use super::{bounded, consequential_name, CallFact, ConnectionHost, Decision};
+use super::{bounded, CallFact, ConnectionHost, Decision};
 use crate::work_computer::ToolReply;
 
 /// The separator between a server's id and its tool's name.
 const SEPARATOR: &str = "__";
 const MAX_TOOL_NAME: usize = 64;
-const MAX_ARGUMENT_TEXT: usize = 4096;
+const MAX_ARGUMENT_TEXT: usize = zephium_core::work::runtime::MAX_WORK_CONFIRM_TEXT_BYTES;
 
 /// Environment every stdio server gets, besides its own.
 const INHERITED: [&str; 7] = [
@@ -45,11 +45,16 @@ pub fn tool_name(server: &str, tool: &str) -> String {
     name.chars().take(MAX_TOOL_NAME).collect()
 }
 
-/// Whether calling `tool` needs the person's confirmation.
-pub fn asks(tool: &McpTool) -> bool {
-    consequential_name(&tool.name)
-        || tool.read_only == Some(false)
-        || tool.destructive == Some(true)
+/// Generic servers have no locally reviewed per-tool capability policy. Service
+/// access alone does not authorize an operation's arguments or side effects.
+/// A server's read-only annotation cannot exempt its calls from confirmation.
+pub fn asks(_tool: &McpTool) -> bool {
+    true
+}
+
+fn review_arguments(arguments: &Map<String, Value>) -> Option<String> {
+    let text = serde_json::to_string_pretty(arguments).ok()?;
+    (text.len() <= MAX_ARGUMENT_TEXT).then_some(text)
 }
 
 fn category(name: &str) -> WorkConfirmCategoryV1 {
@@ -279,10 +284,12 @@ impl McpConnection {
         let Some(tool) = self.find(name) else {
             return fault(&format!("There is no `{name}` tool."));
         };
+        let Some(arguments) = args.as_object().cloned() else {
+            return fault("Tool arguments must be an object. No call was sent.");
+        };
         if let Err(reply) = self.allowed(host).await {
             return reply;
         }
-        let arguments: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
         let fact = CallFact {
             service: self.server.id.clone(),
             tool: name.to_owned(),
@@ -291,10 +298,9 @@ impl McpConnection {
             ..Default::default()
         };
         if asks(tool) {
-            let (text, _) = bounded(
-                &serde_json::to_string_pretty(&arguments).unwrap_or_default(),
-                MAX_ARGUMENT_TEXT,
-            );
+            let Some(text) = review_arguments(&arguments) else {
+                return fault("This tool call is too large to review safely. Reduce its arguments before trying again.");
+            };
             let facts = arguments
                 .iter()
                 .filter_map(|(key, value)| {
@@ -305,7 +311,11 @@ impl McpConnection {
                     };
                     Some(WorkConfirmFactV1 {
                         label: key.chars().take(40).collect(),
-                        value: value.chars().take(200).collect(),
+                        value: bounded(
+                            &value,
+                            zephium_core::work::runtime::MAX_WORK_CONFIRM_LINE_BYTES,
+                        )
+                        .0,
                     })
                 })
                 .take(8)
@@ -398,6 +408,28 @@ mod tests {
     }
 
     #[test]
+    fn approval_never_hides_a_suffix_of_the_actual_arguments() {
+        let small = json!({"body":"hello"}).as_object().unwrap().clone();
+        assert_eq!(
+            serde_json::from_str::<Value>(&review_arguments(&small).unwrap()).unwrap(),
+            Value::Object(small)
+        );
+        let oversized = json!({"body":"x".repeat(MAX_ARGUMENT_TEXT)})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(review_arguments(&oversized).is_none());
+        let boundary = json!({"body":"x".repeat(4096)})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(
+            review_arguments(&boundary).is_none(),
+            "the complete review must fit the actual confirmation contract"
+        );
+    }
+
+    #[test]
     fn names_and_consequences() {
         assert_eq!(tool_name("linear", "create_issue"), "linear__create_issue");
         assert_eq!(
@@ -405,11 +437,11 @@ mod tests {
             "my-notes__notes_search_v2"
         );
         assert!(tool_name("x", &"y".repeat(100)).len() <= 64);
-        assert!(!asks(&tool("search_issues", None, None)));
-        assert!(!asks(&tool("get_page", Some(true), None)));
+        assert!(asks(&tool("search_issues", None, None)));
+        assert!(asks(&tool("get_page", Some(true), None)));
         assert!(
             asks(&tool("create_issue", Some(true), None)),
-            "the name wins over a read-only claim"
+            "a read-only claim cannot authorize a write"
         );
         assert!(asks(&tool("run_query", Some(false), None)));
         assert!(asks(&tool("fetch", None, Some(true))));

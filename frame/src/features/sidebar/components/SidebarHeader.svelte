@@ -87,16 +87,23 @@
     style:padding-inline-start={IS_MAC ? "var(--traffic-light-inset)" : "6px"}
     aria-label={m.ui_navigation()}
   >
-    {#if navigation}<IconButton
+    <!-- Beside a tool panel the panel's own close button already gives the
+         column back, so a second way to the same shape would only crowd the
+         lights. -->
+    {#if navigation && !launcher}<IconButton
         icon={SidebarLeftIcon}
         label={m.ui_compact_mode()}
         onclick={ontoggle}
       />
-    {/if}{#if launcher}<IconButton
-        icon={Search01Icon}
-        label={m.ui_search_or_enter_an_address()}
-        onclick={() => void commands.runCommand("launcher.toggle")}
-      />
+    {/if}<!-- The search glyph reads closer to the lights than the toggle's
+         does, so it keeps a little more room. -->{#if launcher}<span
+        class="ms-1.5 flex"
+        ><IconButton
+          icon={Search01Icon}
+          label={m.ui_search_or_enter_an_address()}
+          onclick={() => void commands.runCommand("launcher.toggle")}
+        /></span
+      >
     {/if}<span class="flex-1" aria-hidden="true"></span>
 
     {#if navigation && pageControls}<div

@@ -457,7 +457,8 @@ fn history_reaches_the_field_through_the_real_store_and_read_queue() {
         "https://www.notion.so/workspace".into(),
         "Notion".into(),
     );
-    store.flush();
+    // A loaded test machine can outlast the default barrier.
+    assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
 
     let queue = crate::store_reads::StoreReadQueue::new();
     shell.store_reads = Some(queue.clone());

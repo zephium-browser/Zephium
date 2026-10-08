@@ -423,3 +423,117 @@ test("a Today row does not repeat the day its section already names", async () =
   // A month out, the row has to say which day.
   expect(chipFor("Quarterly review")).not.toBe("");
 });
+
+test("typing in a task says nothing about saving unless a save is slow", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000027";
+  const made = server(profile);
+  const id = seed(made.records, "Call mom", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Call mom").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  const status = screen.container.querySelector(".detail-save")!;
+
+  const seen: string[] = [];
+  const watch = new MutationObserver(() => seen.push(status.textContent ?? ""));
+  watch.observe(status, { childList: true, characterData: true, subtree: true });
+  await title.fill("Call mom today");
+  await expect
+    .poll(() => made.records.get(id)!.draft.title, { timeout: 4000 })
+    .toBe("Call mom today");
+  expect(seen.filter((text) => text.includes("Saving"))).toEqual([]);
+  watch.disconnect();
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  native.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") await gate;
+    return made.call(owner, call);
+  });
+  await title.fill("Call mom tonight");
+  await expect.element(screen.getByText("Saving…")).toBeVisible();
+  release();
+  await expect.poll(() => status.textContent).toBe("");
+});
+
+test("the capture field keeps focus and keys while a task is being created", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000028";
+  const made = server(profile);
+  let release!: () => void;
+  let fail = false;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  native.call.mockImplementation(async (owner, call) => {
+    if (call.kind === "mutate") {
+      await gate;
+      if (fail) return { profile, response: { kind: "error", error: "unavailable" } };
+    }
+    return made.call(owner, call);
+  });
+  const screen = await render(TaskHost, { profile, scope: "all" });
+  const field = screen.getByRole("textbox", { name: "New task", exact: true });
+  await field.click();
+  await userEvent.keyboard("Water the plants{Enter}Feed");
+  await expect.element(field).toHaveValue("Feed");
+  await expect.element(field).toBeEnabled();
+  await expect.element(field).toHaveFocus();
+  release();
+  await expect.poll(() => tasks(made.records)).toEqual(["Water the plants"]);
+  await expect.element(field).toHaveValue("Feed");
+
+  // A capture that fails gives its words back to an empty field.
+  fail = true;
+  await userEvent.keyboard(" the cat{Enter}");
+  await expect.element(field).toHaveValue("Feed the cat");
+  expect(tasks(made.records)).toEqual(["Water the plants"]);
+});
+
+test("hiding the window saves a title being typed at once", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000029";
+  const made = server(profile);
+  const id = seed(made.records, "Plan", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Plan").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  await title.fill("Plan the trip");
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+  try {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await expect
+      .poll(() => made.records.get(id)!.draft.title, { timeout: 500 })
+      .toBe("Plan the trip");
+  } finally {
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+});
+
+test("the list behind an open task catches up once it is shown again", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000031";
+  const made = server(profile);
+  seed(made.records, "Draft memo", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Draft memo").click();
+  const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  await title.fill("Draft the memo");
+  // Hidden, the list is not regrouped for every key.
+  expect(screen.container.querySelector(".task-label")?.textContent).toBe("Draft memo");
+  await screen.getByRole("button", { name: "Back to tasks" }).click();
+  await expect.element(screen.getByText("Draft the memo")).toBeVisible();
+});
+
+test("a title renamed from its row is saved as soon as it is entered", async () => {
+  await page.viewport(900, 800);
+  const profile = "00000000000000000000000032";
+  const made = server(profile);
+  const id = seed(made.records, "Old name", { due_date: today });
+  const screen = await render(TaskHost, { profile });
+  await screen.getByText("Old name").hover();
+  await screen.getByRole("button", { name: "More actions" }).click();
+  await screen.getByRole("menuitem", { name: "Rename" }).click();
+  const field = screen.container.querySelector<HTMLTextAreaElement>(".task-rename")!;
+  await expect.poll(() => document.activeElement === field).toBe(true);
+  await userEvent.keyboard("New name{Enter}");
+  await expect.poll(() => made.records.get(id)!.draft.title, { timeout: 500 }).toBe("New name");
+});

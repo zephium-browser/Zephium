@@ -3,3 +3,6 @@ assets/blocker-seed/v1/*.gz binary
 assets/blocker-seed/v1/*.json text eol=lf
 assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt text eol=lf
 assets/blocker-seed/v1/NOTICE text eol=lf
+
+# Unified diff context prefixes include whitespace-only lines.
+patches/*.patch whitespace=-blank-at-eol

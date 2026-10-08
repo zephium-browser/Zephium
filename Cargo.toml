@@ -5,6 +5,7 @@ exclude = [
     "vendor/adblock",
     "vendor/tauri",
     "vendor/tauri-runtime-wry",
+    "vendor/tauri-plugin-updater",
     "vendor/wry",
 ]
 
@@ -68,6 +69,7 @@ tough = { version = "=0.24.0", default-features = false }
 # construction policy and Wry's callback, prompt, teardown, profile, and Linux
 # process-isolation policy reproducible without relying on mutable forks.
 [patch.crates-io]
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
 adblock = { path = "vendor/adblock" }
 tauri = { path = "vendor/tauri" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }

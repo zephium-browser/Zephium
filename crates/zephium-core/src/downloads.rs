@@ -15,6 +15,8 @@ pub const MAX_DOWNLOAD_RECORD_BYTES: usize = 24 * 1024;
 pub enum DownloadState {
     Pending,
     Receiving,
+    // The retained native transfer can resume; never replay its request URL.
+    Paused,
     Cancelling,
     Finalizing,
     Completed,
@@ -44,6 +46,16 @@ pub enum DownloadError {
     // denied ACL or Windows Controlled Folder Access.
     Permission,
     Network,
+    ConnectionLost,
+    Timeout,
+    Authentication,
+    Certificate,
+    Server,
+    Source,
+    FileBusy,
+    FileTooLarge,
+    Integrity,
+    Runtime,
     DiskFull,
     Protection,
     MissingFile,
@@ -208,6 +220,7 @@ pub enum DownloadCall {
     RetryCleanup,
     List { before: Option<String>, limit: u32 },
     Cancel { id: String },
+    Resume { id: String },
     Open { id: String },
     Reveal { id: String },
     Forget { id: String },
@@ -225,9 +238,11 @@ impl DownloadCall {
                     && *limit <= MAX_DOWNLOAD_PAGE
                     && before.as_ref().is_none_or(|id| canonical_id(id))
             }
-            Self::Cancel { id } | Self::Open { id } | Self::Reveal { id } | Self::Forget { id } => {
-                canonical_id(id)
-            }
+            Self::Cancel { id }
+            | Self::Resume { id }
+            | Self::Open { id }
+            | Self::Reveal { id }
+            | Self::Forget { id } => canonical_id(id),
             _ => true,
         }
     }

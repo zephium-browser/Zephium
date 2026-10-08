@@ -16,6 +16,24 @@ describe("asks", () => {
     expect(named).toMatchObject({ kind: "folder", choose: false, reason: null });
   });
 
+  test("an address the agent wrote reads with its host and Rust's own option words", () => {
+    const [ask] = asksOf(f.runWith([f.addressAsk]));
+    expect(ask).toMatchObject({
+      kind: "address",
+      host: "warsaw-sfo-flights.collector.example",
+      open: "Open",
+      allowSite: "Allow collector.example for this request",
+      decline: "Don\u2019t open",
+    });
+    const plain = { ...f.addressAsk, kind: { ...f.addressAsk.kind, prompt: "Open it?" } };
+    expect(asksOf(f.runWith([plain as typeof f.addressAsk]))[0]?.kind).toBe("question");
+  });
+
+  test("typing held on a site the person did not name reads as Type with the run option", () => {
+    const [ask] = asksOf(f.runWith([f.typeSearch]));
+    expect(ask).toMatchObject({ kind: "confirm", verb: "Type", runOption: true });
+  });
+
   test("a held step reads as a Confirm with the page's own words and the page's frame", () => {
     const [ask] = asksOf(f.runWith([f.airbnbBook]), [f.tripPage]);
     expect(ask).toMatchObject({

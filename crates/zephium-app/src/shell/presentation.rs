@@ -43,6 +43,10 @@ pub(super) struct PresentationState {
     /// success without unrelated-tab churn causing starvation.
     pub(super) last_tab_projection_revision:
         std::cell::RefCell<std::collections::HashMap<ItemId, String>>,
+    /// The last ordinary view offered for each tab. A tab whose view is
+    /// unchanged keeps its revision, so chrome keeps the same object and a
+    /// tab switch does not re-render every row in the column.
+    pub(super) last_tab_views: std::cell::RefCell<std::collections::HashMap<ItemId, TabView>>,
     pub(super) projection_sequence: std::cell::Cell<u128>,
 }
 
@@ -228,6 +232,7 @@ impl Shell {
         );
         let projection_revision = projection.projection_revision.clone();
         self.record_tab_projection_revision(id, &projection_revision);
+        self.remember_tab_view(id, &projection);
         self.publish_icons();
         let active = self.windows.focused().and_then(|window| window.active);
         let Some(queue) = self.self_queue.clone() else {

@@ -63,7 +63,7 @@ impl Shell {
         // residency, or split topology. A captured divider path cannot cross
         // that boundary; resize/sidebar geometry updates deliberately bypass
         // `commit` and remain draggable through path-based recomputation.
-        self.divider = None;
+        self.drop_divider();
         let mut native = self.apply(effects);
         self.schedule_persist();
         // Visibility has to land before dormancy. WebView2 only accepts a

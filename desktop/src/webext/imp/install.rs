@@ -221,6 +221,14 @@ pub(super) fn stage(
     let result = (|| {
         let (id, original) = unpack(source, &dir)?;
         let existing = installed.iter().find(|entry| entry.id == id.as_str());
+        // An unsigned package takes its identity from a manifest key anyone
+        // can copy. It may update a file install, never a store extension,
+        // whose access, data and native-app trust it would otherwise inherit.
+        if matches!(original, Original::Zip(_) | Original::Folder(_))
+            && existing.is_some_and(|entry| !entry.sideloaded)
+        {
+            return Err("An extension from the Chrome Web Store with this identity is already installed. Remove it first to install this file.".into());
+        }
         let manifest = Manifest::load(&dir)
             .map_err(|error| format!("The extension's manifest is invalid ({error})."))?;
         let warnings = permissions::warnings(&manifest);
@@ -233,7 +241,7 @@ pub(super) fn stage(
         hosts.dedup();
         let version = manifest
             .version()
-            .ok_or("The extension has no version.")?
+            .ok_or("The extension has no valid version.")?
             .to_owned();
         let name = manifest.name().unwrap_or_else(|| id.to_string());
         let description = manifest.description().unwrap_or_default().to_owned();

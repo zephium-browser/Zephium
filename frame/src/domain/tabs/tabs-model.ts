@@ -55,7 +55,14 @@ export class TabProjectionModel {
         this.#appliedTabRevisions.set(tab.id, tab.projection_revision);
       }
     }
-    this.#state = candidate;
+    // Native keeps an unchanged tab's revision; keeping its object too means
+    // a tab switch re-renders only the rows that changed.
+    const kept = new Map(this.#state.tabs.map((tab) => [tab.id, tab]));
+    const tabs = candidate.tabs.map((tab) => {
+      const previous = kept.get(tab.id);
+      return previous?.projection_revision === tab.projection_revision ? previous : tab;
+    });
+    this.#state = { ...candidate, tabs };
     return true;
   }
 

@@ -1,38 +1,35 @@
 version: 2
+
+# Minor and patch updates arrive as one grouped pull request per graph each
+# week; a major version gets its own. A release must be a week old before it
+# is proposed, so a compromised publish has time to be caught upstream.
+# Security updates are not delayed.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-  - package-ecosystem: cargo
-    # The adblock security fork is excluded and owns its reviewed lock graph.
-    directory: /vendor/adblock
-    schedule:
-      interval: weekly
-  - package-ecosystem: cargo
-    # The sanitizer harness is an independent, explicitly pinned test graph.
-    directory: /crates/zephium-blocker/fuzz
-    schedule:
-      interval: weekly
-  - package-ecosystem: cargo
-    # Wry is excluded from the root workspace and owns an independent lockfile.
-    directory: /vendor/wry
-    schedule:
-      interval: weekly
-  - package-ecosystem: cargo
-    # Tauri's policy fork is excluded and owns an independent validation graph.
-    directory: /vendor/tauri
-    schedule:
-      interval: weekly
-  - package-ecosystem: cargo
-    # The runtime adapter is independently locked and validated on every OS.
-    directory: /vendor/tauri-runtime-wry
-    schedule:
-      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      rust:
+        update-types: [minor, patch]
+
   - package-ecosystem: npm
     # pnpm-lock.yaml is owned by the repository-root workspace and covers
     # both frame/ and desktop/. Updating only /frame would miss the Tauri CLI
@@ -40,3 +37,81 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      javascript:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    # The adblock security fork is excluded and owns its reviewed lock graph.
+    directory: /vendor/adblock
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      adblock:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    # The sanitizer harness is an independent, explicitly pinned test graph.
+    directory: /crates/zephium-blocker/fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      fuzz:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    # Wry is excluded from the root workspace and owns an independent lockfile.
+    directory: /vendor/wry
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      wry:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    # Tauri's policy fork is excluded and owns an independent validation graph.
+    directory: /vendor/tauri
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      tauri:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    # The runtime adapter is independently locked and validated on every OS.
+    directory: /vendor/tauri-runtime-wry
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      tauri-runtime-wry:
+        update-types: [minor, patch]

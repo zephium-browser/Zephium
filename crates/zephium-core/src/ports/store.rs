@@ -98,6 +98,10 @@ pub enum ProfileDeletionFinalizeOutcome {
     Failed,
 }
 
+/// `SessionLoad::RecoveryRequired` for a session saved by a newer Zephium: it
+/// opens again once that version is back, so it is never set aside.
+pub const NEWER_SESSION_REASON: &str = "authoritative session is newer than supported";
+
 /// Result of reading the authoritative browser session.
 ///
 /// `Failed` is deliberately distinct from `Absent`: callers may initialize a
@@ -344,6 +348,12 @@ pub trait Store {
         }
     }
     fn load_session(&self) -> SessionLoad;
+    /// After `RecoveryRequired`: keeps the unrestorable session's bytes in a
+    /// file and restarts the session from the profile registry with no tabs.
+    /// Returns the restarted load and the file, or `None` when it could not.
+    fn set_aside_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        None
+    }
     /// Durably replaces a profile's blocker preference only when `expected`
     /// is still authoritative. The storage adapter allocates the next checked
     /// revision and invokes `done` after transaction settlement.
@@ -553,6 +563,12 @@ pub trait Store {
         false
     }
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32;
+    /// Clears history only after earlier activity writes settle. `None`
+    /// means the durability barrier or deletion failed; zero rows is a
+    /// successful, distinct result. Legacy stores retain their old contract.
+    fn clear_history_checked(&self, profile: ProfileId, since: Option<i64>) -> Option<u32> {
+        Some(self.clear_history(profile, since))
+    }
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Age in seconds of the cached icon for a page origin, None when absent.

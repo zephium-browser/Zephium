@@ -350,3 +350,73 @@ fn the_range_the_reader_picks_narrows_the_list_it_is_looking_at() {
         "a scoped request must reach the store's range bound: {visits:?}"
     );
 }
+
+#[test]
+fn a_failed_history_clear_completes_with_an_error_once() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, queue) = browsed(store);
+    visit(&mut shell, &screen, "kept.example");
+    let profile = shell.windows.focused().unwrap().profile;
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        HistoryCall::Clear {
+            range: HistoryRange::Everything,
+        },
+    );
+    assert!(
+        answer.lock().unwrap().is_none(),
+        "clear must reach the pending reader before failure settlement"
+    );
+    let token = 1; // This fresh shell owns its first history-surface request.
+    shell.handle(Command::StoreRead(StoreReadResult::HistorySurfaceFailed {
+        token,
+        profile,
+    }));
+    assert!(matches!(
+        taken(&answer),
+        HistoryResponse::Error {
+            error: HistoryError::Unavailable
+        }
+    ));
+    shell.handle(Command::StoreRead(StoreReadResult::HistorySurfaceFailed {
+        token,
+        profile,
+    }));
+    assert!(answer.lock().unwrap().is_none());
+    queue.stop();
+}
+
+#[test]
+fn a_refused_time_clear_preserves_blocker_counters_and_skips_the_reader() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, queue) = browsed(store.clone());
+    visit(&mut shell, &screen, "kept.example");
+    let profile = shell.windows.focused().unwrap().profile;
+    let writes = store
+        .statistics_writes
+        .load(std::sync::atomic::Ordering::Acquire);
+    store
+        .reject_time_clears
+        .store(true, std::sync::atomic::Ordering::Release);
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        HistoryCall::Clear {
+            range: HistoryRange::Everything,
+        },
+    );
+    assert!(matches!(
+        taken(&answer),
+        HistoryResponse::Error {
+            error: HistoryError::Unavailable
+        }
+    ));
+    assert_eq!(
+        store
+            .statistics_writes
+            .load(std::sync::atomic::Ordering::Acquire),
+        writes
+    );
+    assert_eq!(queue.pending_surface_calls_for_test(), 0);
+}

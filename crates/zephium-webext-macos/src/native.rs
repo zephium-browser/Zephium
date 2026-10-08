@@ -20,7 +20,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message;
-use objc2_foundation::NSError;
+use objc2_foundation::{NSError, NSString};
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionMessagePort};
 use serde_json::Value;
 
@@ -107,6 +107,13 @@ fn open(
     port: Option<Retained<WKWebExtensionMessagePort>>,
     reply: Option<Reply>,
 ) -> Result<Rc<Connection>, String> {
+    // The browser's own bridges never reach this point; outside hosts are
+    // only for extensions that declared them, as the install review showed.
+    let declared = unsafe { context.webExtension().requestedPermissions() }
+        .containsObject(&NSString::from_str("nativeMessaging"));
+    if !declared {
+        return Err("Access to native messaging requires nativeMessaging permission.".into());
+    }
     let extension = unsafe { context.uniqueIdentifier() }.to_string();
     let running = CONNECTIONS.with(|connections| {
         connections

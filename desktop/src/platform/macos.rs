@@ -1,4 +1,6 @@
+mod log;
 mod sidebar_resize;
+pub use log::redirect_stderr;
 
 use std::cell::RefCell;
 use std::ptr::null_mut;

@@ -701,7 +701,11 @@ fn admit_root(
     let home = home?;
     if same_path(&root, home)
         || !permitted.iter().any(|folder| root.starts_with(folder))
-        || protected.iter().any(|folder| path_contains(folder, &root))
+        // A parent such as ~/Library would expose the protected folder
+        // beneath it as surely as granting that folder itself.
+        || protected
+            .iter()
+            .any(|folder| path_contains(folder, &root) || path_contains(&root, folder))
     {
         return None;
     }
@@ -1375,6 +1379,26 @@ mod tests {
                 .bytes,
             0
         );
+    }
+
+    #[test]
+    fn grants_refuse_folders_that_contain_a_protected_folder() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (home, _grant, project) = home_grant();
+        for protected in ["Library/Keychains", ".config/gcloud", "Library/Cookies"] {
+            std::fs::create_dir_all(home.path().join(protected)).unwrap();
+        }
+        for parent in ["Library", ".config"] {
+            let folder = home.path().join(parent);
+            let (grant, refused) = WorkFileGrant::admit(&[folder.to_string_lossy().into_owned()]);
+            assert!(grant.is_empty(), "{parent}");
+            assert_eq!(refused.len(), 1, "{parent}");
+        }
+        let (grant, refused) = WorkFileGrant::admit(&[project.to_string_lossy().into_owned()]);
+        assert!(!grant.is_empty());
+        assert!(refused.is_empty());
     }
 
     #[cfg(windows)]

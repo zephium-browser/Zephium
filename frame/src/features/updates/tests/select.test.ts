@@ -8,6 +8,7 @@ const facts = (overrides: Partial<NoticeFacts> = {}): NoticeFacts => ({
   seen: "1.0.1",
   securityDismissed: "",
   advisories: [],
+  sessionSetAside: false,
   ...overrides,
 });
 const behind = [{ kind: "update_recommended", update_target: "operating_system" }] as const;
@@ -91,5 +92,14 @@ describe("update notices", () => {
     expect(
       selectNotices(facts({ status: { state: "unavailable" }, seen: "1.0.0", advisories: behind })),
     ).toEqual({ pill: null, card: null });
+  });
+
+  it("says first, in any build, that the last tabs could not be reopened", () => {
+    expect(
+      selectNotices(facts({ sessionSetAside: true, seen: "1.0.0", advisories: behind })).card,
+    ).toEqual({ kind: "session" });
+    expect(
+      selectNotices(facts({ status: { state: "unavailable" }, sessionSetAside: true })).card,
+    ).toEqual({ kind: "session" });
   });
 });

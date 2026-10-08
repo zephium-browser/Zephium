@@ -5,6 +5,7 @@
  */
 import { commands, type UpdateStatus } from "$shared/ipc/bindings";
 import { preferences } from "$domain/preferences";
+import { events } from "$shared/ipc/native-events";
 
 /** After launch, long enough to stay out of startup's way. */
 export const FIRST_CHECK_MS = 30_000;
@@ -22,6 +23,7 @@ let epoch = 0;
 let lifetime = 0;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let lastScheduled = 0;
+let installProgress: ReturnType<typeof setTimeout> | undefined;
 
 export const status = () => current;
 export const available = () => current.state !== "unavailable";
@@ -85,7 +87,18 @@ export async function relaunch(): Promise<boolean> {
   const accepted = await commands.updateRelaunch().catch(() => false);
   await refresh();
   relaunching = false;
+  if (accepted && status().state === "installing") watchInstallation(lifetime);
   return accepted;
+}
+
+function watchInstallation(generation: number) {
+  clearTimeout(installProgress);
+  installProgress = setTimeout(() => {
+    if (generation !== lifetime) return;
+    void refresh().finally(() => {
+      if (generation === lifetime && current.state === "installing") watchInstallation(generation);
+    });
+  }, PROGRESS_MS);
 }
 
 async function scheduled(generation: number) {
@@ -109,11 +122,22 @@ function onVisible() {
 
 let started = false;
 
+let stopNative: (() => void) | null = null;
+
 /** Reads the status and starts the background schedule. Main window only. */
 export function init(): Promise<void> {
   if (started) return Promise.resolve();
   started = true;
   const generation = ++lifetime;
+  // Native checks on its own schedule too, and says when it has.
+  void events.uiCommand
+    .listen(({ payload }) => {
+      if (payload === "updates.changed" && generation === lifetime) void refresh();
+    })
+    .then((stop) => {
+      if (generation === lifetime) stopNative = stop;
+      else stop();
+    });
   timer = setTimeout(() => void scheduled(generation), FIRST_CHECK_MS);
   document.addEventListener("visibilitychange", onVisible);
   return refresh();
@@ -125,6 +149,10 @@ export function dispose() {
   lifetime += 1;
   epoch += 1;
   clearTimeout(timer);
+  clearTimeout(installProgress);
+  stopNative?.();
+  stopNative = null;
+  installProgress = undefined;
   timer = undefined;
   lastScheduled = 0;
   document.removeEventListener("visibilitychange", onVisible);

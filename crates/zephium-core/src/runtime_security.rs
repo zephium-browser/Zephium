@@ -143,11 +143,17 @@ impl RuntimeSecurityAdvisories {
     }
 }
 
+/// How long after the release gate's review deadline an installed build
+/// keeps quiet about it. The weekly review cadence is for releases; a person
+/// on current software should not be told their browser is overdue days after
+/// installing it. Two missed review cycles of that length is a real signal.
+pub const RUNTIME_REVIEW_GRACE_SECONDS: u64 = 60 * 24 * 60 * 60;
+
 pub const fn overdue_review_advisory(
     unix_seconds: u64,
     review_deadline_exclusive: u64,
 ) -> Option<RuntimeSecurityAdvisory> {
-    if unix_seconds >= review_deadline_exclusive {
+    if unix_seconds >= review_deadline_exclusive.saturating_add(RUNTIME_REVIEW_GRACE_SECONDS) {
         Some(RuntimeSecurityAdvisory::review_overdue())
     } else {
         None
@@ -161,7 +167,7 @@ mod tests {
     #[test]
     fn independent_advisories_are_canonical_bounded_and_never_displace_each_other() {
         let mut advisories =
-            RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(20, 20));
+            RuntimeSecurityAdvisories::new().with_optional(overdue_review_advisory(u64::MAX, 20));
         advisories.insert(RuntimeSecurityAdvisory::unreviewed_runtime());
         advisories.insert(RuntimeSecurityAdvisory::update_recommended(
             RuntimeSecurityUpdateTarget::OperatingSystem,
@@ -191,10 +197,12 @@ mod tests {
     }
 
     #[test]
-    fn review_deadline_is_advisory_at_its_exclusive_boundary() {
-        assert_eq!(overdue_review_advisory(19, 20), None);
+    fn review_deadline_is_advisory_after_its_grace() {
+        let due = 20 + RUNTIME_REVIEW_GRACE_SECONDS;
+        assert_eq!(overdue_review_advisory(20, 20), None);
+        assert_eq!(overdue_review_advisory(due - 1, 20), None);
         assert_eq!(
-            overdue_review_advisory(20, 20),
+            overdue_review_advisory(due, 20),
             Some(RuntimeSecurityAdvisory::review_overdue())
         );
         assert_eq!(

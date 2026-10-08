@@ -20,11 +20,11 @@ pub use action::{
 };
 pub use active_profiles::{ExtensionActiveProfiles, MAX_EXTENSION_ACTIVE_PROFILES};
 pub use browser_surface::{
-    ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestError,
-    ExtensionBrowserRequestId, ExtensionBrowserRequestRejection, ExtensionBrowserRequestResult,
-    ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceError,
-    ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab, ExtensionBrowserWindow,
-    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES, MAX_EXTENSION_BROWSER_TABS,
+    AuthTabCleanupPermit, ExtensionBrowserRequest, ExtensionBrowserRequestAction,
+    ExtensionBrowserRequestError, ExtensionBrowserRequestId, ExtensionBrowserRequestRejection,
+    ExtensionBrowserRequestResult, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserSurfaceError, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+    ExtensionBrowserWindow, MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES, MAX_EXTENSION_BROWSER_TABS,
     MAX_EXTENSION_BROWSER_WINDOWS, MAX_PENDING_EXTENSION_BROWSER_REQUESTS,
     MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE,
 };

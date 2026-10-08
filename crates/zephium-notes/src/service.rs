@@ -163,6 +163,7 @@ fn emit(host: &dyn Host, profile: ProfileId, library: &Library, changes: Changes
         profile: profile.to_string(),
         notes,
         reset: changes.reset,
+        links: changes.links,
     });
 }
 

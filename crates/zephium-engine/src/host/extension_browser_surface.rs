@@ -170,6 +170,8 @@ impl EngineHost {
     }
 
     pub(super) fn retire_extension_browser_surface(&mut self, profile: ProfileId) {
+        #[cfg(target_os = "macos")]
+        self.webext.cancel_profile_auth_flows(profile);
         self.extension_browser_surfaces.remove(&profile);
     }
 }

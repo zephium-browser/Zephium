@@ -230,7 +230,7 @@ impl Shell {
         self.browser_after_return = None;
         let previous = self.browser_page;
         self.browser_page = page.map(|page| (window, page));
-        self.divider = None;
+        self.drop_divider();
         if page != Some(crate::BrowserPage::Work) {
             self.retire_work_pane();
         }

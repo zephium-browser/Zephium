@@ -6,9 +6,9 @@
   let last = $derived(added.at(-1));
 
   // Leaving the page ends hiding; the picker belongs to that document.
+  let page = $derived(`${tabs.activeId()} ${tabs.activeTab()?.url ?? ""}`);
   $effect(() => {
-    void tabs.activeId();
-    void tabs.activeTab()?.url;
+    void page;
     return () => hiding.finish();
   });
 

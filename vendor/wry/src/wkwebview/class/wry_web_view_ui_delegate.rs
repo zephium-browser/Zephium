@@ -165,6 +165,8 @@ pub struct WryWebViewUIDelegateIvars {
   pending_permission_requests: RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
   #[cfg(target_os = "macos")]
   file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
+  #[cfg(target_os = "macos")]
+  script_dialogs: super::super::script_dialog::ScriptDialogs,
 }
 
 #[cfg(target_os = "macos")]
@@ -196,37 +198,68 @@ define_class!(
     #[unsafe(method(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:))]
     fn run_javascript_alert(
       &self,
-      _webview: &WryWebView,
-      _message: &objc2_foundation::NSString,
-      _frame: &WKFrameInfo,
+      webview: &WryWebView,
+      message: &objc2_foundation::NSString,
+      frame: &WKFrameInfo,
       completion_handler: &Block<dyn Fn()>,
     ) {
-      completion_handler.call(());
+      let completion = completion_handler.copy();
+      self.ivars().script_dialogs.present(
+        webview,
+        frame,
+        super::super::script_dialog::Kind::Alert,
+        message,
+        Box::new(move |_| completion.call(())),
+      );
     }
 
     #[cfg(target_os = "macos")]
     #[unsafe(method(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:))]
     fn run_javascript_confirm(
       &self,
-      _webview: &WryWebView,
-      _message: &objc2_foundation::NSString,
-      _frame: &WKFrameInfo,
+      webview: &WryWebView,
+      message: &objc2_foundation::NSString,
+      frame: &WKFrameInfo,
       completion_handler: &Block<dyn Fn(Bool)>,
     ) {
-      completion_handler.call((Bool::NO,));
+      let completion = completion_handler.copy();
+      self.ivars().script_dialogs.present(
+        webview,
+        frame,
+        super::super::script_dialog::Kind::Confirm,
+        message,
+        Box::new(move |answer| {
+          let accepted = matches!(answer, super::super::script_dialog::Answer::Accepted(_));
+          completion.call((Bool::new(accepted),));
+        }),
+      );
     }
 
     #[cfg(target_os = "macos")]
     #[unsafe(method(webView:runJavaScriptTextInputPanelWithPrompt:defaultText:initiatedByFrame:completionHandler:))]
     fn run_javascript_prompt(
       &self,
-      _webview: &WryWebView,
-      _prompt: &objc2_foundation::NSString,
-      _default_text: Option<&objc2_foundation::NSString>,
-      _frame: &WKFrameInfo,
+      webview: &WryWebView,
+      prompt: &objc2_foundation::NSString,
+      default_text: Option<&objc2_foundation::NSString>,
+      frame: &WKFrameInfo,
       completion_handler: &Block<dyn Fn(*mut objc2_foundation::NSString)>,
     ) {
-      completion_handler.call((null_mut(),));
+      let completion = completion_handler.copy();
+      let default = default_text.map(|text| text.to_string()).unwrap_or_default();
+      self.ivars().script_dialogs.present(
+        webview,
+        frame,
+        super::super::script_dialog::Kind::Prompt(default),
+        prompt,
+        Box::new(move |answer| match answer {
+          super::super::script_dialog::Answer::Accepted(Some(text)) => {
+            let text = objc2_foundation::NSString::from_str(&text);
+            completion.call((Retained::as_ptr(&text).cast_mut(),));
+          }
+          _ => completion.call((null_mut(),)),
+        }),
+      );
     }
 
     #[cfg(target_os = "macos")]
@@ -621,6 +654,8 @@ impl WryWebViewUIDelegate {
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
         #[cfg(target_os = "macos")]
         file_upload_handler,
+        #[cfg(target_os = "macos")]
+        script_dialogs: Default::default(),
       });
     unsafe { msg_send![super(delegate), init] }
   }

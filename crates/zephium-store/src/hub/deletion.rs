@@ -556,6 +556,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM downloads;
          DELETE FROM blocker_statistics;
          DELETE FROM time_spent;
+         DELETE FROM time_batch_receipts;
          DELETE FROM bookmarks;
          DELETE FROM search_queries;
          DELETE FROM history;
@@ -565,7 +566,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM items;
          DELETE FROM spaces;
          DELETE FROM focus;
-         DELETE FROM sqlite_sequence WHERE name = 'history';",
+         DELETE FROM sqlite_sequence WHERE name IN ('history', 'time_batch_receipts');",
     )?;
     tx.commit()?;
     conn.execute_batch(
@@ -703,6 +704,11 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO time_batch_receipts(batch_id,digest) VALUES(?1,?2)",
+            params![vec![0xaa_u8; 16], vec![0xbb_u8; 32]],
+        )
+        .unwrap();
         drop(conn);
 
         scrub_profile_database(&path).unwrap();
@@ -749,6 +755,7 @@ mod tests {
             "sqlite_sequence",
             "task_list_receipts",
             "task_lists",
+            "time_batch_receipts",
             "time_spent",
             "user_resource_receipts",
             "user_resource_usage",
@@ -785,6 +792,7 @@ mod tests {
         for table in [
             "blocker_statistics",
             "time_spent",
+            "time_batch_receipts",
             "bookmarks",
             "download_cleanup",
             "download_preferences",

@@ -13,11 +13,14 @@ mod extension_browser_surface;
 mod extension_store;
 mod favicon_probe;
 mod favicons;
+mod fullscreen;
 mod history;
 mod operations;
 mod page_permissions;
+mod page_requests;
 mod persistence;
 mod presentation;
+mod private;
 mod profile_deletion;
 mod projections;
 mod scope;
@@ -214,10 +217,19 @@ pub struct Shell {
     presentation: PresentationState,
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
+    private: Option<private::PrivateSession>,
+    /// Sites allowed to open a kind of application link without asking,
+    /// for this run only.
+    external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
     window_visible: bool,
+    window_focused: bool,
+    // Cells because every relayout, which takes `&self`, re-checks that the
+    // fullscreen page may still be fullscreen and drops it at once if not.
+    content_fullscreen: std::cell::Cell<Option<fullscreen::ContentFullscreen>>,
+    host_fullscreen: std::cell::Cell<bool>,
     browser_page: Option<(WindowId, crate::BrowserPage)>,
     browser_page_projected: Option<(WindowId, Option<crate::BrowserPage>)>,
     browser_return_revision: u64,
@@ -227,6 +239,8 @@ pub struct Shell {
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// The saved session could not be restored this launch and was set aside.
+    session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
     crash: CrashState,
     bootstrapped: bool,
@@ -435,9 +449,14 @@ impl Shell {
             presentation: PresentationState::default(),
             zoom: ZoomState::default(),
             divider: None,
+            private: None,
+            external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
+            window_focused: false,
+            content_fullscreen: std::cell::Cell::new(None),
+            host_fullscreen: std::cell::Cell::new(false),
             browser_page: None,
             browser_page_projected: None,
             browser_return_revision: 0,
@@ -447,6 +466,7 @@ impl Shell {
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
             bootstrapped: false,
@@ -736,6 +756,9 @@ impl Shell {
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
             }
+            Command::AnswerPageRequest { id, decision } => {
+                let _ = self.operation_answer_page_request(id, decision);
+            }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);
             }
@@ -763,6 +786,15 @@ impl Shell {
                 }
                 None => self.pending_size = size,
             },
+            Command::SetWindowFocused(focused) => {
+                self.window_focused = focused;
+                if !focused {
+                    self.cancel_page_permission_if_not_foreground();
+                }
+            }
+            Command::StopMediaCapture { item, navigation } => {
+                let _ = self.operation_stop_media_capture(item, navigation);
+            }
             Command::SetWindowVisible(visible) => {
                 if self.window_visible != visible {
                     self.window_visible = visible;
@@ -772,7 +804,7 @@ impl Shell {
                     if !visible {
                         // OS pointer capture cannot remain authoritative while
                         // its window is hidden/minimized.
-                        self.divider = None;
+                        self.drop_divider();
                         if let Some(active) = self.windows.focused().and_then(|w| w.active) {
                             self.touch(active);
                         }
@@ -925,6 +957,7 @@ impl Shell {
                     .focused()
                     .map(|window| window.profile)
                     .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
                 {
                     self.store.resource_call(
                         profile,
@@ -956,6 +989,7 @@ impl Shell {
                     .focused()
                     .map(|window| window.profile)
                     .filter(|profile| *profile == expected_profile)
+                    .filter(|profile| !self.incognito_profile(*profile))
                 {
                     self.store.import_media(
                         profile,
@@ -987,7 +1021,10 @@ impl Shell {
             Command::DropTab { id, x, y } => {
                 let _ = self.operation_drop_tab(id, x, y);
             }
-            Command::DividerGrab { x, y } => self.divider = self.locate_divider(x, y),
+            Command::DividerGrab { x, y } => {
+                self.drop_divider();
+                self.divider = self.locate_divider(x, y);
+            }
             Command::DividerDrag { x, y } => self.divider_drag(x, y),
             Command::DividerRelease { x, y } => {
                 let _ = self.operation_divider_release(x.zip(y));
@@ -1507,6 +1544,20 @@ impl Shell {
         {
             crate::diagnostic!("shutdown: final time flush panicked");
         }
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.flush_pending_focus_records(true);
+            !self.has_unadmitted_time_writes()
+        })) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.retryable_shutdown_failure(ack);
+                return;
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: focus admission preflight panicked");
+                terminal_clean = false;
+            }
+        }
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.persist())).is_err() {
             crate::diagnostic!("shutdown: final session snapshot panicked");
             terminal_clean = false;
@@ -1890,6 +1941,9 @@ impl Shell {
                 next,
                 removed,
             } => self.on_history_surface_read(token, profile, visits, next, removed),
+            StoreReadResult::HistorySurfaceFailed { token, profile } => {
+                self.on_history_surface_failed(token, profile)
+            }
             StoreReadResult::Bookmarks {
                 token,
                 profile,
@@ -1903,6 +1957,8 @@ impl Shell {
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_address_tests;
 #[cfg(all(test, feature = "work-planning"))]
 mod work_context_tests;
 #[cfg(all(test, feature = "work-runtime"))]

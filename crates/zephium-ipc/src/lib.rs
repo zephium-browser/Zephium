@@ -24,16 +24,80 @@ pub struct TabView {
     #[serde(default)]
     pub content: TabContentView,
     pub loading: bool,
+    /// What the page asked for that waits on the person.
     #[serde(default)]
-    pub popup_blocked: bool,
+    #[specta(optional)]
+    pub page_request: Option<PageRequestView>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
     #[specta(optional)]
     pub availability: Option<TabAvailability>,
+    /// The last navigation the person asked for that did not load, until the
+    /// next attempt or commit. Never carries native error text.
+    #[serde(default)]
+    #[specta(optional)]
+    pub failure: Option<TabFailure>,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
+    #[serde(default)]
+    #[specta(optional)]
+    pub capture: Option<MediaCaptureView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PageRequestView {
+    /// Open a link in another application. `app` is its name when the system
+    /// knows one; `scheme` names the kind of link otherwise.
+    ExternalApp {
+        site: Option<String>,
+        scheme: String,
+        app: Option<String>,
+    },
+    /// A new tab the page tried to open; `host` is set when it can be opened.
+    Popup { host: Option<String> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRequestAnswer {
+    Allow,
+    AlwaysAllow,
+    Dismiss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureDeviceStateView {
+    None,
+    Active,
+    Muted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MediaCaptureView {
+    pub navigation_id: String,
+    pub camera: CaptureDeviceStateView,
+    pub microphone: CaptureDeviceStateView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabFailure {
+    pub url: String,
+    pub reason: TabFailureReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabFailureReason {
+    Offline,
+    HostNotFound,
+    Unreachable,
+    TimedOut,
+    Insecure,
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -857,6 +921,9 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// The saved session could not be restored this launch: its bytes were
+    /// kept in a file and the browser started with fresh tabs.
+    pub session_set_aside: bool,
     /// Bounded fail-closed aggregate of ownership scopes whose latest native
     /// user-content observation was not exactly applied. An impossible
     /// over-capacity observation contributes at most one sentinel. No script,
@@ -1222,8 +1289,15 @@ pub enum Projection {
     UiCommand(String),
     FindResult(FindResultView),
     Search(SearchResults),
-    OpenNote { profile: String, id: String },
+    OpenNote {
+        profile: String,
+        id: String,
+    },
     Layout(LayoutState),
+    /// The page on screen is fullscreen and fills the browser window, which
+    /// should itself be fullscreen until this turns false. Only engines that
+    /// present fullscreen inside the browser window send it.
+    HostFullscreen(bool),
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),

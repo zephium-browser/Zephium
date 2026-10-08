@@ -314,6 +314,28 @@ fn navigation_completion_phase(
   }
 }
 
+/// The category a person can act on for a failed navigation, or None when it
+/// was cancelled (a stop, a download conversion) rather than failed.
+fn web_error_failure(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<crate::NavigationFailure> {
+  use crate::NavigationFailure as Failure;
+  Some(match status {
+    COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED => return None,
+    COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED => Failure::Offline,
+    COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED => Failure::HostNotFound,
+    COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET => Failure::Unreachable,
+    COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => Failure::TimedOut,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED
+    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => Failure::Insecure,
+    _ => Failure::Other,
+  })
+}
+
 #[derive(Default)]
 struct InFlightNavigationUrls {
   urls: HashMap<u64, String>,
@@ -1299,6 +1321,10 @@ impl InnerWebView {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
       options.set_additional_browser_arguments(additional_browser_args);
+      // Zephium keeps crash diagnostics local for explicit user sharing. This
+      // disables WebView2's automatic crash upload, not SmartScreen or the
+      // runtime's separately governed required diagnostics.
+      options.set_is_custom_crash_reporting_enabled(true);
       // A true value can reach this boundary only with the startup gate
       // retained above. The gate runs against the exact controller/profile
       // before WebView initialization or initial navigation.
@@ -1765,6 +1791,26 @@ impl InnerWebView {
           };
           let mut navigation_id = 0;
           args.NavigationId(&mut navigation_id)?;
+          // WebView2's own error page is not the document the person asked
+          // for. Hide it like any commit, but report no commit: the failure
+          // that follows lets the embedder explain it in its own surface.
+          let mut error_page = BOOL::default();
+          args.IsErrorPage(&mut error_page)?;
+          if error_page.as_bool() {
+            let tracked = committed_urls
+              .lock()
+              .unwrap_or_else(|poisoned| poisoned.into_inner())
+              .urls
+              .contains_key(&navigation_id);
+            if tracked {
+              if let Some(guard) = navigation_presentation_guard.as_ref() {
+                guard();
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = committed_controller.SetIsVisible(false);
+              }
+            }
+            return Ok(());
+          }
           let url = committed_urls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1792,6 +1838,7 @@ impl InnerWebView {
 
       let completed_urls = in_flight_navigation_urls.clone();
       let completed_handler = handler.clone();
+      let failure_handler = attributes.navigation_failure_handler.take();
       webview.add_NavigationCompleted(
         &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
           let Some(args) = args else {
@@ -1810,6 +1857,13 @@ impl InnerWebView {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finish(navigation_id);
           if let Some(url) = url {
+            if !succeeded.as_bool() {
+              if let (Some(report), Some(failure)) =
+                (failure_handler.as_ref(), web_error_failure(status))
+              {
+                report(NavigationId::from_raw(navigation_id), failure);
+              }
+            }
             completed_handler(NavigationEvent {
               id: NavigationId::from_raw(navigation_id),
               phase: navigation_completion_phase(succeeded.as_bool(), status),

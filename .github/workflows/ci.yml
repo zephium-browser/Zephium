@@ -10,7 +10,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A release needs a finished main run for its exact commit, so main runs
+  # are never cancelled by the next push.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +30,8 @@ jobs:
         run: ruby scripts/ci/check_action_pins.rb
       - name: Test the macOS blocker seed probe policy
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
+      - name: Test which changes need the Rust jobs
+        run: bash scripts/ci/test_needs_rust.sh
       - name: actionlint
         run: |
           set -euo pipefail
@@ -37,6 +41,43 @@ jobs:
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  ${archive}" | sha256sum --check --strict
           tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}" actionlint
           "${RUNNER_TEMP}/actionlint" -color
+
+  # A pull request that touches only the frame, docs or Markdown skips the
+  # Rust jobs, unless Rust reads one of those frame files. Main always runs
+  # everything: a release needs a full run for its exact commit.
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          rust=true
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)')"
+            # The files API stops at 3000 entries; a list that long, or none,
+            # cannot prove the Rust jobs are unaffected.
+            count="$(grep -c . <<< "${files}" || true)"
+            if (( count > 0 && count < 3000 )); then
+              rust="$(scripts/ci/needs-rust.sh <<< "${files}")"
+            fi
+          fi
+          echo "rust=${rust}" >> "${GITHUB_OUTPUT}"
+          echo "Rust jobs needed: ${rust}" >> "${GITHUB_STEP_SUMMARY}"
 
   frontend:
     name: Frontend
@@ -54,8 +95,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Build tools run while producing signed artifacts, so dev dependencies
       # are in scope.
-      # Shipped code gates the build; tooling advisories arrive as Dependabot PRs.
-      - run: pnpm audit --prod --audit-level high
+      - run: node --test scripts/ci/audit-dependencies.test.mjs
+      - run: node scripts/ci/audit-dependencies.mjs
       - name: Typecheck, lint and unit tests
         run: pnpm --dir frame run check
       - name: Windows semantic input guards
@@ -67,6 +108,9 @@ jobs:
   # runs the platform-neutral policy gates.
   policy:
     name: Rust policy
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -100,6 +144,9 @@ jobs:
 
   macos:
     name: Rust (macOS)
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -115,7 +162,12 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # `--all-targets` lets test-only uses hide dead production code.
       - run: cargo clippy --workspace --lib --locked -- -D warnings
-      - run: cargo nextest run --workspace --locked --retries 2
+      - name: Vendored updater tests
+        run: cargo test -p tauri-plugin-updater --lib --locked
+      - run: cargo nextest run --workspace --locked --profile ci --retries 2
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
       # The desktop tests regenerate the TypeScript IPC bindings.
       - name: Bindings drift
         run: git diff --exit-code frame/src/shared/ipc/bindings.ts
@@ -138,6 +190,9 @@ jobs:
 
   windows:
     name: Rust (Windows)
+    needs: changes
+    # Runs when the scope check itself failed, so a broken check never skips Rust.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -151,6 +206,8 @@ jobs:
           tool: cargo-nextest@0.9.137
           fallback: none
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Vendored updater tests
+        run: cargo test -p tauri-plugin-updater --lib --locked
       # The desktop test binary needs the WebView2 loader at run time, which
       # hosted runners lack; the log-policy crate covers its Windows-only code.
       # The native Work storage tests exercise real NTFS handles and process
@@ -159,7 +216,11 @@ jobs:
       # elevated runner creates directories owned by Administrators. Both run on
       # the Windows QA machine instead.
       - run: >-
-          cargo nextest run --workspace --exclude zephium-desktop --locked --retries 2 --no-fail-fast
+          cargo nextest run --workspace --exclude zephium-desktop --locked --profile ci --retries 2 --no-fail-fast
           -E 'not (test(/^platform::windows::native_storage::work::tests::/)
           or (package(zephium-store) and test(/^(hub::agent_work|actor::tests::work_journal_|hub::work_document::runtime_store::tests::approved_deadline_)/)))'
+      - name: Report flaky tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
       - run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml

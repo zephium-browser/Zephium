@@ -368,6 +368,11 @@ pub fn harden_privileged(
 }
 
 // Undecorated windows lose DWM rounding unless asked for explicitly.
+/// Keeps the window's own caption out of a page that fills the screen.
+pub fn set_caption_suppressed(window: &WebviewWindow, suppressed: bool) {
+    caption::set_suppressed(window, suppressed);
+}
+
 pub fn round_corners(window: &WebviewWindow) {
     use windows::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,

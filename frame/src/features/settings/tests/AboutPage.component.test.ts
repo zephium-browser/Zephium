@@ -77,7 +77,11 @@ test("a failed check says so and can be tried again", async () => {
   native.check.mockResolvedValueOnce({ state: "failed" });
   const screen = await render(AboutPage);
   await screen.getByRole("button", { name: "Check now" }).click();
-  await expect.element(screen.getByText("Couldn't check for updates")).toBeVisible();
+  await expect
+    .element(
+      screen.getByText("Couldn't complete the update. Try again, or download the latest version."),
+    )
+    .toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Check now" })).toBeEnabled();
 });
 
@@ -96,6 +100,7 @@ test("a system behind on security updates is explained where the rail sends peop
   native.status = { state: "upToDate" };
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: [
       { kind: "review_overdue", update_target: "zephium" },
@@ -116,4 +121,27 @@ test("settings search finds the update controls", () => {
     "updates.auto-check",
   );
   expect(searchSettings("new version").map((result) => result.target)).toContain("about.updates");
+});
+
+test("manual installation opens the exact release instead of retrying an impossible swap", async () => {
+  native.status = { state: "manualInstall", version: "1.0.2" };
+  const screen = await render(AboutPage);
+  await screen.getByRole("button", { name: "Download and install manually" }).click();
+  expect(native.openUrl).toHaveBeenCalledWith(
+    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.2",
+    true,
+  );
+  expect(screen.getByRole("button", { name: "Relaunch to update" }).query()).toBeNull();
+});
+
+test("a postponed update remains ready with its failure explained", async () => {
+  native.status = {
+    state: "ready",
+    version: "1.0.2",
+    retry_reason:
+      "The previous update did not finish. Your downloaded update is still ready to install.",
+  };
+  const screen = await render(AboutPage);
+  await expect.element(screen.getByText(native.status.retry_reason!)).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Relaunch to update" })).toBeEnabled();
 });

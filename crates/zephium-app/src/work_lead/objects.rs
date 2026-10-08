@@ -427,6 +427,16 @@ pub(crate) fn propose(
         ));
     }
     let mut data = data;
+    // The canvas fetches pictures by themselves, so once the run holds the
+    // person's data a picture address must be one a page showed.
+    if run.is_private() {
+        let dropped = keep_shown_pictures(&mut data, |url| run.known_url(url));
+        if dropped > 0 {
+            left_out.push(format!(
+                "{dropped} picture address(es) no page showed; use the photo addresses reads returned"
+            ));
+        }
+    }
     if let WorkArtifactDataV1::Plan { steps, .. } = &mut data {
         for (index, step) in steps.iter_mut().enumerate() {
             let Some(pick) = &step.pick else { continue };
@@ -844,9 +854,55 @@ pub(crate) fn part_holds<'a>(
     })
 }
 
+/// Removes picture addresses `shown` does not know from the pictures the
+/// canvas fetches on its own, and says how many went.
+fn keep_shown_pictures(data: &mut WorkArtifactDataV1, shown: impl Fn(&str) -> bool) -> usize {
+    let mut dropped = 0;
+    let mut keep = |candidates: &mut Vec<String>| {
+        let before = candidates.len();
+        candidates.retain(|url| shown(url));
+        dropped += before - candidates.len();
+    };
+    match data {
+        WorkArtifactDataV1::Picks { items, .. } => items
+            .iter_mut()
+            .for_each(|item| keep(&mut item.image_candidates)),
+        WorkArtifactDataV1::ComparisonMatrix { subjects, .. }
+        | WorkArtifactDataV1::Findings { subjects, .. }
+        | WorkArtifactDataV1::EvidenceCollection { subjects, .. } => subjects
+            .iter_mut()
+            .for_each(|subject| keep(&mut subject.image_candidates)),
+        _ => {}
+    }
+    dropped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_private_run_keeps_only_the_pictures_pages_showed() {
+        let mut data: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks",
+            "facet": "stay",
+            "items": [{"name": "Loft", "image_candidates": [
+                "https://img.example.com/loft.jpg",
+                "https://secret-words.collector.example/p.png"
+            ]}]
+        }))
+        .unwrap();
+        let dropped =
+            keep_shown_pictures(&mut data, |url| url == "https://img.example.com/loft.jpg");
+        assert_eq!(dropped, 1);
+        let WorkArtifactDataV1::Picks { items, .. } = data else {
+            panic!()
+        };
+        assert_eq!(
+            items[0].image_candidates,
+            ["https://img.example.com/loft.jpg"]
+        );
+    }
 
     #[test]
     fn a_follow_up_about_the_same_subject_is_the_same_object() {

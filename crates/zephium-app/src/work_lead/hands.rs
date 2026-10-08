@@ -311,6 +311,26 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let mut refused = Vec::new();
+        let mut admitted = Vec::with_capacity(requests.len());
+        for request in requests {
+            if let WorkStepKindV1::Read { url, .. } = &request.kind {
+                if let Err(why) = self.run.admit_address(url, self.part).await {
+                    refused.push((request.call, why, true));
+                    continue;
+                }
+            }
+            admitted.push(request);
+        }
+        let mut results = self.run_admitted(admitted).await?;
+        results.extend(refused);
+        Ok(results)
+    }
+
+    async fn run_admitted(
+        &self,
+        requests: Vec<Request>,
+    ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -335,6 +355,21 @@ where
         if let Some(status) = self.enter_sites(&mut driver, &requests).await {
             return Err(status);
         }
+        // Typing could carry what the run read to a site the person did not
+        // name, so on those sites each field waits for them.
+        let private = self.run.is_private();
+        driver.hold_typing(
+            requests
+                .iter()
+                .filter_map(|request| match &request.kind {
+                    WorkStepKindV1::Read {
+                        url, goal: Some(_), ..
+                    } if private => crate::work_sites::site_of(url),
+                    _ => None,
+                })
+                .filter(|site| !self.run.trusts(site))
+                .collect(),
+        );
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
@@ -375,6 +410,9 @@ where
                 kinds,
             )
             .await;
+        for site in driver.take_typing_allowed() {
+            self.run.trust_site(&site);
+        }
         let used = driver.used();
         let notices = driver.take_notices();
         {
@@ -426,6 +464,18 @@ where
                     .collect()
             })
             .unwrap_or_default();
+        if new.iter().any(|step| {
+            step.account.is_some()
+                || matches!(
+                    step.kind,
+                    WorkStepKindV1::List { .. }
+                        | WorkStepKindV1::ReadFile { .. }
+                        | WorkStepKindV1::SearchFiles { .. }
+                        | WorkStepKindV1::RunCommand { .. }
+                )
+        }) {
+            self.run.mark_private();
+        }
         let mut used_steps = BTreeSet::new();
         let mut results = Vec::new();
         for request in &requests {
@@ -805,6 +855,7 @@ where
                 line.push_str(&format!(" · url {homepage}"));
             }
             for image in &subject.image_candidates {
+                self.run.allow_url(image);
                 line.push_str(&format!(" · photo {image}"));
             }
             if subject.image_candidates.is_empty() {
@@ -812,6 +863,7 @@ where
                 if let Some((_, image, key)) =
                     facts.iter().find(|(path, ..)| Some(path) == page.as_ref())
                 {
+                    self.run.allow_url(image);
                     line.push_str(&format!(" · photo {image} [{key}]"));
                 }
             }
