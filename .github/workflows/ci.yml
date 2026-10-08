@@ -47,7 +47,9 @@ jobs:
   # Decides which jobs a pull request needs: docs and repository metadata
   # need none, frame changes skip Rust unless Rust reads the file, and a CI
   # change runs everything. Main always runs everything: a release needs a
-  # full run for its exact commit. Skipped jobs satisfy required checks.
+  # full run for its exact commit. Skipped jobs satisfy required checks, so
+  # the classifier always comes from the base branch: a pull request cannot
+  # change the rule that decides which of its own checks run.
   changes:
     name: Changes
     runs-on: ubuntu-24.04
@@ -62,6 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
       - id: scope
         env:
@@ -78,7 +81,16 @@ jobs:
             # cannot prove any job is unaffected.
             count="$(grep -c . <<< "${files}" || true)"
             if (( count > 0 && count < 3000 )); then
-              scope="$(scripts/ci/scope.sh <<< "${files}")"
+              classified="$(scripts/ci/scope.sh <<< "${files}" || true)"
+              # Anything but exactly one boolean per job runs everything.
+              valid=true
+              for key in rust frontend workflows; do
+                [[ "$(grep -cxE "${key}=(true|false)" <<< "${classified}")" == 1 ]] || valid=false
+              done
+              [[ "$(grep -c . <<< "${classified}")" == 3 ]] || valid=false
+              if [[ "${valid}" == true ]]; then
+                scope="${classified}"
+              fi
             fi
           fi
           echo "${scope}" >> "${GITHUB_OUTPUT}"
