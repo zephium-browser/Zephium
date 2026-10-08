@@ -810,18 +810,27 @@ impl Shell {
     }
 
     pub(super) fn operation_run_command(&mut self, id: &str) -> OperationDisposition {
-        // Inside Work the pane's tab is the only page a shortcut can mean.
-        let in_work = self.active_browser_page().is_some();
-        let active = if in_work {
-            self.work_pane_tab()
-        } else {
-            self.windows.focused().and_then(|window| window.active)
+        // A shortcut means the page in front. Work's pane tab inside Work; a
+        // window page such as Settings or History stands over the active tab,
+        // so it has no tab to act on; otherwise the active tab, including a
+        // browser-owned one like Extensions.
+        let window_page = self.windows.focused().and_then(|window| {
+            self.browser_page
+                .filter(|(owner, _)| *owner == window.id)
+                .map(|(_, page)| page)
+        });
+        let in_work = window_page == Some(crate::BrowserPage::Work);
+        let active = match window_page {
+            Some(crate::BrowserPage::Work) => self.work_pane_tab(),
+            Some(_) => None,
+            None => self.windows.focused().and_then(|window| window.active),
         };
         match id {
             "tab.new" => self.operation_open(),
             "window.newPrivate" => self.operation_enter_private(),
             "window.closePrivate" => self.operation_close_private(),
             "tab.close" if in_work => self.operation_work_pane_hide(),
+            "tab.close" if window_page.is_some() => self.operation_show_browser_page(None),
             "tab.close" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_close(id),
