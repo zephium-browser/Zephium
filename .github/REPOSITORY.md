@@ -77,9 +77,10 @@ release build, so only a maintainer can push one.
   secret format is blocked; the pusher can still bypass with a stated reason,
   which is recorded, and unsupported token formats are not detected.
 - Code scanning: *Default setup* stays off. [`workflows/codeql.yml`](workflows/codeql.yml)
-  analyses Actions and JavaScript/TypeScript, and Rust on macOS and Windows
-  runners so each platform's code is covered, after code changes reach
-  `main` and weekly. It does not run on pull requests.
+  analyses Actions and JavaScript/TypeScript after code changes reach `main`
+  and weekly, and Rust weekly and on demand on macOS and Windows runners, so
+  each platform's code is covered; a Rust analysis takes over an hour. It
+  does not run on pull requests, and results in `vendor/` are ignored.
 
 ## Issues and labels
 
