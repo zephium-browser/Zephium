@@ -148,12 +148,33 @@ const MODIFIER_CODES = new Set([
 /** The accelerator a key press spells, by physical key so it does not change
  *  with the keyboard layout, or null while only modifiers are held. */
 export function acceleratorFrom(event: KeyboardEvent, mac: boolean): string | null {
-  if (!event.code || MODIFIER_CODES.has(event.code)) return null;
+  return spell(event, mac, event.code);
+}
+
+const LETTER = /^[a-z]$/iu;
+
+/** A command shortcut as the active Windows layout spells it. WebView2 matches
+ *  letters by virtual key, so the physical QWERTY position would turn AZERTY's
+ *  A into Q and Z into W. Other platforms and non-letter keys keep their codes. */
+export function keymapAcceleratorFrom(
+  event: KeyboardEvent,
+  mac: boolean,
+  windows: boolean,
+): string | null {
+  const key =
+    windows && typeof event.key === "string" && LETTER.test(event.key)
+      ? event.key.toUpperCase()
+      : event.code;
+  return spell(event, mac, key);
+}
+
+function spell(event: KeyboardEvent, mac: boolean, key: string): string | null {
+  if (!event.code || !key || MODIFIER_CODES.has(event.code)) return null;
   const parts: string[] = [];
   if (event.ctrlKey) parts.push("Ctrl");
   if (event.altKey) parts.push("Alt");
   if (event.shiftKey) parts.push("Shift");
   if (event.metaKey) parts.push(mac ? "Cmd" : "Super");
-  parts.push(event.code);
+  parts.push(key);
   return parts.join("+");
 }
