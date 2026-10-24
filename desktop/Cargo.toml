@@ -135,7 +135,7 @@ zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
-window-vibrancy = "=0.8.0"
+window-vibrancy = "=0.8.1"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
