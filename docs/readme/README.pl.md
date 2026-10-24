@@ -10,7 +10,7 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platformy: macOS i Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
-    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/x.com-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
   </p>
 
   <p>
