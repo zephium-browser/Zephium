@@ -2,7 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>快速、功能完备的浏览器与工作环境，<br />为你和你的智能体重新打造。</strong></p>
+  <p><strong>快速、功能完备的浏览器与工作环境，<br />为你和你的智能体重新构想。</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="最新版本" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="支持平台：macOS 和 Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">官网</a> ·
+    <a href="https://zephium.app/docs">文档</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">发布影片</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">下载</a>
   </p>
 </div>
 
@@ -31,7 +39,10 @@
 </details>
 
 <p align="center">
-  <img src="../../.github/assets/browse.webp" alt="Browse 模式下的 Zephium，标签页位于侧边栏，已打开 zephium.app" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/browse-dark.webp" />
+    <img src="../../.github/assets/browse-light.webp" alt="Zephium 的新标签页：窗口朝向天空打开，页脚处是名称、时间与日期，以及当天的数据" width="960" />
+  </picture>
 </p>
 
 <p align="center">
@@ -39,23 +50,22 @@
   还有 <strong>Work</strong>：一块画布，让你的智能体在你眼前完成真正的工作。
 </p>
 
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; 观看发布影片</a></p>
+
 ---
 
 Zephium 是一款开源浏览器，用 Rust 构建，基于操作系统自带的网页引擎：macOS 上是 WebKit（Safari 所用的引擎），Windows 上是 WebView2。它不是 Chromium 或 Firefox 的分支。它原生拦截广告和跟踪器，可运行 Chrome 扩展，并让任务、笔记和你的上网时间一键可达。安装包约 30 MB。
 
 只需一个开关，就能进入 **Work**。你的工作本来就在浏览器里进行，标签页、登录状态和历史记录都在这里。Work 把智能体带到这里，而不是让你转去别处，并且让你亲眼看着它们工作。
 
-> [!NOTE]
-> Zephium 目前处于 beta 阶段，已经可以作为你的日常浏览器。如果哪里不对劲，请[提交 issue](https://github.com/zephium-browser/Zephium/issues)。
-
 ## Work
 
 用自己的话描述想要的结果：规划一次旅行、比较供应商、设计一个系统、修复一个 bug。Work 会在画布上接手，你能看到每一个步骤。
 
 <p align="center">
-  <img src="../../.github/assets/work.webp" alt="Work 模式下的 Zephium：智能体比较 AWS、Vercel、Hetzner 和 Cloudflare，并绘制参考架构图" width="960" />
+  <img src="../../.github/assets/work.webp" alt="Zephium 中完整的一次 Work 运行：助手在各自的官网上阅读 Uptime Kuma、Gatus 和 OpenStatus，一个本地助手检查各个端点，随后是答案、对比表格和图表、一张示意图、配置文件和四项任务" width="960" />
 </p>
-<p align="center"><sub>被要求比较 AI SaaS 的托管方案时，Work 会阅读各家定价页面，推荐一套技术栈，并画出架构图。</sub></p>
+<p align="center"><sub>被要求做一个状态页时，Work 会在三款监控工具各自的官网上阅读资料，用你自己的机器检查你的端点，给出最终选择，并把对比、配置和任务留在画布上。</sub></p>
 
 - **从你已有的东西开始。** Work 会回忆它对你的了解，在有帮助时搜索你的历史记录，并为任务加载合适的技能。每一步发生时都会显示在画布上。
 - **助手并行工作，一切公开可见。** 规划旅行时，一个助手找房子，另一个查签证，第三个比较航班。它们浏览的是你能亲眼看到的实时页面，任何来源都可以在画布旁的面板中打开。
@@ -63,9 +73,18 @@ Zephium 是一款开源浏览器，用 Rust 构建，基于操作系统自带的
 - **计划变成你的一天。** 一次点击，就能把计划中的每一步变成任务，并链接回对应的 Work。任何值得保留的内容都可以存为笔记。
 - **能力延伸到浏览器之外。** Work 可以读取和编辑你授权的文件夹，运行命令，并把较大的编码任务交给 Claude Code 或 Codex。它能连接 Linear、Notion、Sentry、Stripe、Figma 等 MCP 服务器，以及 `gh` 这类命令行工具。
 - **决定权始终在你。** 任何会发布、合并或更改内容的操作，都会等你确认。
-- **随意选择模型。** 使用你自己的密钥接入 Anthropic、OpenAI、Google Gemini、DeepSeek 或 OpenRouter，或通过 Ollama、LM Studio 或任何兼容 OpenAI 的服务器在本地运行模型。密钥保存在系统钥匙串中。
+- **随意选择模型。** 使用你自己的密钥接入 Anthropic、OpenAI、Google Gemini、DeepSeek 或 OpenRouter，或通过 Ollama、LM Studio 或任何兼容 OpenAI 的服务器在本地运行模型。密钥保存在系统钥匙串中。或者登录 Zephium AI，免去密钥：它会为每一步选出合适的模型，开始时还有免费额度（[定价](https://zephium.app/pricing)）。
 
 Work 内置 25 项技能，包括旅行规划、调研、对比与选择、规划我的一天、修复 bug 和每周状态汇报。你也可以编写自己的技能。
+
+## Ask Zephium
+
+侧边栏里的助手，快捷键是 `⌘ E`（Windows 上为 `Ctrl E`）。它会读取你正在看的页面并回答相关问题，指出哪些内容值得你花时间，并把你选中的内容在新标签页中打开。你可以让它在页面上执行几个步骤，或者为你每天都会访问的网站换一套样式，它会就地完成。当任务超出一次聊天能承载的范围时，**Continue in Work** 会把它连同当前页面一起带到画布上。
+
+<p align="center">
+  <img src="../../.github/assets/ask.webp" alt="Ask Zephium 位于 Hacker News 旁：挑出三篇文章，在新标签页中打开，并把首页重新排成清爽的卡片" width="960" />
+</p>
+<p align="center"><sub>被问到什么值得读时，它挑出三篇文章，把它们打开，并把首页重新排成清爽的卡片。</sub></p>
 
 ## Browse
 
@@ -77,6 +96,7 @@ Work 内置 25 项技能，包括旅行规划、调研、对比与选择、规�
 
 ### 为长期使用而设计
 
+- 新标签页朝向天空打开，随你的主题呈现白天或夜晚，页脚处显示时间、专注状态和当天的任务。
 - 安静的侧边栏中的垂直标签页，支持空间、配置文件、固定标签页、文件夹和分屏视图。
 - macOS 26 上的 Liquid Glass，Windows 11 上的 Mica。
 - 启动器快捷键为 `⌘ ⇧ Space`（Windows 上为 `Ctrl Shift Space`），可在桌面任何位置访问标签页、历史记录、笔记和命令。在那里输入的任何内容都可以变成任务。
@@ -94,9 +114,9 @@ Work 内置 25 项技能，包括旅行规划、调研、对比与选择、规�
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks：一个带有状态、截止日期、列表、优先级和关联页面的任务" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time：今天上网 42 分钟、专注计时器和各网站用时" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes：页面旁的 Markdown 笔记，包含标题、列表和代码" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks：今天、明天和即将到来的任务，其中一个任务关联着它来自的页面" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time：今天上网 3 小时 24 分钟、一轮 25 分钟的专注和各网站用时" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes：页面旁的 Markdown 发布清单，含代码" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>像说话一样写下来，比如“明天下午 3 点给 Anna 打电话”。支持列表、优先级、截止日期和子任务，你当时所在的页面也会保持关联。</sub></td>

@@ -2,7 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>高速で機能の揃ったブラウザと仕事の環境を、<br />あなたとエージェントのために作り直しました。</strong></p>
+  <p><strong>高速で機能の揃ったブラウザと仕事の環境を、<br />あなたとエージェントのために一から考え直しました。</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="最新リリース" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="対応プラットフォーム: macOS と Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">ウェブサイト</a> ·
+    <a href="https://zephium.app/docs">ドキュメント</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">ローンチフィルム</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">ダウンロード</a>
   </p>
 </div>
 
@@ -31,7 +39,10 @@
 </details>
 
 <p align="center">
-  <img src="../../.github/assets/browse.webp" alt="Browse モードの Zephium。サイドバーにタブが並び、zephium.app が開いている" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/browse-dark.webp" />
+    <img src="../../.github/assets/browse-light.webp" alt="Zephium の新しいタブ。ウィンドウが空に向かって開き、下部に名前、時刻と日付、その日の数字が並んでいる" width="960" />
+  </picture>
 </p>
 
 <p align="center">
@@ -39,23 +50,22 @@
   そして <strong>Work</strong>。エージェントが目の前で本物の仕事をこなすキャンバスです。
 </p>
 
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; ローンチフィルムを見る</a></p>
+
 ---
 
 Zephium は、Rust で作られたオープンソースのブラウザです。OS 標準の Web エンジンを土台にしていて、macOS では Safari と同じ WebKit、Windows では WebView2 を使います。Chromium や Firefox のフォークではありません。広告とトラッキングをネイティブにブロックし、Chrome 拡張機能も動かせます。タスク、ノート、Web で過ごす時間も、ワンクリックで手元に開けます。ダウンロードサイズは約 30 MB です。
 
 スイッチひとつで **Work** に切り替わります。仕事はもともとブラウザの中、つまりタブやログイン情報、履歴のある場所で行われています。Work は、どこか別の場所へ移るのではなく、エージェントのほうをそこへ連れてきます。しかも、その仕事ぶりを見届けられます。
 
-> [!NOTE]
-> Zephium はベータ版ですが、普段使いのブラウザとして使える状態です。うまく動かない点があれば、[issue を作成](https://github.com/zephium-browser/Zephium/issues)してください。
-
 ## Work
 
 求める結果を、ふだんの言葉で伝えてください。旅行の計画、ベンダーの比較、システムの設計、バグの修正など。あとは Work がキャンバス上で引き受け、すべてのステップが見えます。
 
 <p align="center">
-  <img src="../../.github/assets/work.webp" alt="Work モードの Zephium。エージェントが AWS、Vercel、Hetzner、Cloudflare を比較し、リファレンスアーキテクチャを描いている" width="960" />
+  <img src="../../.github/assets/work.webp" alt="Zephium での Work の一連の流れ。ヘルパーが Uptime Kuma、Gatus、OpenStatus をそれぞれのサイトで読み、ローカルのヘルパーがエンドポイントを確認し、続いて回答、比較表とグラフ、図、設定、4 つのタスクが並ぶ" width="960" />
 </p>
-<p align="center"><sub>AI SaaS 向けのホスティングの比較を頼むと、Work は料金ページを読み、構成を提案し、アーキテクチャ図を描きます。</sub></p>
+<p align="center"><sub>ステータスページを頼まれた Work は、3 つの監視ツールをそれぞれのサイトで読み、あなたのエンドポイントをあなたのマシンから確認し、選んだ構成を組み上げ、比較、設定、タスクをキャンバスに残します。</sub></p>
 
 - **すでにあるものから始まります。** Work はあなたについて知っていることを思い出し、役に立つときは履歴を検索し、その仕事に合ったスキルを読み込みます。各ステップは、実行されるたびにキャンバスに現れます。
 - **ヘルパーが並行して、オープンに作業します。** 旅行なら、ひとりが物件を探し、別のひとりがビザを調べ、もうひとりが航空券を比べます。ヘルパーはライブのページを閲覧し、その様子は見ることができます。どの情報源も、キャンバスの横のペインで開けます。
@@ -63,9 +73,18 @@ Zephium は、Rust で作られたオープンソースのブラウザです。O
 - **計画が、あなたの一日になります。** ワンクリックで、計画の各ステップが、その Work にリンクしたタスクになります。残しておきたいものは、ノートとして保存できます。
 - **ブラウザの外にも手が届きます。** Work は、許可したフォルダを読み書きし、コマンドを実行し、大きなコーディング作業は Claude Code や Codex に任せます。Linear、Notion、Sentry、Stripe、Figma などの MCP サーバーや、`gh` のようなコマンドラインツールにも接続できます。
 - **主導権はあなたにあります。** 投稿、マージ、変更を伴う操作は、あなたの OK を待ちます。
-- **好きなモデルを使えます。** Anthropic、OpenAI、Google Gemini、DeepSeek、OpenRouter は自分のキーで利用でき、Ollama、LM Studio、OpenAI 互換のサーバー経由でローカルモデルも動かせます。キーはシステムのキーチェーンに保存されます。
+- **好きなモデルを使えます。** Anthropic、OpenAI、Google Gemini、DeepSeek、OpenRouter は自分のキーで利用でき、Ollama、LM Studio、OpenAI 互換のサーバー経由でローカルモデルも動かせます。キーはシステムのキーチェーンに保存されます。または Zephium AI にサインインすれば、キーは不要です。ステップごとに最適なモデルを選び、無料クレジットから始められます（[料金](https://zephium.app/pricing)）。
 
 Work には 25 のスキルが付属しています。旅行の計画、リサーチ、比較して選ぶ、今日の計画、バグの修正、週次ステータスなどです。自分でスキルを書くこともできます。
+
+## Ask Zephium
+
+サイドバーのアシスタントで、`⌘ E`（Windows では `Ctrl E`）で開きます。今開いているページを読んで内容について答え、時間をかける価値のあるものを示し、選んだものを新しいタブで開きます。ページ上でいくつかの操作を頼んだり、毎日見るサイトの見た目を変えてもらったりすると、その場で実行します。チャットでは収まらない仕事になったら、**Continue in Work** で、ページごとキャンバスに引き継げます。
+
+<p align="center">
+  <img src="../../.github/assets/ask.webp" alt="Hacker News の横に開いた Ask Zephium。3 本の記事を選んで新しいタブで開き、トップページを落ち着いたカードに組み直した" width="960" />
+</p>
+<p align="center"><sub>読む価値のあるものを尋ねると、3 本の記事を選んで開き、トップページを落ち着いたカードに組み直します。</sub></p>
 
 ## Browse
 
@@ -77,6 +96,7 @@ Work には 25 のスキルが付属しています。旅行の計画、リサ�
 
 ### 住み続けられるデザイン
 
+- 空に向かって開く新しいタブ。テーマに合わせて昼にも夜にもなり、下部には時刻、フォーカス、その日のタスクが並びます。
 - 落ち着いたサイドバーに縦型のタブ。スペース、プロファイル、ピン留めタブ、フォルダ、分割表示に対応しています。
 - macOS 26 では Liquid Glass、Windows 11 では Mica。
 - `⌘ ⇧ Space`（Windows では `Ctrl Shift Space`）のランチャーから、デスクトップのどこからでもタブ、履歴、ノート、コマンドにアクセスできます。そこで入力した内容は、そのままタスクにできます。
@@ -94,9 +114,9 @@ Chrome ウェブストアから、そのまま拡張機能をインストール�
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: ステータス、期限、リスト、優先度、リンクされたページを持つタスク" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 今日は Web で 42 分、フォーカスタイマー、サイトごとの時間" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: ページの横に開いた、見出し、リスト、コードを含む Markdown ノート" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: 今日、明日、これからの予定。元のページにリンクされたタスク付き" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 今日は Web で 3 時間 24 分、25 分のフォーカスラウンド、サイトごとの時間" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: ページの横に開いた、コード入りの Markdown リリースチェックリスト" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>話しかけるように書けます。たとえば「明日の 3 時にアンナに電話」。リスト、優先度、期限、サブタスクに対応し、開いていたページもリンクされたまま残ります。</sub></td>

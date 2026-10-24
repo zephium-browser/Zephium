@@ -2,7 +2,7 @@
   <img src=".github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>A fast, fully featured browser and work environment<br />rebuilt for you and your agents.</strong></p>
+  <p><strong>A fast, fully featured browser and work environment,<br />reimagined for you and your agents.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Latest release" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platforms: macOS and Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">Website</a> ·
+    <a href="https://zephium.app/docs">Docs</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">Launch film</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Download</a>
   </p>
 </div>
 
@@ -31,13 +39,18 @@
 </details>
 
 <p align="center">
-  <img src=".github/assets/browse.webp" alt="Zephium in Browse mode, with tabs in the sidebar and zephium.app open" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/browse-dark.webp" />
+    <img src=".github/assets/browse-light.webp" alt="Zephium's new tab: the window opens onto the sky, with the name, the time and date, and the day's figures along its foot" width="960" />
+  </picture>
 </p>
 
 <p align="center">
   <strong>Safari's efficiency. Brave's protection. Arc's design.</strong><br />
   And <strong>Work</strong>, a canvas where your agents do real work in plain sight.
 </p>
+
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; Watch the launch film</a></p>
 
 ---
 
@@ -51,10 +64,6 @@ One switch away is **Work**. Your work already happens in the browser, where
 your tabs, logins and history are. Work brings agents there instead of asking
 you to move somewhere else, and lets you watch them do it.
 
-> [!NOTE]
-> Zephium is in beta and ready to be your everyday browser. If something isn't
-> right, please [open an issue](https://github.com/zephium-browser/Zephium/issues).
-
 ## Work
 
 Describe an outcome in your own words: plan a trip, compare vendors, design a
@@ -62,9 +71,9 @@ system, fix a bug. Work takes it from there on a canvas, and you see every
 step.
 
 <p align="center">
-  <img src=".github/assets/work.webp" alt="Zephium in Work mode: an agent compares AWS, Vercel, Hetzner and Cloudflare and draws a reference architecture" width="960" />
+  <img src=".github/assets/work.webp" alt="A whole Work run in Zephium: helpers reading Uptime Kuma, Gatus and OpenStatus on their own sites, a local helper checking the endpoints, then the answer, a comparison table and charts, a diagram, the config and four tasks" width="960" />
 </p>
-<p align="center"><sub>Asked to compare hosting for an AI SaaS, Work reads the pricing pages, recommends a stack and draws the architecture.</sub></p>
+<p align="center"><sub>Asked for a status page, Work reads three monitors on their own sites, checks your endpoints from your machine, builds the pick, and leaves the comparison, the config and the tasks on the canvas.</sub></p>
 
 - **It starts from what you already have.** Work recalls what it knows about
   you, searches your history when it helps, and loads the right skill for the
@@ -86,10 +95,26 @@ step.
 - **Bring any model.** Use your own keys for Anthropic, OpenAI, Google Gemini,
   xAI, Mistral, DeepSeek, Groq, Cerebras or OpenRouter, or run a model locally
   through Ollama, LM Studio or any OpenAI-compatible server. Keys live in your
-  system keychain. Or sign in to Zephium AI and skip the keys.
+  system keychain. Or sign in to Zephium AI and skip the keys: it picks the
+  right model for each step, and you start with free credits
+  ([pricing](https://zephium.app/pricing)).
 
 Work ships with 25 skills, including trip planning, research, compare and
 choose, plan my day, fix a bug and weekly status. You can write your own.
+
+## Ask Zephium
+
+An assistant in the sidebar, on `⌘ E` (`Ctrl E` on Windows). It reads the page
+you are on and answers about it, points at what is worth your time, and opens
+what you choose in new tabs. Ask it to take a few steps on the page, or to
+restyle a site you visit every day, and it does it in place. When a job
+outgrows a chat, **Continue in Work** carries it to the canvas, with the page
+along.
+
+<p align="center">
+  <img src=".github/assets/ask.webp" alt="Ask Zephium beside Hacker News: three stories picked, opened in new tabs, and the front page re-set as calm cards" width="960" />
+</p>
+<p align="center"><sub>Asked what is worth reading, it picks three stories, opens them, and re-sets the front page as calm cards.</sub></p>
 
 ## Browse
 
@@ -106,6 +131,8 @@ choose, plan my day, fix a bug and weekly status. You can write your own.
 
 ### Designed to live in
 
+- A new tab that opens onto the sky, by day or by night with your theme, with
+  your time, your focus and the day's tasks along its foot.
 - Vertical tabs in a quiet sidebar, with spaces, profiles, pinned tabs, folders
   and split view.
 - Liquid Glass on macOS 26 and Mica on Windows 11.
@@ -130,9 +157,9 @@ Edge.
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src=".github/assets/tasks.webp" alt="Tasks: a task with status, deadline, list, priority and a linked page" /></td>
-    <td width="33%" align="center"><img src=".github/assets/time.webp" alt="Time: 42 minutes on the web today, a focus timer and time per site" /></td>
-    <td width="33%" align="center"><img src=".github/assets/notes.webp" alt="Notes: a Markdown note with headings, lists and code beside the page" /></td>
+    <td width="33%" align="center"><img src=".github/assets/tasks.webp" alt="Tasks: today, tomorrow and upcoming, with a task linked to the page it came from" /></td>
+    <td width="33%" align="center"><img src=".github/assets/time.webp" alt="Time: 3 hours 24 minutes on the web today, a 25-minute focus round and time per site" /></td>
+    <td width="33%" align="center"><img src=".github/assets/notes.webp" alt="Notes: a Markdown release checklist with code, beside the page" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>Write them the way you would say them, like "call Anna tomorrow at 3". Lists, priorities, deadlines, subtasks, and the page you were on stays linked.</sub></td>

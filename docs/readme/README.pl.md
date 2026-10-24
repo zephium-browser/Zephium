@@ -2,7 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>Szybka, w pełni funkcjonalna przeglądarka i środowisko pracy,<br />zbudowane od nowa dla Ciebie i Twoich agentów.</strong></p>
+  <p><strong>Szybka, w pełni funkcjonalna przeglądarka i środowisko pracy,<br />wymyślone na nowo dla Ciebie i Twoich agentów.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Najnowsze wydanie" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platformy: macOS i Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">Strona WWW</a> ·
+    <a href="https://zephium.app/docs">Dokumentacja</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">Film premierowy</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Pobierz</a>
   </p>
 </div>
 
@@ -31,13 +39,18 @@
 </details>
 
 <p align="center">
-  <img src="../../.github/assets/browse.webp" alt="Zephium w trybie Browse, z kartami na pasku bocznym i otwartą stroną zephium.app" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/browse-dark.webp" />
+    <img src="../../.github/assets/browse-light.webp" alt="Nowa karta w Zephium: okno otwiera się na niebo, a u dołu widać nazwę, godzinę i datę oraz liczby dnia" width="960" />
+  </picture>
 </p>
 
 <p align="center">
   <strong>Wydajność Safari. Ochrona Brave. Wygląd Arc.</strong><br />
   Do tego <strong>Work</strong>, kanwa, na której Twoi agenci wykonują prawdziwą pracę na Twoich oczach.
 </p>
+
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; Obejrzyj film premierowy</a></p>
 
 ---
 
@@ -53,9 +66,6 @@ przeglądarce, gdzie masz karty, logowania i historię. Work sprowadza tam
 agentów, zamiast kazać Ci przenosić się gdzie indziej, i pozwala patrzeć, jak
 pracują.
 
-> [!NOTE]
-> Zephium jest w wersji beta i jest gotowy, by być Twoją codzienną przeglądarką. Jeśli coś nie działa jak trzeba, [zgłoś proszę problem](https://github.com/zephium-browser/Zephium/issues).
-
 ## Work
 
 Opisz własnymi słowami, co chcesz osiągnąć: zaplanować podróż, porównać
@@ -63,9 +73,9 @@ dostawców, zaprojektować system, naprawić błąd. Dalej zajmuje się tym Work
 kanwie, a Ty widzisz każdy krok.
 
 <p align="center">
-  <img src="../../.github/assets/work.webp" alt="Zephium w trybie Work: agent porównuje AWS, Vercel, Hetzner i Cloudflare oraz rysuje architekturę referencyjną" width="960" />
+  <img src="../../.github/assets/work.webp" alt="Cały przebieg Work w Zephium: pomocnicy czytają Uptime Kuma, Gatus i OpenStatus na ich własnych stronach, lokalny pomocnik sprawdza endpointy, a potem pojawia się odpowiedź, tabela porównawcza z wykresami, diagram, konfiguracja i cztery zadania" width="960" />
 </p>
-<p align="center"><sub>Poproszony o porównanie hostingu dla AI SaaS, Work czyta cenniki, poleca stos technologiczny i rysuje architekturę.</sub></p>
+<p align="center"><sub>Poproszony o stronę statusu, Work czyta trzy monitory na ich własnych stronach, sprawdza Twoje endpointy z Twojego komputera, składa wybrane rozwiązanie i zostawia na kanwie porównanie, konfigurację i zadania.</sub></p>
 
 - **Zaczyna od tego, co już masz.** Work przypomina sobie, co o Tobie wie,
   w razie potrzeby przeszukuje Twoją historię i ładuje odpowiednią umiejętność
@@ -90,10 +100,27 @@ kanwie, a Ty widzisz każdy krok.
   DeepSeek lub OpenRouter albo uruchom model lokalnie przez Ollama, LM Studio
   lub dowolny serwer zgodny z OpenAI. Klucze są przechowywane w systemowym
   pęku kluczy.
+  Albo zaloguj się do Zephium AI i pomiń klucze: sam dobiera odpowiedni model
+  do każdego kroku, a na start dostajesz darmowe kredyty
+  ([cennik](https://zephium.app/pricing)).
 
 Work ma w zestawie 25 umiejętności, między innymi planowanie podróży, badanie
 tematu, porównywanie i wybór, planowanie dnia, naprawę błędu i cotygodniowy
 raport. Możesz napisać własne.
+
+## Ask Zephium
+
+Asystent na pasku bocznym, pod `⌘ E` (`Ctrl E` w Windows). Czyta stronę, na
+której jesteś, i odpowiada na jej temat, wskazuje to, co warto Twojego czasu, i
+otwiera w nowych kartach to, co wybierzesz. Poproś go, żeby wykonał kilka kroków
+na stronie albo zmienił wygląd serwisu, który odwiedzasz codziennie, a zrobi to
+na miejscu. Gdy zadanie wykracza poza rozmowę, **Continue in Work** przenosi je
+na kanwę razem ze stroną.
+
+<p align="center">
+  <img src="../../.github/assets/ask.webp" alt="Ask Zephium obok Hacker News: wybrane trzy artykuły, otwarte w nowych kartach, a strona główna ułożona na nowo w spokojne kafelki" width="960" />
+</p>
+<p align="center"><sub>Zapytany, co warto przeczytać, wybiera trzy artykuły, otwiera je i układa stronę główną na nowo w spokojne kafelki.</sub></p>
 
 ## Browse
 
@@ -111,6 +138,8 @@ raport. Możesz napisać własne.
 
 ### Stworzona do codziennego życia
 
+- Nowa karta, która otwiera się na niebo, w dzień lub w nocy, zależnie od motywu,
+  a u dołu pokazuje Twój czas, skupienie i zadania na dziś.
 - Pionowe karty w spokojnym pasku bocznym, z przestrzeniami, profilami,
   przypiętymi kartami, folderami i widokiem podzielonym.
 - Liquid Glass w macOS 26 i Mica w Windows 11.
@@ -136,9 +165,9 @@ Edge.
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: zadanie ze statusem, terminem, listą, priorytetem i powiązaną stroną" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 42 minuty w sieci dzisiaj, licznik skupienia i czas na poszczególnych stronach" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: notatka w Markdown z nagłówkami, listami i kodem obok strony" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: dziś, jutro i nadchodzące, z zadaniem powiązanym ze stroną, z której pochodzi" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 3 godziny 24 minuty w sieci dzisiaj, 25-minutowa runda skupienia i czas na poszczególnych stronach" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: notatka w Markdown z listą kontrolną wydania i kodem, obok strony" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>Zapisuj je tak, jak powiedziałbyś na głos, na przykład „zadzwonić do Ani jutro o 15". Listy, priorytety, terminy, podzadania, a strona, na której byłeś, pozostaje powiązana.</sub></td>

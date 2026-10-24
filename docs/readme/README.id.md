@@ -2,7 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>Browser dan lingkungan kerja yang cepat dan lengkap fiturnya,<br />dibangun ulang untuk Anda dan agen Anda.</strong></p>
+  <p><strong>Browser dan lingkungan kerja yang cepat dan lengkap fiturnya,<br />dirancang ulang untuk Anda dan agen Anda.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="Rilis terbaru" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="Platform: macOS dan Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">Situs web</a> ·
+    <a href="https://zephium.app/docs">Dokumentasi</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">Film peluncuran</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">Unduh</a>
   </p>
 </div>
 
@@ -31,13 +39,18 @@
 </details>
 
 <p align="center">
-  <img src="../../.github/assets/browse.webp" alt="Zephium dalam mode Browse, dengan tab di bilah samping dan zephium.app terbuka" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/browse-dark.webp" />
+    <img src="../../.github/assets/browse-light.webp" alt="Tab baru Zephium: jendela terbuka ke langit, dengan nama, jam dan tanggal, serta angka-angka hari ini di bagian bawah" width="960" />
+  </picture>
 </p>
 
 <p align="center">
   <strong>Efisiensi Safari. Perlindungan Brave. Desain Arc.</strong><br />
   Ditambah <strong>Work</strong>, kanvas tempat agen Anda mengerjakan tugas nyata di depan mata Anda.
 </p>
+
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; Tonton film peluncuran</a></p>
 
 ---
 
@@ -53,9 +66,6 @@ browser, tempat tab, akun login, dan riwayat Anda berada. Work membawa agen ke
 sana, bukan menyuruh Anda pindah ke tempat lain, dan memungkinkan Anda
 menyaksikan mereka bekerja.
 
-> [!NOTE]
-> Zephium sedang dalam tahap beta dan siap menjadi browser harian Anda. Jika ada yang tidak beres, silakan [buka issue](https://github.com/zephium-browser/Zephium/issues).
-
 ## Work
 
 Jelaskan hasil yang Anda inginkan dengan kata-kata sendiri: merencanakan
@@ -63,9 +73,9 @@ perjalanan, membandingkan vendor, merancang sistem, memperbaiki bug. Work
 mengerjakannya di atas kanvas, dan Anda melihat setiap langkahnya.
 
 <p align="center">
-  <img src="../../.github/assets/work.webp" alt="Zephium dalam mode Work: agen membandingkan AWS, Vercel, Hetzner, dan Cloudflare lalu menggambar arsitektur referensi" width="960" />
+  <img src="../../.github/assets/work.webp" alt="Satu putaran lengkap Work di Zephium: para asisten membaca Uptime Kuma, Gatus, dan OpenStatus di situs masing-masing, satu asisten lokal memeriksa endpoint, lalu jawaban, tabel perbandingan dan grafik, diagram, konfigurasi, dan empat tugas" width="960" />
 </p>
-<p align="center"><sub>Diminta membandingkan hosting untuk AI SaaS, Work membaca halaman harga, merekomendasikan stack, dan menggambar arsitekturnya.</sub></p>
+<p align="center"><sub>Diminta membuat halaman status, Work membaca tiga alat pemantau di situs masing-masing, memeriksa endpoint Anda dari komputer Anda, menyusun pilihannya, dan meninggalkan perbandingan, konfigurasi, serta tugas di kanvas.</sub></p>
 
 - **Dimulai dari apa yang sudah Anda punya.** Work mengingat apa yang ia ketahui
   tentang Anda, menelusuri riwayat Anda saat berguna, dan memuat skill yang
@@ -90,10 +100,28 @@ mengerjakannya di atas kanvas, dan Anda melihat setiap langkahnya.
   Google Gemini, DeepSeek, atau OpenRouter, atau jalankan model secara lokal
   lewat Ollama, LM Studio, atau server mana pun yang kompatibel dengan OpenAI.
   Kunci disimpan di keychain sistem Anda.
+  Atau masuk ke Zephium AI dan lewati urusan kunci: Zephium AI memilih model yang
+  tepat untuk setiap langkah, dan Anda mulai dengan kredit gratis
+  ([harga](https://zephium.app/pricing)).
 
 Work hadir dengan 25 skill, termasuk perencanaan perjalanan, riset,
 membandingkan dan memilih, merencanakan hari saya, memperbaiki bug, dan status
 mingguan. Anda bisa menulis skill sendiri.
+
+## Ask Zephium
+
+Asisten di bilah samping, dengan `⌘ E` (`Ctrl E` di Windows). Asisten ini membaca
+halaman yang sedang Anda buka dan menjawab seputar halaman itu, menunjukkan apa
+yang layak Anda luangkan waktu, dan membuka pilihan Anda di tab baru. Minta ia
+menjalankan beberapa langkah di halaman, atau menata ulang tampilan situs yang
+Anda kunjungi setiap hari, dan ia mengerjakannya di tempat. Saat tugas terlalu
+besar untuk sebuah obrolan, **Continue in Work** membawanya ke kanvas, lengkap
+dengan halamannya.
+
+<p align="center">
+  <img src="../../.github/assets/ask.webp" alt="Ask Zephium di samping Hacker News: tiga cerita dipilih, dibuka di tab baru, dan halaman depan ditata ulang menjadi kartu yang tenang" width="960" />
+</p>
+<p align="center"><sub>Ketika ditanya apa yang layak dibaca, ia memilih tiga cerita, membukanya, dan menata ulang halaman depan menjadi kartu yang tenang.</sub></p>
 
 ## Browse
 
@@ -111,6 +139,8 @@ mingguan. Anda bisa menulis skill sendiri.
 
 ### Dirancang untuk ditinggali
 
+- Tab baru yang terbuka ke langit, siang atau malam mengikuti tema Anda, dengan
+  waktu, fokus, dan tugas hari ini di bagian bawah.
 - Tab vertikal di bilah samping yang tenang, dengan space, profil, tab yang
   disematkan, folder, dan tampilan terpisah.
 - Liquid Glass di macOS 26 dan Mica di Windows 11.
@@ -135,9 +165,9 @@ Edge.
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: sebuah tugas dengan status, tenggat, daftar, prioritas, dan halaman yang tertaut" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 42 menit di web hari ini, pengatur waktu fokus, dan waktu per situs" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: catatan Markdown dengan judul, daftar, dan kode di samping halaman" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: hari ini, besok, dan mendatang, dengan satu tugas yang tertaut ke halaman asalnya" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 3 jam 24 menit di web hari ini, satu putaran fokus 25 menit, dan waktu per situs" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: daftar periksa rilis dalam Markdown berisi kode, di samping halaman" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>Tulis seperti Anda mengucapkannya, misalnya "telepon Anna besok jam 3". Ada daftar, prioritas, tenggat, subtugas, dan halaman yang sedang Anda buka tetap tertaut.</sub></td>

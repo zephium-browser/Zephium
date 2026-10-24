@@ -2,7 +2,7 @@
   <img src="../../.github/assets/logo.png" width="112" height="112" alt="Zephium" />
   <h1>Zephium</h1>
 
-  <p><strong>빠르고 기능이 충실한 브라우저이자 작업 환경,<br />당신과 에이전트를 위해 다시 만들었습니다.</strong></p>
+  <p><strong>빠르고 기능이 충실한 브라우저이자 작업 환경,<br />당신과 에이전트를 위해 새롭게 다시 구상했습니다.</strong></p>
 
   <p>
     <a href="https://github.com/zephium-browser/Zephium/releases"><img src="https://img.shields.io/github/v/release/zephium-browser/Zephium?include_prereleases&label=release&color=blue" alt="최신 릴리스" /></a>
@@ -10,6 +10,14 @@
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey" alt="지원 플랫폼: macOS 및 Windows" />
     <a href="https://discord.gg/tyveTUyEp7"><img src="https://img.shields.io/badge/Discord-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
     <a href="https://www.youtube.com/@crynta"><img src="https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white" alt="YouTube" /></a>
+    <a href="https://x.com/CryntaDev"><img src="https://img.shields.io/badge/@CryntaDev-000000?logo=x&logoColor=white" alt="X: @CryntaDev" /></a>
+  </p>
+
+  <p>
+    <a href="https://zephium.app">웹사이트</a> ·
+    <a href="https://zephium.app/docs">문서</a> ·
+    <a href="https://youtu.be/QbSarcWspvw">런칭 필름</a> ·
+    <a href="https://github.com/zephium-browser/Zephium/releases/latest">다운로드</a>
   </p>
 </div>
 
@@ -31,7 +39,10 @@
 </details>
 
 <p align="center">
-  <img src="../../.github/assets/browse.webp" alt="Browse 모드의 Zephium. 사이드바에 탭이 있고 zephium.app이 열려 있다" width="960" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../.github/assets/browse-dark.webp" />
+    <img src="../../.github/assets/browse-light.webp" alt="Zephium의 새 탭. 창이 하늘을 향해 열리고, 아래쪽에 이름, 시간과 날짜, 그날의 수치가 놓여 있다" width="960" />
+  </picture>
 </p>
 
 <p align="center">
@@ -39,23 +50,22 @@
   그리고 <strong>Work</strong>, 에이전트가 눈앞에서 실제 작업을 해내는 캔버스.
 </p>
 
+<p align="center"><a href="https://youtu.be/QbSarcWspvw">▶&nbsp; 런칭 필름 보기</a></p>
+
 ---
 
 Zephium은 Rust로 만든 오픈 소스 브라우저로, 운영체제에 내장된 웹 엔진 위에서 동작합니다. macOS에서는 Safari가 쓰는 엔진인 WebKit을, Windows에서는 WebView2를 사용합니다. Chromium이나 Firefox의 포크가 아닙니다. 광고와 트래커를 네이티브로 차단하고, Chrome 확장 프로그램을 실행하며, 작업, 메모, 웹에서 보내는 시간을 클릭 한 번이면 열 수 있게 해 줍니다. 다운로드 크기는 약 30 MB입니다.
 
 스위치 하나만 누르면 **Work**가 열립니다. 당신의 작업은 이미 브라우저, 즉 탭과 로그인과 방문 기록이 있는 곳에서 이루어지고 있습니다. Work는 다른 곳으로 옮겨 가라고 하는 대신 에이전트를 이곳으로 데려오고, 에이전트가 일하는 모습을 지켜볼 수 있게 합니다.
 
-> [!NOTE]
-> Zephium은 베타 단계이며, 일상적으로 쓰는 브라우저로 충분히 쓸 수 있습니다. 문제가 있다면 [이슈를 열어 주세요](https://github.com/zephium-browser/Zephium/issues).
-
 ## Work
 
 원하는 결과를 평소 쓰는 말로 설명해 보세요. 여행 계획, 업체 비교, 시스템 설계, 버그 수정 같은 것들입니다. 그다음은 Work가 캔버스 위에서 이어받고, 모든 단계를 눈으로 확인할 수 있습니다.
 
 <p align="center">
-  <img src="../../.github/assets/work.webp" alt="Work 모드의 Zephium. 에이전트가 AWS, Vercel, Hetzner, Cloudflare를 비교하고 참조 아키텍처를 그린다" width="960" />
+  <img src="../../.github/assets/work.webp" alt="Zephium에서 Work가 한 번 실행되는 전 과정. 도우미들이 Uptime Kuma, Gatus, OpenStatus를 각 사이트에서 읽고, 로컬 도우미가 엔드포인트를 확인한 뒤, 답변, 비교 표와 차트, 다이어그램, 설정, 작업 네 개가 이어진다" width="960" />
 </p>
-<p align="center"><sub>AI SaaS용 호스팅을 비교해 달라고 요청하면, Work는 요금 페이지를 읽고 스택을 추천하며 아키텍처를 그립니다.</sub></p>
+<p align="center"><sub>상태 페이지를 만들어 달라고 요청하면, Work는 모니터링 도구 세 가지를 각 사이트에서 읽고, 당신의 엔드포인트를 당신의 컴퓨터에서 확인해 최종안을 만든 다음, 비교, 설정, 작업을 캔버스에 남깁니다.</sub></p>
 
 - **이미 가진 것에서 출발합니다.** Work는 당신에 대해 알고 있는 것을 떠올리고, 도움이 될 때는 방문 기록을 검색하며, 작업에 맞는 스킬을 불러옵니다. 각 단계는 진행되는 대로 캔버스에 나타납니다.
 - **도우미들이 병렬로, 공개적으로 일합니다.** 여행이라면 한 도우미는 집을 찾고, 다른 도우미는 비자를 확인하고, 또 다른 도우미는 항공편을 비교합니다. 도우미들은 직접 볼 수 있는 실제 페이지를 탐색하고, 어떤 출처든 캔버스 옆 창에서 열 수 있습니다.
@@ -63,9 +73,18 @@ Zephium은 Rust로 만든 오픈 소스 브라우저로, 운영체제에 내장�
 - **계획이 하루가 됩니다.** 한 번 클릭하면 계획의 각 단계가 해당 Work에 연결된 작업이 됩니다. 남겨 둘 만한 내용은 무엇이든 메모로 저장할 수 있습니다.
 - **브라우저 밖까지 닿습니다.** Work는 허용한 폴더를 읽고 편집하고, 명령을 실행하며, 규모가 큰 코딩 작업은 Claude Code나 Codex에 넘깁니다. Linear, Notion, Sentry, Stripe, Figma 같은 MCP 서버와 `gh` 같은 명령줄 도구에도 연결됩니다.
 - **결정권은 당신에게 있습니다.** 게시하거나 병합하거나 무언가를 바꾸는 작업은 당신의 승인을 기다립니다.
-- **어떤 모델이든 사용할 수 있습니다.** Anthropic, OpenAI, Google Gemini, DeepSeek, OpenRouter는 직접 발급한 키로 사용하고, Ollama, LM Studio 또는 OpenAI 호환 서버를 통해 로컬 모델을 실행할 수도 있습니다. 키는 시스템 키체인에 보관됩니다.
+- **어떤 모델이든 사용할 수 있습니다.** Anthropic, OpenAI, Google Gemini, DeepSeek, OpenRouter는 직접 발급한 키로 사용하고, Ollama, LM Studio 또는 OpenAI 호환 서버를 통해 로컬 모델을 실행할 수도 있습니다. 키는 시스템 키체인에 보관됩니다. 또는 Zephium AI에 로그인해 키 없이 시작할 수도 있습니다. 단계마다 알맞은 모델을 골라 주고, 무료 크레딧으로 시작할 수 있습니다([요금](https://zephium.app/pricing)).
 
 Work에는 여행 계획, 리서치, 비교하고 선택하기, 내 하루 계획, 버그 수정, 주간 현황 등 25개의 스킬이 포함되어 있습니다. 직접 스킬을 만들 수도 있습니다.
+
+## Ask Zephium
+
+사이드바의 어시스턴트로, `⌘ E`(Windows에서는 `Ctrl E`)로 엽니다. 지금 보고 있는 페이지를 읽고 그에 대해 답하며, 시간을 들일 만한 것을 짚어 주고, 당신이 고른 것을 새 탭으로 엽니다. 페이지에서 몇 가지 단계를 대신 해 달라고 하거나, 매일 들르는 사이트의 스타일을 바꿔 달라고 하면 그 자리에서 해냅니다. 일이 채팅으로는 감당하기 어려워지면, **Continue in Work**가 페이지까지 함께 캔버스로 옮겨 줍니다.
+
+<p align="center">
+  <img src="../../.github/assets/ask.webp" alt="Hacker News 옆의 Ask Zephium. 기사 세 개를 골라 새 탭으로 열고, 첫 페이지를 차분한 카드로 다시 짠다" width="960" />
+</p>
+<p align="center"><sub>읽을 만한 게 뭐냐고 물으면, 기사 세 개를 골라 열고 첫 페이지를 차분한 카드로 다시 구성합니다.</sub></p>
 
 ## Browse
 
@@ -77,6 +96,7 @@ Work에는 여행 계획, 리서치, 비교하고 선택하기, 내 하루 계�
 
 ### 오래 머물 수 있게 설계했습니다
 
+- 하늘을 향해 열리는 새 탭. 테마에 따라 낮이나 밤의 모습이 되고, 아래쪽에 시간, 집중, 그날의 작업이 놓입니다.
 - 조용한 사이드바의 세로 탭, 그리고 스페이스, 프로필, 고정 탭, 폴더, 분할 보기.
 - macOS 26에서는 Liquid Glass, Windows 11에서는 Mica.
 - `⌘ ⇧ Space`(Windows에서는 `Ctrl Shift Space`)로 여는 런처로 데스크톱 어디서든 탭, 방문 기록, 메모, 명령에 접근할 수 있습니다. 거기에 입력한 내용은 무엇이든 작업으로 만들 수 있습니다.
@@ -94,9 +114,9 @@ Chrome 웹 스토어에서 곧바로 확장 프로그램을 설치할 수 있습
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: 상태, 마감일, 목록, 우선순위, 연결된 페이지가 있는 작업" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 오늘 웹에서 보낸 42분, 집중 타이머, 사이트별 시간" /></td>
-    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: 페이지 옆에 열린, 제목과 목록과 코드가 있는 Markdown 메모" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/tasks.webp" alt="Tasks: 오늘, 내일, 예정된 작업과 출처 페이지에 연결된 작업" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/time.webp" alt="Time: 오늘 웹에서 보낸 3시간 24분, 25분 집중 라운드, 사이트별 시간" /></td>
+    <td width="33%" align="center"><img src="../../.github/assets/notes.webp" alt="Notes: 페이지 옆의 코드가 있는 Markdown 릴리스 체크리스트" /></td>
   </tr>
   <tr>
     <td valign="top"><strong>Tasks</strong><br /><sub>말하듯이 적으세요. 예를 들어 "내일 3시에 Anna에게 전화". 목록, 우선순위, 마감일, 하위 작업을 지원하고, 보고 있던 페이지도 연결된 채로 남습니다.</sub></td>
