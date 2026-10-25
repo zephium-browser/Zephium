@@ -4397,37 +4397,73 @@ fn launcher_run(
             background,
         );
     };
-    // The shell runs only what acts on tabs and pages. A Settings section, a
-    // tool or a browser page belongs to the app, so it runs the way a menu or
-    // a key runs it, and the launcher steps aside once that is admitted.
-    let mut in_shell = false;
-    let admission = execute_command_or(&app, id, || {
-        in_shell = true;
-        run_in_shell(
-            &shell,
-            &overlay,
-            &ledger,
-            operation_id.clone(),
-            action.clone(),
-            context.clone(),
-            false,
-        )
-    });
-    if in_shell {
-        return admission;
-    }
-    // No disposition will ever carry this id back, so it settles here.
-    ledger.cancel_reservation(&operation_id);
-    if admission.accepted {
-        overlay.operation(zephium_ipc::OperationDisposition {
-            operation_id,
-            outcome: zephium_ipc::OperationOutcome::Applied,
-            reason: zephium_ipc::OperationReason::MutationApplied,
-        });
-    } else {
-        overlay.action_rejected(&operation_id);
+    let (admission, settlement) = route_launcher_command(
+        |to_shell| execute_command_or(&app, id, to_shell),
+        || {
+            run_in_shell(
+                &shell,
+                &overlay,
+                &ledger,
+                operation_id.clone(),
+                action.clone(),
+                context.clone(),
+                false,
+            )
+        },
+    );
+    match settlement {
+        LauncherSettlement::Shell => {}
+        LauncherSettlement::Admitted => {
+            // No disposition will ever carry this id back, so it settles here.
+            ledger.cancel_reservation(&operation_id);
+            overlay.operation(zephium_ipc::OperationDisposition {
+                operation_id,
+                outcome: zephium_ipc::OperationOutcome::Applied,
+                reason: zephium_ipc::OperationReason::MutationApplied,
+            });
+        }
+        LauncherSettlement::Refused => {
+            ledger.cancel_reservation(&operation_id);
+            overlay.action_rejected(&operation_id);
+        }
     }
     admission
+}
+
+/// Who settles an armed launcher command, and when.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherSettlement {
+    /// The shell owns it; its disposition settles the launcher later.
+    Shell,
+    /// The app ran it, so the launcher settles now and steps aside.
+    Admitted,
+    /// The app refused it; the launcher stays open to say so.
+    Refused,
+}
+
+/// The shell runs only what acts on tabs and pages. A Settings section, a
+/// tool or a browser page belongs to the app, so `execute` runs it the way a
+/// menu or a key runs it, and calls `to_shell` only for a command the shell
+/// owns.
+fn route_launcher_command(
+    execute: impl FnOnce(
+        Box<dyn FnOnce() -> zephium_ipc::OperationAdmission + '_>,
+    ) -> zephium_ipc::OperationAdmission,
+    to_shell: impl FnOnce() -> zephium_ipc::OperationAdmission,
+) -> (zephium_ipc::OperationAdmission, LauncherSettlement) {
+    let mut in_shell = false;
+    let admission = execute(Box::new(|| {
+        in_shell = true;
+        to_shell()
+    }));
+    let settlement = if in_shell {
+        LauncherSettlement::Shell
+    } else if admission.accepted {
+        LauncherSettlement::Admitted
+    } else {
+        LauncherSettlement::Refused
+    };
+    (admission, settlement)
 }
 
 /// Sends an armed launcher action to the shell, whose disposition settles
@@ -10037,5 +10073,50 @@ mod tests {
         assert_eq!(super::appearance_code("light"), super::APPEARANCE_LIGHT);
         assert_eq!(super::appearance_code("dark"), super::APPEARANCE_DARK);
         assert_eq!(super::appearance_code("invalid"), super::APPEARANCE_SYSTEM);
+    }
+
+    fn launcher_admitted() -> zephium_ipc::OperationAdmission {
+        zephium_ipc::OperationAdmission {
+            operation_id: Some("0000000000000001".into()),
+            accepted: true,
+        }
+    }
+
+    #[test]
+    fn an_accepted_app_command_settles_the_launcher_at_admission() {
+        let (admission, settlement) = super::route_launcher_command(
+            |_| super::accepted_ui_operation(),
+            || panic!("an app command never reaches the shell"),
+        );
+        assert!(admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Admitted);
+    }
+
+    #[test]
+    fn an_accepted_shell_command_waits_for_its_disposition() {
+        let (admission, settlement) =
+            super::route_launcher_command(|to_shell| to_shell(), launcher_admitted);
+        assert_eq!(admission.operation_id.as_deref(), Some("0000000000000001"));
+        assert_eq!(settlement, super::LauncherSettlement::Shell);
+    }
+
+    #[test]
+    fn a_refused_app_command_leaves_the_launcher_open() {
+        let (admission, settlement) = super::route_launcher_command(
+            |_| super::rejected_operation(),
+            || panic!("a refused command never reaches the shell"),
+        );
+        assert!(!admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Refused);
+    }
+
+    #[test]
+    fn a_shell_refusal_is_the_shell_paths_to_settle() {
+        // `run_in_shell` already releases the launcher when the shell
+        // refuses admission; settling it again here would be a second answer.
+        let (admission, settlement) =
+            super::route_launcher_command(|to_shell| to_shell(), super::rejected_operation);
+        assert!(!admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Shell);
     }
 }
