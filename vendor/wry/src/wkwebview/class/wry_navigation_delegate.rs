@@ -81,6 +81,8 @@ pub struct WryNavigationDelegateIvars {
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
   #[cfg(target_os = "macos")]
+  pub main_frame_navigation_hold: Option<Box<dyn Fn(Box<dyn FnOnce()>) -> bool>>,
+  #[cfg(target_os = "macos")]
   pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
@@ -327,6 +329,9 @@ impl WryNavigationDelegate {
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
     apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+    #[cfg(target_os = "macos")] main_frame_navigation_hold: Option<
+      Box<dyn Fn(Box<dyn FnOnce()>) -> bool>,
+    >,
     #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
@@ -374,6 +379,8 @@ impl WryNavigationDelegate {
         navigation_policy_function,
         #[cfg(target_os = "macos")]
         main_frame_navigation_attempt_handler,
+        #[cfg(target_os = "macos")]
+        main_frame_navigation_hold,
         #[cfg(target_os = "macos")]
         credential_challenge_denied_handler,
         has_download_handler,

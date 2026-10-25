@@ -1301,6 +1301,12 @@ impl EngineHost {
                 #[cfg(feature = "agentic-browser")]
                 super::page_reader::attempt(&attempt_reader, &target);
             });
+            // Pages opened while the profile's extensions are still loading,
+            // such as restored tabs at launch, wait for their content scripts.
+            let profile = partition.profile();
+            builder = builder.with_main_frame_navigation_hold(move |resume| {
+                super::webext::hold_navigation(profile, resume)
+            });
         }
         for script in wry_document_start_scripts(&scripts) {
             builder = builder.with_initialization_script_for_main_only(

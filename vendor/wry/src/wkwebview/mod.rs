@@ -880,6 +880,8 @@ impl InnerWebView {
         #[cfg(target_os = "macos")]
         attributes.main_frame_navigation_attempt_handler,
         #[cfg(target_os = "macos")]
+        attributes.main_frame_navigation_hold,
+        #[cfg(target_os = "macos")]
         attributes.credential_challenge_denied_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,

@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,7 +12,9 @@ use std::time::{Duration, Instant};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSPopoverBehavior, NSView};
-use objc2_foundation::{NSPoint, NSRect, NSRectEdge, NSSize, NSString};
+use objc2_foundation::{
+    NSPoint, NSRect, NSRectEdge, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+};
 use objc2_web_kit::{WKWebExtensionAction, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRevision,
@@ -196,7 +199,9 @@ impl WebextHost {
         let install = load.install;
         let start_background = load.start_background || reloaded;
         let sink = sink.clone();
+        extension_load_started(profile);
         entry.runtime.load(spec, move |result| {
+            extension_load_settled(profile);
             let result = result.map(|loaded| {
                 let extension_id = loaded.id.clone();
                 super::dispatch::best_effort_with(move |host| {
@@ -1040,6 +1045,135 @@ impl AuthFlowRegistry {
 
 thread_local! {
     static AUTH_FLOWS: RefCell<AuthFlowRegistry> = RefCell::new(AuthFlowRegistry::default());
+    static LOAD_GATES: RefCell<HashMap<ProfileId, LoadGate>> = RefCell::new(HashMap::new());
+}
+
+/// How long a page may wait for its profile's extensions to finish loading.
+/// Chrome loads extensions before restoring tabs, so their content scripts
+/// reach restored pages; here both start together at launch.
+const EXTENSION_LOAD_HOLD: Duration = Duration::from_millis(1500);
+
+type Resume = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+
+/// A profile's extension loads in flight and the navigations waiting on them.
+#[derive(Default)]
+struct LoadGate {
+    loading: usize,
+    deadline: Option<Instant>,
+    held: Vec<Resume>,
+}
+
+impl LoadGate {
+    fn started(&mut self, now: Instant) {
+        self.loading += 1;
+        self.deadline = Some(now + EXTENSION_LOAD_HOLD);
+    }
+
+    /// The held navigations to release once nothing is loading.
+    fn settled(&mut self) -> Vec<Resume> {
+        self.loading = self.loading.saturating_sub(1);
+        if self.loading > 0 {
+            return Vec::new();
+        }
+        self.deadline = None;
+        std::mem::take(&mut self.held)
+    }
+
+    /// How long a held navigation still waits, or `None` when nothing is
+    /// loading or the deadline has passed; a load that never settles cannot
+    /// hold pages.
+    fn remaining(&self, now: Instant) -> Option<Duration> {
+        let deadline = self.deadline.filter(|_| self.loading > 0)?;
+        deadline
+            .checked_duration_since(now)
+            .filter(|wait| !wait.is_zero())
+    }
+
+    /// How long `resume` waits, or `None` to proceed now.
+    fn hold(&mut self, now: Instant, resume: &Resume) -> Option<Duration> {
+        let wait = self.remaining(now)?;
+        self.held.retain(|held| held.borrow().is_some());
+        self.held.push(resume.clone());
+        Some(wait)
+    }
+}
+
+fn extension_load_started(profile: ProfileId) {
+    LOAD_GATES.with(|gates| {
+        gates
+            .borrow_mut()
+            .entry(profile)
+            .or_default()
+            .started(Instant::now());
+    });
+}
+
+fn extension_load_settled(profile: ProfileId) {
+    let released = LOAD_GATES.with(|gates| {
+        gates
+            .borrow_mut()
+            .get_mut(&profile)
+            .map(LoadGate::settled)
+            .unwrap_or_default()
+    });
+    for resume in released {
+        release(&resume);
+    }
+}
+
+fn release(resume: &Resume) {
+    let resume = resume.borrow_mut().take();
+    if let Some(resume) = resume {
+        resume();
+    }
+}
+
+/// Holds a page's main-frame navigation while its profile's extensions load,
+/// at most until [`EXTENSION_LOAD_HOLD`] after the latest load began. Returns
+/// false, dropping `resume`, when the navigation may proceed now.
+pub(super) fn hold_navigation(profile: ProfileId, resume: Box<dyn FnOnce()>) -> bool {
+    let resume: Resume = Rc::new(RefCell::new(Some(resume)));
+    let wait = LOAD_GATES.with(|gates| {
+        gates
+            .borrow_mut()
+            .get_mut(&profile)?
+            .hold(Instant::now(), &resume)
+    });
+    let Some(wait) = wait else {
+        return false;
+    };
+    expire_after(profile, resume, wait);
+    true
+}
+
+/// Releases `resume` at the gate's deadline. A load that began after the
+/// navigation was held moves that deadline, so the wait is renewed instead.
+fn expire_after(profile: ProfileId, resume: Resume, wait: Duration) {
+    let block = block2::RcBlock::new(move |_timer: NonNull<NSTimer>| {
+        if resume.borrow().is_none() {
+            return;
+        }
+        let remaining = LOAD_GATES.with(|gates| {
+            gates
+                .borrow()
+                .get(&profile)
+                .and_then(|gate| gate.remaining(Instant::now()))
+        });
+        match remaining {
+            Some(wait) => expire_after(profile, resume.clone(), wait),
+            None => release(&resume),
+        }
+    });
+    // Common modes, so a held page is still released during a modal sheet
+    // or a window drag.
+    unsafe {
+        let timer = NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            wait.as_secs_f64(),
+            false,
+            &block,
+        );
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    }
 }
 
 /// The Shell replies to tabs.create before first navigation. Bind only at
@@ -2046,5 +2180,72 @@ mod tests {
         assert_eq!(first_line("\n  Dark Reader \t"), "Dark Reader");
         assert_eq!(first_line("a\u{7}b"), "ab");
         assert_eq!(first_line(""), "");
+    }
+
+    fn resume(count: &Rc<Cell<u32>>) -> Resume {
+        let count = count.clone();
+        Rc::new(RefCell::new(Some(Box::new(move || {
+            count.set(count.get() + 1)
+        }))))
+    }
+
+    #[test]
+    fn navigations_wait_until_every_extension_load_settles() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        let released = Rc::new(Cell::new(0));
+        let held = resume(&released);
+        assert_eq!(gate.hold(now, &held), None);
+
+        gate.started(now);
+        gate.started(now);
+        assert_eq!(gate.hold(now, &held), Some(EXTENSION_LOAD_HOLD));
+        assert!(gate.settled().is_empty());
+        let ready = gate.settled();
+        assert_eq!(ready.len(), 1);
+        ready.iter().for_each(release);
+        assert_eq!(released.get(), 1);
+        assert_eq!(gate.hold(now, &resume(&released)), None);
+    }
+
+    #[test]
+    fn a_load_that_never_settles_holds_pages_only_until_the_deadline() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        let released = Rc::new(Cell::new(0));
+        let half = EXTENSION_LOAD_HOLD / 2;
+        assert_eq!(gate.hold(now + half, &resume(&released)), Some(half));
+        assert_eq!(
+            gate.hold(now + EXTENSION_LOAD_HOLD, &resume(&released)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_later_load_keeps_a_held_navigation_past_the_first_deadline() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        let held = resume(&Rc::new(Cell::new(0)));
+        assert_eq!(gate.hold(now, &held), Some(EXTENSION_LOAD_HOLD));
+        let second = Duration::from_millis(1000);
+        gate.started(now + second);
+        // At the first load's deadline the timer renews the wait.
+        assert_eq!(gate.remaining(now + EXTENSION_LOAD_HOLD), Some(second));
+        assert_eq!(gate.remaining(now + second + EXTENSION_LOAD_HOLD), None);
+    }
+
+    #[test]
+    fn a_navigation_released_by_its_timer_is_not_released_again() {
+        let now = Instant::now();
+        let mut gate = LoadGate::default();
+        gate.started(now);
+        let released = Rc::new(Cell::new(0));
+        let held = resume(&released);
+        gate.hold(now, &held);
+        release(&held);
+        gate.settled().iter().for_each(release);
+        assert_eq!(released.get(), 1);
     }
 }

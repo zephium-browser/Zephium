@@ -764,6 +764,11 @@ struct WebViewAttributes<'a> {
   /// The callback is observational and must not grant page authority.
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+  /// Defers an admitted main-frame navigation. Returning `true` keeps the
+  /// navigation waiting until the callback's `resume` runs, which the
+  /// embedder must guarantee; `false` lets it proceed at once.
+  #[cfg(target_os = "macos")]
+  pub main_frame_navigation_hold: Option<Box<dyn Fn(Box<dyn FnOnce()>) -> bool>>,
   /// Notification only: a native credential challenge is about to be cancelled.
   /// Carries no challenge data and cannot change TLS or credential policy.
   #[cfg(target_os = "macos")]
@@ -1023,6 +1028,8 @@ impl Default for WebViewAttributes<'_> {
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
       main_frame_navigation_attempt_handler: None,
+      #[cfg(target_os = "macos")]
+      main_frame_navigation_hold: None,
       #[cfg(target_os = "macos")]
       credential_challenge_denied_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
@@ -1540,6 +1547,17 @@ impl<'a> WebViewBuilder<'a> {
     callback: impl Fn(String) + 'static,
   ) -> Self {
     self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Hold an admitted macOS main-frame navigation until `resume` is called;
+  /// see [`WebViewAttributes::main_frame_navigation_hold`].
+  #[cfg(target_os = "macos")]
+  pub fn with_main_frame_navigation_hold(
+    mut self,
+    callback: impl Fn(Box<dyn FnOnce()>) -> bool + 'static,
+  ) -> Self {
+    self.attrs.main_frame_navigation_hold = Some(Box::new(callback));
     self
   }
 

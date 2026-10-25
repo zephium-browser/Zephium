@@ -240,3 +240,16 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 `ContentLoading` of WebView2's built-in error page is hidden like a commit but
 not reported as one, so the failure lands on the document the person asked for
 and the host can show its own explanation.
+
+### Held main-frame navigations (macOS)
+
+`with_main_frame_navigation_hold` lets the embedder keep WebKit's policy answer
+for an admitted main-frame navigation and give it later. It runs after the
+policy callback and the attempt observer, so it can only delay an allowed
+navigation, never admit one; denied, sub-frame and target-less actions are
+unaffected. Returning `true` hands the embedder a `resume` that answers Allow,
+which it must eventually call; `false` drops `resume` and the navigation
+proceeds at once. The view, its navigation epoch and its layout are created as
+usual, and WebKit only starts the page when answered. Zephium uses it to hold
+pages while the profile's extensions load at launch, bounded to 1.5 s, so
+restored tabs receive extensions' content scripts.

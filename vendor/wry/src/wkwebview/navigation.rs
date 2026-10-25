@@ -931,6 +931,14 @@ pub(crate) fn navigation_policy(
         if let Some(observe) = &this.ivars().main_frame_navigation_attempt_handler {
           observe(url.clone());
         }
+        if let Some(hold) = &this.ivars().main_frame_navigation_hold {
+          let handler = handler.copy();
+          let resume: Box<dyn FnOnce()> =
+            Box::new(move || handler.call((WKNavigationActionPolicy::Allow,)));
+          if hold(resume) {
+            return;
+          }
+        }
       }
       match policy_allows {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
