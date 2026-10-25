@@ -483,6 +483,20 @@ impl Overlay {
         self.on_main(|this| this.publish());
         true
     }
+    pub fn admits(&self, context: &SearchContext) -> bool {
+        self.state().model.admits(context)
+    }
+    /// A command the app ran itself has no disposition to wait for; once it
+    /// is admitted, the browser is where the user is going next.
+    pub fn command_ran(&self) {
+        self.on_main(|this| {
+            let old = this.state().model.session();
+            this.state().model.hide();
+            this.cancel_search(old);
+            this.present();
+            this.raise_browser();
+        });
+    }
     pub fn action_rejected(&self, id: &str) {
         let mut state = self.state();
         if state

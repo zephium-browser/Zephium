@@ -3853,6 +3853,20 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
+    execute_command_or(app, id, || {
+        app.try_state::<Handle>()
+            .map_or_else(rejected_operation, |shell| {
+                dispatch_operation(app, &shell, Command::Run(id.to_string()))
+            })
+    })
+}
+
+/// Runs a command the app owns itself, handing one the shell owns to `shell`.
+fn execute_command_or(
+    app: &tauri::AppHandle,
+    id: &str,
+    shell: impl FnOnce() -> zephium_ipc::OperationAdmission,
+) -> zephium_ipc::OperationAdmission {
     if id == "browser.quit" {
         app.exit(0);
         return accepted_ui_operation();
@@ -4083,9 +4097,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             });
     }
     if zephium_core::commands::get(id).is_some() {
-        if let Some(shell) = app.try_state::<Handle>() {
-            return dispatch_operation(app, &shell, Command::Run(id.to_string()));
-        }
+        return shell();
     }
     rejected_operation()
 }
@@ -4357,6 +4369,43 @@ fn launcher_run(
     ) else {
         return rejected_operation();
     };
+    // The shell runs only what acts on tabs and pages. A Settings section, a
+    // tool or a browser page belongs to the app, so it runs the way a menu or
+    // a key runs it, and the launcher steps aside once that is admitted.
+    if let zephium_ipc::SearchAction::RunCommand { id } = &action {
+        if !overlay.admits(&context) {
+            return rejected_operation();
+        }
+        let mut in_shell = false;
+        let admission = execute_command_or(&app, id, || {
+            in_shell = true;
+            run_in_shell(
+                &shell,
+                &overlay,
+                &ledger,
+                action.clone(),
+                context.clone(),
+                false,
+            )
+        });
+        if admission.accepted && !in_shell {
+            overlay.command_ran();
+        }
+        return admission;
+    }
+    run_in_shell(&shell, &overlay, &ledger, action, context, background)
+}
+
+/// Sends a launcher action to the shell, whose disposition settles the
+/// launcher.
+fn run_in_shell(
+    shell: &Handle,
+    overlay: &overlay::Overlay,
+    ledger: &OperationLedger,
+    action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
+    background: bool,
+) -> zephium_ipc::OperationAdmission {
     let Ok(sequence) = NEXT_OPERATION_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
     else {
@@ -4370,7 +4419,7 @@ fn launcher_run(
     // is about where the user is going next.
     let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
     if !overlay.arm_action(&operation_id, &context, background) {
-        return finish_operation_admission(&ledger, operation_id, false);
+        return finish_operation_admission(ledger, operation_id, false);
     }
     let accepted = shell.dispatch_operation(
         operation_id.clone(),
@@ -4384,7 +4433,7 @@ fn launcher_run(
     if !accepted {
         overlay.action_rejected(&operation_id);
     }
-    finish_operation_admission(&ledger, operation_id, accepted)
+    finish_operation_admission(ledger, operation_id, accepted)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
