@@ -32,8 +32,11 @@ export class WorkEnvironmentContext {
   readonly media = new SvelteMap<string, MediaAssetV1>();
   /** Each media record's revision: the identity Rust checks when one is context. */
   readonly mediaRevisions = new SvelteMap<string, string>();
+  /** Each tab or link URL's SHA-256: the identity Rust checks when one is context. */
+  readonly urlRevisions = new SvelteMap<string, string>();
   readonly unavailable = new SvelteMap<string, boolean>();
   private wanted: string[] = [];
+  private urls: string[] = [];
   private noteIds: string[] = [];
   private pending = new SvelteSet<string>();
   private workers = 0;
@@ -117,6 +120,21 @@ export class WorkEnvironmentContext {
       if (this.active) void this.readNotes();
     }
     this.pump();
+  }
+  trackUrls(urls: readonly string[]) {
+    this.urls = [...urls];
+    for (const url of [...this.urlRevisions.keys()])
+      if (!urls.includes(url)) this.urlRevisions.delete(url);
+    for (const url of urls) if (!this.urlRevisions.has(url)) void this.digestUrl(url);
+  }
+  private async digestUrl(url: string) {
+    const generation = this.generation;
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(url));
+    if (generation !== this.generation || !this.urls.includes(url)) return;
+    this.urlRevisions.set(
+      url,
+      Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    );
   }
   private pump() {
     if (!this.active) return;
@@ -338,6 +356,8 @@ export class WorkEnvironmentContext {
     this.objectives.clear();
     this.media.clear();
     this.mediaRevisions.clear();
+    this.urlRevisions.clear();
+    this.urls = [];
     this.pages.clear();
     this.unavailable.clear();
     this.notes = [];

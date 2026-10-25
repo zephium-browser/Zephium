@@ -10,7 +10,7 @@ const MAX_CONTEXT_ITEMS = 16;
 
 /**
  * The selection as displayed, with the identity token Rust will recompute:
- * resource revision, tab URL, Work revision, or artifact id. Items whose token
+ * resource revision, URL digest, Work revision, or artifact id. Items whose token
  * is not yet known locally are left out rather than sent with a guess.
  */
 export function contextSelection(
@@ -23,6 +23,7 @@ export function contextSelection(
     /** Media record revisions: an image or a document is context like a note. */
     media?: ReadonlyMap<string, string>;
     objects?: ReadonlyMap<string, string>;
+    urls?: ReadonlyMap<string, string>;
   },
   /** Consent, for this request, to list the window's open tabs: titles and addresses only. */
   openTabs = false,
@@ -47,11 +48,11 @@ export function contextSelection(
         break;
       case "browser": {
         const tab = tabs.find((tab) => tab.id === reference.tab);
-        revision = tab ? (tab.url ?? "") : null;
+        revision = tab ? (known.urls?.get(tab.url ?? "") ?? null) : null;
         break;
       }
       case "link":
-        revision = reference.url;
+        revision = known.urls?.get(reference.url) ?? null;
         break;
       case "objective":
         revision = known.objectives.get(reference.objective)?.work.revision ?? null;
