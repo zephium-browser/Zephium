@@ -4,9 +4,9 @@
 
 #[cfg(all(
     feature = "native-work",
-    not(any(target_os = "macos", target_os = "windows"))
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
 ))]
-compile_error!("native Work composition requires macOS or Windows");
+compile_error!("native Work composition requires macOS, Windows or Linux");
 #[cfg(all(feature = "public-qualification", not(debug_assertions)))]
 compile_error!("public Work qualification is forbidden in optimized builds");
 #[cfg(all(

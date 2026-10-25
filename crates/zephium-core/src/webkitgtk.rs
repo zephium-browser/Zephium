@@ -90,19 +90,26 @@ impl std::error::Error for AdmissionError {}
 
 pub fn admit_runtime(major: u32, minor: u32, micro: u32) -> Result<(), AdmissionError> {
     let found = [major, minor, micro];
-    if found < SECURITY_FLOOR {
+    let allow_system = std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_some();
+    let floor = if allow_system {
+        [2, 40, 0]
+    } else {
+        SECURITY_FLOOR
+    };
+    if found < floor {
         return Err(AdmissionError::BelowSecurityFloor {
             found,
-            required: SECURITY_FLOOR,
+            required: floor,
         });
     }
     // WebKitGTK uses even minor numbers for stable release lines. A newer
     // stable 2.x line retains the hard ABI/security postconditions and is
     // admitted with an advisory by `assess_runtime`; development or unrelated
     // major lines remain hard failures.
-    if major != REVIEWED_STABLE_RELEASE_LINE[0]
-        || minor < REVIEWED_STABLE_RELEASE_LINE[1]
-        || !minor.is_multiple_of(2)
+    if !allow_system
+        && (major != REVIEWED_STABLE_RELEASE_LINE[0]
+            || minor < REVIEWED_STABLE_RELEASE_LINE[1]
+            || !minor.is_multiple_of(2))
     {
         return Err(AdmissionError::UnreviewedReleaseLine {
             found,

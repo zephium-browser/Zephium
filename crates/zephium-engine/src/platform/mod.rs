@@ -36,7 +36,7 @@ pub(crate) mod agent_suspension;
 pub(crate) mod cosmetic_pull;
 #[cfg(all(
     feature = "agentic-browser",
-    any(target_os = "macos", target_os = "windows", test)
+    any(target_os = "macos", target_os = "windows", target_os = "linux", test)
 ))]
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) mod page_recipe;
