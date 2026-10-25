@@ -4369,43 +4369,6 @@ fn launcher_run(
     ) else {
         return rejected_operation();
     };
-    // The shell runs only what acts on tabs and pages. A Settings section, a
-    // tool or a browser page belongs to the app, so it runs the way a menu or
-    // a key runs it, and the launcher steps aside once that is admitted.
-    if let zephium_ipc::SearchAction::RunCommand { id } = &action {
-        if !overlay.admits(&context) {
-            return rejected_operation();
-        }
-        let mut in_shell = false;
-        let admission = execute_command_or(&app, id, || {
-            in_shell = true;
-            run_in_shell(
-                &shell,
-                &overlay,
-                &ledger,
-                action.clone(),
-                context.clone(),
-                false,
-            )
-        });
-        if admission.accepted && !in_shell {
-            overlay.command_ran();
-        }
-        return admission;
-    }
-    run_in_shell(&shell, &overlay, &ledger, action, context, background)
-}
-
-/// Sends a launcher action to the shell, whose disposition settles the
-/// launcher.
-fn run_in_shell(
-    shell: &Handle,
-    overlay: &overlay::Overlay,
-    ledger: &OperationLedger,
-    action: zephium_ipc::SearchAction,
-    context: zephium_ipc::SearchContext,
-    background: bool,
-) -> zephium_ipc::OperationAdmission {
     let Ok(sequence) = NEXT_OPERATION_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
     else {
@@ -4418,9 +4381,66 @@ fn run_in_shell(
     // Only an address can be sent behind the current tab; every other action
     // is about where the user is going next.
     let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    // Armed before either path runs, so one action at a time reaches the
+    // launcher's outcome, wherever it is carried out.
     if !overlay.arm_action(&operation_id, &context, background) {
-        return finish_operation_admission(ledger, operation_id, false);
+        return finish_operation_admission(&ledger, operation_id, false);
     }
+    let zephium_ipc::SearchAction::RunCommand { id } = &action else {
+        return run_in_shell(
+            &shell,
+            &overlay,
+            &ledger,
+            operation_id,
+            action,
+            context,
+            background,
+        );
+    };
+    // The shell runs only what acts on tabs and pages. A Settings section, a
+    // tool or a browser page belongs to the app, so it runs the way a menu or
+    // a key runs it, and the launcher steps aside once that is admitted.
+    let mut in_shell = false;
+    let admission = execute_command_or(&app, id, || {
+        in_shell = true;
+        run_in_shell(
+            &shell,
+            &overlay,
+            &ledger,
+            operation_id.clone(),
+            action.clone(),
+            context.clone(),
+            false,
+        )
+    });
+    if in_shell {
+        return admission;
+    }
+    // No disposition will ever carry this id back, so it settles here.
+    ledger.cancel_reservation(&operation_id);
+    if admission.accepted {
+        overlay.operation(zephium_ipc::OperationDisposition {
+            operation_id,
+            outcome: zephium_ipc::OperationOutcome::Applied,
+            reason: zephium_ipc::OperationReason::MutationApplied,
+        });
+    } else {
+        overlay.action_rejected(&operation_id);
+    }
+    admission
+}
+
+/// Sends an armed launcher action to the shell, whose disposition settles
+/// the launcher.
+fn run_in_shell(
+    shell: &Handle,
+    overlay: &overlay::Overlay,
+    ledger: &OperationLedger,
+    operation_id: String,
+    action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
+    background: bool,
+) -> zephium_ipc::OperationAdmission {
     let accepted = shell.dispatch_operation(
         operation_id.clone(),
         Command::RunSearchAction {
