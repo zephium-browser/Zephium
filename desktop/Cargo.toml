@@ -6,7 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["work-product", "macos-page-permission-prompts"]
+default = ["work-product", "macos-page-permission-prompts", "custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 # Dormant until an explicit Work intent. Native adapters are target-specific;
 # durable contracts and orchestration also compile on Windows.
 work-product = [

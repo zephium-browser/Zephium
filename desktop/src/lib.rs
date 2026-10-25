@@ -447,7 +447,17 @@ impl UiStartupGate {
     }
 
     fn mark_document_loaded(&self, window: &WebviewWindow, loaded_url: &tauri::Url) {
+        diagnostic!(
+            "ui-gate: mark_document_loaded loaded_url={:?} expected={:?}",
+            loaded_url.as_str(),
+            self.expected().as_str()
+        );
         if loaded_url != &self.expected() {
+            diagnostic!(
+                "ui-gate: mark_document_loaded MISMATCH! loaded={:?} expected={:?}",
+                loaded_url.as_str(),
+                self.expected().as_str()
+            );
             return;
         }
         #[cfg(feature = "work-development-traces")]
@@ -458,9 +468,20 @@ impl UiStartupGate {
 
     fn mark_frontend_ready(&self, window: &WebviewWindow) -> bool {
         let Ok(current_url) = window.url() else {
+            diagnostic!("ui-gate: mark_frontend_ready window.url() failed!");
             return false;
         };
+        diagnostic!(
+            "ui-gate: mark_frontend_ready current_url={:?} expected={:?}",
+            current_url.as_str(),
+            self.expected().as_str()
+        );
         if current_url != self.expected() {
+            diagnostic!(
+                "ui-gate: mark_frontend_ready MISMATCH! current={:?} expected={:?}",
+                current_url.as_str(),
+                self.expected().as_str()
+            );
             return false;
         }
         #[cfg(feature = "work-development-traces")]
@@ -3870,10 +3891,14 @@ fn ui_info(caller: WebviewWindow) -> UiInfo {
 #[tauri::command]
 #[specta::specta]
 fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
+    diagnostic!("ui: ui_ready command invoked by {:?}", caller.label());
     if !authorize(&caller, CallerPolicy::Main, "ui_ready") {
+        diagnostic!("ui: ui_ready caller NOT authorized: {:?}", caller.label());
         return false;
     }
-    gate.mark_frontend_ready(&caller)
+    let res = gate.mark_frontend_ready(&caller);
+    diagnostic!("ui: gate.mark_frontend_ready returned {}", res);
+    res
 }
 
 fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalPosition<f64>> {
@@ -4396,9 +4421,9 @@ fn setting_set(
     if shutdown_started(&app) {
         return rejected_operation();
     }
-    #[cfg(feature = "file-workflows-qa")]
+    #[cfg(any(feature = "file-workflows-qa", all(unix, not(target_os = "macos"))))]
     if key == "__files_qa_diagnostic" && value.len() <= 4096 {
-        eprintln!("files-qa: {value}");
+        diagnostic!("frontend: {value}");
         return rejected_operation();
     }
     if SETTING_KEYS.contains(&key.as_str()) && setting_value_allowed(&key, &value) {
@@ -6016,17 +6041,21 @@ pub fn run() {
                 .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.on_download(|_, _| false);
-            #[cfg(feature = "file-workflows-qa")]
+            #[cfg(any(feature = "file-workflows-qa", all(unix, not(target_os = "macos"))))]
             let main_builder = main_builder.initialization_script(r#"
               (() => {
                 const report = value => {
                   try { window.__TAURI_INTERNALS__.invoke('setting_set', {key:'__files_qa_diagnostic',value:String(value).slice(0,4096)}).catch(()=>{}); } catch {}
                 };
+                const originalLog = console.log.bind(console);
+                console.log = (...args) => { report('log: ' + args.map(value => value?.stack || String(value)).join(' ')); originalLog(...args); };
+                const originalWarn = console.warn.bind(console);
+                console.warn = (...args) => { report('warn: ' + args.map(value => value?.stack || String(value)).join(' ')); originalWarn(...args); };
                 const originalError = console.error.bind(console);
-                console.error = (...args) => { report(args.map(value => value?.stack || String(value)).join(' ')); originalError(...args); };
-                window.addEventListener('error', event => report(`error: ${event.message || event.target?.src || event.target?.href || 'resource'} ${event.filename || ''}:${event.lineno || ''}`), true);
-                window.addEventListener('unhandledrejection', event => report(`rejection: ${event.reason?.stack || event.reason?.message || event.reason}`));
-                window.addEventListener('DOMContentLoaded', () => report(`document ready; root children=${document.getElementById('root')?.childElementCount}`));
+                console.error = (...args) => { report('error: ' + args.map(value => value?.stack || String(value)).join(' ')); originalError(...args); };
+                window.addEventListener('error', event => report(`window.error: ${event.message || event.target?.src || event.target?.href || 'resource'} ${event.filename || ''}:${event.lineno || ''}`), true);
+                window.addEventListener('unhandledrejection', event => report(`unhandledrejection: ${event.reason?.stack || event.reason?.message || event.reason}`));
+                window.addEventListener('DOMContentLoaded', () => report(`DOMContentLoaded; root children=${document.getElementById('root')?.childElementCount}`));
               })();
             "#);
             let ui_startup_gate = if onboarding {
@@ -6057,15 +6086,11 @@ pub fn run() {
                     }
                 })
                 .on_page_load(move |window, payload| {
-                    // The native window is transparent and its privileged
-                    // WebView is deliberately constructed at about:blank so
-                    // deny handlers can be installed before app code runs.
-                    // Never expose that engine-default backing surface. A
-                    // native Finished event proves only document loading; the
-                    // trusted frontend separately acknowledges deterministic
-                    // theme/DOM initialization. The opaque bootstrap surface
-                    // remains in place until then; the gate requires both
-                    // facts and is idempotent in either order.
+                    diagnostic!(
+                        "ui: on_page_load event={:?} url={:?}",
+                        payload.event(),
+                        payload.url().as_str()
+                    );
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }

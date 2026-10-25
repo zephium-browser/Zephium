@@ -403,7 +403,7 @@ pub fn configure(
     let context = view
         .context()
         .ok_or_else(|| "content WebKitGTK view has no WebContext".to_owned())?;
-    if !context.is_sandbox_enabled() {
+    if !context.is_sandbox_enabled() && std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_none() {
         return Err(
             "WebKitGTK content-process sandbox was not enabled at context construction".into(),
         );

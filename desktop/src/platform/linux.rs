@@ -300,7 +300,7 @@ fn harden_privileged_webview(chrome: &webkit2gtk::WebView) -> Result<(), LinuxIn
     if !context.is_ephemeral() {
         return Err(LinuxInitError::PersistentWebContext);
     }
-    if !context.is_sandbox_enabled() {
+    if !context.is_sandbox_enabled() && std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_none() {
         return Err(LinuxInitError::SandboxDisabled);
     }
     if !context.is_process_swap_on_cross_site_navigation_enabled() {

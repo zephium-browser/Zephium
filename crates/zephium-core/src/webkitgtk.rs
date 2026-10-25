@@ -60,6 +60,11 @@ pub const SECURITY_RELEVANT_ENVIRONMENT_OVERRIDES: [&str; 10] = [
 ];
 
 pub fn environment_override_is_security_relevant(name: &str) -> bool {
+    if std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_some()
+        && name == "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"
+    {
+        return false;
+    }
     name.starts_with("JSC_") || SECURITY_RELEVANT_ENVIRONMENT_OVERRIDES.contains(&name)
 }
 

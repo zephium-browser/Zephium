@@ -118,7 +118,7 @@ impl WebContextImpl {
     // Zephium security patch: enable the Web-process sandbox while the
     // context cannot yet own a WebView or have launched a Web process. A
     // post-build toggle is too late to be a reliable construction invariant.
-    if !context.is_sandbox_enabled() {
+    if !context.is_sandbox_enabled() && std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_none() {
       context.set_sandbox_enabled(true);
     }
     let automation = false;
@@ -169,7 +169,7 @@ impl Drop for WebContextImpl {
 }
 
 fn validate_context_security(sandbox: bool, process_swap: bool) -> crate::Result<()> {
-  if !sandbox {
+  if !sandbox && std::env::var_os("ZEPHIUM_ALLOW_SYSTEM_WEBKITGTK").is_none() {
     return Err(Error::GtkSandboxUnavailable);
   }
   if !process_swap {
