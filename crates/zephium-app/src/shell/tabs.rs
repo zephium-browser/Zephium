@@ -351,16 +351,34 @@ impl Shell {
         at: Option<usize>,
     ) -> Option<ItemId> {
         let tabs = self.keyboard_tabs(profile, space);
-        if tabs.is_empty() {
-            return None;
-        }
         let at = at.unwrap_or(tabs.len());
+        // Closed Essentials stay in the sidebar; sleeping pages still count as open.
+        let is_candidate = |id: &ItemId| {
+            self.items.get(*id).is_some_and(|item| {
+                item.parent.is_some()
+                    || !matches!(item.placement, Placement::Favorites { .. })
+                    || item
+                        .tab()
+                        .is_some_and(|tab| tab.has_view() || tab.lifecycle == Lifecycle::Hibernated)
+            })
+        };
+        let (before, after) = tabs.split_at(at.min(tabs.len()));
         match self.tab_preferences.after_close {
-            AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
-            AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
+            AfterClose::Next => after
+                .iter()
+                .chain(before.iter().rev())
+                .copied()
+                .find(is_candidate),
+            AfterClose::Previous => before
+                .iter()
+                .rev()
+                .chain(after.iter())
+                .copied()
+                .find(is_candidate),
             AfterClose::Recent => tabs
                 .iter()
                 .copied()
+                .filter(is_candidate)
                 .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id)),
         }
     }

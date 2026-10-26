@@ -546,6 +546,115 @@ fn native_download_cleanup_survives_a_space_switch() {
 }
 
 #[test]
+fn repeated_close_with_recent_policy_does_not_reopen_closed_essentials() {
+    repeated_close_does_not_reopen_closed_essentials("recent");
+}
+
+#[test]
+fn repeated_close_with_next_policy_does_not_reopen_closed_essentials() {
+    repeated_close_does_not_reopen_closed_essentials("next");
+}
+
+#[test]
+fn repeated_close_with_previous_policy_does_not_reopen_closed_essentials() {
+    repeated_close_does_not_reopen_closed_essentials("previous");
+}
+
+fn repeated_close_does_not_reopen_closed_essentials(policy: &str) {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.after-close".into(),
+        value: policy.into(),
+    });
+    let profile = shell.windows.focused().unwrap().profile;
+    let placement = Placement::Favorites { profile };
+    let site = |url: &str| crate::ImportedSite {
+        url: url.into(),
+        title: url.into(),
+    };
+    shell.handle(Command::Import {
+        work: Box::new(crate::ImportWork::Essentials(vec![
+            site("https://mail.example/"),
+            site("https://board.example/"),
+        ])),
+        done: crate::ImportCompletion::new(|_| {}),
+    });
+    let essentials = shell.items.roots(placement).to_vec();
+    for id in &essentials {
+        shell.handle(Command::Activate(*id));
+    }
+    let mut closed_essentials = Vec::new();
+    for attempt in 1..=6 {
+        let Some(active) = shell.windows.focused().unwrap().active else {
+            break;
+        };
+        let url = shell.items.tab(active).unwrap().url.clone();
+        if shell.items.roots(placement).contains(&active) {
+            closed_essentials.push(url.clone());
+        }
+        shell.handle(Command::Close(active));
+        let loaded_essentials: Vec<_> = shell
+            .items
+            .roots(placement)
+            .iter()
+            .filter_map(|id| shell.items.tab(*id))
+            .filter(|tab| tab.has_view())
+            .map(|tab| tab.url.clone())
+            .collect();
+        assert!(
+            loaded_essentials
+                .iter()
+                .all(|url| !closed_essentials.contains(url)),
+            "policy {policy}, close {attempt} reopened an already closed Essential"
+        );
+    }
+    assert_eq!(closed_essentials.len(), essentials.len());
+    assert_eq!(shell.items.roots(placement).len(), essentials.len());
+
+    let reopened = shell.items.roots(placement)[0];
+    shell.handle(Command::Activate(reopened));
+    assert!(shell.items.tab(reopened).unwrap().has_view());
+    shell.handle(Command::Open);
+    let foreground = shell.windows.focused().unwrap().active.unwrap();
+    assert!(shell.items.mark_view_discarded(reopened));
+    shell.handle(Command::Close(foreground));
+    assert_eq!(shell.windows.focused().unwrap().active, Some(reopened));
+    assert!(shell.items.tab(reopened).unwrap().has_view());
+}
+
+#[test]
+fn closing_skips_unloaded_essentials_without_shifting_neighbor_order() {
+    for (policy, close_first) in [("next", true), ("previous", false)] {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let first = active_id(&screen);
+        shell.handle(Command::Open);
+        let middle = active_id(&screen);
+        shell.handle(Command::Open);
+        let profile = shell.windows.focused().unwrap().profile;
+        assert!(shell.items.insert_unloaded_tab(
+            ItemId::generate(),
+            Placement::Favorites { profile },
+            url::Url::parse("https://kept.example/").unwrap(),
+            "Kept",
+        ));
+        shell.handle(Command::SetAppSetting {
+            key: "tabs.after-close".into(),
+            value: policy.into(),
+        });
+        let (closing, expected) = if close_first {
+            (first, middle)
+        } else {
+            (middle, first)
+        };
+        shell.handle(Command::Activate(closing));
+        shell.handle(Command::Close(closing));
+        assert_eq!(active_id(&screen), expected, "policy {policy}");
+    }
+}
+
+#[test]
 fn closing_an_essential_ends_its_page_and_keeps_it_in_place() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
