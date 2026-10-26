@@ -14,7 +14,7 @@ pub(super) enum AfterClose {
     #[default]
     Next,
     Previous,
-    /// The tab used most recently before the closed one.
+    /// The tab activated most recently before the closed one.
     Recent,
 }
 
@@ -210,9 +210,7 @@ impl Shell {
             self.items.set_last_active(id, now);
         }
         self.cancel_page_permission_if_not_foreground();
-        self.residency.recent.retain(|r| *r != id);
-        self.residency.recent.push(id);
-        self.touch(id);
+        self.note_activation(id);
         self.items.ensure_view(id)
     }
 
@@ -280,7 +278,7 @@ impl Shell {
         }
         let tabs_before = self.keyboard_tabs(profile, space);
         let pos = tabs_before.iter().position(|x| *x == id);
-        let mut fx = self.items.remove(id);
+        let mut fx = self.remove_item(id);
         if let Some(closed) = closed {
             if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
                 self.recently_closed.remove(0);
@@ -358,10 +356,28 @@ impl Shell {
         match self.tab_preferences.after_close {
             AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
             AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
-            AfterClose::Recent => tabs
-                .iter()
-                .copied()
-                .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id)),
+            AfterClose::Recent => {
+                // `tabs` is this space's sidebar, with the profile's
+                // Essentials, so the search skips tabs of other spaces.
+                let candidates: std::collections::HashSet<ItemId> = tabs.iter().copied().collect();
+                // A tab never activated here, such as one restored at launch,
+                // is not on the stack: rank the rest as before, without
+                // Essentials, so a closed one is never reopened on its own.
+                self.residency
+                    .recent
+                    .most_recent_first()
+                    .find(|id| candidates.contains(id))
+                    .or_else(|| {
+                        tabs.iter()
+                            .copied()
+                            .filter(|id| {
+                                !self.items.get(*id).is_some_and(|item| {
+                                    matches!(item.placement, Placement::Favorites { .. })
+                                })
+                            })
+                            .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id))
+                    })
+            }
         }
     }
 
@@ -428,7 +444,7 @@ impl Shell {
         } else {
             self.cancel_discard_probe(id);
         }
-        let effects = self.items.remove(id);
+        let effects = self.remove_item(id);
         for (window_id, space, was_active) in affected {
             let replacement = was_active
                 .then(|| self.today_tabs(space).into_iter().next())
@@ -443,6 +459,7 @@ impl Shell {
             }
             if let Some(replacement) = replacement {
                 self.items.set_lifecycle(replacement, Lifecycle::Active);
+                self.note_activation(replacement);
             }
         }
         let _ = self.commit(effects);
@@ -491,7 +508,7 @@ impl Shell {
                 .then_some(candidate)
         })?;
         if !self.items.set_committed_url_str(id, &entry.url) {
-            let _ = self.items.remove(id);
+            let _ = self.remove_item(id);
             return None;
         }
         self.items.set_title(id, entry.title.clone());
@@ -632,7 +649,7 @@ impl Shell {
             return;
         }
         if !self.items.adopt_native_view(child) {
-            let _ = self.items.remove(child);
+            let _ = self.remove_item(child);
             return;
         }
         self.record_view_creation(child);
@@ -714,7 +731,7 @@ impl Shell {
                 }
             }
         }
-        let effects = self.items.remove(child);
+        let effects = self.remove_item(child);
         self.commit(effects);
     }
 

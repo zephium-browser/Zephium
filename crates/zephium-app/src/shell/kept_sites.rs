@@ -114,7 +114,7 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
         self.cancel_favicon_attempt(kept);
-        let fx = self.items.remove(kept);
+        let fx = self.remove_item(kept);
         mutation_result(self.commit(fx))
     }
 

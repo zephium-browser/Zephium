@@ -1,5 +1,6 @@
 //! Bounded native-view residency, discard, crash, and process recovery.
 
+use super::recent_tabs::RecentTabs;
 use super::*;
 use zephium_core::ports::engine::MemoryPressure;
 
@@ -66,7 +67,7 @@ pub(super) struct ResidencyState {
     memory_sampled: Option<std::time::Instant>,
     pub(super) capacity_requests: std::collections::VecDeque<CapacityRequest>,
     capacity_blocked: std::collections::HashMap<ItemId, String>,
-    pub(super) recent: Vec<ItemId>,
+    pub(super) recent: RecentTabs,
     pub(super) last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) resident_since: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) inactive_since: std::collections::HashMap<ItemId, std::time::Instant>,
@@ -96,7 +97,7 @@ impl Default for ResidencyState {
             memory_sampled: None,
             capacity_requests: std::collections::VecDeque::new(),
             capacity_blocked: std::collections::HashMap::new(),
-            recent: Vec::new(),
+            recent: RecentTabs::default(),
             last_focus: std::collections::HashMap::new(),
             resident_since: std::collections::HashMap::new(),
             inactive_since: std::collections::HashMap::new(),
@@ -416,9 +417,6 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
-        self.residency
-            .recent
-            .retain(|id| self.items.tab(*id).is_some());
         self.residency
             .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());
@@ -1097,10 +1095,39 @@ impl Shell {
                     window.active = Some(replacement);
                 }
                 self.items.set_lifecycle(replacement, Lifecycle::Active);
-                self.touch(replacement);
+                self.note_activation(replacement);
             }
         }
         self.commit(effects);
+    }
+
+    /// A tab was activated: it goes on top of `residency.recent` and its
+    /// idle clock restarts. The only push onto `recent`; sites that show a
+    /// tab without activating it (split partners, the work pane, a hidden
+    /// window) call `touch` alone.
+    pub(super) fn note_activation(&mut self, id: ItemId) {
+        if self.items.tab(id).is_some() {
+            self.residency.recent.push(id);
+        }
+        self.touch(id);
+    }
+
+    /// Removes an item and its descendants from the tree. Every shell
+    /// removal goes through here or `remove_profile_items`, so
+    /// `residency.recent` never names a closed tab.
+    pub(super) fn remove_item(&mut self, id: ItemId) -> Vec<Effect> {
+        let effects = self.items.remove(id);
+        self.residency.recent.retain_live(&self.items);
+        effects
+    }
+
+    pub(super) fn remove_profile_items(
+        &mut self,
+        spaces: &zephium_core::spaces::RemovedProfileSpaces,
+    ) -> Vec<Effect> {
+        let effects = self.items.remove_for_profile(spaces);
+        self.residency.recent.retain_live(&self.items);
+        effects
     }
 
     pub(super) fn touch(&mut self, id: ItemId) {
