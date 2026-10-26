@@ -134,7 +134,7 @@ impl Shell {
         let native = self.commit(effects);
         if native.rejected {
             if created {
-                let _ = self.items.remove(id);
+                let _ = self.remove_item(id);
             } else {
                 self.items.set_lifecycle(id, Lifecycle::Inactive);
             }
@@ -188,9 +188,7 @@ impl Shell {
                 let fallback = self
                     .residency
                     .recent
-                    .iter()
-                    .rev()
-                    .copied()
+                    .most_recent_first()
                     .find(|id| {
                         self.item_in_focused_scope(*id)
                             && self.items.tab(*id).is_some_and(|tab| {

@@ -273,13 +273,10 @@ impl Shell {
         }
 
         let removed_spaces = self.spaces.remove_for_profile(profile);
-        let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
+        let _native_erasure_owns_close = self.remove_profile_items(&removed_spaces);
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 
-        self.residency
-            .recent
-            .retain(|id| self.items.tab(*id).is_some());
         self.residency
             .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());

@@ -2054,6 +2054,7 @@ mod private;
 mod profile_deletion;
 mod profiles;
 mod projections;
+mod recent_tabs;
 mod search;
 mod shutdown;
 mod spaces;

@@ -473,7 +473,7 @@ impl Shell {
                 .tab(id)
                 .is_some_and(|tab| tab.content != zephium_core::item::TabContent::Web)
         {
-            self.touch(id);
+            self.note_activation(id);
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         if self.active_browser_page().is_some()
@@ -496,7 +496,7 @@ impl Shell {
             Some(PendingDiscardProbe::Closing { .. })
         );
         if active == Some(id) && has_view && !discard_closing {
-            self.touch(id);
+            self.note_activation(id);
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         let effects = self.focus_tab(id);

@@ -162,7 +162,7 @@ impl Shell {
             if splits.as_ref().is_some_and(|tree| tree.contains(*id)) {
                 splits = None;
             }
-            let effects = self.items.remove(*id);
+            let effects = self.remove_item(*id);
             if !effects.is_empty() {
                 crate::diagnostic!(
                     "bootstrap: retired Settings tab unexpectedly owned a native view"

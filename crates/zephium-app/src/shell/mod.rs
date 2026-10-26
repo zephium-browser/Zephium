@@ -25,6 +25,7 @@ mod private;
 mod profile_deletion;
 mod profile_roster;
 mod projections;
+mod recent_tabs;
 mod scope;
 mod search;
 mod tabs;
