@@ -159,6 +159,23 @@ test("Enter runs what was typed even when a local match exists", async () => {
   );
 });
 
+test("Enter while replacing results runs the current typed query", async () => {
+  const screen = await mount({ tabId: "tab" });
+  const input = screen.getByRole("combobox");
+  await input.fill("rust");
+  await reply("rust", [search("rust"), tab("Rust docs")]);
+  await expect.element(screen.getByRole("option", { name: /Rust docs/u })).toBeInTheDocument();
+
+  await input.fill("rust book");
+  await userEvent.keyboard("{Enter}");
+  expect(native.run).not.toHaveBeenCalled();
+
+  const context = await reply("rust book", [search("rust book"), tab("Rust docs")]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(search("rust book").action, context),
+  );
+});
+
 test("selection moves without wrapping and returns to the typed action", async () => {
   const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");

@@ -343,7 +343,7 @@ export function createSearchSurface(options: {
     }
     // Sending something behind the current tab is a deliberate choice about
     // a row the user can see; it is never deferred onto an answer they cannot.
-    if (query.trim() && !background) queued = row?.id ?? "";
+    if (query.trim() && !background) queued = moved ? (row?.id ?? "") : "";
   }
 
   async function copy() {
