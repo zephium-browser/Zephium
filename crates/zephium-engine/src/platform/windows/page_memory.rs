@@ -79,21 +79,23 @@ fn renderers(infos: &ICoreWebView2ProcessExtendedInfoCollection) -> Vec<(u64, Ve
             continue;
         };
         let mut pages = Vec::new();
-        // SAFETY: a live extended info; the iterator is walked to its end
-        // or to the frame bound.
-        if let Ok(iterator) = unsafe { info.AssociatedFrameInfos() }
-            .and_then(|frames| unsafe { frames.GetIterator() })
-        {
-            let mut more = windows_core::BOOL::default();
-            while pages.len() < FRAME_LIMIT
-                && unsafe { iterator.HasCurrent(&mut more) }.is_ok()
-                && more.as_bool()
-            {
-                if let Some(page) = unsafe { iterator.GetCurrent() }.ok().and_then(page_of) {
-                    pages.push(page);
-                }
-                if unsafe { iterator.MoveNext(&mut more) }.is_err() {
-                    break;
+        // Keep the collection alive until its iterator is dropped. WebView2's
+        // iterator borrows its backing storage; releasing `frames` inside an
+        // and_then before GetCurrent can cause a native access violation.
+        // SAFETY: live collection and iterator, walked to a bounded end.
+        if let Ok(frames) = unsafe { info.AssociatedFrameInfos() } {
+            if let Ok(iterator) = unsafe { frames.GetIterator() } {
+                let mut more = windows_core::BOOL::default();
+                for _ in 0..FRAME_LIMIT {
+                    if unsafe { iterator.HasCurrent(&mut more) }.is_err() || !more.as_bool() {
+                        break;
+                    }
+                    if let Some(page) = unsafe { iterator.GetCurrent() }.ok().and_then(page_of) {
+                        pages.push(page);
+                    }
+                    if unsafe { iterator.MoveNext(&mut more) }.is_err() {
+                        break;
+                    }
                 }
             }
         }

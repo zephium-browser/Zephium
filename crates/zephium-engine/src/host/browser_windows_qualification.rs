@@ -71,6 +71,61 @@ fn until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+#[ignore = "requires installed WebView2; uses a disposable profile and inline pages"]
+fn native_page_memory_survives_tab_switches() {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+    }
+    let profile = tempfile::tempdir().unwrap();
+    let host = Host::new();
+    let mut context = wry::WebContext::new(Some(profile.path().to_owned()));
+    let mut views = Vec::new();
+    for _ in 0..2 {
+        let loaded = Arc::new(Mutex::new(false));
+        let page_loaded = loaded.clone();
+        let view = WebViewBuilder::new_with_web_context(&mut context)
+            .with_visible(false)
+            .with_focused(false)
+            .with_html("<!doctype html><title>Memory fixture</title><iframe srcdoc='<p>Child frame</p>'></iframe>")
+            .with_on_page_load_handler(move |event, _| {
+                if matches!(event, wry::PageLoadEvent::Finished) {
+                    *page_loaded.lock().unwrap() = true;
+                }
+            })
+            .build_as_child(&host)
+            .unwrap();
+        until(|| *loaded.lock().unwrap());
+        views.push(view);
+    }
+    let frames: Vec<_> = views
+        .iter()
+        .map(|view| crate::platform::imp::main_frame_id(view).unwrap())
+        .collect();
+    assert_ne!(frames[0], frames[1]);
+    for turn in 0..12 {
+        for (index, view) in views.iter().enumerate() {
+            view.set_visible(index == turn % 2).unwrap();
+        }
+        let result = Rc::new(RefCell::new(None));
+        let completed = result.clone();
+        assert!(crate::platform::imp::sample_renderers(
+            &views[0].environment(),
+            move |renderers| *completed.borrow_mut() = Some(renderers),
+        ));
+        until(|| result.borrow().is_some());
+        let renderers = result.borrow_mut().take().unwrap();
+        for frame in &frames {
+            assert!(
+                renderers
+                    .iter()
+                    .any(|(bytes, pages)| *bytes > 0 && pages.contains(frame)),
+                "memory sample must include both the visible and hidden page",
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires installed WebView2; uses a disposable profile and loopback download"]
 fn native_download_staging_and_media_capabilities() {
     unsafe {
