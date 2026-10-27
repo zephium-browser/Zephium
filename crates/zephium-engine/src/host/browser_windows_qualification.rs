@@ -78,6 +78,10 @@ fn native_page_memory_survives_tab_switches() {
     }
     let profile = tempfile::tempdir().unwrap();
     let host = Host::new();
+    // A child view is only really visible inside a shown parent.
+    unsafe {
+        let _ = ShowWindow(host.0, SW_SHOWNOACTIVATE);
+    }
     let mut context = wry::WebContext::new(Some(profile.path().to_owned()));
     let mut views = Vec::new();
     for _ in 0..2 {
