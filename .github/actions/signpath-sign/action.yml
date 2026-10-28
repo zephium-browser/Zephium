@@ -1,0 +1,64 @@
+name: Sign the next Zephium binary
+description: Resume Tauri only after SignPath returns a verified binary.
+inputs:
+  role:
+    description: app, uninstaller, or installer, in that order
+    required: true
+  policy:
+    description: SignPath test-signing or release-signing
+    required: true
+  api-token:
+    description: Zephium CI submitter token
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Wait for the packaging signing hook
+      id: request
+      shell: pwsh
+      env:
+        SIGNING_ROLE: ${{ inputs.role }}
+      run: ./scripts/release/signpath.ps1 -Operation Wait -Role $env:SIGNING_ROLE
+    - name: Upload unsigned binary for trusted origin verification
+      id: unsigned
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: signpath-${{ inputs.policy }}-${{ inputs.role }}-${{ github.run_attempt }}
+        path: ${{ steps.request.outputs.unsigned }}/Zephium.exe
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+    - name: Submit to SignPath and wait for completion
+      id: sign
+      uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+      with:
+        api-token: ${{ inputs.api-token }}
+        organization-id: 6d23e298-6eb5-4692-b09e-9ab18f484855
+        project-slug: Zephium
+        signing-policy-slug: ${{ inputs.policy }}
+        artifact-configuration-slug: initial
+        github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+        wait-for-completion: true
+        wait-for-completion-timeout-in-seconds: 3600
+        service-unavailable-timeout-in-seconds: 300
+        download-signed-artifact-timeout-in-seconds: 180
+        output-artifact-directory: ${{ steps.request.outputs.signed }}
+        parameters: |
+          version: ${{ toJSON(steps.request.outputs.version) }}
+    - name: Verify signed output before resuming packaging
+      shell: pwsh
+      env:
+        SIGNING_ROLE: ${{ inputs.role }}
+        SIGNING_REQUEST_URL: ${{ steps.sign.outputs.signing-request-web-url }}
+      run: |
+        # Composite steps do not support timeout-minutes. Bound the verifier
+        # process itself so Windows trust/network stalls fail closed.
+        $script = (Resolve-Path ./scripts/release/signpath.ps1).Path
+        $arguments = @('-NoProfile', '-NonInteractive', '-File', ('"' + $script + '"'), '-Operation', 'Complete', '-Role', $env:SIGNING_ROLE)
+        $verify = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList $arguments -NoNewWindow -PassThru
+        if (!$verify.WaitForExit(300000)) {
+          $verify.Kill($true)
+          throw 'Signed artifact verification timed out'
+        }
+        if ($verify.ExitCode -ne 0) { throw "Signed artifact verification failed ($($verify.ExitCode))" }
+        "- $($env:SIGNING_ROLE): $($env:SIGNING_REQUEST_URL)" >> $env:GITHUB_STEP_SUMMARY

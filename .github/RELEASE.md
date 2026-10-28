@@ -179,57 +179,27 @@ Download them for any release you need to symbolicate later.
 
 ## Windows signing
 
-SignPath integration is **inactive** until the accepted project's certificate is
-issued and the owner completes the setup below. No signing request is sent while
-all three configuration values are absent. Partial configuration fails the release;
-drafts remain explicitly labelled unsigned
-while setup is pending. No secret belongs in an untrusted PR job.
+The SignPath integration is awaiting test signing and production certificate
+issuance. Do not enable this release workflow on the default branch until the
+qualification checklist in [Windows signing setup](../signpath/README.md) is
+complete. Existing public releases remain unsigned.
 
-The owner creates these exact SignPath resources:
+The Windows job signs the packaged browser, generated uninstaller, and final
+installer in that order. Each production request requires approval in SignPath.
+Missing credentials, a missing certificate pin, or failed signature checks stop
+the job; there is no unsigned fallback. Updater signing runs **after** all
+Authenticode changes. Exactly one unconditional `cargo xtask sign-windows-updater`
+step signs the final bytes and binds the version and `windows-x86_64-nsis` target.
+No later step may replace this signature.
 
-- Project slug **`zephium`**, linked to the public
-  `zephium-browser/Zephium` repository and GitHub.com Trusted Build System.
-- Signing policy **`release-signing`**, using the issued production certificate,
-  approved release submitters and human approval, restricted to this repository's
-  `.github/workflows/release.yml`, protected `v*` tags and GitHub-hosted runners.
-- Artifact configuration **`windows-nsis`**: a ZIP root (the upload-artifact
-  envelope) containing exactly one PE `Zephium_*_x64-setup.exe`, with
-  Authenticode signing and timestamping. NSIS is treated as a PE file; this signs
-  the downloaded setup, and does not claim signatures on its embedded payload.
-- Install the SignPath GitHub App and grant this repository access as required
-  by SignPath's origin verification policy.
+The Windows job allows 75 minutes for compilation, 85 minutes for each of the
+three signing stages, and 30 minutes for setup, verification and uploads (360
+minutes total). Each stage waits up to 60 minutes for approval, five minutes
+for service availability and three minutes for download. Each stage also allows
+ten minutes for the packaging hook to become ready. Its step cap includes
+verification and other overhead; timeouts stop the release.
 
-Then add repository Actions secrets **`SIGNPATH_API_TOKEN`** (a submitter token
-restricted to the project/policy) and **`SIGNPATH_ORGANIZATION_ID`** (the UUID
-from the dashboard), plus Actions variable **`SIGNPATH_SIGNER_SUBJECT`** with
-the issued certificate's complete, exact X.500 Subject. Do not guess the subject
-from the product name or activate using a test certificate. The existing updater
-key secrets are still required independently.
-
-The Windows job uploads `signpath-unsigned-windows-x64`, waits for approval,
-verifies `Get-AuthenticodeSignature` is `Valid`, checks the exact subject and a
-timestamp, then replaces the setup. Only afterwards does
-`cargo run --locked -p xtask -- sign-windows-updater <setup> <version>`
-regenerates the updater signature over the final bytes, binding the version and
-target. This step also runs when SignPath is inactive; the draft job verifies
-the signature against the configured public key. Signing failures never
-fall back to unsigned assets. The action is pinned to verified v3.0 commit
-`f6d04783b4569d051e0c80105fe66e82819d0092`.
-
-The Windows job has a bounded 180-minute budget: up to 75 minutes for the build,
-75 for the signing action, and 30 for setup and final verification/uploads. Within
-the signing action, human approval waits at most 60 minutes, service availability
-five minutes and download three minutes. Its explicit step cap bounds other
-request/processing overhead; a signing timeout fails rather than falling back.
-
-Before the first signed public release, qualify the exact downloaded setup on
-a clean Windows device: expected publisher, trust chain, timestamp, final hash,
-installation, updater signature and provenance. The accepted project and pending
-certificate alone do not establish those results. Follow the
-[SignPath GitHub integration](https://docs.signpath.io/trusted-build-systems/github)
-and [artifact reference](https://docs.signpath.io/artifact-configuration/reference).
-
-Until then, SmartScreen judges each installer by its own download reputation.
+SmartScreen reputation can still affect newly signed downloads.
 After publishing, submit `Zephium-Windows-x64-setup.exe` at
 <https://www.microsoft.com/wdsi/filesubmission> as a software developer
 ("Incorrectly detected as malware/malicious" when it is flagged). Keep the

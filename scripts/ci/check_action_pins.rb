@@ -27,7 +27,8 @@ def collect(node, key, found = [])
 end
 
 errors = []
-workflows = Dir[File.join(ROOT, ".github/workflows/*.{yml,yaml}")].sort
+workflows = (Dir[File.join(ROOT, ".github/workflows/*.{yml,yaml}")] +
+             Dir[File.join(ROOT, ".github/actions/**/action.{yml,yaml}")]).sort
 errors << "no workflows found" if workflows.empty?
 
 workflows.each do |path|
@@ -68,7 +69,7 @@ workflows.each do |path|
 end
 
 if errors.empty?
-  puts "action pins: #{workflows.length} workflows verified"
+  puts "action pins: #{workflows.length} workflow/action definitions verified"
 else
   warn errors
   exit 1

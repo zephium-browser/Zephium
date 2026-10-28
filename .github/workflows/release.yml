@@ -39,7 +39,6 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       pubkey: ${{ steps.version.outputs.pubkey }}
-      signpath: ${{ steps.signpath.outputs.enabled }}
     steps:
       - name: Require release secrets
         env:
@@ -74,8 +73,7 @@ jobs:
         id: signpath
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
-          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
+          SIGNPATH_RELEASE_CERT_THUMBPRINT: ${{ vars.SIGNPATH_RELEASE_CERT_THUMBPRINT }}
         run: bash scripts/release/signpath_config.sh
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -319,8 +317,8 @@ jobs:
     name: Windows (x64)
     needs: gate
     runs-on: windows-latest
-    # 75 minutes build + 75 minutes signing + 30 minutes setup/verification.
-    timeout-minutes: 180
+    # 75 minutes build + three 85-minute signing stages + 30 minutes overhead.
+    timeout-minutes: 360
     permissions:
       contents: read
       actions: read
@@ -329,6 +327,8 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ needs.gate.outputs.version }}
+      SIGNPATH_POLICY: release-signing
+      SIGNPATH_CERT_THUMBPRINT: ${{ vars.SIGNPATH_RELEASE_CERT_THUMBPRINT }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -351,64 +351,56 @@ jobs:
           python3 scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt \
             || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
 
+      - name: Require production signing configuration
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if (!$env:SIGNPATH_API_TOKEN) { throw 'Missing SIGNPATH_API_TOKEN secret' }
+          if ($env:SIGNPATH_CERT_THUMBPRINT -notmatch '^[A-Fa-f0-9]{40}$') { throw 'Production certificate is not configured; never fall back to unsigned or test-signed releases' }
+
       - name: Build
         timeout-minutes: 75
         working-directory: desktop
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # The release profile strips symbols, which on MSVC also drops the
           # PDB. MSVC keeps debug info in the PDB, never in the .exe.
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
           CARGO_PROFILE_RELEASE_STRIP: none
-        run: pnpm tauri build --bundles nsis --config "${RELEASE_CONFIG}"
+        run: pnpm tauri build --no-bundle -- --locked
 
-      - name: Upload the unsigned setup for SignPath
-        if: needs.gate.outputs.signpath == 'true'
-        id: signpath-unsigned
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: signpath-unsigned-windows-x64
-          path: target/release/bundle/nsis/Zephium_${{ env.VERSION }}_x64-setup.exe
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Sign the Windows setup
-        timeout-minutes: 75
-        if: needs.gate.outputs.signpath == 'true'
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: zephium
-          signing-policy-slug: release-signing
-          artifact-configuration-slug: windows-nsis
-          github-artifact-id: ${{ steps.signpath-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 3600
-          service-unavailable-timeout-in-seconds: 300
-          download-signed-artifact-timeout-in-seconds: 180
-          output-artifact-directory: ${{ runner.temp }}/signpath-signed
-
-      - name: Verify publisher trust and timestamp before replacing the setup
-        if: needs.gate.outputs.signpath == 'true'
+      - name: Start packaging with the signing hook
         shell: pwsh
-        env:
-          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $name = "Zephium_${env:VERSION}_x64-setup.exe"
-          $signed = Join-Path $env:RUNNER_TEMP "signpath-signed/$name"
-          $signature = Get-AuthenticodeSignature -LiteralPath $signed
-          if ($signature.Status -ne 'Valid' -or
-              $signature.SignerCertificate.Subject -cne $env:SIGNPATH_SIGNER_SUBJECT -or
-              $null -eq $signature.TimeStamperCertificate) {
-            throw "Installer publisher, trust chain or timestamp verification failed."
-          }
-          Copy-Item -LiteralPath $signed -Destination "target/release/bundle/nsis/$name" -Force
+        run: ./scripts/release/signpath.ps1 -Operation Start
+      - name: Sign packaged browser executable
+        timeout-minutes: 85
+        uses: ./.github/actions/signpath-sign
+        with:
+          role: app
+          policy: release-signing
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      - name: Sign generated uninstaller
+        timeout-minutes: 85
+        uses: ./.github/actions/signpath-sign
+        with:
+          role: uninstaller
+          policy: release-signing
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      - name: Sign final installer
+        timeout-minutes: 85
+        uses: ./.github/actions/signpath-sign
+        with:
+          role: installer
+          policy: release-signing
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      - name: Verify all publisher signatures and packaging
+        shell: pwsh
+        run: ./scripts/release/signpath.ps1 -Operation Finish
+      - name: Verify installed signatures and uninstallation
+        shell: pwsh
+        run: ./scripts/release/signpath.ps1 -Operation Smoke
 
-      # Authenticode changes bytes, so replace the bundler's updater signature
-      # only after verifying and copying the signed setup.
+      # Bind version and target only after every Authenticode change is verified.
       - name: Sign the final Windows bytes for the updater
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -439,6 +431,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      - name: Stop packaging and clean up signing session
+        if: always()
+        shell: pwsh
+        run: ./scripts/release/signpath.ps1 -Operation Cleanup
+
   publish:
     name: Draft release
     needs: [gate, ci, components, macos, windows]
@@ -452,7 +449,6 @@ jobs:
     env:
       VERSION: ${{ needs.gate.outputs.version }}
       UPDATER_PUBKEY: ${{ needs.gate.outputs.pubkey }}
-      SIGNPATH_ENABLED: ${{ needs.gate.outputs.signpath }}
       EMERGENCY_SKIP_COMPONENTS: ${{ inputs.emergency }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -525,17 +521,15 @@ jobs:
             fi
             gh release delete "${TAG}" --repo "${GITHUB_REPOSITORY}" --yes
           fi
-          windows_signing="The Windows installer is unsigned while SignPath certificate setup is pending. SmartScreen may ask for confirmation."
-          if [[ "${SIGNPATH_ENABLED}" == true ]]; then
-            windows_signing="The Windows installer carries a verified Authenticode publisher signature and timestamp. SmartScreen reputation checks still apply."
-          fi
           cat > "${RUNNER_TEMP}/notes.md" <<EOF
           Download Zephium ${VERSION}:
 
           - macOS (Apple Silicon): [Zephium-macOS-arm64.dmg](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-macOS-arm64.dmg)
           - Windows (x64): [Zephium-Windows-x64-setup.exe](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-Windows-x64-setup.exe)
 
-          Installed copies update themselves. ${windows_signing}
+          Installed copies update themselves. The Windows installer, browser executable and uninstaller are Authenticode-signed. SmartScreen reputation may still affect new downloads.
+
+          [Code signing policy](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/code-signing-policy.md)
 
           Verify a download with \`SHA256SUMS\` or \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`.
           EOF

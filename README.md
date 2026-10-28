@@ -259,6 +259,9 @@ explains what gets merged and how. Questions and ideas are welcome on
 
 ## Security
 
+[Code signing policy](docs/code-signing-policy.md) describes Windows signing
+status, responsibilities, and privacy information.
+
 Please report vulnerabilities privately, not in a public issue. See
 [SECURITY.md](SECURITY.md).
 

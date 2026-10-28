@@ -162,6 +162,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_wikilink_labels_do_not_multiply_following_events() {
+        let markdown = "[[a|]] ".repeat(16);
+        let limit = 4 * 16 + 1;
+        let count = Parser::new_ext(&markdown, options())
+            .take(limit + 1)
+            .count();
+        assert_eq!(count, limit);
+    }
+
+    #[test]
     fn a_leading_heading_is_the_title_and_the_rest_previews() {
         let outline = outline("# Trip  *planning*\n\nBook the **train**.\n\n- [ ] pack");
         assert_eq!(outline.heading.as_deref(), Some("Trip planning"));

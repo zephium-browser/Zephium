@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
-# All configuration absent means the pending-certificate integration is inactive.
+# Production releases require signing; absent or partial setup fails closed.
 set -euo pipefail
-configured=0
-for name in SIGNPATH_API_TOKEN SIGNPATH_ORGANIZATION_ID SIGNPATH_SIGNER_SUBJECT; do
-  [[ -z "${!name:-}" ]] || configured=$((configured + 1))
-done
-if (( configured != 0 && configured != 3 )); then
-  echo '::error::Complete the SignPath configuration in .github/RELEASE.md or leave all three values unset.'
+if [[ -z "${SIGNPATH_API_TOKEN:-}" ]]; then
+  echo '::error::Set the SignPath CI submitter token before releasing.'
   exit 1
 fi
-if (( configured == 3 )); then
-  echo 'enabled=true' >> "${GITHUB_OUTPUT}"
-else
-  echo 'enabled=false' >> "${GITHUB_OUTPUT}"
-  echo '::notice::SignPath is inactive: certificate/setup pending. Windows drafts remain unsigned.'
+if [[ ! "${SIGNPATH_RELEASE_CERT_THUMBPRINT:-}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
+  echo '::error::Set the verified production certificate thumbprint before releasing. See signpath/README.md.'
+  exit 1
 fi
+echo 'enabled=true' >> "${GITHUB_OUTPUT}"
