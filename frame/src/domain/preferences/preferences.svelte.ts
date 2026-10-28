@@ -9,6 +9,7 @@ const defaults = {
   "search.custom-url": "",
   "search.suggestions": "true",
   "sidebar.mode": "default",
+  "sidebar.hover-expand": "false",
   "ui.accent": "graphite",
   "ui.material": "auto",
   "ui.reduce-motion": "false",

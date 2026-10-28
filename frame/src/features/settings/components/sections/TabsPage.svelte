@@ -12,7 +12,7 @@
   /><PreferenceSwitch id="tabs.duplicates" preference="tabs.switch-to-open" /><PreferenceSwitch
     id="tabs.automatic-pip"
     preference="tabs.automatic-pip"
-  /></SettingsGroup
+  /><PreferenceSwitch id="tabs.hover-expand" preference="sidebar.hover-expand" /></SettingsGroup
 >
 <SettingsGroup title={m.tabs_group_closing()}
   ><PreferenceSelect id="tabs.close" preference="tabs.after-close" /><PreferenceSelect

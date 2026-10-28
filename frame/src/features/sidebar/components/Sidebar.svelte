@@ -9,12 +9,15 @@
   import {
     COMPACT_WIDTH,
     PANEL_GAP,
+    collapseAfterHover,
     effectiveWidth,
+    expandForHover,
     isCompact,
     sidebarResizeSettlement,
     toggleMode,
   } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
+  import { preferences } from "$domain/preferences";
   import SidebarHeader from "./SidebarHeader.svelte";
   import * as shapeMorph from "../lib/shape-morph";
   import { duration, reducedMotion } from "$shared/lib/motion";
@@ -148,8 +151,45 @@
   // own view can leave standing; leaving the document or the window losing
   // focus ends it too.
   let pointerIn = $state(false);
+
+  // Hover to expand: a short rest opens the full column so passing over the
+  // rail on the way to the page does not, and a short grace on leaving lets
+  // the pointer overshoot the edge without the column snapping shut.
+  const HOVER_OPEN_MS = 150;
+  const HOVER_CLOSE_MS = 300;
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+  function pointerEnter() {
+    pointerIn = true;
+    clearTimeout(hoverTimer);
+    if (preferences.value("sidebar.hover-expand") !== "true" || !isCompact()) return;
+    if (railPage || tools.activeTool() !== null) return;
+    hoverTimer = setTimeout(expandForHover, HOVER_OPEN_MS);
+  }
+  function pointerLeave() {
+    pointerIn = false;
+    clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(collapseAfterHover, HOVER_CLOSE_MS);
+  }
+  // Work, a tool or the preference turning off while the pointer stays put
+  // gets no leave, so drop a pending or open hover expansion here.
   $effect(() => {
-    const out = () => (pointerIn = false);
+    const eligible =
+      preferences.value("sidebar.hover-expand") === "true" &&
+      !railPage &&
+      tools.activeTool() === null;
+    untrack(() => {
+      if (eligible) return;
+      clearTimeout(hoverTimer);
+      collapseAfterHover();
+    });
+  });
+  $effect(() => () => {
+    clearTimeout(hoverTimer);
+    collapseAfterHover();
+  });
+
+  $effect(() => {
+    const out = () => pointerLeave();
     document.documentElement.addEventListener("mouseleave", out);
     window.addEventListener("blur", out);
     return () => {
@@ -186,8 +226,8 @@
   data-sidebar-resize-settling={resizeSettling}
   data-header-fresh={headerFresh}
   data-pointer-in={pointerIn}
-  onpointerenter={() => (pointerIn = true)}
-  onpointerleave={() => (pointerIn = false)}
+  onpointerenter={pointerEnter}
+  onpointerleave={pointerLeave}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
   {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle

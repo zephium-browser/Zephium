@@ -280,6 +280,12 @@ export const fields = {
     description: m.pref_tabs_automatic_pip_help,
     initial: true,
   },
+  "tabs.hover-expand": {
+    section: "tabs",
+    label: m.pref_sidebar_hover_expand,
+    description: m.pref_sidebar_hover_expand_help,
+    initial: false,
+  },
   "tabs.external": {
     section: "tabs",
     label: m.tabs_external,

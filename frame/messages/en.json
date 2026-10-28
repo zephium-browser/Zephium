@@ -411,6 +411,8 @@
   "pref_tabs_duplicates_help": "Avoid opening another copy of the same page.",
   "pref_tabs_automatic_pip": "Automatic picture-in-picture",
   "pref_tabs_automatic_pip_help": "Keep a playing video with sound visible when switching tabs. Return to its tab to bring it back.",
+  "pref_sidebar_hover_expand": "Expand compact sidebar on hover",
+  "pref_sidebar_hover_expand_help": "In compact mode, show the full sidebar while the pointer rests on it, and return to the rail when it leaves.",
   "pref_tabs_folders": "Allow folders",
   "pref_tabs_folders_help": "One level of folders within each space.",
   "pref_tabs_archive": "Archive Today tabs",

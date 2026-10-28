@@ -2,13 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
   width: vi.fn(async () => undefined),
+  save: vi.fn(async () => ({ operation_id: null, accepted: true })),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     sidebarSetWidth: native.width,
-    settingSet: vi.fn(async () => ({ operation_id: null, accepted: true })),
+    settingSet: native.save,
     settingGet: vi.fn(async () => null),
   });
 });
@@ -26,6 +27,9 @@ const {
   expanded,
   resolveDragWidth,
   adoptMode,
+  collapseAfterHover,
+  expandForHover,
+  setMode,
   setPanelExtent,
   sidebarMode,
   toggleMode,
@@ -192,6 +196,69 @@ describe("the stored preference catching up with a toggle", () => {
     expect((native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean])[1]).toBe(
       false,
     );
+    vi.useRealTimers();
+  });
+});
+
+describe("expanding the rail on hover", () => {
+  const settle = () => vi.advanceTimersByTime(2000);
+
+  it("shows the full column and puts the rail back without saving", () => {
+    vi.useFakeTimers();
+    setMode("compact");
+    settle();
+    native.save.mockClear();
+    native.width.mockClear();
+
+    expandForHover();
+    expect(sidebarMode()).toBe("default");
+    expect(native.width.mock.calls.at(-1)?.slice(0, 2)).toEqual([expanded(), true]);
+    // A second hover while open changes nothing.
+    expandForHover();
+    expect(native.width.mock.calls).toHaveLength(1);
+
+    collapseAfterHover();
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width.mock.calls.at(-1)?.slice(0, 2)).toEqual([COMPACT_WIDTH, true]);
+    expect(native.save).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("leaves an expanded column and an open panel alone", () => {
+    vi.useFakeTimers();
+    setMode("default");
+    settle();
+    native.width.mockClear();
+    expandForHover();
+    collapseAfterHover();
+    expect(sidebarMode()).toBe("default");
+    expect(native.width).not.toHaveBeenCalled();
+
+    setMode("compact");
+    settle();
+    setPanelExtent(200);
+    native.width.mockClear();
+    expandForHover();
+    expect(sidebarMode()).toBe("compact");
+    expect(native.width).not.toHaveBeenCalled();
+    setPanelExtent(0);
+    vi.useRealTimers();
+  });
+
+  it("saves a toggle made while hover-expanded and keeps the column open", () => {
+    vi.useFakeTimers();
+    setMode("compact");
+    settle();
+    native.save.mockClear();
+
+    expandForHover();
+    toggleMode();
+    expect(sidebarMode()).toBe("default");
+    expect(native.save).toHaveBeenCalledWith("sidebar.mode", "default");
+
+    // The pointer leaving afterwards must not undo the choice.
+    collapseAfterHover();
+    expect(sidebarMode()).toBe("default");
     vi.useRealTimers();
   });
 });
