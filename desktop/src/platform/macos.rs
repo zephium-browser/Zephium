@@ -1,4 +1,5 @@
 mod log;
+mod sidebar_overlay;
 mod sidebar_resize;
 mod swipe;
 pub use log::redirect_stderr;
@@ -637,15 +638,27 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
-            let commit = std::rc::Rc::new(move |width, revision| {
+            let commit = std::rc::Rc::new(move |release, revision| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
                     return;
                 }
-                // A guide release is a snap to a new shape: the content
-                // travels there, which also covers the chrome's repaint.
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, true)) {
+                let (width, travel) = match release {
+                    sidebar_resize::Release::Width { width, travel } => (width, travel),
+                    // Hiding is the frame's to own: it saves the choice and
+                    // tells native, then the column returns at `width`.
+                    sidebar_resize::Release::Hide { width } => {
+                        crate::emit_to_privileged(
+                            sender.app_handle(),
+                            crate::MAIN_LABEL,
+                            "zephium:sidebar-hide-selected",
+                            &serde_json::json!({"width": width, "revision": revision}),
+                        );
+                        return;
+                    }
+                };
+                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, travel)) {
                     crate::emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
@@ -663,6 +676,60 @@ pub async fn configure_sidebar_resize(
         return false;
     }
     receive.await.unwrap_or(false)
+}
+
+/// Raises the chrome over the page while the hidden sidebar is called up, or
+/// returns it beneath. Resolves `None` when the chrome could not be moved,
+/// otherwise whether the pointer is on the column's side once it stands: one
+/// that left while the column was rising has nothing left to announce.
+pub async fn set_sidebar_overlay(
+    window: &WebviewWindow,
+    raised: bool,
+    column: f64,
+) -> Option<bool> {
+    let generation = CHROME_GENERATION.load(Ordering::Acquire);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let owner = window.clone();
+    let scheduled = window.run_on_main_thread(move || {
+        let done = with_chrome_view(generation, |view| {
+            sidebar_overlay::set_raised(view, raised, column)
+        })
+        .unwrap_or(false);
+        if done {
+            // The stage parked the chrome's pointer tracking while beneath it;
+            // raised, the chrome needs it back, and lowered, parked again.
+            zephium_engine::resync_pointer_covers();
+            // The controls come back with the floating column and leave with it.
+            super::window_controls::conceal(&owner, !raised);
+        }
+        let _ = send.send(done.then(|| raised && sidebar_overlay::pointer_on_side()));
+    });
+    if scheduled.is_err() {
+        return None;
+    }
+    receive.await.ok().flatten()
+}
+
+/// A hidden sidebar takes the window controls with it and watches the
+/// window's left edge for the pointer, which calls it up; shown, both end.
+pub fn set_sidebar_hidden(window: &WebviewWindow, hidden: bool) {
+    let generation = CHROME_GENERATION.load(Ordering::Acquire);
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        super::window_controls::conceal(&owner, hidden);
+        let app = owner.app_handle().clone();
+        let report = hidden.then(|| {
+            Box::new(move |inside: bool| {
+                crate::emit_to_privileged(
+                    &app,
+                    crate::MAIN_LABEL,
+                    "zephium:sidebar-edge",
+                    &serde_json::json!({ "inside": inside }),
+                );
+            }) as Box<dyn Fn(bool)>
+        });
+        let _ = with_chrome_view(generation, |view| sidebar_overlay::watch(view, report));
+    });
 }
 
 /// Reads sideways swipes over the sidebar column's `region` (chrome points,
@@ -719,6 +786,7 @@ fn clear_chrome_view(generation: u64) {
                 slot.borrow_mut().take();
                 sidebar_resize::dispose(Some(generation));
                 swipe::dispose(Some(generation));
+                sidebar_overlay::dispose();
             }
         }
     });
@@ -803,6 +871,7 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) -> bool {
         view.setFrame(f);
     }
     sidebar_resize::refresh();
+    sidebar_overlay::refresh(view);
     hold
 }
 

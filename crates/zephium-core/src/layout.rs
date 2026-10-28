@@ -15,6 +15,9 @@ pub struct Metrics {
     pub gap: f64,
     /// Optional reserved title band. Native overlay controls reserve no space.
     pub caption: f64,
+    /// The sidebar is hidden and only floats over the page when called up,
+    /// so the page takes the column's place.
+    pub sidebar_hidden: bool,
 }
 
 impl Default for Metrics {
@@ -24,6 +27,7 @@ impl Default for Metrics {
             padding: 8.0,
             gap: 8.0,
             caption: 0.0,
+            sidebar_hidden: false,
         }
     }
 }
@@ -95,6 +99,10 @@ pub fn compute(window: Size, mode: Mode, m: Metrics, content_present: bool) -> L
 /// column itself, so its origin is the same in every shape and only its width
 /// changes. Moving the origin between shapes made the whole column jump for
 /// the frames between native moving the view and the frame repadding it.
+///
+/// A hidden sidebar's chrome lies under the page, which covers it, and is
+/// raised over the page when called up rather than laid out again. It spans
+/// the gap too, where the floating column draws its edge.
 fn sidebar(win: Size, m: Metrics, content_present: bool) -> Layout {
     let p = m.padding;
     let inner_h = win.height - 2.0 * p;
@@ -106,8 +114,12 @@ fn sidebar(win: Size, m: Metrics, content_present: bool) -> Layout {
         };
     }
 
-    let chrome = Rect::new(0.0, 0.0, p + m.sidebar_width, win.height);
-    let content_x = p + m.sidebar_width + m.gap;
+    let (chrome_width, content_x) = if m.sidebar_hidden {
+        (p + m.sidebar_width + m.gap, p)
+    } else {
+        (p + m.sidebar_width, p + m.sidebar_width + m.gap)
+    };
+    let chrome = Rect::new(0.0, 0.0, chrome_width, win.height);
     let content = Rect::new(
         content_x,
         p + m.caption,
@@ -139,6 +151,7 @@ mod tests {
         padding: 8.0,
         gap: 8.0,
         caption: 0.0,
+        sidebar_hidden: false,
     };
 
     #[test]
@@ -168,6 +181,17 @@ mod tests {
         assert_eq!(content, Rect::new(256.0, 8.0, 936.0, 784.0));
         // chrome right edge + gap == content left edge: no overlap.
         assert_eq!(l.chrome.x + l.chrome.width + M.gap, content.x);
+    }
+
+    #[test]
+    fn a_hidden_sidebar_gives_the_page_its_place_and_keeps_the_chrome_beneath() {
+        let m = Metrics {
+            sidebar_hidden: true,
+            ..M
+        };
+        let l = compute(Size::new(1200.0, 800.0), Mode::Sidebar, m, true);
+        assert_eq!(l.chrome, Rect::new(0.0, 0.0, 256.0, 800.0));
+        assert_eq!(l.content, Some(Rect::new(8.0, 8.0, 1184.0, 784.0)));
     }
 
     #[test]

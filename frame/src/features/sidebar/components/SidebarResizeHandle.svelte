@@ -2,6 +2,9 @@
   import {
     applyDragWidth,
     claimSidebarResizeOwner,
+    hideFromDrag,
+    isHidden,
+    previewDragWidth,
     sidebarResizeRevision,
     beginSidebarResize,
     finishSidebarResize,
@@ -11,17 +14,22 @@
     COMPACT_WIDTH,
     MAX_EXPANDED_WIDTH,
     MIN_EXPANDED_WIDTH,
+    SNAP_THRESHOLD,
   } from "$session/sidebar-mode.svelte";
+  import { IS_MAC } from "$shared/platform";
   import { commands } from "$shared/ipc/bindings";
   import { onDestroy } from "svelte";
 
   let { width, disabled = false }: { width: number; disabled?: boolean } = $props();
+  // The core layout's gap between the column and the page.
+  const PAGE_GAP = 8;
   let configuredRevision = claimSidebarResizeOwner();
   let nativeCapture = $state(false);
   let resizing = $state(false);
   let guide = $state<number | null>(null);
   let startX = 0;
   let startWidth = $state(0);
+  let requested = 0;
   let frame = 0;
   let pending = 0;
   let generation = 0;
@@ -72,13 +80,16 @@
     });
   });
 
-  function clearGuide() {
+  function hideGuide() {
     if (frame !== 0) cancelAnimationFrame(frame);
     frame = 0;
     guide = null;
     if (guideRequested) void commands.sidebarResizeGuide(null).catch(() => {});
     guideRequested = false;
     nativeGuide = false;
+  }
+  function clearGuide() {
+    hideGuide();
     document.body.style.cursor = previousCursor;
   }
   function handlePointerDown(event: PointerEvent) {
@@ -99,8 +110,17 @@
     updateGuide(width);
   }
   function updateGuide(value: number) {
+    requested = value;
+    // An expanded column follows the pointer and stops at its narrowest; it
+    // never folds into the rail.
+    if (startWidth >= MIN_EXPANDED_WIDTH) {
+      pending = Math.round(Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
+      previewDragWidth(pending);
+      hideGuide();
+      return;
+    }
+    // The rail's drag out lands on release; the guide shows where.
     pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-    // Preview where release lands, including the snap to the rail.
     const landing = resolveDragWidth(pending);
     pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
     guide = pending;
@@ -128,6 +148,11 @@
       target.releasePointerCapture(event.pointerId);
     const landing = pending;
     clearGuide();
+    // Released past the narrowest, an expanded column hides, as on the native path.
+    if (IS_MAC && !isHidden() && startWidth >= MIN_EXPANDED_WIDTH && requested < SNAP_THRESHOLD) {
+      hideFromDrag(startWidth);
+      return;
+    }
     // The guide showed where release lands, snap and bounds included.
     finishSidebarResize(landing);
   }
@@ -185,9 +210,9 @@
   aria-disabled={disabled}
   tabindex={disabled ? -1 : 0}
   class={[
-    // Mostly in the gap beside the column, as the native target on macOS,
-    // so the tab list's edge and scrollbar stay usable.
-    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
+    // Fills the gap and reaches a little over the page's edge, as the native
+    // target on macOS, so the tab list's edge and scrollbar stay usable.
+    "group absolute inset-y-0 -right-3.5 z-20 w-4 cursor-col-resize touch-none outline-none",
     // The native control owns the pointer; the tab list's edge stays usable.
     nativeCapture && "pointer-events-none",
   ]}
@@ -198,12 +223,10 @@
   onlostpointercapture={cancelPointerResize}
   onkeydown={handleKeydown}
 >
+  <!-- No mark on hover: only keyboard focus shows where the handle is. -->
   {#if !disabled}<span
       aria-hidden="true"
-      class={[
-        "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
-        !nativeCapture && "group-hover:bg-text-muted",
-      ]}
+      class="absolute top-1/2 right-3.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent"
     ></span>{/if}
 </div>
 {#if resizing && guide !== null && !nativeGuide}
@@ -211,6 +234,6 @@
   <span
     aria-hidden="true"
     class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-accent"
-    style:left={`${Math.min(startWidth - 2, guide - 2)}px`}
+    style:left={`${Math.min(startWidth, guide) + PAGE_GAP - 2}px`}
   ></span>
 {/if}

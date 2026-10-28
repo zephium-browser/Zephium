@@ -25,6 +25,7 @@ const TITLES: Record<string, () => string> = {
   "find.next": m.command_find_next,
   "find.previous": m.command_find_previous,
   "sidebar.toggleCompact": m.command_sidebar_compact,
+  "sidebar.toggleHidden": m.command_sidebar_hidden,
   "nav.reload": m.command_nav_reload,
   "nav.hardReload": m.command_nav_hard_reload,
   "nav.reload.alt": m.command_nav_reload_alternate,

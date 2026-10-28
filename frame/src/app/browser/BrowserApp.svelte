@@ -43,6 +43,10 @@
     const mode = preferences.value("sidebar.mode");
     if (mode === "default" || mode === "compact") untrack(() => sidebar.adoptMode(mode));
   });
+  $effect(() => {
+    const hidden = preferences.value("sidebar.hidden") === "true";
+    untrack(() => sidebar.adoptHidden(hidden));
+  });
 
   $effect(() => {
     theme.applyUiPreferences(

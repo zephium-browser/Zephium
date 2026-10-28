@@ -1201,6 +1201,17 @@ fn sidebar_shape_slides_precede_layout() {
 }
 
 #[test]
+fn a_hidden_sidebar_asked_for_before_bootstrap_is_kept_for_the_window() {
+    let (mut shell, _, _) = setup();
+    // The frame's stored preference can reach the shell before the window.
+    shell.handle(Command::SetSidebarHidden(true));
+    shell.handle(Command::Bootstrap);
+    assert!(shell.windows.focused().unwrap().metrics.sidebar_hidden);
+    shell.handle(Command::SetSidebarHidden(false));
+    assert!(!shell.windows.focused().unwrap().metrics.sidebar_hidden);
+}
+
+#[test]
 fn sidebar_resize_guide_does_not_mutate_width_or_layout() {
     let (mut shell, engine, _) = setup();
     shell.handle(Command::Bootstrap);

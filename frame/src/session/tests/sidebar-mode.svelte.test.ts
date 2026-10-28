@@ -23,6 +23,7 @@ const {
   beginSidebarResize,
   finishSidebarResize,
   cancelSidebarResize,
+  previewDragWidth,
   expanded,
   resolveDragWidth,
   adoptMode,
@@ -102,6 +103,19 @@ describe("which width changes the page travels with", () => {
     finishSidebarResize(315);
     expect(native.width.mock.calls.length).toBe(before + 1);
     expect(last()).toEqual([315, false]);
+  });
+
+  it("an expanded column follows the drag without travel, and cancel gives it back", () => {
+    const originalWidth = expanded();
+    beginSidebarResize();
+    previewDragWidth(330);
+    expect(expanded()).toBe(330);
+    expect(last()).toEqual([330, false]);
+    previewDragWidth(330);
+    expect(last()).toEqual([330, false]);
+    cancelSidebarResize();
+    expect(expanded()).toBe(originalWidth);
+    expect(last()).toEqual([originalWidth, false]);
   });
 
   it("cancellation leaves the original shape untouched and emits no layout", () => {

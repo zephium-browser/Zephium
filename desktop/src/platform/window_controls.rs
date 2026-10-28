@@ -66,6 +66,9 @@ pub struct Ivars {
     /// Full screen hands the controls to the menu-bar reveal, where they must
     /// be visible the moment it slides down.
     suspended: Cell<bool>,
+    /// The sidebar is hidden and the page reaches the corner, so the controls
+    /// leave with it and come back while the column floats over the page.
+    concealed: Cell<bool>,
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     /// The browser window's chrome, told the moment fullscreen begins or
     /// ends so the room it keeps for the controls follows them at once.
@@ -99,7 +102,7 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            if self.ivars().suspended.get() {
+            if self.ivars().suspended.get() || self.ivars().concealed.get() {
                 return;
             }
             let (white, alpha) = if self.is_dark() { REST_DARK } else { REST_LIGHT };
@@ -162,6 +165,7 @@ impl WindowControls {
             lit: Cell::new(false),
             settled: Cell::new(false),
             suspended: Cell::new(false),
+            concealed: Cell::new(false),
             observers: RefCell::new(Vec::new()),
             chrome: RefCell::new(None),
         });
@@ -213,7 +217,7 @@ impl WindowControls {
 
     fn light(&self, lit: bool, animate: bool) {
         self.ivars().lit.set(lit);
-        if self.ivars().suspended.get() {
+        if self.ivars().suspended.get() || self.ivars().concealed.get() {
             return;
         }
         let reduce = NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
@@ -260,10 +264,14 @@ impl WindowControls {
         self.ivars().suspended.set(suspended);
         self.tell_chrome(suspended);
         if suspended {
+            // The menu-bar reveal shows them even over a hidden sidebar.
             for button in self.buttons() {
+                button.setHidden(false);
                 fade(&button, 1.0, 0.0);
             }
             fade(self, 0.0, 0.0);
+        } else if self.ivars().concealed.get() {
+            self.apply_concealed();
         } else {
             // Leaving fullscreen, AppKit lays the titlebar out afresh at its
             // own position. The inset is applied as the content view draws,
@@ -282,6 +290,29 @@ impl WindowControls {
         self.tell_chrome(false);
         for button in self.buttons() {
             fade(&button, 0.0, 0.0);
+        }
+    }
+
+    fn conceal(&self, concealed: bool) {
+        if self.ivars().concealed.replace(concealed) == concealed || self.ivars().suspended.get() {
+            return;
+        }
+        self.apply_concealed();
+    }
+
+    /// Hidden rather than faded: a transparent close button over the page
+    /// would still take the click meant for the page.
+    fn apply_concealed(&self) {
+        let concealed = self.ivars().concealed.get();
+        for button in self.buttons() {
+            button.setHidden(concealed);
+        }
+        if concealed {
+            fade(self, 0.0, 0.0);
+        } else {
+            self.reinset();
+            self.setNeedsDisplay(true);
+            self.resync(false);
         }
     }
 
@@ -395,6 +426,32 @@ fn fade(view: &NSView, opacity: f32, duration: f64) {
         layer.addAnimation_forKey(&animation, Some(ns_string!("opacity")));
     }
     CATransaction::commit();
+}
+
+/// Hides the window controls while the sidebar is hidden, or brings them back.
+/// A no-op off the main thread or before `install`.
+pub fn conceal(window: &WebviewWindow, concealed: bool) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(pointer) = window.ns_window() else {
+        return;
+    };
+    // SAFETY: `ns_window` returns Tao's live NSWindow, borrowed for this
+    // main-thread call only.
+    let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let Some(close) = ns_window.standardWindowButton(NSWindowButton::CloseButton) else {
+        return;
+    };
+    // SAFETY: a main-thread read of the live close button's parent.
+    let Some(parent) = (unsafe { close.superview() }) else {
+        return;
+    };
+    for view in parent.subviews().iter() {
+        if let Some(controls) = view.downcast_ref::<WindowControls>() {
+            controls.conceal(concealed);
+        }
+    }
 }
 
 /// Installs the resting controls on a browser window. Idempotent, and a no-op

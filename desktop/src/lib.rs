@@ -1818,6 +1818,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_search,
             launcher_run,
             sidebar_set_width,
+            sidebar_set_hidden,
+            sidebar_overlay,
             sidebar_resize,
             sidebar_resize_guide,
             tab_drag_over,
@@ -3829,7 +3831,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
     // Sidebar presentation is privileged-chrome state persisted through the
     // settings allowlist, not an actor mutation. Deliver the intent and let
     // the frame own it.
-    if id == SIDEBAR_COMPACT_COMMAND {
+    if id == SIDEBAR_COMPACT_COMMAND || id == SIDEBAR_HIDDEN_COMMAND {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -5326,6 +5328,63 @@ fn sidebar_set_width(
 
 #[tauri::command]
 #[specta::specta]
+async fn sidebar_set_hidden(caller: WebviewWindow, hidden: bool) {
+    if !authorize(&caller, CallerPolicy::Main, "sidebar_set_hidden") {
+        return;
+    }
+    let Some(shell) = caller
+        .try_state::<Handle>()
+        .map(|state| state.inner().clone())
+    else {
+        return;
+    };
+    // Showing waits for the floating column to go back beneath the page and
+    // hiding does not, so two quick toggles could land out of order. Only the
+    // newest request changes anything, and it holds the lock until the shell
+    // has it.
+    static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static APPLYING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let request = REQUEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+    let _applying = APPLYING.lock().await;
+    if REQUEST.load(std::sync::atomic::Ordering::Acquire) != request {
+        return;
+    }
+    // A column left floating over the page would cover it once the page
+    // moves back beside the column.
+    #[cfg(target_os = "macos")]
+    {
+        if !hidden {
+            platform::imp::set_sidebar_overlay(&caller, false, MIN_SIDEBAR_WIDTH).await;
+        }
+        platform::imp::set_sidebar_hidden(&caller, hidden);
+    }
+    shell.dispatch(Command::SetSidebarHidden(hidden));
+}
+
+/// Floats the hidden sidebar, `width` wide, over the page, or puts it back
+/// beneath. `null` when it could not; otherwise whether the pointer is on the
+/// column's side once it stands. Only macOS can raise the chrome over pages;
+/// elsewhere this refuses.
+#[tauri::command]
+#[specta::specta]
+async fn sidebar_overlay(caller: WebviewWindow, raised: bool, width: f64) -> Option<bool> {
+    if !authorize(&caller, CallerPolicy::Main, "sidebar_overlay") || !sidebar_width_in_bounds(width)
+    {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        platform::imp::set_sidebar_overlay(&caller, raised, width).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = raised;
+        None
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn sidebar_resize(caller: WebviewWindow, width: f64, enabled: bool, revision: f64) -> bool {
     let Some(revision) = sidebar_resize_revision(revision) else {
         return false;
@@ -5597,7 +5656,10 @@ fn build_menu(
         .item(&item("zoom.out")?)
         .item(&item("zoom.reset")?)
         .separator()
-        .item(&item("sidebar.toggleCompact")?)
+        .item(&item("sidebar.toggleCompact")?);
+    #[cfg(target_os = "macos")]
+    let view = view.item(&item(SIDEBAR_HIDDEN_COMMAND)?);
+    let view = view
         .item(&appearance)
         .separator()
         .item(&item("url.focus")?)
@@ -5746,6 +5808,7 @@ const TAB_MENU_CLEAR_SITE_DATA_COMMAND: &str = "tab.clearSiteData";
 
 /// Registry command delivered to the frame, which owns sidebar presentation.
 const SIDEBAR_COMPACT_COMMAND: &str = "sidebar.toggleCompact";
+const SIDEBAR_HIDDEN_COMMAND: &str = "sidebar.toggleHidden";
 
 /// The rail cannot show a navigation cluster, so the collapsed menu carries
 /// the whole one rather than a subset of it.

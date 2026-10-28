@@ -13,6 +13,7 @@
   import { tabs } from "$domain/tabs";
   import { surface } from "$domain/surface";
   import { uiCommands as ui } from "$domain/ui-commands";
+  import { isHidden, isPeeking, peek } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
@@ -20,7 +21,7 @@
   import CaptureControl from "$shared/ui/CaptureControl";
   import { preferences } from "$domain/preferences";
   import * as find from "../lib/find.svelte";
-  import { flushSync, untrack, type Snippet } from "svelte";
+  import { flushSync, tick, untrack, type Snippet } from "svelte";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import {
     addressSecurity,
@@ -121,11 +122,31 @@
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
     // At rail width the field is not drawn; the launcher stands in for it.
     const tab = untrack(() => tabs.activeTab());
-    if (compact && tab?.url && (tab.content ?? "web") === "web") {
+    // A hidden column is not on screen either, unless it has been called up.
+    const offscreen = untrack(() => isHidden() && !isPeeking());
+    if ((compact || offscreen) && tab?.url && (tab.content ?? "web") === "web") {
       // Work has no page in front, so there the launcher opens empty.
       if (untrack(() => surface.currentPage()) === "work")
         void commands.runCommand("launcher.toggle");
       else void commands.launcherEdit(tab.id, tab.url);
+      return;
+    }
+    // Without a page to edit, the field itself is wanted: the hidden column
+    // floats up first, since its fields take no focus while it is away. The
+    // focused field then holds it up until the person moves on. A rail has
+    // no field to show, so there the launcher stands in, as above.
+    if (offscreen && compact) {
+      void commands.runCommand("launcher.toggle");
+      return;
+    }
+    if (offscreen) {
+      const field = input;
+      void peek().then(async (onSide) => {
+        if (onSide === null) return;
+        await tick();
+        field.focus();
+        field.select();
+      });
       return;
     }
     input.focus();

@@ -1,7 +1,8 @@
 //! Native check of the pointer cover: a canvas web view beneath a native pane
 //! parks its tracking areas while the cover holds it, still takes hits, and
 //! gets the areas back when the pane hides, the last cover goes, or the
-//! window stops being key. Moves the system pointer into the window, so it
+//! window stops being key, and follows a change of the views' order. Moves
+//! the system pointer into the window, so it
 //! needs a desktop session; the pointer is put back at the end. Synthetic
 //! enter and exit events do not reach the window, so the cover is re-read
 //! with `sync` where AppKit would have sent them.
@@ -14,7 +15,7 @@ fn main() {
     use objc2::rc::Retained;
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-        NSScreen, NSWindow, NSWindowStyleMask,
+        NSScreen, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
     };
     use objc2_core_foundation::CGPoint;
     use objc2_core_graphics::CGWarpMouseCursorPosition;
@@ -139,6 +140,28 @@ fn main() {
     window.makeKeyAndOrderFront(None);
     pump(0.5);
     check("a keyed window parks it again", areas() == 0);
+
+    // A canvas raised over the cover is no longer beneath it, and one
+    // lowered again is; the order alone changing is not announced.
+    // SAFETY: a main-thread read of the canvas's parent.
+    let parent = unsafe { canvas_view.superview() }.expect("canvas parent");
+    parent.addSubview_positioned_relativeTo(
+        &canvas_view,
+        NSWindowOrderingMode::Above,
+        Some(&pane_view),
+    );
+    pointer_cover::resync_all();
+    check(
+        "a canvas raised over the cover is released",
+        areas() == live,
+    );
+    parent.addSubview_positioned_relativeTo(
+        &canvas_view,
+        NSWindowOrderingMode::Below,
+        Some(&pane_view),
+    );
+    pointer_cover::resync_all();
+    check("lowered beneath it again, it is parked", areas() == 0);
 
     // Two covers over one canvas: it returns only when both have let go.
     let second = pointer_cover::PointerCover::attach(&pane_view).expect("second cover");

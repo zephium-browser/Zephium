@@ -5,6 +5,7 @@ pub const KEYS: &[&str] = &[
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
+    "sidebar.hidden",
     "ui.accent",
     "ui.material",
     "ui.reduce-motion",
@@ -293,7 +294,8 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "time.track"
         | "performance.sleep"
         | "updates.auto-check"
-        | "focus.breaks" => {
+        | "focus.breaks"
+        | "sidebar.hidden" => {
             matches!(value, "true" | "false")
         }
         _ => false,

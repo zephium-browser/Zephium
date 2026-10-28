@@ -25,6 +25,8 @@ thread_local! {
     /// How many covers hold each canvas parked, by view address, so two panes
     /// over one canvas release it only when the pointer has left both.
     static HELD: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+    /// Every live cover, for a sibling order changed under them.
+    static COVERS: RefCell<Vec<Weak<Cover>>> = const { RefCell::new(Vec::new()) };
 }
 
 struct CoverIvars {
@@ -207,6 +209,10 @@ impl PointerCover {
             }
         }
         cover.sync();
+        COVERS.with_borrow_mut(|covers| {
+            covers.retain(|cover| cover.load().is_some());
+            covers.push(Weak::from_retained(&cover));
+        });
         Some(Self(cover))
     }
 
@@ -214,6 +220,18 @@ impl PointerCover {
     /// the covering view hiding, closing or moving under a still pointer.
     pub(crate) fn sync(&self) {
         self.0.sync();
+    }
+}
+
+/// Parks afresh beneath every cover after the views' order changed: one view
+/// raised above a cover is no longer beneath it, and one lowered now is. The
+/// order alone changing is not something AppKit announces.
+pub fn resync_all() {
+    let covers: Vec<_> =
+        COVERS.with_borrow(|covers| covers.iter().filter_map(Weak::load).collect());
+    for cover in covers {
+        cover.release();
+        cover.sync();
     }
 }
 

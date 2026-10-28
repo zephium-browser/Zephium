@@ -1,4 +1,7 @@
-//! Native pointer feedback for the Svelte sidebar. Only release changes layout.
+//! Native pointer capture for the Svelte sidebar. An expanded column follows
+//! the pointer and stops at its narrowest; released well past that, it hides
+//! and the page takes its place. It never folds into the rail. The rail's own
+//! drag out is a change of shape, which waits for release.
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -7,12 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dispatch2::MainThreadBound;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
+use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
-    NSWindowDidResizeNotification, NSWindowOrderingMode, NSWindowWillCloseNotification,
-    NSWorkspace,
+    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSView, NSWindow,
+    NSWindowDidResignKeyNotification, NSWindowDidResizeNotification, NSWindowOrderingMode,
+    NSWindowWillCloseNotification, NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol,
@@ -22,7 +24,15 @@ use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
 use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-type Commit = Rc<dyn Fn(f64, u64)>;
+/// What a released (or abandoned) drag asks the column for.
+#[derive(Clone, Copy)]
+pub(super) enum Release {
+    /// A width, travelling for a change of shape.
+    Width { width: f64, travel: bool },
+    /// Hide the column; it comes back at `width`.
+    Hide { width: f64 },
+}
+type Commit = Rc<dyn Fn(Release, u64)>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -30,14 +40,17 @@ pub(super) fn publish_revision(revision: u64) -> bool {
 fn revision_current(revision: u64) -> bool {
     REVISION.load(Ordering::Acquire) == revision
 }
-// The hot zone overlaps the sidebar by only 2pt and otherwise covers the empty
-// gap before the content, so the tab list's edge and overlay scrollbar stay
-// reachable underneath it.
-const HOT_WIDTH: f64 = 8.0;
 /// The chrome draws the window's gutter before the column, so the column's
 /// edge is this far in from the chrome's own.
-const GUTTER: f64 = 8.0;
+pub(super) const GUTTER: f64 = 8.0;
+/// The gap between the column and the page.
+pub(super) const GAP: f64 = 8.0;
+// The hot zone overlaps the sidebar by only 2pt, so the tab list's edge and
+// overlay scrollbar stay reachable underneath it, fills the gap, and reaches
+// a little over the page's edge, where the pointer tends to land.
 const HOT_INSET: f64 = 2.0;
+const HOT_OUTSET: f64 = 6.0;
+const HOT_WIDTH: f64 = HOT_INSET + GAP + HOT_OUTSET;
 const SNAP: f64 = 140.0;
 const MIN_EXPANDED: f64 = 180.0;
 
@@ -47,6 +60,11 @@ struct Capture {
     original: f64,
     pending: f64,
     revision: u64,
+    /// An expanded column resizes as it is dragged. The rail does not: its
+    /// way out is a change of shape, which only release makes.
+    live: bool,
+    /// The width the column was last given during the drag.
+    applied: f64,
 }
 
 struct Observers {
@@ -104,7 +122,6 @@ pub struct Ivars {
     generation: Cell<u64>,
     capture: Cell<Option<Capture>>,
     guide: RefCell<Option<Retained<NSView>>>,
-    tracking: RefCell<Option<Retained<NSTrackingArea>>>,
     observers: RefCell<Option<Observers>>,
     commit: Commit,
 }
@@ -116,19 +133,6 @@ define_class!(
     #[ivars = Ivars]
     pub(super) struct Control;
     impl Control {
-        #[unsafe(method(updateTrackingAreas))]
-        fn update_tracking(&self) {
-            let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
-            if self.ivars().tracking.try_borrow().is_ok_and(|area| area.is_some()) { return; }
-            let options = NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveInKeyWindow | NSTrackingAreaOptions::InVisibleRect;
-            // SAFETY: this main-thread NSView is the owner of these two callbacks.
-            let area = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, options, Some(self), None) };
-            if let Ok(mut stored) = self.ivars().tracking.try_borrow_mut() {
-                if stored.is_some() { return; }
-                *stored = Some(area.clone());
-            } else { return; }
-            self.addTrackingArea(&area);
-        }
         #[unsafe(method(resetCursorRects))]
         #[allow(deprecated)]
         fn reset_cursor_rects(&self) {
@@ -141,10 +145,6 @@ define_class!(
         fn can_move_window(&self) -> bool { false }
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
-        #[unsafe(method(mouseEntered:))]
-        fn entered(&self, _event: &NSEvent) { if self.ivars().enabled.get() { self.feedback(self.ivars().width.get(), false); } }
-        #[unsafe(method(mouseExited:))]
-        fn exited(&self, _event: &NSEvent) { if self.ivars().capture.get().is_none() { self.cancel(false); } }
         #[unsafe(method(viewDidMoveToWindow))]
         fn moved(&self) {
             let _: () = unsafe { msg_send![super(self), viewDidMoveToWindow] };
@@ -157,9 +157,10 @@ define_class!(
             if !self.ivars().enabled.get() || !revision_current(self.ivars().revision.get()) { return; }
             let Some(window) = self.window() else { return };
             let original = self.ivars().width.get();
-            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get() }));
+            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get(), live: original >= MIN_EXPANDED, applied: original }));
             if !self.install_observers(window) { self.cancel(false); return; }
-            self.feedback(original, true);
+            // A live drag is its own feedback; the rail's drag previews its landing.
+            if original < MIN_EXPANDED { self.feedback(guide_x(original)); }
         }
         #[unsafe(method(mouseDragged:))]
         fn dragged(&self, event: &NSEvent) {
@@ -172,9 +173,25 @@ define_class!(
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-            self.ivars().capture.set(Some(capture));
-            // Preview where release will land, including the rail snap.
-            self.feedback(resolved_width(capture.pending), true);
+            let landing = resolved_width(capture.pending, capture.live);
+            if capture.live {
+                // Past the narrowest, release hides the column; the guide
+                // stands where the page will then begin.
+                if hides(requested, &capture) { self.feedback(HIDE_GUIDE_X); } else { self.clear_guide(); }
+                let changed = (landing - capture.applied).abs() >= 0.5;
+                if changed { capture.applied = landing; }
+                self.ivars().capture.set(Some(capture));
+                if changed {
+                    self.ivars().width.set(landing);
+                    super::sidebar_overlay::set_column(landing);
+                    self.place();
+                    (self.ivars().commit)(Release::Width { width: landing, travel: false }, capture.revision);
+                }
+            } else {
+                self.ivars().capture.set(Some(capture));
+                // The rail's way out lands on release; the guide shows where.
+                self.feedback(guide_x(landing));
+            }
         }
         #[unsafe(method(mouseUp:))]
         fn up(&self, event: &NSEvent) {
@@ -182,13 +199,19 @@ define_class!(
             let Some(capture) = self.ivars().capture.get() else { return };
             if !revision_current(capture.revision) { self.cancel(false); return; }
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
-            let width = resolved_width(if requested.is_finite() { requested } else { capture.pending });
+            let width = resolved_width(if requested.is_finite() { requested } else { capture.pending }, capture.live);
             let generation = self.ivars().generation.get();
-            self.feedback(width, true);
+            let shape = !capture.live;
+            let hide = requested.is_finite() && hides(requested, &capture);
+            if shape { self.feedback(guide_x(width)); }
             if self.ivars().generation.get() != generation { return; }
             self.cancel(true);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision); }
+            if !revision_current(capture.revision) { return; }
+            // A drag that followed the pointer is already there; a change of
+            // shape travels, which also covers the chrome's repaint.
+            if hide { (self.ivars().commit)(Release::Hide { width: capture.original }, capture.revision); return; }
+            if shape || (width - capture.applied).abs() >= 0.5 { (self.ivars().commit)(Release::Width { width, travel: shape }, capture.revision); }
         }
     }
 );
@@ -220,7 +243,6 @@ impl Control {
             generation: Cell::new(0),
             capture: Cell::new(None),
             guide: RefCell::new(None),
-            tracking: RefCell::new(None),
             observers: RefCell::new(None),
             commit,
         });
@@ -237,7 +259,14 @@ impl Control {
         };
         let frame = chrome.frame();
         let width = self.ivars().width.get();
-        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < GUTTER + width;
+        // A live drag widens the column before the chrome has grown to it.
+        let growing = self
+            .ivars()
+            .capture
+            .get()
+            .is_some_and(|capture| capture.live);
+        let hidden =
+            !self.ivars().enabled.get() || (!growing && frame.size.width + 0.5 < GUTTER + width);
         let target = NSRect::new(
             NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
@@ -267,7 +296,8 @@ impl Control {
             }
         }
     }
-    fn feedback(&self, width: f64, dragging: bool) {
+    /// Draws the guide `x` points in from the chrome's edge.
+    fn feedback(&self, x: f64) {
         let Some(chrome) = self.ivars().chrome.load() else {
             return;
         };
@@ -277,17 +307,9 @@ impl Control {
         };
         let generation = self.ivars().generation.get();
         let frame = chrome.frame();
-        let height = if dragging {
-            frame.size.height
-        } else {
-            28.0_f64.min(frame.size.height)
-        };
         let target = NSRect::new(
-            NSPoint::new(
-                frame.origin.x + GUTTER + width - 2.0,
-                frame.origin.y + (frame.size.height - height) / 2.0,
-            ),
-            NSSize::new(2.0, height),
+            NSPoint::new(frame.origin.x + x, frame.origin.y),
+            NSSize::new(2.0, frame.size.height),
         );
         let existing = self
             .ivars()
@@ -326,22 +348,49 @@ impl Control {
         view.setFrame(target);
         if let Some(layer) = view.layer() {
             let paint = block2::RcBlock::new(|| {
-                let color = if dragging {
-                    NSColor::labelColor()
-                } else {
-                    NSColor::secondaryLabelColor()
-                };
-                layer.setBackgroundColor(Some(&color.CGColor()));
+                layer.setBackgroundColor(Some(&NSColor::labelColor().CGColor()));
             });
             self.effectiveAppearance()
                 .performAsCurrentDrawingAppearance(&paint);
             layer.setCornerRadius(1.0);
-            layer.setOpacity(if dragging { 0.9 } else { 0.65 });
+            layer.setOpacity(0.9);
         }
         CATransaction::commit();
         if !self.guide_current(&view, generation) {
             view.removeFromSuperview();
         }
+    }
+    fn clear_guide(&self) {
+        let guide = self
+            .ivars()
+            .guide
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut guide| guide.take());
+        if let Some(guide) = guide {
+            guide.removeFromSuperview();
+        }
+    }
+    /// Escape gives back the width the drag started from.
+    fn restore(&self) {
+        let Some(capture) = self.ivars().capture.get() else {
+            return;
+        };
+        if !capture.live
+            || (capture.applied - capture.original).abs() < 0.5
+            || !revision_current(capture.revision)
+        {
+            return;
+        }
+        self.ivars().width.set(capture.original);
+        self.place();
+        (self.ivars().commit)(
+            Release::Width {
+                width: capture.original,
+                travel: false,
+            },
+            capture.revision,
+        );
     }
     fn guide_current(&self, view: &NSView, generation: u64) -> bool {
         self.ivars().generation.get() == generation
@@ -353,7 +402,7 @@ impl Control {
             })
     }
     fn cancel(&self, fade: bool) {
-        self.ivars().capture.set(None);
+        let captured = self.ivars().capture.take().is_some();
         self.ivars()
             .generation
             .set(self.ivars().generation.get().wrapping_add(1));
@@ -370,6 +419,9 @@ impl Control {
             .ok()
             .and_then(|mut observers| observers.take());
         drop(observers);
+        if captured {
+            super::sidebar_overlay::capture_ended();
+        }
         if let Some(guide) = guide {
             if !fade || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
                 guide.removeFromSuperview();
@@ -409,6 +461,7 @@ impl Control {
                 let canceled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(control) = weak.load() {
                         if control.ivars().generation.get() == generation {
+                            control.restore();
                             control.cancel(false);
                             return true;
                         }
@@ -569,13 +622,27 @@ pub(super) fn configure(
         }
         control
     };
-    if control.ivars().capture.get().is_some() || control.ivars().width.get() != width || !enabled {
+    // A live drag publishes widths as it goes, and the frame echoes each one
+    // back, late; the drag owns the width until release.
+    let dragging = enabled
+        && control
+            .ivars()
+            .capture
+            .get()
+            .is_some_and(|capture| capture.live && capture.revision == revision);
+    if !dragging
+        && (control.ivars().capture.get().is_some()
+            || control.ivars().width.get() != width
+            || !enabled)
+    {
         control.cancel(false);
     }
     if !configuration_current(epoch, generation, revision) || !registered(&control, generation) {
         return false;
     }
-    control.ivars().width.set(width);
+    if !dragging {
+        control.ivars().width.set(width);
+    }
     control.ivars().enabled.set(enabled);
     control.ivars().revision.set(revision);
     control.place();
@@ -615,6 +682,20 @@ pub(super) fn column_width(width: f64) {
         disable();
     }
 }
+/// Whether `view` is the resize control or its guide, which stand above the
+/// floating column so it can be resized.
+pub(super) fn is_own(view: &NSView) -> bool {
+    view.isKindOfClass(Control::class()) || view.isKindOfClass(Guide::class())
+}
+/// Whether a drag holds the pointer.
+pub(super) fn capturing() -> bool {
+    CONTROL.with(|slot| {
+        slot.try_borrow().ok().is_some_and(|slot| {
+            slot.as_ref()
+                .is_some_and(|(_, control)| control.ivars().capture.get().is_some())
+        })
+    })
+}
 pub(super) fn refresh() {
     let control = CONTROL.with(|slot| {
         slot.try_borrow()
@@ -642,8 +723,29 @@ pub(super) fn dispose(generation: Option<u64>) {
         control.removeFromSuperview();
     }
 }
-fn resolved_width(width: f64) -> f64 {
-    if !width.is_finite() || width < SNAP {
+/// The guide for a column `width` wide: at the page's edge, where the hot
+/// zone ends, not the column's.
+fn guide_x(width: f64) -> f64 {
+    GUTTER + width + GAP - 2.0
+}
+/// The guide for a release that hides the column: where the page will begin.
+const HIDE_GUIDE_X: f64 = GUTTER - 2.0;
+/// An expanded column dragged this far short of its narrowest hides. One
+/// already floating over the page is hidden, and stops at its narrowest.
+fn hides(requested: f64, capture: &Capture) -> bool {
+    capture.live && requested < SNAP && !super::sidebar_overlay::floating()
+}
+/// Where a drag lands. An expanded column stops at its narrowest; only the
+/// rail's drag can stay on the rail, when it does not reach the snap.
+fn resolved_width(width: f64, expanded: bool) -> f64 {
+    if !width.is_finite() {
+        return if expanded {
+            MIN_EXPANDED
+        } else {
+            MIN_SIDEBAR_WIDTH
+        };
+    }
+    if !expanded && width < SNAP {
         MIN_SIDEBAR_WIDTH
     } else {
         width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)

@@ -272,6 +272,9 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
+        if let Some(win) = self.windows.get_mut(window) {
+            win.metrics.sidebar_hidden = self.pending_sidebar_hidden;
+        }
         // Starting with a new tab, or with pages, keeps every restored tab
         // where it was and loads none of them. A link that launched the browser is its own
         // new tab, and a blank tab left in front already is one.

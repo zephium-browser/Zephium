@@ -79,6 +79,7 @@ pub(crate) use work_observation_presentation::retained_page_hidden;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
 mod pointer_cover;
+pub use pointer_cover::resync_all as resync_pointer_covers;
 mod stage;
 mod webext_action_icon;
 

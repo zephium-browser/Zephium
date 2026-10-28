@@ -10,9 +10,16 @@
     COMPACT_WIDTH,
     PANEL_GAP,
     effectiveWidth,
+    holdHidden,
     isCompact,
+    isHidden,
+    isPeeking,
+    peek,
+    sidebarResizeActive,
     sidebarResizeSettlement,
+    toggleHidden,
     toggleMode,
+    unpeek,
   } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import SidebarHeader from "./SidebarHeader.svelte";
@@ -62,6 +69,13 @@
   let navigating = $derived(settings);
   let paneled = $derived(settings || tools.activeTool() !== null);
   let compact = $derived(navigating || railPage || isCompact() || tools.activeTool() !== null);
+  // Settings, a tool or a rail page stands beside the column, so it cannot hide.
+  $effect(() => {
+    const held = navigating || railPage || tools.activeTool() !== null;
+    untrack(() => holdHidden(held));
+  });
+  let hidden = $derived(isHidden());
+  let peeking = $derived(isPeeking());
 
   // A change of shape is one continuous change: every mark travels from the
   // old shape into the new one while native slides the page to match. Not
@@ -148,13 +162,100 @@
   // own view can leave standing; leaving the document or the window losing
   // focus ends it too.
   let pointerIn = $state(false);
+  // A hidden column floats in as the pointer reaches the window's left edge,
+  // or passes beyond it, and leaves as soon as the pointer has gone, unless
+  // something in it still holds the person: an open menu, the field they are
+  // typing in, or a resize. Native says where the pointer is; the column's
+  // side spans it and an allowance over the page beside it, so a pointer that
+  // strays a little past its edge keeps it, as in Arc.
+  let aside = $state<HTMLElement>();
+  let leaving: ReturnType<typeof setTimeout> | undefined;
+  let over = false;
+  // Counts what native says about the pointer, and window blurs. Native only
+  // reports a departure once the column is up, so anything counted while it
+  // rises is newer than the answer raising gives, and wins over it.
+  let heard = 0;
+  const LEAVE_DELAY = 0;
+  // The slide, both ways; matches --sidebar-slide below.
+  const LEAVE_SLIDE = 200;
+  function stay() {
+    clearTimeout(leaving);
+    leaving = undefined;
+  }
+  function holding() {
+    if (sidebarResizeActive()) return true;
+    // An open panel or popup, which would vanish with the column. Not an
+    // expanded folder: it stays open, and would hold the column up for good.
+    if (
+      aside?.querySelector(
+        '.sidebar-softens[data-open="true"], [aria-haspopup][aria-expanded="true"]',
+      )
+    )
+      return true;
+    // Only while this document has the keyboard: a field keeps being the
+    // active element after the person has moved on to a page, which would
+    // otherwise hold the column up for good.
+    const active = document.activeElement;
+    return (
+      document.hasFocus() &&
+      active instanceof HTMLInputElement &&
+      active.type !== "button" &&
+      !!aside?.contains(active)
+    );
+  }
+  // Scheduled even before the column is up: the pointer can leave while it
+  // is still being raised.
+  function leave() {
+    if (!hidden) return;
+    stay();
+    leaving = setTimeout(() => {
+      leaving = undefined;
+      if (!peeking || over || holding()) return;
+      unpeek(LEAVE_SLIDE);
+    }, LEAVE_DELAY);
+  }
+  $effect(() => () => clearTimeout(leaving));
+  // Native watches the window's edge while the column is hidden, and the
+  // floating column while it is up: this page cannot see the pointer reach
+  // the edge from over a page.
+  $effect(() => {
+    const edge = (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail?.inside !== "boolean") return;
+      heard++;
+      over = event.detail.inside;
+      if (over) {
+        stay();
+        const asked = heard;
+        void peek().then((onSide) => {
+          if (onSide === null) return;
+          if (heard === asked) over = onSide;
+          if (!over) leave();
+        });
+      } else {
+        pointerIn = false;
+        leave();
+      }
+    };
+    window.addEventListener("zephium:sidebar-edge", edge);
+    return () => window.removeEventListener("zephium:sidebar-edge", edge);
+  });
+  $effect(() => {
+    if (!hidden) stay();
+  });
   $effect(() => {
     const out = () => (pointerIn = false);
+    // Native watches only the key window, so leaving it ends the watch.
+    const blur = () => {
+      out();
+      heard++;
+      over = false;
+      leave();
+    };
     document.documentElement.addEventListener("mouseleave", out);
-    window.addEventListener("blur", out);
+    window.addEventListener("blur", blur);
     return () => {
       document.documentElement.removeEventListener("mouseleave", out);
-      window.removeEventListener("blur", out);
+      window.removeEventListener("blur", blur);
     };
   });
 
@@ -168,6 +269,7 @@
     // shape changed mid-pass re-renders before the old shape is measured,
     // so nothing could travel from it.
     if (command.id === "sidebar.toggleCompact") queueMicrotask(toggleShape);
+    if (command.id === "sidebar.toggleHidden") queueMicrotask(toggleHidden);
   });
 
   function toggleShape() {
@@ -177,8 +279,10 @@
 </script>
 
 <aside
+  bind:this={aside}
   data-tauri-drag-region="deep"
   aria-label={m.ui_browser_sidebar()}
+  inert={hidden && !peeking}
   style:width={`${width}px`}
   style:--sidebar-width={`${width}px`}
   data-menu-material={IS_WINDOWS && !settings ? "opaque" : undefined}
@@ -186,11 +290,17 @@
   data-sidebar-resize-settling={resizeSettling}
   data-header-fresh={headerFresh}
   data-pointer-in={pointerIn}
-  onpointerenter={() => (pointerIn = true)}
+  data-hidden={hidden}
+  data-peek={hidden && peeking}
+  onpointerenter={() => {
+    pointerIn = true;
+    stay();
+  }}
   onpointerleave={() => (pointerIn = false)}
+  onfocusout={leave}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
+  {#if (!hidden || peeking) && !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
       {width}
       disabled={reshaping}
     />{/if}
@@ -241,5 +351,45 @@
     :global([data-under-panel]) {
       transition: none;
     }
+  }
+
+  /* Hidden, the column leaves the row to the page and waits off the window's
+     edge. Called up, it floats over the page on a solid card, its edge drawn
+     out into the gutter around it. */
+  .browser-sidebar[data-hidden="true"] {
+    --sidebar-slide: 200ms;
+
+    position: fixed;
+    inset-block: 8px;
+    inset-inline-start: 8px;
+    z-index: 30;
+    border-radius: var(--content-radius);
+    background: var(--color-float);
+    box-shadow:
+      0 0 0 8px var(--color-float),
+      var(--shadow-menu);
+    translate: calc(-100% - 24px) 0;
+
+    /* Leaving keeps one even pace: an arriving curve would cover most of
+       the way in its first beat. */
+    transition: translate var(--sidebar-slide) cubic-bezier(0.37, 0, 0.63, 1);
+
+    /* The slide is where the column is, not decoration. Like the page's own
+       slide as the column hides or shows, which native draws whatever the
+       motion setting, it stays under reduced motion, which otherwise
+       collapses every transition to a frame. */
+    transition-duration: var(--sidebar-slide) !important;
+  }
+
+  /* Arriving settles in on the curve of the page's own slide. */
+  .browser-sidebar[data-peek="true"] {
+    translate: 0 0;
+    transition: translate var(--sidebar-slide) var(--ease-emphasized);
+    transition-duration: var(--sidebar-slide) !important;
+  }
+
+  /* The new tab fills the window, flush with its edge as a page would be. */
+  :global(.shell:has(> .browser-sidebar[data-hidden="true"]) > main) {
+    padding-inline-start: 0;
   }
 </style>

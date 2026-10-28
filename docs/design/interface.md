@@ -107,10 +107,21 @@ already in the backend needs a visible home, and this is the honest answer to
 
 ## 4. Compact mode
 
-Two modes only: Default (240-280px) and Compact (~52px, icons). No hidden mode.
+Two shapes: Default (180-460px) and Compact (~52px, icons). Dragging the
+default column's edge resizes it live and stops at its narrowest; it never
+folds into Compact, which is a deliberate toggle (Cmd+Shift+S).
 
-**Compact never hover-expands.** An expanding overlay would have to cover page
-pixels, which we cannot do, and hover-expand is twitchy regardless.
+**Compact never hover-expands.** Hover-expand of a rail is twitchy, and the rail
+is already a complete way to browse.
+
+**Hidden (macOS)** is the one place the column floats over the page, as in Arc.
+Ctrl+Cmd+S, or releasing a drag well past the column's narrowest, hides it: the
+page takes its place and the window controls leave with it. The pointer reaching the
+window's left edge (or passing beyond it) slides the column in over the page;
+leaving the column and a 75px allowance beside it slides it away at once. Native
+raises the chrome view over the page stage for exactly that time and watches the
+pointer itself, since the chrome cannot see it from beneath a page. Windows and
+Linux cannot raise the chrome over pages yet, so the mode is macOS only.
 
 - Essentials become a vertical icon rail; tabs become favicons with an active bar.
 - The address field collapses to a search icon that **opens the launcher**. This
