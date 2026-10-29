@@ -249,11 +249,40 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   ├── zephium-agentic          pure browser-execution identity, lifecycle,
 │   │                            semantic, action, policy, and probe contracts;
 │   │                            native fixtures remain release-excluded.
+│   ├── zephium-agent-runtime    platform-independent execution ownership for
+│   │                            browser agents; owns neither a browser
+│   │                            implementation nor a provider.
+│   ├── zephium-agent-controller bounded, policy-authorized semantic browser
+│   │                            controllers.
+│   ├── zephium-agent-provider-transport
+│   │                            safe facade over the optional provider
+│   │                            transport runtime.
 │   ├── zephium-agent-model-catalog
 │   │                            product-owned immutable Terra provider model,
 │   │                            tokenizer, and standard-rate pricing entry.
 │   ├── zephium-work-composition optional trusted macOS engine/Store adapter to
 │   │                            durable Work admission; no UI or task authority.
+│   ├── zephium-account          optional Zephium account: passwordless email
+│   │                            sign-in, OS-vault session, plan/usage/billing.
+│   ├── zephium-credentials      bounded OS-vault secrets: Windows Credential
+│   │                            Manager, macOS Keychain.
+│   ├── zephium-decision         typed probabilistic answers over code-
+│   │                            enumerated options.
+│   ├── zephium-import           reads bookmarks/history from other installed
+│   │                            browsers.
+│   ├── zephium-mcp              bounded MCP client over the official SDK
+│   │                            (rmcp); server output is data, never
+│   │                            instructions.
+│   ├── zephium-notes            Markdown notes stored as files the person owns.
+│   ├── zephium-page-assist      pure core for page-scoped AI: framing,
+│   │                            citation, pacing.
+│   ├── zephium-private-fs       fail-closed filesystem primitives for browser-
+│   │                            owned private data.
+│   ├── zephium-terra-macos-probe
+│   │                            explicit, release-excluded live Terra semantic-
+│   │                            action qualification.
+│   ├── zephium-voice            Work-bar dictation: mic, live level, on-device
+│   │                            or cloud transcription.
 │   ├── zephium-ipc              DTOs + specta/tauri-specta TS codegen.
 │   ├── zephium-engine           Wry adapter + native stage per platform
 │   │                            (stage_macos / stage_windows / stage_linux,
@@ -267,18 +296,12 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   │                            package storage, rollback/clock authority.
 │   ├── zephium-blocker-service  candidate preparation, durable commit, and
 │   │                            exact compiler activation coordinator.
-│   ├── zephium-extension-package bounded manifests, catalogs, tree indexes,
-│   │                            portable paths, and CRX3 authentication.
-│   ├── zephium-extension-acquisition catalog-bound hostile ZIP preflight and
-│   │                            bounded streaming decompression.
-│   ├── zephium-extension-authority product-sealed catalog/manifest policy.
-│   ├── zephium-extension-distribution fixed-origin authenticated catalog and
-│   │                            one-at-a-time CRX/legal object acquisition.
-│   ├── zephium-extension-repository immutable package materialization, atomic
-│   │                            catalog sets, leases, rollback, recovery, GC.
-│   ├── zephium-extension-runtime-api move-only native host authority.
-│   ├── zephium-extension-service serialized Store/repository/native lifecycle
-│   │                            and management transactions.
+│   ├── zephium-webext           Chrome extension packages: CRX3 verification,
+│   │                            safe extraction, manifests.
+│   ├── zephium-webext-macos     WKWebExtension runtime for Chrome extensions on
+│   │                            macOS.
+│   ├── zephium-webext-windows   Windows extension qualification; not yet wired
+│   │                            into the browser.
 │   ├── zephium-store            SQLite actor, migrations, FTS5, fakes.
 │   └── zephium-app              the actor shell: owns composed core state,
 │                                drives ports, builds projections.
