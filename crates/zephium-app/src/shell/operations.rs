@@ -1025,6 +1025,8 @@ impl Shell {
             ),
             "space.next" => self.operation_space(crate::SpaceCommand::Step(1)),
             "space.previous" => self.operation_space(crate::SpaceCommand::Step(-1)),
+            "profile.next" => self.operation_step_profile(true),
+            "profile.previous" => self.operation_step_profile(false),
             id if id.starts_with("space.select.") => id["space.select.".len()..]
                 .parse::<usize>()
                 .ok()
