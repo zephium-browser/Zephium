@@ -77,6 +77,22 @@ impl State {
         self.pending = None;
         self.model.search();
     }
+    /// Holds the launcher for one action until it settles, so a second one
+    /// cannot hide the outcome of the first.
+    fn arm(&mut self, id: &str, context: &SearchContext, background: bool) -> bool {
+        if !self.model.admits(context) || self.pending.is_some() {
+            return false;
+        }
+        self.model.clear_error();
+        self.pending = Some(Pending {
+            id: id.into(),
+            background,
+        });
+        true
+    }
+    fn settle(&mut self, id: &str) -> Option<Pending> {
+        self.pending.take_if(|pending| pending.id == id)
+    }
 }
 #[derive(Clone)]
 pub struct Overlay {
@@ -469,38 +485,20 @@ impl Overlay {
         self.state().model.context(request_id)
     }
     pub fn arm_action(&self, id: &str, context: &SearchContext, background: bool) -> bool {
-        {
-            let mut state = self.state();
-            if !state.model.admits(context) || state.pending.is_some() {
-                return false;
-            }
-            state.model.clear_error();
-            state.pending = Some(Pending {
-                id: id.into(),
-                background,
-            });
+        if !self.state().arm(id, context, background) {
+            return false;
         }
         self.on_main(|this| this.publish());
         true
     }
     pub fn action_rejected(&self, id: &str) {
-        let mut state = self.state();
-        if state
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.id == id)
-        {
-            state.pending = None;
-        }
+        let _ = self.state().settle(id);
     }
     pub fn operation(&self, result: OperationDisposition) {
         self.on_main(move |this| {
             let old_session = this.state().model.session();
             let mut state = this.state();
-            let Some(pending) = state
-                .pending
-                .take_if(|pending| pending.id == result.operation_id)
-            else {
+            let Some(pending) = state.settle(&result.operation_id) else {
                 return;
             };
             let accepted = matches!(
@@ -1042,5 +1040,67 @@ mod context_cache_tests {
         assert_eq!(cache.search_private(&stale), None);
         cache.0.lock().unwrap().as_mut().unwrap().space = "next".into();
         assert_eq!(cache.newtab_context("tab", 8).unwrap().space_id, "next");
+    }
+}
+
+#[cfg(test)]
+mod action_barrier_tests {
+    use super::*;
+    fn presented() -> State {
+        let mut model = Model::default();
+        model.set_owner(Some(Owner {
+            private: false,
+            window: "window".into(),
+            profile: "profile".into(),
+            name: "Personal".into(),
+            space: "space".into(),
+        }));
+        model.search();
+        State {
+            model,
+            pending: None,
+            content_height: geometry::INITIAL_HEIGHT,
+            layout_revision: 0,
+            placement: None,
+            pending_document: None,
+            focus_revision: 0,
+            focus_timer: false,
+            closed: false,
+            suspending: false,
+        }
+    }
+
+    #[test]
+    fn one_action_holds_the_launcher_until_it_settles() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("app", &context, false));
+        // A shell action sent while an app command is in flight would hide
+        // whichever outcome lands second.
+        assert!(!state.arm("shell", &context, false));
+        assert!(state.settle("shell").is_none());
+        assert!(state.settle("app").is_some());
+        assert!(state.arm("shell", &context, false));
+    }
+
+    #[test]
+    fn a_refused_command_releases_the_launcher() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("disabled", &context, false));
+        // What `action_rejected` does when routing refuses the command.
+        let _ = state.settle("disabled");
+        assert!(state.pending.is_none());
+        assert!(state.arm("next", &context, false));
+    }
+
+    #[test]
+    fn a_stale_presentation_arms_nothing() {
+        let mut state = presented();
+        let stale = state.model.context("1").unwrap();
+        state.model.hide();
+        state.begin();
+        assert!(!state.arm("late", &stale, false));
+        assert!(state.pending.is_none());
     }
 }
