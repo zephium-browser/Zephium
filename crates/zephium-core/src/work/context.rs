@@ -402,6 +402,11 @@ pub fn truncate(text: &str, max: usize) -> (String, bool) {
     (text[..end].to_owned(), true)
 }
 
+/// A tab or link's identity token: its URL routinely outgrows `MAX_CONTEXT_REVISION_BYTES`.
+pub fn url_revision(url: &str) -> String {
+    hex(&Sha256::digest(url.as_bytes()))
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -620,6 +625,22 @@ mod tests {
         assert!(matches!(oversized, Err(WorkError::Capacity)));
         assert!(selection(&[]).validate().is_err());
         assert!(selection(&[(1, "a"), (1, "b")]).validate().is_err());
+    }
+
+    #[test]
+    fn a_long_url_is_a_bounded_selection_token() {
+        let url = format!("https://outlook.live.com/mail/0/inbox/id/{}", "A".repeat(300));
+        assert!(selection(&[(1, url.as_str())]).validate().is_err());
+        let revision = url_revision(&url);
+        assert_eq!(revision.len(), 64);
+        assert!(revision.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(selection(&[(1, revision.as_str())]).validate(), Ok(()));
+        assert_ne!(url_revision(&format!("{url}B")), revision);
+        // frame/src/domain/work-environment/tests/context.svelte.test.ts pins the same digest.
+        assert_eq!(
+            url_revision("https://outlook.live.com/mail/0/inbox/id/AQQkADAwATM0MDAAMS1hYmQ5"),
+            "0694dabf6871fb107ac842abba5f084b2a54d906ca6e854fcb80af0aa5702ea0"
+        );
     }
 }
 

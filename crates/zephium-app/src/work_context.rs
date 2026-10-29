@@ -294,7 +294,7 @@ impl WorkContextAdmission {
                 element: id,
                 kind: WorkContextItemKind::Tab,
                 title: title.clone(),
-                revision: url.clone(),
+                revision: url_revision(url),
                 visibility: WorkContextVisibility::Public,
                 text: format!("{title}\n{url}"),
             }),
@@ -313,7 +313,7 @@ impl WorkContextAdmission {
                     element: id,
                     kind: WorkContextItemKind::Tab,
                     title: tab.title.clone(),
-                    revision: url.clone(),
+                    revision: url_revision(&url),
                     visibility: WorkContextVisibility::Private,
                     text: format!("{}\n{url}", tab.title),
                 })

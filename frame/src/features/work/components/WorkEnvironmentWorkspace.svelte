@@ -231,6 +231,7 @@
         objectives: context.objectives,
         media: context.mediaRevisions,
         objects: owned.revisions(),
+        urls: context.urlRevisions,
       },
       openTabs,
       referencesCanvasBlock(session.composer),
@@ -1928,6 +1929,16 @@
     const current = snapshot;
     const focused = inspected;
     if (current) untrack(() => context.update(current, focused ?? undefined));
+  });
+  $effect(() => {
+    const urls = (snapshot?.elements ?? []).flatMap((element) => {
+      const reference = element.reference;
+      if (reference.kind === "link") return [reference.url];
+      if (reference.kind !== "browser") return [];
+      const tab = tabs.find((tab) => tab.id === reference.tab);
+      return tab ? [tab.url ?? ""] : [];
+    });
+    untrack(() => context.trackUrls(urls));
   });
   $effect(() => {
     const current = session;

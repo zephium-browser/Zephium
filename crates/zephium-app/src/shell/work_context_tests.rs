@@ -179,7 +179,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
             },
             WorkContextSelectionItem {
                 element: element("tab"),
-                revision: "https://docs.example/guide".into(),
+                revision: url_revision("https://docs.example/guide"),
             },
         ],
         tabs: false,
@@ -500,4 +500,99 @@ async fn open_tabs_join_context_only_with_consent_and_without_their_query() {
     }
     .validate()
     .is_err());
+}
+
+#[tokio::test]
+async fn a_tab_with_a_long_address_is_context_until_it_navigates() {
+    let store = std::sync::Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let space = shell.windows.focused().unwrap().space;
+    let tab = shell.windows.focused().unwrap().active.unwrap();
+    let message = format!(
+        "https://outlook.live.com/mail/0/inbox/id/{}",
+        "AQQkADAwATM0MDAAMS1hYmQ5LTRiZWYtMDACLTAwCgAQ".repeat(4)
+    );
+    assert!(message.len() > MAX_CONTEXT_REVISION_BYTES);
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: message.clone(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: tab,
+        url: message.clone(),
+    }));
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id: tab,
+        title: "Mail - Outlook".into(),
+    }));
+    let created = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Create {
+                space,
+                title: "Inbox".into(),
+            },
+        },
+    )
+    .await;
+    let snapshot = environment(
+        &mut shell,
+        &queue,
+        &handle,
+        profile,
+        WorkEnvironmentCall::Command {
+            command: WorkCommandId::generate(),
+            intent: WorkEnvironmentIntent::Edit {
+                id: created.id,
+                expected: created.revision,
+                edit: WorkEnvironmentEdit::Add {
+                    reference: WorkEnvironmentReference::Browser { tab },
+                    area: None,
+                },
+            },
+        },
+    )
+    .await;
+    let element = snapshot
+        .elements
+        .iter()
+        .find(|element| element.reference == WorkEnvironmentReference::Browser { tab })
+        .unwrap()
+        .id;
+    let selection = WorkContextSelectionV1 {
+        environment: snapshot.id,
+        items: vec![WorkContextSelectionItem {
+            element,
+            revision: url_revision(&message),
+        }],
+        tabs: false,
+        blocks: false,
+    };
+    let admission = WorkContextAdmission::new(handle.clone());
+    let admitted = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Agent, &selection),
+    )
+    .await
+    .unwrap();
+    assert_eq!(admitted.disclosure.items[0].kind, WorkContextItemKind::Tab);
+    assert_eq!(admitted.disclosure.items[0].revision, url_revision(&message));
+    assert!(admitted.bodies[0].text.contains(&message));
+
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: tab,
+        url: "https://outlook.live.com/mail/0/".into(),
+    }));
+    let stale = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Agent, &selection),
+    )
+    .await;
+    assert!(matches!(stale, Err(WorkError::Conflict)));
 }
