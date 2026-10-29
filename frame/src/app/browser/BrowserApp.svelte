@@ -9,7 +9,7 @@
   import * as sidebar from "$session/sidebar-mode.svelte";
   import { Dividers } from "$features/split";
   import { commands } from "$shared/ipc/bindings";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import { blocker } from "$domain/blocker";
   import { extensions } from "$domain/extensions";
   import { favicons } from "$domain/favicons";
@@ -30,7 +30,7 @@
   import { keymap } from "$domain/keymap";
   import { browserImport, nativeImportAdapter } from "$domain/browser-import";
   import { findInPage } from "$features/address";
-  import { acceleratorFrom } from "$shared/lib/accelerator";
+  import { keymapAcceleratorFrom } from "$shared/lib/accelerator";
   import { applyLanguage } from "$shared/lib/locale.svelte";
   import { applySpaceTheme, spaceThemeValues } from "$features/tabs";
   import Shell from "./Shell.svelte";
@@ -104,7 +104,7 @@
     // The native content stage is suppressed while this browser-owned modal
     // is active. Keep chrome shortcuts from mutating tabs behind it as well.
     if (consentActive || event.defaultPrevented || event.isComposing) return;
-    const pressed = acceleratorFrom(event, IS_MAC);
+    const pressed = keymapAcceleratorFrom(event, IS_MAC, IS_WINDOWS);
     if (pressed === null) return;
     const command = keymap.commandFor(event, IS_MAC, pressed);
     if (command === null) return;

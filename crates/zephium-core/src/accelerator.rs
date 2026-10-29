@@ -51,6 +51,8 @@ pub enum Key {
     PageDown,
     /// F1 through F12.
     Function(u8),
+    /// Any other printable character, matched by the active keyboard layout.
+    Character(char),
 }
 
 impl Key {
@@ -110,7 +112,17 @@ impl Key {
             "END" => Key::End,
             "PAGEUP" => Key::PageUp,
             "PAGEDOWN" => Key::PageDown,
-            _ => return None,
+            _ => {
+                let mut characters = token.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None)
+                        if !character.is_control() && !character.is_whitespace() =>
+                    {
+                        Key::Character(character)
+                    }
+                    _ => return None,
+                }
+            }
         })
     }
 
@@ -145,6 +157,7 @@ impl Key {
             Key::End => "End",
             Key::PageUp => "PageUp",
             Key::PageDown => "PageDown",
+            Key::Character(character) => return character.to_string(),
         };
         named.to_owned()
     }
@@ -166,6 +179,7 @@ impl Key {
             Key::Slash => '/',
             Key::Backslash => '\\',
             Key::Backquote => '`',
+            Key::Character(character) => character,
             _ => return None,
         })
     }
@@ -201,6 +215,7 @@ impl Key {
             Key::End => 0x23,
             Key::PageUp => 0x21,
             Key::PageDown => 0x22,
+            Key::Character(character) => u32::from(character),
         }
     }
 }
@@ -258,7 +273,7 @@ impl Accelerator {
             }
             *flag = true;
         }
-        let key = Key::parse(if last == "+" { "=" } else { last })?;
+        let key = Key::parse(last)?;
         Some(Accelerator {
             meta,
             ctrl,
@@ -441,6 +456,14 @@ mod tests {
         );
         assert_eq!(Accelerator::parse("Cmd+KeyKK", Platform::Mac), None);
         assert_eq!(Accelerator::parse("Cmd+Digit", Platform::Mac), None);
+    }
+
+    #[test]
+    fn printable_layout_characters_round_trip() {
+        for text in ["Ctrl+!", "Ctrl+?", "Ctrl+é", "Ctrl+ù"] {
+            let accelerator = parse(text, Platform::Other);
+            assert_eq!(accelerator.format(Platform::Other), text);
+        }
     }
 
     #[test]

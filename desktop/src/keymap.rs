@@ -7,7 +7,7 @@
 use super::*;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
-use zephium_core::accelerator::{Accelerator, AcceleratorError, Platform};
+use zephium_core::accelerator::{Accelerator, AcceleratorError, Key, Platform};
 use zephium_core::commands::{self, Group, KeymapError, ResolvedCommand};
 use zephium_core::ports::engine::Shortcut;
 
@@ -275,8 +275,32 @@ pub(crate) fn shortcut(id: &str, accelerator: &str) -> Option<Shortcut> {
         ctrl: parsed.ctrl,
         shift: parsed.shift,
         alt: parsed.alt,
-        key: parsed.key.virtual_key(),
+        key: platform_virtual_key(parsed.key),
     })
+}
+
+#[cfg(target_os = "windows")]
+fn platform_virtual_key(key: Key) -> u32 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
+
+    let Some(character) = key.character() else {
+        return key.virtual_key();
+    };
+    let Ok(character) = u16::try_from(u32::from(character)) else {
+        return key.virtual_key();
+    };
+    let layout = unsafe { GetKeyboardLayout(0) };
+    let scan = unsafe { VkKeyScanExW(character, layout) };
+    if scan == -1 {
+        key.virtual_key()
+    } else {
+        u32::from(scan as u16 & 0xff)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_virtual_key(key: Key) -> u32 {
+    key.virtual_key()
 }
 
 pub(crate) const EVENT_KEYMAP_CHANGED: &str = "zephium:keymap-changed";
@@ -573,5 +597,41 @@ mod tests {
         let back = shortcut("nav.back.alt", "Alt+Left").expect("Alt+Left key");
         assert!(back.alt && !back.ctrl && !back.shift);
         assert_eq!(back.key, 0x25);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn page_punctuation_uses_the_active_windows_layout() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, VkKeyScanExW};
+
+        let layout = unsafe { GetKeyboardLayout(0) };
+        let mut checked = 0;
+        for (accelerator, character) in [
+            ("Ctrl+,", ','),
+            ("Ctrl+;", ';'),
+            ("Ctrl+!", '!'),
+            ("Ctrl+?", '?'),
+            ("Ctrl+é", 'é'),
+            ("Ctrl+ù", 'ù'),
+        ] {
+            let codepoint =
+                u16::try_from(u32::from(character)).expect("test characters fit in UTF-16");
+            let scan = unsafe { VkKeyScanExW(codepoint, layout) };
+            if scan == -1 {
+                continue;
+            }
+            checked += 1;
+            assert_eq!(
+                shortcut("test.layout", accelerator)
+                    .unwrap_or_else(|| panic!("{accelerator} parses"))
+                    .key,
+                u32::from(scan as u16 & 0xff),
+                "{accelerator}"
+            );
+        }
+        assert!(
+            checked > 0,
+            "the active layout must type at least one test character"
+        );
     }
 }
