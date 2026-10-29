@@ -141,12 +141,12 @@ along.
   there can become a task.
 - Every keyboard shortcut can be changed.
 
-### Extensions
+### Extensions (in progress)
 
-Install extensions straight from the Chrome Web Store. Twenty popular ones are
-verified to work well in Zephium and are a click away in the extension manager,
-including 1Password, Bitwarden, Grammarly, DeepL, Dark Reader, Vimium,
-SponsorBlock, Raindrop.io, Notion Web Clipper and Refined GitHub.
+Chrome extension compatibility is active work, not yet enabled in release
+builds. Vimium, Dark Reader and 1Password have real workflow evidence on
+macOS, with Windows parity underway. See
+[docs/architecture.md](docs/architecture.md) for the current scope.
 
 ### Bring everything with you
 
