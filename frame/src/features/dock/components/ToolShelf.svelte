@@ -182,6 +182,8 @@
 
 <style>
   .shelf {
+    --shelf-stagger: 22ms;
+
     position: relative;
     z-index: 20;
     flex: none;
@@ -258,6 +260,21 @@
     overflow-y: auto;
     overscroll-behavior: contain;
     transform-origin: bottom left;
+    scale: 0.98;
+    transition:
+      opacity var(--motion-fast) var(--ease-smooth),
+      scale var(--motion-fast) var(--ease-smooth),
+      translate var(--motion-fast) var(--ease-smooth),
+      visibility 0s linear var(--motion-fast);
+  }
+
+  .shelf :global(.shelf-stack[data-open="true"]) {
+    scale: 1;
+    transition:
+      opacity var(--motion-base) var(--ease-smooth),
+      scale var(--motion-page) var(--ease-smooth),
+      translate var(--motion-page) var(--ease-smooth),
+      visibility 0s;
   }
 
   .shelf :global(.shelf-stack:not([data-open="true"])) {
@@ -399,8 +416,8 @@
   /* Each row settles in behind the one below it, so the stack reads as
      unfolding from the case instead of arriving as a block. */
   .shelf :global(.shelf-stack[data-open="true"] :is(.shelf-item, .shelf-head)) {
-    animation: shelf-item-in var(--motion-slow) var(--ease-out) both;
-    animation-delay: calc(var(--step) * 14ms);
+    animation: shelf-item-in var(--motion-page) var(--ease-smooth) both;
+    animation-delay: calc(var(--step) * var(--shelf-stagger));
   }
 
   /* stylelint-disable-next-line keyframes-name-pattern -- Svelte's global prefix. */
@@ -474,5 +491,15 @@
     .shelf :global(.case.case-lit) {
       border: 1px solid Highlight;
     }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shelf {
+      --shelf-stagger: 0ms;
+    }
+  }
+
+  :global(:root[data-reduce-motion="true"]) .shelf {
+    --shelf-stagger: 0ms;
   }
 </style>
