@@ -234,6 +234,39 @@ impl Shell {
         operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
     }
 
+    /// Switches the focused window to the neighbouring rostered profile,
+    /// wrapping around in roster order.
+    pub(super) fn operation_step_profile(&mut self, forward: bool) -> OperationDisposition {
+        let current = if self.private_shown() {
+            self.private
+                .as_ref()
+                .map(|session| session.regular_profile())
+        } else {
+            self.windows.focused().map(|window| window.profile)
+        };
+        let Some(current) = current else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let rostered: Vec<ProfileId> = self
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .filter(|profile| self.rostered(*profile))
+            .collect();
+        let Some(index) = rostered.iter().position(|profile| *profile == current) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        };
+        if rostered.len() < 2 {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
+        let next = if forward {
+            (index + 1) % rostered.len()
+        } else {
+            (index + rostered.len() - 1) % rostered.len()
+        };
+        self.operation_switch_profile(rostered[next])
+    }
+
     pub(super) fn operation_switch_profile(&mut self, profile: ProfileId) -> OperationDisposition {
         if !self.rostered(profile) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
