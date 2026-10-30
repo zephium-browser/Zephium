@@ -254,7 +254,16 @@ mod tests {
             .prefix("zgh-")
             .tempdir_in("/private/tmp")
             .unwrap();
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        // AF_UNIX connect is rejected under the user-profile temp tree on Windows.
+        let directory = tempfile::Builder::new()
+            .prefix("zgh-")
+            .tempdir_in(
+                std::env::var_os("PUBLIC")
+                    .expect("PUBLIC must identify a writable local directory for AF_UNIX tests"),
+            )
+            .unwrap();
+        #[cfg(not(any(unix, windows)))]
         let directory = tempfile::Builder::new().prefix("zgh-").tempdir().unwrap();
         let path = directory.path().canonicalize().unwrap().join("broker.sock");
         let listener = Listener::bind(&path).unwrap();
