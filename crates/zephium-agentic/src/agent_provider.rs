@@ -64,7 +64,7 @@ pub use pricing::{
     AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
     AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
     AgentProviderTokenRates, MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
-    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS, MAX_AGENT_PROVIDER_REPORTED_INPUT_TOKENS,
 };
 pub use settlement::{
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
@@ -872,7 +872,7 @@ impl AgentProviderCallConfig {
             AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
                 if catalog.response_route() != AgentProviderResponseRoute::ModelReported
                     || catalog.pricing_profile().max_input_tokens()
-                        > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
+                        > pricing::MAX_AGENT_PROVIDER_REPORTED_INPUT_TOKENS =>
             {
                 return Err(AgentProviderContractError::InputAccountingMode);
             }
