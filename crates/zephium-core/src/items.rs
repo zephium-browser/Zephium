@@ -426,6 +426,19 @@ impl Items {
         let Some(url) = navigation::classify(input) else {
             return Vec::new();
         };
+        self.navigate_to(id, url)
+    }
+
+    /// Opens what another application handed over, which may be a local
+    /// document that typed input never reaches.
+    pub fn navigate_external(&mut self, id: ItemId, input: &str) -> Vec<Effect> {
+        let Some(url) = navigation::external_document(input) else {
+            return Vec::new();
+        };
+        self.navigate_to(id, url)
+    }
+
+    fn navigate_to(&mut self, id: ItemId, url: Url) -> Vec<Effect> {
         if !self
             .tab(id)
             .is_some_and(|tab| tab.content == TabContent::Web)

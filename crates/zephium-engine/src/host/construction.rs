@@ -150,6 +150,7 @@ impl EngineHost {
         );
         // Restored and explicitly opened tabs need the same live profile grant
         // as native child adoption, before either fresh or spare construction.
+        event_permit.grant_local_document(url);
         if !event_permit.allows_navigation(url) {
             eprintln!("security: rejected invalid native view target");
             self.sink
@@ -211,6 +212,7 @@ impl EngineHost {
                 .store(false, Ordering::Release);
             spare.view.presentation_announced = None;
             spare.view.title_ready = None;
+            spare.view.event_permit.grant_local_document(url);
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }

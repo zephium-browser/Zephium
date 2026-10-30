@@ -1223,7 +1223,14 @@ impl InnerWebView {
       {
         return Err(Error::WebKitNavigationIdentityUnavailable);
       }
-      let Some(navigation) = self.webview.loadRequest(&request) else {
+      // WebKit refuses `loadRequest` for a file URL. A local document needs
+      // `loadFileURL`, with read access to its folder for its own styles,
+      // scripts and images.
+      let navigation = match url.URLByDeletingLastPathComponent() {
+        Some(folder) if url.isFileURL() => self.webview.loadFileURL_allowingReadAccessToURL(&url, &folder),
+        _ => self.webview.loadRequest(&request),
+      };
+      let Some(navigation) = navigation else {
         self
           .navigation_policy_delegate
           .cancel_programmatic_navigation();

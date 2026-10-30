@@ -72,7 +72,7 @@ fn classify_input(s: &str) -> InputKind {
     if s.contains("://") || Url::parse(s).is_ok() {
         return Url::parse(s)
             .ok()
-            .filter(is_browser_target)
+            .filter(|url| is_browser_target(url) && !local_document(url))
             .map_or(InputKind::Rejected, InputKind::Direct);
     }
 
@@ -150,6 +150,54 @@ pub fn external_target(argument: &str) -> Option<Url> {
     Url::parse(argument.trim())
         .ok()
         .filter(|url| matches!(url.scheme(), "http" | "https") && is_allowed(url))
+}
+
+/// File extensions of the local pages another application may hand over.
+const LOCAL_DOCUMENT_EXTENSIONS: &[&str] = &["html", "htm", "xhtml", "shtml"];
+
+/// A local web page on this computer: a `file:` address with no host, no
+/// credentials and no query, whose name ends in an HTML extension. Only an
+/// application's hand-off (a double-clicked file, Open With, a command line)
+/// may open one. Typed input and page-initiated navigation still refuse every
+/// `file:` address, because [`is_allowed`] does not admit it.
+pub fn local_document(url: &Url) -> bool {
+    url.scheme() == "file"
+        && url.as_str().len() <= MAX_URL_BYTES
+        && url
+            .host_str()
+            .is_none_or(|host| host.is_empty() || host == "localhost")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .and_then(|name| name.rsplit_once('.'))
+            .is_some_and(|(stem, extension)| {
+                !stem.is_empty()
+                    && LOCAL_DOCUMENT_EXTENSIONS
+                        .iter()
+                        .any(|allowed| extension.eq_ignore_ascii_case(allowed))
+            })
+}
+
+/// A page or local document handed to Zephium by another application. The
+/// argument is a web address, a `file:` address, or a native file path such
+/// as `C:\notes\a.html` (what Windows and Linux pass on a double-click).
+pub fn external_document(argument: &str) -> Option<Url> {
+    if argument.len() > MAX_URL_BYTES {
+        return None;
+    }
+    let argument = argument.trim();
+    if let Some(url) = external_target(argument) {
+        return Some(url);
+    }
+    let url = match Url::parse(argument) {
+        // A drive letter parses as a one-letter scheme; read it as a path.
+        Ok(url) if url.scheme().len() > 1 => url,
+        _ => Url::from_file_path(argument).ok()?,
+    };
+    local_document(&url).then_some(url)
 }
 
 /// A document a page builds for one of its own frames: an `about:srcdoc` or
@@ -260,7 +308,9 @@ pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
 /// require the engine's live, profile-specific installation grant. This is not
 /// permission to load an extension or to expose its resources to web pages.
 pub fn is_browser_target(url: &Url) -> bool {
-    is_allowed(url) || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
+    is_allowed(url)
+        || local_document(url)
+        || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
 }
 
 pub fn is_browser_target_str(target: &str) -> bool {
@@ -329,6 +379,46 @@ mod tests {
         assert_eq!(app_link_outcome(true, false), AppLinkOutcome::Ask);
         assert_eq!(app_link_outcome(false, true), AppLinkOutcome::Show);
         assert_eq!(app_link_outcome(false, false), AppLinkOutcome::Silent);
+    }
+
+    #[test]
+    fn another_application_may_hand_over_a_local_html_file() {
+        for argument in [
+            "file:///Users/me/page.html",
+            "file:///Users/me/My%20Page.HTM#top",
+            "file://localhost/tmp/a.xhtml",
+            "/Users/me/page.html",
+        ] {
+            let url = super::external_document(argument);
+            if cfg!(unix) || argument.starts_with("file:") {
+                assert!(
+                    url.is_some_and(|url| super::is_browser_target(&url)),
+                    "{argument}"
+                );
+            }
+        }
+        for argument in [
+            "file:///etc/passwd",
+            "file:///tmp/script.js",
+            "file:///tmp/.html",
+            "file:///tmp/a.html?x=1",
+            "file://server/share/a.html",
+            "file://user@host/a.html",
+            "javascript:alert(1)",
+            "relative/page.html",
+        ] {
+            assert!(super::external_document(argument).is_none(), "{argument}");
+        }
+        assert!(super::external_document("https://example.com/").is_some());
+    }
+
+    #[test]
+    fn typed_input_and_page_navigation_still_refuse_local_files() {
+        assert!(super::classify("file:///Users/me/page.html").is_none());
+        assert!(super::classify("/Users/me/page.html").is_none());
+        let url = url::Url::parse("file:///Users/me/page.html").unwrap();
+        assert!(!super::is_allowed(&url));
+        assert!(!super::is_allowed_str("file:///Users/me/page.html"));
     }
 
     #[test]

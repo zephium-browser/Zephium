@@ -174,3 +174,19 @@ fn extension_close_requires_own_granted_document_and_live_view() {
     permit.revoke();
     assert!(!permit.allows_extension_document_close(own));
 }
+
+#[test]
+fn a_local_document_loads_only_after_the_shell_asks_for_that_exact_file() {
+    let token = Arc::new(AtomicBool::new(true));
+    let permit = EventPermit::bound(&token);
+    let page = "file:///Users/me/page.html";
+    assert!(!permit.allows_navigation(page));
+    permit.grant_local_document(page);
+    assert!(permit.allows_navigation(page));
+    assert!(!permit.allows_navigation("file:///Users/me/other.html"));
+    assert!(!permit.allows_navigation("file:///etc/passwd"));
+    permit.grant_local_document("https://example.com/");
+    assert!(!permit.allows_navigation(page));
+    permit.grant_local_document("file:///etc/passwd");
+    assert!(!permit.allows_navigation("file:///etc/passwd"));
+}

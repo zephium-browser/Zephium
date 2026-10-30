@@ -784,6 +784,7 @@ impl EngineHost {
             // displaced while a native message loop was reentrant.
             return;
         }
+        view.event_permit.grant_local_document(url);
         if !view.event_permit.allows_navigation(url) {
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });

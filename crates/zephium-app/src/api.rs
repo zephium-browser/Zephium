@@ -649,7 +649,7 @@ pub enum Command {
     /// Finds text in the page in front; `None` ends the search.
     Find(Option<zephium_core::ports::engine::FindRequest>),
     /// Addresses handed over by another application, already admitted by
-    /// `navigation::external_target`. Each opens in a new tab; any that
+    /// `navigation::external_document`. Each opens in a new tab; any that
     /// arrive before the session is restored wait for it.
     OpenExternal(Vec<String>),
     SetAppSetting {

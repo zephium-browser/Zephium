@@ -4,5 +4,6 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   DeleteRegKey HKCU "Software\Clients\StartMenuInternet\Zephium"
   DeleteRegKey HKCU "Software\Classes\ZephiumURL"
+  DeleteRegKey HKCU "Software\Classes\ZephiumHTML"
   DeleteRegValue HKCU "Software\RegisteredApplications" "Zephium"
 !macroend

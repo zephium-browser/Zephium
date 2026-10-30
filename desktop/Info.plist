@@ -20,6 +20,22 @@
   <string>Zephium saves downloads to your Desktop when you choose it as the download folder.</string>
   <key>NSDocumentsFolderUsageDescription</key>
   <string>Zephium saves downloads to your Documents folder when you choose it as the download folder.</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>HTML document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.html</string>
+        <string>public.xhtml</string>
+      </array>
+    </dict>
+  </array>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
