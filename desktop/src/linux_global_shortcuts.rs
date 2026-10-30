@@ -42,6 +42,10 @@ impl LinuxGlobalShortcuts {
         state
     }
 
+    pub(crate) fn is_registered(&self) -> bool {
+        self.registration.is_live()
+    }
+
     pub(crate) fn start_after_main_mapped(&self) {
         if self.backend != DisplayBackend::Wayland
             || self.shortcut.is_none()

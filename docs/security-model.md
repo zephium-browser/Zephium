@@ -252,14 +252,14 @@ Any change that breaks one of these invariants must fail review and release:
    pass after the exact document reaches load completion. Rust accepts only an exact,
    canonical 32-by-32 RGBA raster for the current navigation epoch and origin; chrome
    paints that fixed raster without parsing a page-controlled image container.
-10. Linux is not a supported platform at launch: `run()` in `desktop/src/lib.rs` prints
-    that Zephium isn't available on Linux yet and exits with status 1 before any
-    runtime is touched. The Linux engine code stays in the tree and keeps the
-    admission described here, but none of it is exercised by a shipped build. On
-    Linux, browsing requires WebKitGTK 2.54.0 or newer. Older builds,
-    odd-minor development builds, and unrelated major lines fail closed. A
-    newer stable even-minor WebKitGTK 2.x line is admitted with a visible
-    unreviewed-runtime advisory rather than a numeric-version kill switch.
+10. Linux is an experimental source-build target, not an officially supported
+    release platform; official releases do not currently publish Linux installers.
+    `run()` permits Linux to proceed through startup, where the GTK/WebKitGTK
+    adapter enforces the runtime requirements below. Browsing requires WebKitGTK
+    2.54.0 or newer. Older builds, odd-minor development builds, and unrelated
+    major lines fail closed. A newer stable even-minor WebKitGTK 2.x line is
+    admitted with a visible unreviewed-runtime advisory rather than a
+    numeric-version kill switch.
     Every Wry context, persistent or ephemeral, is constructed with top-level
     cross-site process swapping enabled. The
     requested Web-process sandbox flag and the construct-only swap policy are read back

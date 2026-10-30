@@ -26,7 +26,7 @@ impl WorkProductState {
 }
 /// Admits a Work run that Rust itself starts (the Ask panel's "Run in
 /// Work"), through the same operation owner as the panel's own runs.
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 pub(crate) fn admit_run(
     app: &tauri::AppHandle,
     profile: ProfileId,

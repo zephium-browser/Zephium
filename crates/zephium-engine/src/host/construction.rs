@@ -40,6 +40,10 @@ use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
+pub(super) const fn content_devtools_enabled(is_linux: bool, debug_build: bool) -> bool {
+    !is_linux || debug_build
+}
+
 pub(super) enum NativeViewPurpose {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     NativeTab(wry::NewWindowOpener),
@@ -1077,7 +1081,10 @@ impl EngineHost {
             .with_focused(false)
             // Pages a person reads can be inspected, as in any browser; the
             // privileged chrome and agent views never can.
-            .with_devtools(true)
+            .with_devtools(content_devtools_enabled(
+                cfg!(target_os = "linux"),
+                cfg!(debug_assertions),
+            ))
             .with_autoplay(false)
             // A tab a person reads may take the screen for its video, as in
             // any browser; the host observes every transition and the shell

@@ -15,7 +15,9 @@ This is normal for a solo maintained project. A "no" on a PR is not personal.
 
 ## What Zephium is
 
-A lightweight, FOSS, zero-telemetry browser on the OS-native webview, Rust-heavy. Supported platforms are macOS (Apple Silicon) and Windows; Linux is not supported yet.
+A lightweight, FOSS, zero-telemetry browser on the OS-native webview, Rust-heavy.
+Supported releases target macOS (Apple Silicon) and Windows. Experimental Linux
+source builds are described in [docs/linux.md](docs/linux.md).
 
 The priorities, in order:
 
@@ -30,7 +32,9 @@ If a change trades any of these away for convenience, it probably won't land. Wh
 
 ### Prerequisites
 
-Supported development platforms are macOS (Apple Silicon) and Windows 10/11. Linux development is not supported yet; the app refuses to start there.
+Supported development platforms are macOS (Apple Silicon) and Windows 10/11.
+Linux source builds are experimental; see [the Linux guide](docs/linux.md) for
+setup and current limitations.
 
 - **Rust**: install [rustup](https://rustup.rs). The pinned toolchain in `rust-toolchain.toml` (with `rustfmt` and `clippy`) is installed automatically on first use.
 - **Node.js**: the version in `.node-version` (`engines` in `package.json` allows `>=24.18.0 <25`).

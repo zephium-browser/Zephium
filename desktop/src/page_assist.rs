@@ -10,6 +10,7 @@ use zephium_ipc::page_assist::*;
 pub(crate) struct PageAssistChanged(pub(crate) PageAssistChangedV1);
 
 const VERSION: u16 = 2;
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 const EVENT: &str = "zephium:page-assist-changed";
 
 fn allowed(caller: &WebviewWindow, command: &'static str) -> bool {
@@ -68,7 +69,7 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
 }
 
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 mod product {
     use super::*;
     use std::collections::HashMap;
@@ -1147,28 +1148,47 @@ mod product {
     }
 }
 
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 pub(crate) use product::{
     hosted_charged, hosted_sourced, install, observe_items, observe_tab, preference_changed,
 };
 
-#[cfg(not(feature = "work-product"))]
+#[cfg(any(not(feature = "work-product"), target_os = "linux"))]
 pub(crate) fn observe_items(_state: &zephium_ipc::ItemsState) {}
-#[cfg(not(feature = "work-product"))]
+#[cfg(any(not(feature = "work-product"), target_os = "linux"))]
 pub(crate) fn observe_tab(_tab: &zephium_ipc::TabView) {}
-#[cfg(not(feature = "work-product"))]
+#[cfg(any(not(feature = "work-product"), target_os = "linux"))]
 pub(crate) fn preference_changed(_key: &str, _value: &str) {}
+
+#[cfg(all(feature = "work-product", target_os = "linux"))]
+pub(crate) fn install(
+    _app: &tauri::AppHandle,
+    _engine: Arc<zephium_engine::WebviewEngine>,
+    _store: Arc<zephium_store::SqliteStore>,
+) {
+}
+
+#[cfg(all(feature = "work-product", target_os = "linux"))]
+pub(crate) fn hosted_sourced(_request_id: &str, _conversation: &str, _reply: u32) {}
+
+#[cfg(all(feature = "work-product", target_os = "linux"))]
+pub(crate) fn hosted_charged(
+    _request_id: &str,
+    _charged_units: Option<u64>,
+    _units_per_credit: Option<u64>,
+) {
+}
 
 macro_rules! with_service {
     ($none:expr, |$service:ident| $body:expr) => {{
-        #[cfg(feature = "work-product")]
+        #[cfg(all(feature = "work-product", not(target_os = "linux")))]
         {
             match product::service() {
                 Some($service) => $body,
                 None => $none,
             }
         }
-        #[cfg(not(feature = "work-product"))]
+        #[cfg(any(not(feature = "work-product"), target_os = "linux"))]
         {
             $none
         }
@@ -1247,6 +1267,8 @@ pub(crate) async fn page_assist_ask(
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn page_assist_stop(caller: WebviewWindow, space: String) -> bool {
+    #[cfg(target_os = "linux")]
+    let _ = &space;
     allowed(&caller, "page_assist_stop") && with_service!(false, |service| service.stop(&space))
 }
 
@@ -1259,6 +1281,8 @@ pub(crate) async fn page_assist_cite(
     reply: u32,
     n: u8,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    let _ = (reply, n);
     allowed(&caller, "page_assist_cite")
         && valid_id(&conversation)
         && with_service!(false, |service| service.cite(&conversation, reply, n))
@@ -1274,6 +1298,8 @@ pub(crate) async fn page_assist_focus(
     block: u16,
     n: Option<u8>,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    let _ = (reply, block, n);
     allowed(&caller, "page_assist_focus")
         && valid_id(&conversation)
         && with_service!(false, |service| service.focus(
@@ -1294,6 +1320,8 @@ pub(crate) async fn page_assist_decide(
     block: u16,
     decision: PageAssistDecisionV1,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    let _ = (reply, block, &decision);
     allowed(&caller, "page_assist_decide")
         && valid_id(&conversation)
         && with_service!(false, |service| service.decide(
@@ -1312,6 +1340,8 @@ pub(crate) async fn page_assist_resume(
     conversation: String,
     reply: u32,
 ) -> bool {
+    #[cfg(target_os = "linux")]
+    let _ = reply;
     allowed(&caller, "page_assist_resume")
         && valid_id(&conversation)
         && with_service!(false, |service| service.resume(&conversation, reply))
@@ -1326,6 +1356,8 @@ pub(crate) async fn page_assist_continue(
     reply: u32,
     block: u16,
 ) -> PageAssistContinueV1 {
+    #[cfg(target_os = "linux")]
+    let _ = (reply, block);
     let unavailable = PageAssistContinueV1 {
         work: None,
         fault: Some(PageAssistFaultV1::Unavailable),
@@ -1463,6 +1495,8 @@ pub(crate) async fn page_style_toggle(
     style: String,
     enabled: bool,
 ) -> PageStylesV1 {
+    #[cfg(target_os = "linux")]
+    let _ = enabled;
     if !allowed(&caller, "page_style_toggle") || !valid_id(&style) {
         return no_styles(tab);
     }
@@ -1484,7 +1518,7 @@ pub(crate) async fn page_style_remove(
     with_service!(no_styles(tab), |service| service.remove_style(&tab, &style))
 }
 
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 fn profile_of(profile: &str) -> Option<zephium_core::ids::ProfileId> {
     zephium_core::ids::ProfileId::parse(profile).filter(|id| id.to_string() == profile)
 }
@@ -1514,6 +1548,8 @@ pub(crate) async fn page_style_toggle_for(
     style: String,
     enabled: bool,
 ) -> PageStylesAllV1 {
+    #[cfg(target_os = "linux")]
+    let _ = enabled;
     if !allowed(&caller, "page_style_toggle_for") || !valid_id(&style) || site.len() > 253 {
         return no_profile_styles(profile);
     }
@@ -1558,11 +1594,26 @@ mod tests {
         assert!(valid_id("s123-4"));
         assert!(!valid_id("s1\"};"));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_page_assistant_is_unavailable_without_native_reader() {
+        let status = with_service!(unavailable_status("space".into(), None), |_service| {
+            panic!("Linux must not create the native page assistant")
+        });
+        assert!(matches!(
+            status.availability,
+            PageAssistAvailabilityV1::Unavailable
+        ));
+        assert!(status.page.is_none());
+        assert!(!status.can_pick);
+        assert!(status.conversation.messages.is_empty());
+    }
 }
 
 /// "Run in Work" from the Ask panel: the same Work documents and operation
 /// owner the panel's own Work flow uses, in order.
-#[cfg(feature = "work-product")]
+#[cfg(all(feature = "work-product", not(target_os = "linux")))]
 mod handoff {
     use super::*;
     use std::time::Duration;

@@ -13,17 +13,16 @@ use zephium_agentic::{
     AgentBrowserPort, ContextCancellationSettlement, ContextConstructionSettlement,
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
-    ContextNativeResourceSnapshot, ContextPortFailure, ContextResourceAuditId,
-    ContextResourceAuditSettlement, ContextShutdownAuditSettlement, ContextShutdownDispatch,
-    SemanticActionNativeCompletion, SemanticActionNativeRequest, SemanticRuntimeCorrelation,
-    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
-    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+    ContextNativeResourceSnapshot, ContextOperationKind, ContextPortFailure,
+    ContextResourceAuditId, ContextResourceAuditSettlement, ContextShutdownAuditSettlement,
+    ContextShutdownDispatch, SemanticActionNativeCompletion, SemanticActionNativeRequest,
+    SemanticRuntimeCorrelation, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
+    SemanticRuntimeSettlement, SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_agentic::{
-    ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextOperationKind,
-    ContextRendererLoss,
+    ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextRendererLoss,
 };
 #[cfg(target_os = "macos")]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
@@ -205,6 +204,18 @@ impl AgentPortAdmission {
             .is_some_and(|failed| failed.load(Ordering::Acquire))
     }
 
+    fn mutation_is_closed(&self, state: &AgentPortAdmissionState) -> bool {
+        state.sealed
+            || state.retired
+            || state.invariant_failed
+            || self.lineage_failed()
+            || self.group.as_ref().is_some_and(|group| {
+                group
+                    .upgrade()
+                    .is_none_or(|group| group.sealed.load(Ordering::Acquire))
+            })
+    }
+
     fn reserve(self: &Arc<Self>) -> Result<AgentTaskPermit, ContextPortFailure> {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -217,15 +228,7 @@ impl AgentPortAdmission {
                 return Err(ContextPortFailure::Shutdown);
             }
         };
-        if state.sealed
-            || state.invariant_failed
-            || self.lineage_failed()
-            || self.group.as_ref().is_some_and(|group| {
-                group
-                    .upgrade()
-                    .is_none_or(|group| group.sealed.load(Ordering::Acquire))
-            })
-        {
+        if self.mutation_is_closed(&state) {
             return Err(ContextPortFailure::Shutdown);
         }
         if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
@@ -1644,6 +1647,7 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_screenshot_public_candidate(
         &self,
         lease: &zephium_agentic::WorkBrowserExecutionLease,
@@ -1652,6 +1656,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         self.native_image_public_candidate(lease, context)
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn claim_work_screenshot_source(
         &self,
         lease: &zephium_agentic::WorkBrowserExecutionLease,
@@ -1733,6 +1738,18 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     }
 
     fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch {
+        // Retirement remains terminal even where native requests are unsupported.
+        let closed = match self.admission.state.lock() {
+            Ok(state) => self.admission.mutation_is_closed(&state),
+            Err(poisoned) => {
+                drop(poisoned.into_inner());
+                self.admission.fail_invariant();
+                true
+            }
+        };
+        if closed {
+            return ContextDispatch::Rejected(ContextPortFailure::Shutdown);
+        }
         if self.admission.group.is_some() {
             return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
         }
@@ -3247,6 +3264,55 @@ mod tests {
             dispatches.load(Ordering::Relaxed),
             usize::from(cfg!(any(target_os = "macos", target_os = "windows")))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_shared_runtime_never_admits_missing_native_browser_adapters() {
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| panic!("unsupported native browser operation was scheduled")),
+            Arc::new(|_| panic!("unsupported operation raised an invariant failure")),
+        );
+        let port = slot
+            .take(Arc::new(|_| {
+                panic!("unsupported operation published a native event")
+            }))
+            .expect("port");
+        assert_eq!(
+            port.dispatch(construction_request()),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.transfer_cookies(cookie_request()),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.invoke_semantic(semantic_invocation(FrameId::MAIN)),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.capture_semantic_screenshot(
+                screenshot_native_request(500),
+                Box::new(|_| panic!("unsupported capture invoked its completion")),
+            ),
+            ContextDispatch::Unsupported
+        );
+        assert!(!port.supports_work_resource_history_back());
+        for kind in [
+            ContextOperationKind::Suspend,
+            ContextOperationKind::Resume,
+            ContextOperationKind::Recover,
+            ContextOperationKind::Close,
+        ] {
+            assert!(!supports_owned_transition(kind));
+        }
+        let state = slot.state.lock().expect("slot state");
+        let admission = state.admission.as_ref().expect("admission");
+        let state = admission.state.lock().expect("admission state");
+        assert_eq!(state.pending, 0);
+        assert_eq!(state.physical_screenshots, 0);
+        assert!(!state.sealed);
+        assert!(!state.invariant_failed);
     }
 
     #[test]

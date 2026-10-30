@@ -646,11 +646,18 @@ fn shortcut_modifiers(shortcut: &Shortcut) -> gtk::gdk::ModifierType {
 }
 
 fn observed_shortcut_modifiers(state: gtk::gdk::ModifierType) -> gtk::gdk::ModifierType {
+    observed_shortcut_modifiers_with_mask(state, gtk::accelerator_get_default_mod_mask())
+}
+
+fn observed_shortcut_modifiers_with_mask(
+    state: gtk::gdk::ModifierType,
+    accelerator_mask: gtk::gdk::ModifierType,
+) -> gtk::gdk::ModifierType {
     // GTK's default accelerator mask deliberately excludes lock modifiers.
     // Keep the virtual modifiers explicit as a defense against a process-wide
     // mask override: the shared Linux parser rejects Meta/Super/Hyper, so the
     // focused fallback must never accept them as an invisible extra chord.
-    let relevant = gtk::accelerator_get_default_mod_mask()
+    let relevant = accelerator_mask
         | gtk::gdk::ModifierType::SUPER_MASK
         | gtk::gdk::ModifierType::HYPER_MASK
         | gtk::gdk::ModifierType::META_MASK;
@@ -673,6 +680,15 @@ mod shortcut_tests {
 
     #[test]
     fn focused_shortcut_requires_exact_non_lock_modifiers() {
+        // Exercise the pure filter without GTK initialization or a display.
+        let observed_shortcut_modifiers = |state| {
+            observed_shortcut_modifiers_with_mask(
+                state,
+                gtk::gdk::ModifierType::CONTROL_MASK
+                    | gtk::gdk::ModifierType::SHIFT_MASK
+                    | gtk::gdk::ModifierType::MOD1_MASK,
+            )
+        };
         let expected = shortcut_modifiers(&launcher_shortcut());
         assert_eq!(
             observed_shortcut_modifiers(
@@ -681,12 +697,21 @@ mod shortcut_tests {
             expected
         );
         for unexpected in [
+            gtk::gdk::ModifierType::MOD1_MASK,
             gtk::gdk::ModifierType::SUPER_MASK,
             gtk::gdk::ModifierType::HYPER_MASK,
             gtk::gdk::ModifierType::META_MASK,
         ] {
             assert_ne!(observed_shortcut_modifiers(expected | unexpected), expected);
         }
+        // Even a process-wide override cannot hide virtual modifiers.
+        assert_eq!(
+            observed_shortcut_modifiers_with_mask(
+                gtk::gdk::ModifierType::SUPER_MASK,
+                gtk::gdk::ModifierType::empty(),
+            ),
+            gtk::gdk::ModifierType::SUPER_MASK,
+        );
     }
 
     #[test]

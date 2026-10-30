@@ -5134,10 +5134,10 @@ const fn map_context_failure_to_action(failure: ContextPortFailure) -> SemanticA
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn navigation_targets_share_origin(
-    prior: &ContextNavigationTarget,
-    current: &ContextNavigationTarget,
+    prior: &zephium_agentic::ContextNavigationTarget,
+    current: &zephium_agentic::ContextNavigationTarget,
 ) -> bool {
     SemanticOrigin::parse(prior.as_url().as_str())
         .ok()

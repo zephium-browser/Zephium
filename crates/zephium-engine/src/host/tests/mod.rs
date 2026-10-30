@@ -26,6 +26,16 @@ fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
 }
 
 #[test]
+fn release_linux_content_views_disable_devtools() {
+    use super::construction::content_devtools_enabled;
+
+    assert!(!content_devtools_enabled(true, false));
+    assert!(content_devtools_enabled(true, true));
+    assert!(content_devtools_enabled(false, false));
+    assert!(content_devtools_enabled(false, true));
+}
+
+#[test]
 fn raw_popups_use_owned_native_adoption_with_explicit_gesture_and_scope_checks() {
     let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_new_window_req_handler"));

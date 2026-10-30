@@ -6321,9 +6321,13 @@ fn install_async_runtime() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if cfg!(all(unix, not(target_os = "macos"))) {
+    if !cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    )) {
         diagnostic!(
-            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
+            "Zephium does not support this platform. Use macOS, Windows, or Linux (experimental)."
         );
         std::process::exit(1);
     }
@@ -6654,6 +6658,9 @@ pub fn run() {
             // Onboarding composes for one size; the browser takes the window
             // back resizable once it has replaced onboarding.
             if onboarding {
+                // Wayland owns the final surface size. Fixing GTK's min/max
+                // geometry here can disconnect startup on a smaller display.
+                #[cfg(not(target_os = "linux"))]
                 window.set_resizable(false)?;
                 window.set_maximizable(false)?;
             }
