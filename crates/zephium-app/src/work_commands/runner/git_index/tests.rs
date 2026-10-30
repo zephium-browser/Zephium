@@ -385,6 +385,7 @@ fn cycles_and_depth_are_bounded_before_materialization() {
     fixture.index(&[("note.txt", [1; 20], 0o100644)]);
     assert!(matches!(fixture.capture(&["note.txt"]), Err(Error::Limit)));
 }
+#[cfg(not(windows))]
 #[test]
 fn index_identity_and_digest_are_revalidated() {
     let fixture = Fixture::new();
@@ -409,6 +410,24 @@ fn index_identity_and_digest_are_revalidated() {
         captured.unchanged(&AtomicBool::new(false)),
         Err(Error::Changed)
     ));
+}
+#[cfg(windows)]
+#[test]
+fn captured_git_index_cannot_be_changed_while_its_handle_is_held() {
+    let fixture = Fixture::new();
+    let id = fixture.loose(b"before");
+    fixture.index(&[("note.txt", id, 0o100644)]);
+    fs::write(fixture.root.join("note.txt"), b"after").unwrap();
+    let captured = fixture.capture(&["note.txt"]).unwrap();
+    let path = fixture.root.join(".git/index");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[12] ^= 1;
+    rechecksum(&mut bytes);
+
+    // The Windows metadata handle deliberately denies write sharing, keeping
+    // the captured index stable until the snapshot is released.
+    assert!(fs::write(&path, bytes).is_err());
+    assert!(captured.unchanged(&AtomicBool::new(false)).is_ok());
 }
 #[cfg(unix)]
 #[test]

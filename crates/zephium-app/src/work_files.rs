@@ -1677,11 +1677,11 @@ fn clip(text: String) -> (String, bool) {
 mod tests {
     use super::*;
 
-    fn home_grant() -> (tempfile::TempDir, WorkFileGrant, PathBuf) {
-        // The grant policy resolves against $HOME; tests point it at a
-        // temporary home so nothing real is touched.
+    fn home_grant() -> (tempfile::TempDir, TestGrantHome, WorkFileGrant, PathBuf) {
+        // Keep the test home thread-local so parallel tests never observe a
+        // temporary HOME value or inherit one after this fixture is dropped.
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", home.path());
+        let home_scope = TestGrantHome::new(home.path().to_path_buf());
         let project = home.path().join("Documents").join("project");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::create_dir_all(home.path().join(".ssh")).unwrap();
@@ -1700,7 +1700,7 @@ mod tests {
             "relative/path".into(),
         ]);
         assert_eq!(refused.len(), 4);
-        (home, grant, project)
+        (home, home_scope, grant, project)
     }
 
     #[test]
@@ -1708,7 +1708,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("ordinary.txt");
         for secret in [
             "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -1750,7 +1750,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let large = project.join("large.txt");
         std::fs::File::create(&large)
             .unwrap()
@@ -1777,7 +1777,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let marker = "fixture-secret-never-return";
         for name in [
             ".env",
@@ -1923,7 +1923,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (home, grant, project) = home_grant();
+        let (home, _home_scope, grant, project) = home_grant();
         let listing = grant.list(&project.to_string_lossy()).unwrap();
         assert_eq!(listing.kind, WorkFileKindV1::Directory);
         assert!(listing.text.contains("src/\n"));
@@ -2008,7 +2008,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (home, _grant, project) = home_grant();
+        let (home, _home_scope, _grant, project) = home_grant();
         for protected in ["Library/Keychains", ".config/gcloud", "Library/Cookies"] {
             std::fs::create_dir_all(home.path().join(protected)).unwrap();
         }
@@ -2029,7 +2029,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (home, grant, project) = home_grant();
+        let (home, _home_scope, grant, project) = home_grant();
         for protected in [
             ".ssh/keys",
             ".config/gcloud/accounts",
@@ -2200,7 +2200,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let readme = project.join("README.md").to_string_lossy().into_owned();
         let proposal = grant
             .propose_edit(&readme, "hello world", "hello, world")
@@ -2240,7 +2240,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("many.txt");
         std::fs::write(
             &path,
@@ -2297,7 +2297,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("README.md").to_string_lossy().into_owned();
         let before = grant.read(&path).unwrap();
         let mut kind = WorkStepKindV1::EditFile {
@@ -2347,7 +2347,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let from = project.join("README.md").to_string_lossy().into_owned();
         let to = project.join("moved.md").to_string_lossy().into_owned();
         let kind = WorkStepKindV1::MoveFile {
