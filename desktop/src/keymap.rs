@@ -136,7 +136,13 @@ impl Keymap {
                 .resolved()
                 .iter()
                 .filter(|_| !recording)
-                .filter(|command| command.group == Group::Keys)
+                .filter(|command| {
+                    // Tab cycling also has a menu item, but the menu only sees
+                    // the key after the focused page has, and a page keystroke
+                    // hides the pointer until the mouse moves.
+                    command.group == Group::Keys
+                        || matches!(command.id, "tab.next" | "tab.previous")
+                })
                 .filter(|command| self.offers(command.id))
                 .filter_map(|command| {
                     let accelerator = command.accelerator.as_deref()?;
@@ -551,6 +557,20 @@ mod tests {
         assert!(read(&keymap.key_table)
             .iter()
             .any(|(_, id)| *id == "work.dictate"));
+    }
+
+    #[test]
+    fn tab_cycling_keys_are_taken_before_the_page_sees_them() {
+        // A keystroke that reaches a page hides the pointer on macOS, so each
+        // platform must match Ctrl+Tab and Ctrl+Shift+Tab ahead of the page.
+        let keymap = Keymap::default();
+        keymap.refresh_tables();
+        for id in ["tab.next", "tab.previous"] {
+            #[cfg(target_os = "macos")]
+            assert!(read(&keymap.key_table).iter().any(|(_, held)| *held == id));
+            #[cfg(not(target_os = "macos"))]
+            assert!(keymap.engine_table().iter().any(|s| s.id == id));
+        }
     }
 
     #[test]
