@@ -2050,12 +2050,13 @@ pub fn install_accelerators(
         {
             return Ok(());
         }
-        let hit = shortcuts
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt)
-            .map(|shortcut| shortcut.id.clone());
+        let hit = {
+            let shortcuts = shortcuts
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Shortcut::match_windows(&shortcuts, key, ctrl, shift, alt)
+                .map(|shortcut| shortcut.id.clone())
+        };
         if let Some(command) = hit {
             unsafe { args.SetHandled(true)? };
             sink(EngineEvent::ShortcutPressed {

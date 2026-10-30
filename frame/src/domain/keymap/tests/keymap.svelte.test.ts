@@ -51,6 +51,72 @@ beforeEach(() => {
 });
 
 describe("keymap", () => {
+  it.each([false, true])("accepts zoom plus and keypad aliases (mac: %s)", async (mac) => {
+    native.entries.mockResolvedValue([
+      entry("zoom.in", "CmdOrCtrl+=", "view"),
+      entry("zoom.out", "CmdOrCtrl+-", "view"),
+    ]);
+    const keymap = await import("../keymap.svelte");
+    await keymap.init();
+    const modifier = mac ? "Cmd" : "Ctrl";
+    expect(
+      keymap.commandFor(
+        press({ code: "Equal", key: "+", shiftKey: true }),
+        mac,
+        `${modifier}+Shift+Equal`,
+      ),
+    ).toBe("zoom.in");
+    expect(
+      keymap.commandFor(press({ code: "NumpadAdd", key: "+" }), mac, `${modifier}+NumpadAdd`),
+    ).toBe("zoom.in");
+    expect(
+      keymap.commandFor(
+        press({ code: "NumpadSubtract", key: "-" }),
+        mac,
+        `${modifier}+NumpadSubtract`,
+      ),
+    ).toBe("zoom.out");
+    expect(
+      keymap.commandFor(press({ code: "NumpadAdd", key: "+" }), mac, "Alt+NumpadAdd"),
+    ).toBeNull();
+  });
+
+  it("preserves exact bindings and does not revive rebound or disabled zoom", async () => {
+    native.entries.mockResolvedValue([
+      entry("zoom.in", "Ctrl+=", "view"),
+      entry("tab.new", "Ctrl+Shift+=", "file"),
+      entry("zoom.out", null, "view"),
+    ]);
+    const keymap = await import("../keymap.svelte");
+    await keymap.init();
+    expect(
+      keymap.commandFor(
+        press({ code: "Equal", key: "+", shiftKey: true }),
+        false,
+        "Ctrl+Shift+Equal",
+      ),
+    ).toBe("tab.new");
+    expect(
+      keymap.commandFor(press({ code: "NumpadSubtract", key: "-" }), false, "Ctrl+NumpadSubtract"),
+    ).toBeNull();
+    native.entries.mockResolvedValue([entry("zoom.in", "Ctrl+J", "view")]);
+    native.listener?.();
+    await vi.waitFor(() => expect(keymap.all()[0]?.accelerator).toBe("Ctrl+J"));
+    expect(
+      keymap.commandFor(press({ code: "NumpadAdd", key: "+" }), false, "Ctrl+NumpadAdd"),
+    ).toBeNull();
+    native.entries.mockResolvedValue([entry("zoom.in", "Ctrl+Alt+=", "view")]);
+    native.listener?.();
+    await vi.waitFor(() => expect(keymap.all()[0]?.accelerator).toBe("Ctrl+Alt+="));
+    expect(
+      keymap.commandFor(
+        press({ code: "NumpadAdd", key: "+", altKey: true }),
+        false,
+        "Ctrl+Alt+NumpadAdd",
+      ),
+    ).toBeNull();
+  });
+
   it("matches chrome key presses against the resolved keymap only", async () => {
     const keymap = await import("../keymap.svelte");
     await keymap.init();

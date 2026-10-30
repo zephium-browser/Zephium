@@ -50,13 +50,32 @@ export function dispose() {
  *  Work keys belong to the pane, so neither is matched here. */
 export function commandFor(event: KeyboardEvent, mac: boolean, pressed: string): string | null {
   if (event.isComposing || event.repeat) return null;
-  const hit = entries.find(
+  let hit = entries.find(
     (entry) =>
       entry.group !== "global" &&
       entry.group !== "work" &&
       entry.accelerator !== null &&
       sameAccelerator(entry.accelerator, pressed, mac),
   );
+  if (!hit) {
+    const key =
+      event.code === "Equal" && event.key === "+"
+        ? pressed.replace("Shift+", "")
+        : event.code === "NumpadAdd"
+          ? pressed.replace("NumpadAdd", "Equal")
+          : event.code === "NumpadSubtract"
+            ? pressed.replace("NumpadSubtract", "Minus")
+            : null;
+    const id = event.code === "NumpadSubtract" ? "zoom.out" : "zoom.in";
+    if (key !== null)
+      hit = entries.find(
+        (entry) =>
+          entry.id === id &&
+          entry.accelerator !== null &&
+          sameAccelerator(entry.accelerator, `CmdOrCtrl+${id === "zoom.in" ? "=" : "-"}`, mac) &&
+          sameAccelerator(entry.accelerator, key, mac),
+      );
+  }
   return hit?.id ?? null;
 }
 

@@ -562,6 +562,101 @@ pub struct Shortcut {
     pub key: u32,
 }
 
+impl Shortcut {
+    /// Exact bindings take precedence over conventional Windows zoom keys.
+    pub fn match_windows(
+        shortcuts: &[Self],
+        key: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<&Self> {
+        shortcuts
+            .iter()
+            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt)
+            .or_else(|| {
+                if !ctrl || alt {
+                    return None;
+                }
+                // VK_OEM_PLUS with Shift, VK_ADD and VK_SUBTRACT.
+                let (id, bound_key) = match (key, shift) {
+                    (0xBB, true) | (0x6B, false) => ("zoom.in", 0xBB),
+                    (0x6D, false) => ("zoom.out", 0xBD),
+                    _ => return None,
+                };
+                shortcuts
+                    .iter()
+                    .find(|s| s.id == id && s.ctrl && !s.shift && !s.alt && s.key == bound_key)
+            })
+    }
+}
+
+#[cfg(test)]
+mod shortcut_matching_tests {
+    use super::Shortcut;
+
+    fn binding(id: &str, key: u32, shift: bool) -> Shortcut {
+        Shortcut {
+            id: id.into(),
+            key,
+            ctrl: true,
+            shift,
+            alt: false,
+        }
+    }
+
+    #[test]
+    fn windows_zoom_accepts_shifted_plus_and_keypad_keys() {
+        let shortcuts = [
+            binding("zoom.in", 0xBB, false),
+            binding("zoom.out", 0xBD, false),
+        ];
+        for (key, shift, id) in [
+            (0xBB, false, "zoom.in"),
+            (0xBB, true, "zoom.in"),
+            (0x6B, false, "zoom.in"),
+            (0x6D, false, "zoom.out"),
+        ] {
+            assert_eq!(
+                Shortcut::match_windows(&shortcuts, key, true, shift, false).map(|s| s.id.as_str()),
+                Some(id)
+            );
+            assert!(Shortcut::match_windows(&shortcuts, key, false, shift, false).is_none());
+            assert!(Shortcut::match_windows(&shortcuts, key, true, shift, true).is_none());
+        }
+    }
+
+    #[test]
+    fn exact_bindings_win_and_rebound_or_disabled_zoom_has_no_alias() {
+        let shortcuts = [
+            binding("zoom.in", 0xBB, false),
+            binding("tab.new", 0xBB, true),
+            binding("tab.close", 0x6B, false),
+        ];
+        assert_eq!(
+            Shortcut::match_windows(&shortcuts, 0xBB, true, true, false)
+                .unwrap()
+                .id,
+            "tab.new"
+        );
+        assert_eq!(
+            Shortcut::match_windows(&shortcuts, 0x6B, true, false, false)
+                .unwrap()
+                .id,
+            "tab.close"
+        );
+        assert!(Shortcut::match_windows(
+            &[binding("zoom.in", 0x4A, false)],
+            0x6B,
+            true,
+            false,
+            false
+        )
+        .is_none());
+        assert!(Shortcut::match_windows(&[], 0xBB, true, true, false).is_none());
+    }
+}
+
 /// How a content layout that follows a deliberate change of the window's
 /// shape is carried out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
