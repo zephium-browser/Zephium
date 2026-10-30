@@ -41,7 +41,7 @@ pub(crate) use page_reader_probe::run as run_page_reader_probe;
 pub(crate) mod audio;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
-pub(crate) use automatic_pip::automatic_pip;
+pub(crate) use automatic_pip::{after_document_fullscreen, automatic_pip};
 pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
 pub(crate) mod autofill;
 mod content_filter;

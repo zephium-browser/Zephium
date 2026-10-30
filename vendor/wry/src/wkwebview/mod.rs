@@ -915,6 +915,8 @@ impl InnerWebView {
         pl_attrs.file_upload_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.autofill_button_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.media_return_handler,
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));

@@ -130,7 +130,7 @@ impl Shell {
 
     /// The player can show a tab of another space; going to it shows that
     /// space, arriving on the tab.
-    fn show_media_tab(&mut self, id: ItemId) -> OperationDisposition {
+    pub(super) fn show_media_tab(&mut self, id: ItemId) -> OperationDisposition {
         if self.item_in_focused_scope(id) {
             return self.operation_activate(id);
         }

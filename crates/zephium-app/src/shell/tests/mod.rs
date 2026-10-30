@@ -1985,6 +1985,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::HostFullscreen(_) => {}
+        Projection::RaiseWindow => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}

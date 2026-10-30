@@ -290,3 +290,13 @@ a pointer-to-`usize` cast, preserving that comparison under the inherited Rust
 or dereferenced from the integer, and the admission policy is unchanged.
 The dependency graph and locked upstream versions remain unchanged. Strict
 standalone validation uses the manifest's default MSRV with no lint overrides.
+
+### Returning media to its page (macOS)
+
+`with_media_return_handler` answers the private `WKUIDelegatePrivate` selector
+`_webViewFullscreenMayReturnToInline:`. The picture-in-picture window's return
+button sends it, and WebKit then waits for the page to become visible before
+it takes the video back, so without a handler that brings the page on screen
+the button does nothing for a background tab. A missing handler keeps
+upstream's no-op; a panic is contained. Like the other private selectors it
+must be reviewed during upstream rebases.

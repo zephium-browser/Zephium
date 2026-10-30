@@ -1495,6 +1495,9 @@ impl EngineHost {
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
             let page_permission_presence = page_permission_pending.clone();
+            let media_item = id.clone();
+            let media_permit = event_permit.clone();
+            let media_sink = self.sink.clone();
             let profile = partition.profile();
             builder = builder
                 // Link preview is a native WebKit UI/network surface outside
@@ -1568,6 +1571,14 @@ impl EngineHost {
                         page_permission_navigation.clone(),
                         page_permission_presence.clone(),
                         request,
+                    )
+                })
+                .with_media_return_handler(move || {
+                    media_permit.emit(
+                        &media_sink,
+                        EngineEvent::MediaReturnRequested {
+                            id: media_item.get(),
+                        },
                     )
                 })
                 .with_on_web_content_process_terminate_handler(move || {
@@ -2526,6 +2537,8 @@ impl EngineHost {
         Some(ObservedView {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             automatic_pip_sequence: Rc::new(Cell::new(0)),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            automatic_pip_after_fullscreen: Cell::new(false),
             favicon_watch: Cell::new(0),
             media_watch: Cell::new((0, false)),
             #[cfg(target_os = "windows")]

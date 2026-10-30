@@ -1,5 +1,6 @@
 //! Automatic video PiP is initiated only by the browser's tab-selection port.
 use super::EngineHost;
+use crate::fullscreen::NativeFullscreen;
 use std::rc::Rc;
 use zephium_core::ids::ItemId;
 
@@ -19,6 +20,16 @@ impl EngineHost {
             return;
         };
         view.automatic_pip_sequence.set(sequence);
+        // The shell asks a page out of element fullscreen as its tab is left,
+        // and a page does not offer its video until it is out. WebKit leaves
+        // fullscreen asynchronously, so ask again once it has.
+        view.automatic_pip_after_fullscreen.set(
+            background
+                && crate::platform::imp::fullscreen_state(&view.view) != NativeFullscreen::Inactive,
+        );
+        if view.automatic_pip_after_fullscreen.get() {
+            return;
+        }
         let Some((epoch, url)) = view.navigation.committed_snapshot() else {
             return;
         };
@@ -40,6 +51,35 @@ impl EngineHost {
         let script =
             format!("location.href === {url} ? ({SCRIPT})('{action}', {sequence}) : false");
         crate::platform::imp::automatic_pip(&view.view, script, current);
+    }
+
+    /// `id` has left element fullscreen: offer its video now if its tab was
+    /// left while it was still fullscreen and has not been shown since.
+    pub(super) fn automatic_pip_after_fullscreen(&self, id: ItemId) {
+        let Some(view) = self
+            .views
+            .get(&id)
+            .filter(|view| view.automatic_pip_after_fullscreen.get())
+        else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            // WebKit reports the view out of fullscreen before its document
+            // hears of it, and the page declines while it is still fullscreen.
+            let sequence = view.automatic_pip_sequence.get();
+            let current = view.automatic_pip_sequence.clone();
+            crate::platform::imp::after_document_fullscreen(&view.view, move || {
+                if current.get() == sequence {
+                    let _ = super::dispatch::try_with(move |host| host.automatic_pip(id, true));
+                }
+            });
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = view;
+            self.automatic_pip(id, true);
+        }
     }
 
     pub(crate) fn cancel_automatic_pip(&self) {

@@ -866,6 +866,126 @@ fn a_tab_opened_in_front_is_shown_after_its_source() {
     assert_eq!(shell.windows.focused().unwrap().active, Some(opened));
 }
 
+type RaiseLog = Arc<Mutex<usize>>;
+
+fn setup_with_raises() -> (Shell, Arc<FakeEngine>, Screen, RaiseLog) {
+    let engine = Arc::new(FakeEngine::default());
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let raises: RaiseLog = Arc::new(Mutex::new(0));
+    let (sink, raise_sink) = (screen.clone(), raises.clone());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if matches!(projection, Projection::RaiseWindow) {
+                *raise_sink.lock().unwrap() += 1;
+            }
+            apply_projection(&mut sink.lock().unwrap(), projection);
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    (shell, engine, screen, raises)
+}
+
+fn media_returns(shell: &mut Shell, id: ItemId) {
+    shell.handle(Command::Engine(EngineEvent::MediaReturnRequested { id }));
+}
+
+#[test]
+fn picture_in_picture_return_brings_its_tab_and_the_window_forward() {
+    let (mut shell, _, screen, raises) = setup_with_raises();
+    let video = active_id(&screen);
+    navigate_and_commit(&mut shell, video, "https://video.example/watch");
+    shell.handle(Command::Open);
+    let other = active_id(&screen);
+    assert_ne!(other, video);
+
+    media_returns(&mut shell, video);
+    assert_eq!(active_id(&screen), video);
+    assert_eq!(*raises.lock().unwrap(), 1);
+
+    // Already in front, the window still comes forward.
+    media_returns(&mut shell, video);
+    assert_eq!(active_id(&screen), video);
+    assert_eq!(*raises.lock().unwrap(), 2);
+}
+
+#[test]
+fn picture_in_picture_return_opens_the_space_holding_its_tab_on_that_tab() {
+    let (mut shell, _, screen, raises) = setup_with_raises();
+    let home = shell.windows.focused().unwrap().space;
+    let video = active_id(&screen);
+    navigate_and_commit(&mut shell, video, "https://video.example/watch");
+    shell.handle(Command::Open);
+    let left_at = active_id(&screen);
+    navigate_and_commit(&mut shell, left_at, "https://news.example/");
+    let created = shell.handle_operation(Command::Space(Box::new(crate::SpaceCommand::Create {
+        name: "Studio".into(),
+        look: Default::default(),
+    })));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    assert_ne!(shell.windows.focused().unwrap().space, home);
+
+    media_returns(&mut shell, video);
+    assert_eq!(shell.windows.focused().unwrap().space, home);
+    assert_eq!(active_id(&screen), video);
+    assert_eq!(*raises.lock().unwrap(), 1);
+}
+
+#[test]
+fn picture_in_picture_return_from_a_closed_tab_changes_nothing() {
+    let (mut shell, _, screen, raises) = setup_with_raises();
+    let kept = active_id(&screen);
+    navigate_and_commit(&mut shell, kept, "https://news.example/");
+    shell.handle(Command::Open);
+    let closed = active_id(&screen);
+    shell.handle(Command::Close(closed));
+    assert_eq!(active_id(&screen), kept);
+
+    media_returns(&mut shell, closed);
+    assert_eq!(active_id(&screen), kept);
+    assert_eq!(*raises.lock().unwrap(), 0);
+}
+
+#[test]
+fn picture_in_picture_return_from_work_steps_back_to_browse_and_its_tab() {
+    let (mut shell, _, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let home = shell.windows.focused().unwrap().space;
+    let video = active_id(&screen);
+    navigate_and_commit(&mut shell, video, "https://video.example/watch");
+    let created = shell.handle_operation(Command::Space(Box::new(crate::SpaceCommand::Create {
+        name: "Studio".into(),
+        look: Default::default(),
+    })));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    assert_eq!(shell.active_browser_page(), Some(crate::BrowserPage::Work));
+
+    media_returns(&mut shell, video);
+    // Work would otherwise keep the tab off screen, and WebKit would keep
+    // the video in picture in picture.
+    assert!(shell.browser_return.is_some());
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+    assert_eq!(shell.active_browser_page(), None);
+    assert_eq!(shell.windows.focused().unwrap().space, home);
+    assert_eq!(active_id(&screen), video);
+}
+
 fn focused_scope(shell: &Shell) -> (ProfileId, SpaceId) {
     let window = shell.windows.focused().unwrap();
     (window.profile, window.space)

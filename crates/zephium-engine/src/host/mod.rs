@@ -165,6 +165,10 @@ struct Spare {
 struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     automatic_pip_sequence: Rc<Cell<u64>>,
+    // A tab left while its page was still leaving element fullscreen offers
+    // its video once the page is out.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    automatic_pip_after_fullscreen: Cell<bool>,
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]

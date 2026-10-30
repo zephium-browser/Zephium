@@ -1635,6 +1635,12 @@ pub enum EngineEvent {
     NativeTabCloseRequested {
         id: ItemId,
     },
+    /// A video the page presents outside itself, in picture in picture, asked
+    /// to go back to it. The engine puts it back once the page is on screen,
+    /// so the person's tab should come forward, as from its own return button.
+    MediaReturnRequested {
+        id: ItemId,
+    },
     PageOpenBlocked {
         id: ItemId,
         /// The refused page, only when it is an ordinary web address.

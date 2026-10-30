@@ -1676,6 +1676,9 @@ pub enum Projection {
     /// should itself be fullscreen until this turns false. Only engines that
     /// present fullscreen inside the browser window send it.
     HostFullscreen(bool),
+    /// The browser window should come to the front, as the person asked for
+    /// one of its pages from outside it.
+    RaiseWindow,
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),

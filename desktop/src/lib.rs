@@ -6996,6 +6996,22 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
                 Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
+                Projection::RaiseWindow => {
+                    let app = emit_handle.clone();
+                    let _ = emit_handle.run_on_main_thread(move || {
+                        let Some(main) = app.get_webview_window(MAIN_LABEL) else {
+                            return;
+                        };
+                        #[cfg(target_os = "macos")]
+                        panel::raise(&main);
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = main.unminimize();
+                            let _ = main.show();
+                            let _ = main.set_focus();
+                        }
+                    });
+                }
                 Projection::RuntimeStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
                 }
