@@ -106,7 +106,7 @@ sha2 = "=0.10.9"
 serde = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
-zeroize = "=1.9.0"
+zeroize = "=1.9.1"
 
 [dev-dependencies]
 tempfile.workspace = true
