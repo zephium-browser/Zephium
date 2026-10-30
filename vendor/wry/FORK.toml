@@ -50,6 +50,10 @@ name = "WebKit frame-scoped extension resource admission"
 paths = ["src/wkwebview/navigation.rs"]
 
 [[patch_sets]]
+name = "WebKit navigation responses without a native response fail closed"
+paths = ["src/wkwebview/navigation.rs"]
+
+[[patch_sets]]
 name = "deny-by-default native media, preview, fullscreen, and file-drag surfaces"
 paths = ["src/native_bounds.rs", "src/webkitgtk/mod.rs", "src/wkwebview"]
 

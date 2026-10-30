@@ -4,10 +4,10 @@ use std::{
 };
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{DeclaredClass, Message};
+use objc2::{msg_send, rc::Retained, DeclaredClass, Message};
 use objc2_foundation::{
   MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString,
-  NSURLErrorFailingURLErrorKey, NSURL,
+  NSURLErrorFailingURLErrorKey, NSURLResponse, NSURL,
 };
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
@@ -961,40 +961,56 @@ pub(crate) fn navigation_policy_response(
   response: &WKNavigationResponse,
   handler: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>,
 ) {
+  // SAFETY: `response` is the live object WebKit passed to this delegate
+  // call and `-response` takes no arguments. Apple declares the result
+  // nonnull, but WebKit on macOS 27 has returned nil during a
+  // process-swapping navigation, so it is received as optional instead of
+  // through the generated getter, which panics on nil.
   unsafe {
-    let can_show_mime_type = response.canShowMIMEType();
+    let native_response: Option<Retained<NSURLResponse>> = msg_send![response, response];
+    let facts = native_response.map(|native| NavigationResponseFacts {
+      can_show_mime_type: response.canShowMIMEType(),
+      attachment: native
+        .downcast_ref::<NSHTTPURLResponse>()
+        .and_then(|native| {
+          native.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition"))
+        })
+        .and_then(|value| bounded_nsstring(&value, crate::native_bounds::DOWNLOAD_FILENAME_LIMIT))
+        .is_some_and(|value| is_attachment_disposition(&value)),
+      url_admitted: !response.isForMainFrame()
+        || native
+          .URL()
+          .and_then(|url| url.absoluteString())
+          .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
+          .is_some(),
+    });
+    let policy = navigation_response_policy(facts, this.ivars().has_download_handler);
+    (*handler).call((policy,));
+  }
+}
 
-    let native_response = response.response();
-    let attachment = native_response
-      .downcast_ref::<NSHTTPURLResponse>()
-      .and_then(|response| {
-        response.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition"))
-      })
-      .and_then(|value| bounded_nsstring(&value, crate::native_bounds::DOWNLOAD_FILENAME_LIMIT))
-      .is_some_and(|value| is_attachment_disposition(&value));
-    if !can_show_mime_type || attachment {
-      let has_download_handler = this.ivars().has_download_handler;
-      if has_download_handler {
-        (*handler).call((WKNavigationResponsePolicy::Download,));
-      } else {
-        (*handler).call((WKNavigationResponsePolicy::Cancel,));
-      }
-      return;
-    }
+struct NavigationResponseFacts {
+  can_show_mime_type: bool,
+  attachment: bool,
+  url_admitted: bool,
+}
 
-    if response.isForMainFrame() {
-      let response = response.response();
-      let Some(_url) = response
-        .URL()
-        .and_then(|url| url.absoluteString())
-        .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
-      else {
-        (*handler).call((WKNavigationResponsePolicy::Cancel,));
-        return;
-      };
-    }
-
-    (*handler).call((WKNavigationResponsePolicy::Allow,));
+fn navigation_response_policy(
+  response: Option<NavigationResponseFacts>,
+  has_download_handler: bool,
+) -> WKNavigationResponsePolicy {
+  let Some(response) = response else {
+    return WKNavigationResponsePolicy::Cancel;
+  };
+  if !response.can_show_mime_type || response.attachment {
+    return match has_download_handler {
+      true => WKNavigationResponsePolicy::Download,
+      false => WKNavigationResponsePolicy::Cancel,
+    };
+  }
+  match response.url_admitted {
+    true => WKNavigationResponsePolicy::Allow,
+    false => WKNavigationResponsePolicy::Cancel,
   }
 }
 
@@ -1459,6 +1475,64 @@ mod attachment_tests {
       "inline; filename=attachment.txt"
     ));
     assert!(!is_attachment_disposition("attachment-invalid"));
+  }
+}
+
+#[cfg(test)]
+mod response_policy_tests {
+  use super::{navigation_response_policy, NavigationResponseFacts};
+  use objc2_web_kit::WKNavigationResponsePolicy;
+
+  fn facts(
+    can_show_mime_type: bool,
+    attachment: bool,
+    url_admitted: bool,
+  ) -> NavigationResponseFacts {
+    NavigationResponseFacts {
+      can_show_mime_type,
+      attachment,
+      url_admitted,
+    }
+  }
+
+  #[test]
+  fn a_missing_response_is_cancelled() {
+    assert_eq!(
+      navigation_response_policy(None, true),
+      WKNavigationResponsePolicy::Cancel
+    );
+    assert_eq!(
+      navigation_response_policy(None, false),
+      WKNavigationResponsePolicy::Cancel
+    );
+  }
+
+  #[test]
+  fn undisplayable_and_attachment_responses_download_only_with_a_handler() {
+    for response in [facts(false, false, true), facts(true, true, true)] {
+      assert_eq!(
+        navigation_response_policy(Some(response), true),
+        WKNavigationResponsePolicy::Download
+      );
+    }
+    for response in [facts(false, false, true), facts(true, true, true)] {
+      assert_eq!(
+        navigation_response_policy(Some(response), false),
+        WKNavigationResponsePolicy::Cancel
+      );
+    }
+  }
+
+  #[test]
+  fn displayable_responses_are_allowed_only_with_an_admitted_url() {
+    assert_eq!(
+      navigation_response_policy(Some(facts(true, false, true)), false),
+      WKNavigationResponsePolicy::Allow
+    );
+    assert_eq!(
+      navigation_response_policy(Some(facts(true, false, false)), true),
+      WKNavigationResponsePolicy::Cancel
+    );
   }
 }
 
