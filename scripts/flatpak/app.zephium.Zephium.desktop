@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Zephium
+Comment=A lightweight browser
+Exec=zephium-desktop %U
+Icon=app.zephium.Zephium
+StartupWMClass=app.zephium.Zephium
+Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;text/html;
+Terminal=false

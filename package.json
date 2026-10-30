@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "pnpm -C desktop dev",
     "build": "pnpm -C desktop build",
+    "build:flatpak": "scripts/flatpak/build.sh",
     "frame:dev": "pnpm -C frame dev",
     "frame:build": "pnpm -C frame build"
   },

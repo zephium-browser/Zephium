@@ -203,7 +203,19 @@ fn install_composition(
 
     let sized_chrome = chrome.clone();
     fixed.connect_size_allocate(move |_, allocation| {
-        sized_chrome.set_size_request(allocation.width(), allocation.height());
+        let (width, height) = (allocation.width(), allocation.height());
+        if sized_chrome.size_request() != (width, height) {
+            sized_chrome.set_size_request(width, height);
+        }
+        // GTK drops a resize queued during allocation, and a window that is
+        // never resized allocates only once, which left the chrome at its
+        // 1x1 initial size. Allocate it directly instead.
+        sized_chrome.size_allocate(&gtk::Allocation::new(
+            allocation.x(),
+            allocation.y(),
+            width,
+            height,
+        ));
     });
     fixed.show_all();
 

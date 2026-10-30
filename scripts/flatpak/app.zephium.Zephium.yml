@@ -1,0 +1,53 @@
+# Linux build on the GNOME runtime, whose WebKitGTK meets the security floor
+# and whose content-process sandbox works through the Flatpak portal.
+id: app.zephium.Zephium
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: zephium-desktop
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-download
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: zephium
+    buildsystem: simple
+    build-options:
+      # Local builds fetch crates directly rather than vendoring them.
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/zephium/cargo
+        # WebKit names its sandboxed processes after the GTK application ID,
+        # and the portal admits only names under the Flatpak ID; build.rs
+        # keeps the desktop entry, GTK and portal IDs on this one value.
+        ZEPHIUM_LINUX_APP_ID: app.zephium.Zephium
+        TAURI_CONFIG: '{"identifier":"app.zephium.Zephium","productName":"app.zephium.Zephium"}'
+    build-commands:
+      # The frontend is embedded at compile time from frame/dist, which
+      # build.sh produces on the host first.
+      - cargo build --release --locked -p zephium-desktop --no-default-features --features tauri/custom-protocol
+      - install -Dm755 target/release/zephium-desktop /app/bin/zephium-desktop
+      - install -Dm644 desktop/icons/128x128.png /app/share/icons/hicolor/128x128/apps/app.zephium.Zephium.png
+      - install -Dm644 desktop/icons/icon.png /app/share/icons/hicolor/512x512/apps/app.zephium.Zephium.png
+      - install -Dm644 scripts/flatpak/app.zephium.Zephium.desktop /app/share/applications/app.zephium.Zephium.desktop
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - node_modules
+          - frame/node_modules
+          - desktop/node_modules
+          - crates/zephium-engine/target
+          - vendor/adblock/target
+          - crates/zephium-blocker/fuzz/target
