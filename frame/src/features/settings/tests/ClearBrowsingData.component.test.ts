@@ -1,3 +1,4 @@
+import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
@@ -61,6 +62,24 @@ test("every time range is offered", async () => {
   await dialog.getByLabelText("Time range").click();
   for (const name of ["Last hour", "Last 24 hours", "Last 7 days", "Last 4 weeks", "All time"])
     await expect.element(page.getByRole("option", { name })).toBeVisible();
+});
+
+test("time range options receive pointer input above the dialog", async () => {
+  const { dialog } = await open();
+  await dialog.getByLabelText("Time range").click();
+  const option = page.getByRole("option", { name: "All time", exact: true });
+  await expect.element(option).toBeVisible();
+  await vi.waitFor(() => {
+    const row = option.element();
+    const box = row.getBoundingClientRect();
+    expect(
+      row.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)),
+    ).toBe(true);
+  });
+  await option.click();
+  await expect.element(dialog.getByLabelText("Time range")).toHaveTextContent("All time");
+  await expect.element(dialog).toBeVisible();
+  expect(native.call).not.toHaveBeenCalled();
 });
 
 test("nothing chosen leaves nothing to clear", async () => {
