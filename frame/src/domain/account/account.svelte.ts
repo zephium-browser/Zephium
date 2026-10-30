@@ -60,6 +60,8 @@ let unreachable = $state(false);
 let busy = $state<AccountAction | null>(null);
 let lastFault = $state.raw<AccountFault | null>(null);
 let moved = $state<string | null>(null);
+// Only the settled form stage survives navigation, never the emailed code.
+let deletionCodeSent = $state(false);
 let users = 0;
 let stop: (() => void) | null = null;
 let generation = 0;
@@ -69,6 +71,7 @@ export const account = () => current;
 export const unavailable = () => unreachable || (current !== null && !current.available);
 export const pending = () => busy;
 export const fault = () => lastFault;
+export const awaitingDeletionCode = () => deletionCodeSent;
 
 function adopt(reply: AccountReplyV1 | undefined) {
   if (reply?.account?.version !== 1) {
@@ -76,6 +79,12 @@ function adopt(reply: AccountReplyV1 | undefined) {
     return;
   }
   unreachable = false;
+  if (
+    !reply.account.signed_in ||
+    current?.server !== reply.account.server ||
+    current?.email !== reply.account.email
+  )
+    deletionCodeSent = false;
   current = reply.account;
   if (current.signed_in) moved = null;
 }
@@ -147,6 +156,9 @@ async function act(
   adopt(response.value);
   const failed = response.value.fault;
   if (failed) lastFault = { action, fault: failed, retryAfter: response.value.retry_after };
+  else if (action === "deletion_code")
+    deletionCodeSent = response.value.account.version === 1 && response.value.account.signed_in;
+  else if (action === "delete") deletionCodeSent = false;
   return !failed;
 }
 
