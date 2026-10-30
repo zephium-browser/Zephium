@@ -1,7 +1,7 @@
 //! The browser's windows and tabs as WebKit's extension runtime sees them.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Weak as RcWeak;
+use std::rc::{Rc, Weak as RcWeak};
 
 use block2::DynBlock;
 use objc2::rc::{Retained, Weak};
@@ -397,6 +397,71 @@ define_class!(
                 TabRequest::FocusWindow { window: self.id() },
                 Box::new(move |_| completion.call((std::ptr::null_mut(),))),
             );
+        }
+
+        // An extension's windows are tabs of this window (see the delegate's
+        // openNewWindow), so removing one closes the tabs it opened here and
+        // leaves the window and the user's tabs alone.
+        #[unsafe(method(closeForWebExtensionContext:completionHandler:))]
+        fn close(
+            &self,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let completion = completion.copy();
+            let Some(shared) = self.ivars().shared.upgrade() else {
+                completion.call((Retained::as_ptr(&error("The browser is closing.")).cast_mut(),));
+                return;
+            };
+            // SAFETY: WebKit passes `context` as a valid extension context for
+            // the duration of this delegate callback.
+            let extension = unsafe { context.uniqueIdentifier() }.to_string();
+            let tabs = {
+                let graph = shared.graph.borrow();
+                shared.opened.take_in(&extension, self.id(), |tab| {
+                    graph
+                        .tab(tab)
+                        .and_then(|tab| tab.window())
+                        .map(|window| window.id())
+                })
+            };
+            if tabs.is_empty() {
+                let error = error("Only windows the extension opened can be closed.");
+                completion.call((Retained::as_ptr(&error).cast_mut(),));
+                return;
+            }
+            let remaining = Rc::new(Cell::new(tabs.len()));
+            let failure: Rc<RefCell<Option<String>>> = Rc::default();
+            for tab in tabs {
+                let completion = completion.clone();
+                let remaining = remaining.clone();
+                let failure = failure.clone();
+                let weak = Rc::downgrade(&shared);
+                let extension = extension.clone();
+                shared.host().tab_request(
+                    TabRequest::Close { tab },
+                    Box::new(move |result| {
+                        if let Err(message) = result {
+                            // Still open, so a later windows.remove can retry it.
+                            if let Some(shared) = weak.upgrade() {
+                                shared.opened.record(&extension, tab);
+                            }
+                            failure.borrow_mut().get_or_insert(message);
+                        }
+                        remaining.set(remaining.get() - 1);
+                        if remaining.get() > 0 {
+                            return;
+                        }
+                        match failure.borrow_mut().take() {
+                            None => completion.call((std::ptr::null_mut(),)),
+                            Some(message) => {
+                                let error = error(&message);
+                                completion.call((Retained::as_ptr(&error).cast_mut(),));
+                            }
+                        }
+                    }),
+                );
+            }
         }
     }
 );

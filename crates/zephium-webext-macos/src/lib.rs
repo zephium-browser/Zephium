@@ -14,6 +14,7 @@ mod json;
 mod lifetime;
 mod native;
 mod offscreen;
+mod opened;
 mod runtime;
 mod socket;
 mod surface;

@@ -72,6 +72,7 @@ pub(crate) struct Shared {
     pub(crate) offscreen: crate::offscreen::Documents,
     pub(crate) workers: crate::lifetime::Workers,
     pub(crate) access: crate::access::Batches,
+    pub(crate) opened: crate::opened::Opened,
     pub(crate) mtm: MainThreadMarker,
 }
 
@@ -137,6 +138,7 @@ impl Runtime {
             offscreen: Default::default(),
             workers: Default::default(),
             access: Default::default(),
+            opened: Default::default(),
             mtm,
         });
         let delegate = Delegate::new(mtm, Rc::downgrade(&shared));
