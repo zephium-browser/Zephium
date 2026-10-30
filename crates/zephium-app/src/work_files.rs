@@ -905,6 +905,17 @@ thread_local! {
     static TEST_GRANT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+fn has_test_grant_home() -> bool {
+    TEST_GRANT_HOME.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::env::current_dir().expect("test working directory"))
+        .expect("create test directory")
+}
+
 /// Current-thread fixture home; never mutates HOME or changes production policy.
 #[cfg(test)]
 pub(crate) struct TestGrantHome {
@@ -960,7 +971,7 @@ fn permitted_folders(home: Option<&Path>) -> Vec<PathBuf> {
     {
         use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads};
         #[cfg(test)]
-        if std::env::var_os("HOME").is_some() {
+        if has_test_grant_home() {
             return folders;
         }
         for id in [FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads] {
@@ -992,7 +1003,10 @@ fn protected_folders(home: Option<&Path>) -> Vec<PathBuf> {
             folders.push(home.join("AppData"));
             folders.push(home.join(".zephium-native-v1"));
         }
-        let native = !cfg!(test) || std::env::var_os("HOME").is_none();
+        #[cfg(test)]
+        let native = !has_test_grant_home();
+        #[cfg(not(test))]
+        let native = true;
         if native {
             for id in [
                 FOLDERID_LocalAppData,
@@ -1680,7 +1694,7 @@ mod tests {
     fn home_grant() -> (tempfile::TempDir, TestGrantHome, WorkFileGrant, PathBuf) {
         // Keep the test home thread-local so parallel tests never observe a
         // temporary HOME value or inherit one after this fixture is dropped.
-        let home = tempfile::tempdir().unwrap();
+        let home = test_tempdir();
         let home_scope = TestGrantHome::new(home.path().to_path_buf());
         let project = home.path().join("Documents").join("project");
         std::fs::create_dir_all(project.join("src")).unwrap();
@@ -2070,8 +2084,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn redirected_known_folders_are_explicit_policy_roots() {
-        let home = tempfile::tempdir().unwrap();
-        let redirected = tempfile::tempdir().unwrap();
+        let home = test_tempdir();
+        let redirected = test_tempdir();
         let home = home.path().canonicalize().unwrap();
         let redirected = redirected.path().canonicalize().unwrap();
         let path = redirected.to_string_lossy();

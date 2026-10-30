@@ -227,6 +227,7 @@ impl Record {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use super::super::Receipt;
     use super::*;
     fn root() -> tempfile::TempDir {
@@ -235,6 +236,7 @@ mod tests {
             .tempdir()
             .unwrap()
     }
+    #[cfg(not(windows))]
     fn receipt(root: &std::path::Path, id: usize) -> Receipt {
         Receipt {
             version: 1,
@@ -246,12 +248,14 @@ mod tests {
             destination: None,
         }
     }
+    #[cfg(not(windows))]
     fn completed(journal: &Journal, root: &std::path::Path, id: usize) -> Record {
         let record = journal.prepare(receipt(root, id), b"saved").unwrap();
         record.mark("trashed").unwrap();
         journal.mark_restored(&record).unwrap();
         record
     }
+    #[cfg(not(windows))]
     #[test]
     fn only_oldest_completed_rows_beyond_256_expire_and_missing_ids_stay_missing() {
         let root = root();
@@ -307,6 +311,7 @@ mod tests {
             .join(format!("original-{MAX_COMPLETED}.txt"))
             .exists());
     }
+    #[cfg(not(windows))]
     #[test]
     fn restored_or_completed_markers_never_retire_an_active_original_or_unacknowledged_move() {
         let root = root();
@@ -335,6 +340,7 @@ mod tests {
         assert!(!record.marked(EXPIRING).unwrap());
         assert!(!pending.marked(EXPIRING).unwrap());
     }
+    #[cfg(not(windows))]
     #[test]
     fn committed_expiry_resumes_after_payload_receipt_or_marker_removal_without_file_replay() {
         for removed in [
@@ -367,6 +373,7 @@ mod tests {
             assert!(!root_path.join("original-1.txt").exists());
         }
     }
+    #[cfg(not(windows))]
     #[test]
     fn unknown_content_and_incomplete_payloads_are_preserved() {
         let root = root();
@@ -408,5 +415,18 @@ mod tests {
                 .as_deref(),
             Some(b"unclassified".as_slice())
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn journal_fails_closed_without_windows_namespace_validation() {
+        let root = root();
+        let root_path = root.path().canonicalize().unwrap();
+
+        assert!(matches!(
+            Journal::open(&root_path, "profile", true),
+            Err(Failure::Storage)
+        ));
+        assert!(!root_path.join(".zephium-work-recovery").exists());
     }
 }

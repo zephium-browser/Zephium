@@ -133,10 +133,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let scratch = tempfile::Builder::new()
-            .prefix("work-git-fixture-")
-            .tempdir()
-            .unwrap();
+        let scratch = crate::work_files::test_tempdir();
         let home = scratch.path().canonicalize().unwrap();
         let root = home.join("code/repo");
         fs::create_dir_all(root.join(".git/objects/pack")).unwrap();
