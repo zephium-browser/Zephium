@@ -260,7 +260,10 @@
     if (!aside || sidebarResizeActive()) return !!aside;
     const typing =
       document.activeElement instanceof HTMLInputElement && aside.contains(document.activeElement);
-    return typing || !!aside.querySelector('[data-open="true"]');
+    const openPanel = !!aside.querySelector(
+      '.ui-disclosure-panel[data-open="true"], .capture[data-open="true"]',
+    );
+    return typing || openPanel;
   };
   function release() {
     clearTimeout(linger);
@@ -476,6 +479,11 @@
   onpointerleave={() => {
     pointerIn = false;
     if (away && peeking) release();
+  }}
+  onfocusout={(event: FocusEvent) => {
+    const next = event.relatedTarget;
+    if (!away || !peeking) return;
+    if (!(next instanceof Node) || !aside || !aside.contains(next)) release();
   }}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
