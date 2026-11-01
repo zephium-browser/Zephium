@@ -243,3 +243,18 @@ fn creating_from_the_sidebar_also_switches_to_the_new_profile() {
         Some(school.to_string())
     );
 }
+
+#[test]
+fn next_and_previous_profile_cycle_the_roster() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let first = window_profile(&shell);
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), first);
+    let second = create(&mut shell, "Studio");
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), second);
+    shell.handle(Command::Run("profile.next".into()));
+    assert_eq!(window_profile(&shell), first);
+    shell.handle(Command::Run("profile.previous".into()));
+    assert_eq!(window_profile(&shell), second);
+}
