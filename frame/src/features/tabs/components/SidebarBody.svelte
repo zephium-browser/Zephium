@@ -6,6 +6,8 @@
   import Icon from "$shared/ui/Icon";
   import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
+  import TabSelectionBar from "./TabSelectionBar.svelte";
+  import { TabSelection } from "../lib/tab-selection.svelte";
   import SpaceBar from "./SpaceBar.svelte";
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
@@ -26,6 +28,8 @@
     /** Set beside the way to open a tab: pinned extensions. */
     extras?: Snippet;
   } = $props();
+
+  const selection = new TabSelection();
 
   // Private browsing keeps one space, so it has no switcher.
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
@@ -98,6 +102,7 @@
       data-glide-scroller
     >
       <TabList
+        {selection}
         entries={pinned}
         section="pinned"
         label={m.pinned_tabs()}
@@ -111,6 +116,7 @@
       {/if}
 
       <TabList
+        {selection}
         entries={today}
         section="today"
         label={m.open_tabs()}
@@ -119,6 +125,7 @@
         {onSelect}
       />
     </div>
+    <TabSelectionBar {selection} />
     {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
   </div>
 </div>
