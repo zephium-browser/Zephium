@@ -22,7 +22,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message;
-use objc2_foundation::{NSError, NSString, NSTimer};
+use objc2_foundation::{NSError, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionMessagePort};
 use serde_json::Value;
 
@@ -106,22 +106,20 @@ fn keep_awake() {
         return;
     }
     let tick = RcBlock::new(|timer: NonNull<NSTimer>| {
-        let mut seen = HashSet::new();
-        let open: Vec<_> = CONNECTIONS.with(|connections| {
-            connections
-                .borrow()
-                .values()
-                .filter(|connection| connection.port.is_some())
-                .filter(|connection| {
-                    seen.insert((
-                        connection.shared.as_ptr() as usize,
-                        connection.extension.clone(),
-                    ))
-                })
-                .map(|connection| (connection.shared.clone(), connection.extension.clone()))
-                .collect()
+        let open = CONNECTIONS.with(|connections| {
+            awake(
+                connections.borrow().values().map(|connection| {
+                    (
+                        (connection.shared.clone(), connection.extension.clone()),
+                        connection.port.is_some(),
+                    )
+                }),
+                |(shared, extension)| (shared.as_ptr() as usize, extension.clone()),
+            )
         });
         if open.is_empty() {
+            // SAFETY: WebKit passes the live timer that is firing, on the main
+            // thread that scheduled it; invalidating it there is permitted.
             unsafe { timer.as_ref().invalidate() };
             KEEP_AWAKE.with(|timer| timer.borrow_mut().take());
             return;
@@ -137,15 +135,37 @@ fn keep_awake() {
                 .map(|loaded| loaded.context.clone());
             if let Some(context) = context {
                 let done = RcBlock::new(|_error: *mut NSError| {});
+                // SAFETY: the context is retained and loaded, and timers fire
+                // on the main thread WebKit requires; the block outlives the call.
                 unsafe { context.loadBackgroundContentWithCompletionHandler(&done) };
             }
         }
     });
-    let timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(KEEP_AWAKE_SECONDS, true, &tick)
-    };
+    // SAFETY: called on the main thread; the block is copied by the timer.
+    let timer =
+        unsafe { NSTimer::timerWithTimeInterval_repeats_block(KEEP_AWAKE_SECONDS, true, &tick) };
     timer.setTolerance(KEEP_AWAKE_SECONDS / 4.0);
+    // Common modes, so an open menu or modal sheet doesn't hold the tick back
+    // past WebKit's idle limit.
+    // SAFETY: the main run loop and the common-modes constant are valid for
+    // the life of the process, and the timer was created on this thread.
+    unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
     KEEP_AWAKE.with(|slot| *slot.borrow_mut() = Some(timer));
+}
+
+/// One entry per extension and profile with a port open; one-off messages
+/// keep nothing awake.
+fn awake<T>(
+    connections: impl IntoIterator<Item = (T, bool)>,
+    key: impl Fn(&T) -> (usize, String),
+) -> Vec<T> {
+    let mut seen = HashSet::new();
+    connections
+        .into_iter()
+        .filter(|(_, port)| *port)
+        .map(|(item, _)| item)
+        .filter(|item| seen.insert(key(item)))
+        .collect()
 }
 
 /// Sends one message for `runtime.sendNativeMessage` and replies with the
@@ -808,6 +828,23 @@ fn valid_host_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_ports_keep_one_background_awake_per_extension_and_profile() {
+        let key = |item: &(usize, &str)| (item.0, item.1.to_string());
+        let open = awake(
+            [
+                ((1, "bitwarden"), true),
+                ((1, "bitwarden"), true),
+                ((2, "bitwarden"), true),
+                ((1, "proton"), false),
+            ],
+            key,
+        );
+        assert_eq!(open, [(1, "bitwarden"), (2, "bitwarden")]);
+        assert!(awake([((1, "proton"), false)], key).is_empty());
+        assert!(awake(Vec::<((usize, &str), bool)>::new(), key).is_empty());
+    }
     use serde_json::json;
 
     const EXTENSION: &str = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";
