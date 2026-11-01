@@ -56,6 +56,9 @@ pub struct WebExtensionLoad {
     pub permissions: Vec<String>,
     /// Explicit original native-app grant bound to authenticated package provenance.
     pub external_native_messaging: bool,
+    /// The authenticated package may ask for native-app access it declares
+    /// optional; the person answers at run time.
+    pub native_messaging_grantable: bool,
     pub match_patterns: Vec<String>,
     /// Set when the package changed since WebKit last ran it, so its
     /// background runs once and WebKit relearns what it listens for.
@@ -551,6 +554,25 @@ pub struct FindRequest {
     pub forward: bool,
 }
 
+/// The browser's own install button on a Chrome Web Store listing, shown in
+/// the page where the store's "Add to Chrome" is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreButton {
+    /// The listing's extension ID; the page shows the button only there.
+    pub extension: String,
+    pub state: StoreButtonState,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreButtonState {
+    Add,
+    Adding,
+    Remove,
+}
+
+pub const MAX_STORE_BUTTON_LABEL_CHARS: usize = 200;
+
 /// A resolved keyboard shortcut for platforms where the engine must
 /// intercept keys natively (WebView2 AcceleratorKeyPressed).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -853,6 +875,9 @@ pub trait Engine {
     /// One step of finding text in the page; `None` ends the session and
     /// clears its highlights. Results arrive as `EngineEvent::FindResult`.
     fn find(&self, id: ItemId, request: Option<FindRequest>) -> NativeDispatch;
+    /// Shows the install button on the Web Store listing `id` displays.
+    /// Clicks arrive as `EngineEvent::StoreButtonClicked`.
+    fn show_store_button(&self, _id: ItemId, _button: StoreButton) {}
     /// Result arrives as `EngineEvent::Captured`.
     fn capture(&self, id: ItemId) -> NativeDispatch;
     /// Result arrives as `EngineEvent::HtmlExtracted`.
@@ -990,6 +1015,24 @@ pub trait Engine {
     }
     /// Stops an extension being uninstalled and erases what it stored.
     fn remove_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Settles a [`EngineEvent::WebExtensionDataRequested`].
+    fn answer_web_extension_data(
+        &self,
+        _profile: ProfileId,
+        _request: u64,
+        _reply: crate::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Tells the profile's extensions what changed in its data; sent only
+    /// for what [`EngineEvent::WebExtensionDataInterest`] said they hear.
+    fn web_extension_data_changed(
+        &self,
+        _profile: ProfileId,
+        _change: crate::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
     /// Requests one complete effective toolbar-action cohort for the exact
@@ -1334,6 +1377,23 @@ pub struct WebExtensionAccessRequest {
     pub patterns: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionDataRequest {
+    pub profile: ProfileId,
+    pub request: u64,
+    pub call: crate::extension_data::ExtensionDataCall,
+}
+
+/// Access an extension gave up itself (`permissions.remove`), so it is not
+/// granted again when the extension next starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRemoval {
+    pub profile: ProfileId,
+    pub extension_id: String,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
 /// What the sidebar's player may ask of a tab's media.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MediaAction {
@@ -1438,6 +1498,15 @@ pub enum EngineEvent {
     /// An extension asked at run time for access the user must approve;
     /// answered through [`EnginePort::answer_web_extension_access`].
     WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
+    WebExtensionAccessRemoved(Box<WebExtensionAccessRemoval>),
+    /// An extension asked for the profile's history, bookmarks or closed
+    /// tabs; answered through [`EnginePort::answer_web_extension_data`].
+    WebExtensionDataRequested(Box<WebExtensionDataRequest>),
+    /// Which data changes the profile's extensions now listen to.
+    WebExtensionDataInterest {
+        profile: ProfileId,
+        interest: crate::extension_data::ExtensionDataInterest,
+    },
     /// A native command matched the reserved browser-action shortcut for one
     /// exact published runtime and resident tab. The event carries no popup
     /// geometry: Shell must rejoin it to the current action snapshot and ask
@@ -1719,6 +1788,12 @@ pub enum EngineEvent {
         matches: u32,
         /// One-based position of the current match, when the engine knows it.
         active: Option<u32>,
+    },
+    /// A person clicked the install button the browser showed on the Web
+    /// Store listing `extension`, the page `id` has committed.
+    StoreButtonClicked {
+        id: ItemId,
+        extension: String,
     },
     SplitChanged {
         window: WindowId,

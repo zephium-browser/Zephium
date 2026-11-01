@@ -7,9 +7,9 @@ use std::time::Duration;
 use zephium_app::Handle;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext::manifest::Manifest;
-use zephium_webext::{archive, crx, permissions, store, ExtensionId};
+use zephium_webext::{archive, crx, limits, permissions, store, ExtensionId};
 
-use super::{compat_revision, prepare_package, target, MAX_PACKAGE_BYTES};
+use super::{compat_revision, platform, prepare_package, target, MAX_PACKAGE_BYTES};
 use crate::webext::{Entry, Original, Pending, WebExtensionReview, WebExtensions};
 
 /// A client that talks only to Google's update and download hosts, where
@@ -186,7 +186,7 @@ async fn review(
     #[cfg(target_os = "windows")]
     let review = {
         let mut review = review;
-        if enabled >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE
+        if enabled >= zephium_core::extensions::WINDOWS_RUNNING_EXTENSIONS
             && !enabled_ids.contains(&review.id)
         {
             review.warnings.push("Windows can run eight extensions at once across all profiles. This extension will wait until you disable or remove another running extension.".into());
@@ -245,6 +245,7 @@ pub(super) fn stage(
         let manifest = Manifest::load(&dir)
             .map_err(|error| format!("The extension's manifest is invalid ({error})."))?;
         let warnings = permissions::warnings(&manifest);
+        let limitations = limits::limitations(&manifest, &manifest.permissions(), platform());
         let icon = icon_data_url(&dir, &manifest);
         let mut hosts = manifest.host_permissions();
         for script in manifest.content_scripts() {
@@ -290,12 +291,15 @@ pub(super) fn stage(
             started: String::new(),
             permissions,
             reviewed_permissions,
+            native_messaging_granted: publisher_verified
+                && existing.is_some_and(|entry| entry.native_messaging_granted),
             publisher_verified,
             hosts,
             icon: icon.clone(),
             held_update: None,
             access,
             sideloaded: from_file,
+            pinned: existing.is_some_and(|entry| entry.pinned),
         };
         Ok(Staged {
             review: WebExtensionReview {
@@ -305,6 +309,7 @@ pub(super) fn stage(
                 version,
                 description,
                 warnings,
+                limitations,
                 icon,
                 update: existing.is_some(),
                 from_file,

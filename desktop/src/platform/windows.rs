@@ -614,16 +614,39 @@ pub fn to_window(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
+#[derive(Default)]
+struct ChromeVisibility {
+    hidden: bool,
+    minimized: bool,
+    // The memory target the frame had asked for before the window was
+    // minimized, given back on restore.
+    memory: Option<
+        webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+    >,
+}
+
+thread_local! {
+    static CHROME_VISIBILITY: std::cell::RefCell<std::collections::HashMap<String, ChromeVisibility>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Hides or shows the chrome WebView while its window stays on screen, so the
 /// window shows only its material, never a document that is still loading.
 pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
     let applied = Arc::new(AtomicBool::new(false));
     let completed = applied.clone();
+    let label = window.label().to_owned();
     let dispatched = window
         .with_webview(move |webview| {
+            let visible = CHROME_VISIBILITY.with(|views| {
+                let mut views = views.borrow_mut();
+                let view = views.entry(label).or_default();
+                view.hidden = hidden;
+                !view.hidden && !view.minimized
+            });
             // SAFETY: Tauri supplies the live controller for the duration of
             // this UI-thread callback.
-            if unsafe { webview.controller().SetIsVisible(!hidden) }.is_err() {
+            if unsafe { webview.controller().SetIsVisible(visible) }.is_err() {
                 crate::write_diagnostic(format_args!("chrome: WebView2 visibility was refused"));
             } else {
                 completed.store(true, Ordering::Release);
@@ -631,6 +654,63 @@ pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
         })
         .is_ok();
     dispatched && applied.load(Ordering::Acquire)
+}
+
+/// WebView2 keeps a minimized window's chrome painting and its timers
+/// running. Hidden, it stops both, and its memory target drops until restore.
+pub fn set_chrome_minimized(window: &WebviewWindow, minimized: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+    };
+    let label = window.label().to_owned();
+    let _ = window.with_webview(move |webview| {
+        // No borrow is held across WebView2 calls, which can pump messages.
+        let visible = CHROME_VISIBILITY.with(|views| {
+            let mut views = views.borrow_mut();
+            let view = views.entry(label.clone()).or_default();
+            (view.minimized != minimized).then(|| {
+                view.minimized = minimized;
+                !view.hidden && !minimized
+            })
+        });
+        let Some(visible) = visible else {
+            return;
+        };
+        // SAFETY: Tauri supplies the live controller for the duration of this
+        // UI-thread callback.
+        unsafe {
+            let controller = webview.controller();
+            let _ = controller.SetIsVisible(visible);
+            let Ok(memory) = controller
+                .CoreWebView2()
+                .and_then(|core| core.cast::<ICoreWebView2_19>())
+            else {
+                return;
+            };
+            if minimized {
+                let mut level = COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL::default();
+                if memory.MemoryUsageTargetLevel(&mut level).is_ok()
+                    && memory
+                        .SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW)
+                        .is_ok()
+                {
+                    CHROME_VISIBILITY.with(|views| {
+                        if let Some(view) = views.borrow_mut().get_mut(&label) {
+                            view.memory = Some(level);
+                        }
+                    });
+                }
+            } else if let Some(level) = CHROME_VISIBILITY.with(|views| {
+                views
+                    .borrow_mut()
+                    .get_mut(&label)
+                    .and_then(|view| view.memory.take())
+            }) {
+                let _ = memory.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
 }
 
 thread_local! {

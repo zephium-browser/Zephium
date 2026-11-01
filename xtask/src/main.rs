@@ -130,7 +130,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
             );
             exit(2);
         }

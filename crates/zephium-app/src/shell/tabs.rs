@@ -571,7 +571,9 @@ impl Shell {
         if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
             self.recently_closed.remove(0);
         }
+        let profile = record.profile;
         self.recently_closed.push(record);
+        self.extension_sessions_changed(profile);
     }
 
     /// Reopens a closed tab of `profile`: the one named, else the newest, from
@@ -617,6 +619,7 @@ impl Shell {
         }
         self.items.set_title(id, entry.title.clone());
         self.recently_closed.remove(position);
+        self.extension_sessions_changed(profile);
         if let Some(before) = entry
             .position
             .and_then(|at| self.items.roots(today).get(at as usize).copied())

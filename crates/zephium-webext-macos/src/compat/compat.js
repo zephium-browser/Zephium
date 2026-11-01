@@ -88,6 +88,25 @@
     };
   }
 
+  // Release builds report only uncaught errors that point at a missing or
+  // broken browser API, without stacks; the browser keeps their wording,
+  // stripped of addresses and quoted text, for bug reports.
+  if (!config.diagnostics && !isContent && typeof runtime.sendNativeMessage === "function") {
+    const gap = /is not a function|is not an object|is not defined|Cannot read propert|Invalid call to|is not supported|not implemented/i;
+    let left = 8;
+    const where = isWorker ? "worker" : location.pathname;
+    const report = (value) => {
+      const text = String((value && value.message) || value || "").slice(0, 300);
+      if (left <= 0 || !gap.test(text)) return;
+      left--;
+      try {
+        native("log", { level: "error", text: `[gap] [${where}] ${text}` }).catch(() => {});
+      } catch {}
+    };
+    g.addEventListener("error", (event) => report(event.error || event.message));
+    g.addEventListener("unhandledrejection", (event) => report(event.reason));
+  }
+
   // ---- Language gaps -------------------------------------------------------
   if (typeof g.scheduler !== "object" || g.scheduler === null) {
     try {
@@ -167,13 +186,20 @@
       return false;
     }
   };
-  pin(g, "chrome", chromeApi);
+  // WebKit finds the API through the global `browser` or `chrome` when it
+  // delivers runtime messages, so a context that hides both (Proton Pass
+  // swaps them for a locked Proxy) never hears another message. The globals
+  // stay the browser's and assignments to them are ignored.
   // WebKit gives `browser` its own copy of the API; making it the same object
   // lets every fix below reach extensions written against `browser.*`. Both
   // accept callbacks and return promises.
-  if (g.browser && g.browser !== chromeApi) {
-    kept.push(g.browser);
-    pin(g, "browser", chromeApi);
+  if (g.browser && g.browser !== chromeApi) kept.push(g.browser);
+  for (const name of ["chrome", "browser"]) {
+    try {
+      Object.defineProperty(g, name, { configurable: true, enumerable: true, get: () => chromeApi, set() {} });
+    } catch {
+      pin(g, name, chromeApi);
+    }
   }
   const namespace = (name) => {
     let value;
@@ -238,6 +264,144 @@
     };
   };
 
+  // ---- Browser events ------------------------------------------------------
+  // Events of the APIs the browser implements reach listening contexts over a
+  // port; the browser starts the worker for events it listens to, and resends
+  // whatever the worker didn't acknowledge.
+  const hub =
+    !isContent && typeof runtime.connectNative === "function"
+      ? (() => {
+          const listeners = new Map();
+          let port = null;
+          let ready = false;
+          let hello = null;
+          let pending = false;
+          let retry = 0;
+          const names = () => [...listeners].filter(([, set]) => set.size > 0).map(([name]) => name);
+          const subscribe = () => {
+            pending = false;
+            if (!port) return connect();
+            if (ready) port.postMessage({ op: "subscribe", worker: isWorker, events: names() });
+          };
+          const receive = (message) => {
+            if (!message) return;
+            if (message.op === "hello") {
+              if (!ready) {
+                ready = true;
+                retry = 0;
+                clearInterval(hello);
+                subscribe();
+              }
+              return;
+            }
+            if (message.op !== "event") return;
+            if (message.seq !== undefined) port.postMessage({ op: "ack", seq: message.seq });
+            const set = listeners.get(message.name);
+            const args = Array.isArray(message.args) ? message.args : [];
+            let replied = !message.reply;
+            const reply = (value) => {
+              if (replied) return;
+              replied = true;
+              if (port) port.postMessage({ op: "reply", seq: message.seq, value: value === undefined ? null : value });
+            };
+            for (const listener of set ? [...set] : []) {
+              try {
+                const result = listener(...args, ...(message.reply ? [reply] : []));
+                if (message.reply && result !== undefined) Promise.resolve(result).then(reply, () => reply(null));
+              } catch (error) {
+                setTimeout(() => {
+                  throw error;
+                });
+              }
+            }
+            if (message.reply && !(set && set.size)) reply(null);
+          };
+          const connect = () => {
+            if (port || names().length === 0) return;
+            port = runtime.connectNative("app.zephium.events");
+            port.onMessage.addListener(receive);
+            port.onDisconnect.addListener(() => {
+              clearInterval(hello);
+              port = null;
+              ready = false;
+              if (names().length) setTimeout(connect, Math.min(30000, 250 * 2 ** retry++));
+            });
+            const greet = () => {
+              try {
+                if (port) port.postMessage({ op: "hello" });
+              } catch {}
+            };
+            greet();
+            hello = setInterval(greet, 50);
+          };
+          const changed = () => {
+            if (pending) return;
+            pending = true;
+            setTimeout(subscribe, 0);
+          };
+          return {
+            event(name, onListen) {
+              const set = listeners.get(name) || new Set();
+              listeners.set(name, set);
+              return {
+                addListener(listener) {
+                  if (typeof listener !== "function" || set.has(listener)) return;
+                  set.add(listener);
+                  changed();
+                  if (onListen) onListen();
+                },
+                removeListener(listener) {
+                  if (set.delete(listener)) changed();
+                },
+                hasListener: (listener) => set.has(listener),
+                hasListeners: () => set.size > 0,
+              };
+            },
+          };
+        })()
+      : null;
+
+  // WebKit's event objects can't be replaced on their namespaces; their
+  // methods can. `alongside` keeps WebKit's own delivery as well.
+  const adopt = (event, ours, alongside = false) => {
+    kept.push(event);
+    const add = event.addListener;
+    const remove = event.removeListener;
+    const has = event.hasListener;
+    pin(event, "__zephiumAdd", (...args) => add.apply(event, args));
+    pin(event, "__zephiumRemove", (listener) => remove.call(event, listener));
+    pin(event, "__zephiumHas", (listener) => has.call(event, listener));
+    pin(event, "addListener", function (listener, ...rest) {
+      if (alongside) add.call(this, listener, ...rest);
+      ours.addListener(listener, ...rest);
+    });
+    pin(event, "removeListener", function (listener) {
+      if (alongside) remove.call(this, listener);
+      ours.removeListener(listener);
+    });
+    pin(event, "hasListener", function (listener) {
+      return ours.hasListener(listener) || (alongside && has.call(this, listener));
+    });
+    pin(event, "hasListeners", () => ours.hasListeners());
+  };
+
+  // Permissions of the APIs the browser implements; WebKit doesn't know them.
+  const BROWSER_PERMISSIONS = new Set(["bookmarks", "downloads", "downloads.open", "history", "idle", "notifications", "privacy", "sessions", "topSites", "webRequestAuthProvider"]);
+  const manifest = (() => {
+    try {
+      return runtime.getManifest() || {};
+    } catch {
+      return {};
+    }
+  })();
+  const declares = (name) =>
+    [].concat(manifest.permissions || [], manifest.optional_permissions || []).includes(name);
+  // Optional native-app access is the browser's to grant: WebKit already holds
+  // nativeMessaging for the browser's own bridges.
+  const browserManaged = (name) =>
+    BROWSER_PERMISSIONS.has(name) ||
+    (name === "nativeMessaging" && (manifest.optional_permissions || []).includes(name));
+
   // Chrome answers "not granted" for permissions a browser doesn't know;
   // WebKit throws, which takes down callers such as Bitwarden's popup. The
   // retry stays synchronous so a request keeps the user's gesture.
@@ -247,22 +411,41 @@
     // WebKit rejects some unknown names synchronously and others only in the
     // returned promise; names learned either way are filtered up front.
     const unknownNames = new Set(["proxy", "debugger"]);
-    // Implemented by this layer, so always granted.
-    const emulated = new Set(["privacy"]);
+    const browserState = () => native("permissions.state", {}).catch(() => ({ granted: [] }));
+    const browserPart = {
+      contains: (names, ok) =>
+        ok && names.length ? browserState().then((state) => names.every((name) => state.granted.includes(name))) : ok,
+      // As in Chrome, a page asks during a click; a worker asks from the
+      // events a click brings it.
+      request: (names, ok) => {
+        if (!ok || !names.length) return ok;
+        const activation = !isWorker && g.navigator && g.navigator.userActivation;
+        if (activation && !activation.isActive) {
+          return Promise.reject(new Error("This function must be called during a user gesture"));
+        }
+        return native("permissions.request", { permissions: names });
+      },
+      remove: (names, ok) => (names.length ? native("permissions.remove", { permissions: names }).then((done) => ok && done) : ok),
+    };
     const guard = (method, withUnknown) => {
       const original = permissions[method];
       if (typeof original !== "function") return;
       pin(permissions, method, function (request, callback) {
         const current = Object.assign({}, request);
         const requested = Array.isArray(current.permissions) ? current.permissions : [];
+        const browserNames = requested.filter(browserManaged);
+        // WebKit refuses match patterns with a port; Chrome matches every port
+        // of a host either way.
+        if (Array.isArray(current.origins)) {
+          current.origins = current.origins.map((origin) => String(origin).replace(/^([^:]+:\/\/[^/:]+):\d+(\/|$)/, "$1$2"));
+        }
         let unknown = requested.some((name) => unknownNames.has(name));
-        const onlyEmulated = requested.some((name) => emulated.has(name));
-        current.permissions = requested.filter((name) => !unknownNames.has(name) && !emulated.has(name));
+        current.permissions = requested.filter((name) => !unknownNames.has(name) && !browserManaged(name));
         let result;
         for (;;) {
           const listed = Array.isArray(current.permissions) ? current.permissions : [];
           const origins = Array.isArray(current.origins) ? current.origins : [];
-          if ((unknown || onlyEmulated) && listed.length === 0 && origins.length === 0) {
+          if ((unknown || browserNames.length) && listed.length === 0 && origins.length === 0) {
             result = Promise.resolve(true);
             break;
           }
@@ -286,12 +469,130 @@
           unknownNames.add(name);
           return withUnknown();
         });
-        return withCallback(unknown ? result.then(withUnknown) : result, callback);
+        if (unknown) result = result.then(withUnknown);
+        return withCallback(result.then((ok) => browserPart[method](browserNames, ok)), callback);
       });
     };
     guard("contains", () => false);
     guard("request", () => false);
     guard("remove", (removed) => removed !== false);
+    if (typeof permissions.getAll === "function") {
+      const getAll = permissions.getAll;
+      pin(permissions, "getAll", function (callback) {
+        const all = Promise.all([Promise.resolve(getAll.call(permissions)), browserState()]).then(([found, state]) =>
+          Object.assign({}, found, { permissions: [...new Set([...(found.permissions || []), ...state.granted])] }),
+        );
+        return withCallback(all, callback);
+      });
+    }
+    // Only extensions that can hold the browser's own permissions hear about
+    // them; a listening port keeps a worker loaded longer.
+    if (hub && ([...BROWSER_PERMISSIONS].some(declares) || browserManaged("nativeMessaging"))) {
+      for (const name of ["onAdded", "onRemoved"]) {
+        const theirs = permissions[name];
+        if (theirs && typeof theirs.addListener === "function") adopt(theirs, hub.event(`permissions.${name}`), true);
+      }
+    }
+  }
+
+  // WebKit raises cookies.onChanged without saying what changed; the
+  // browser compares the cookie store and says it, as Chrome does.
+  const cookies = hub && namespace("cookies");
+  if (cookies && cookies.onChanged) adopt(cookies.onChanged, hub.event("cookies.onChanged"));
+  if (cookies && !cookies.OnChangedCause) {
+    pin(cookies, "OnChangedCause", Object.freeze({
+      EVICTED: "evicted", EXPIRED: "expired", EXPLICIT: "explicit", EXPIRED_OVERWRITE: "expired_overwrite", OVERWRITE: "overwrite",
+    }));
+  }
+
+  // Sign-in challenges reach listeners that may answer them (blocking or
+  // asyncBlocking with webRequestAuthProvider) through the browser, which
+  // asks the person only when none answered. Others keep WebKit's observing
+  // event.
+  const authEvent = hub && declares("webRequestAuthProvider") && chromeApi.webRequest && chromeApi.webRequest.onAuthRequired;
+  if (authEvent && typeof authEvent.addListener === "function") {
+    const answering = new Map();
+    const covers = (pattern, url) => {
+      if (pattern === "<all_urls>") return /^(https?|wss?|ftp):/.test(url);
+      const match = /^(\*|https?|wss?|ftp):\/\/(\*|\*\.[^/*]+|[^/*]+)(\/.*)$/.exec(pattern);
+      if (!match) return false;
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return false;
+      }
+      const [, scheme, host, path] = match;
+      const protocol = parsed.protocol.slice(0, -1);
+      if (scheme === "*" ? !/^(https?|wss?)$/.test(protocol) : scheme !== protocol) return false;
+      const name = host.includes(":") ? parsed.host : parsed.hostname;
+      if (host !== "*" && !(host.startsWith("*.") ? name === host.slice(2) || name.endsWith(host.slice(1)) : name === host)) return false;
+      const escaped = path.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+      return new RegExp(`^${escaped}$`).test(parsed.pathname + parsed.search);
+    };
+    const dispatch = hub.event("webRequest.onAuthRequired");
+    dispatch.addListener((details, reply) => {
+      const chosen = [...answering].filter(([, filter]) =>
+        (filter.urls || []).some((pattern) => covers(pattern, details.url)) &&
+        (!filter.tabId || filter.tabId === details.tabId),
+      );
+      if (chosen.length === 0) return reply(null);
+      let waiting = chosen.length;
+      let settled = false;
+      const settle = (answer) => {
+        if (settled) return;
+        if (answer && (answer.cancel || answer.authCredentials)) {
+          settled = true;
+          return reply(answer);
+        }
+        if (--waiting === 0) {
+          settled = true;
+          reply(null);
+        }
+      };
+      for (const [[listener, callsBack]] of chosen) {
+        try {
+          const result = callsBack ? listener(details, settle) : listener(details);
+          if (!callsBack) settle(result);
+        } catch (error) {
+          settle(null);
+          setTimeout(() => {
+            throw error;
+          });
+        }
+      }
+    });
+    adopt(authEvent, {
+      addListener(listener, filter, spec) {
+        const blocking = Array.isArray(spec) && (spec.includes("blocking") || spec.includes("asyncBlocking"));
+        if (!blocking) return authEvent.__zephiumAdd(listener, filter, spec);
+        answering.set([listener, spec.includes("asyncBlocking")], filter || {});
+      },
+      removeListener(listener) {
+        for (const key of answering.keys()) if (key[0] === listener) answering.delete(key);
+        authEvent.__zephiumRemove(listener);
+      },
+      hasListener: (listener) => [...answering.keys()].some((key) => key[0] === listener) || authEvent.__zephiumHas(listener),
+      hasListeners: () => answering.size > 0,
+    });
+  }
+
+  // Locks a vault or pauses work while the person is away from the Mac.
+  if (hub && !chromeApi.idle && declares("idle")) {
+    let interval = 60;
+    const watch = () => native("idle.watch", { interval }).catch(() => {});
+    const onStateChanged = hub.event("idle.onStateChanged", watch);
+    pin(chromeApi, "idle", {
+      IdleState: Object.freeze({ ACTIVE: "active", IDLE: "idle", LOCKED: "locked" }),
+      queryState: (seconds, callback) =>
+        withCallback(native("idle.query", { interval: Math.max(15, Math.floor(Number(seconds) || 0)) }), callback),
+      setDetectionInterval: (seconds) => {
+        interval = Math.max(15, Math.floor(Number(seconds) || 60));
+        if (onStateChanged.hasListeners()) watch();
+      },
+      getAutoLockDelay: (callback) => withCallback(Promise.resolve(0), callback),
+      onStateChanged,
+    });
   }
 
   // OAuth sign-in: the browser opens the provider's page and returns the
@@ -299,6 +600,7 @@
   if (!isContent) {
     const identity = namespace("identity");
     const target = identity || {};
+    if (!target.AccountStatus) pin(target, "AccountStatus", Object.freeze({ SYNC: "SYNC", ANY: "ANY" }));
     if (typeof target.launchWebAuthFlow !== "function") {
       pin(target, "getRedirectURL", (path) =>
         `https://${runtime.id}.chromiumapp.org/${String(path || "").replace(/^\//, "")}`,
@@ -332,52 +634,183 @@
     }
   }
 
-  // Password managers turn off the browser's own password saving through
-  // chrome.privacy; WebKit has no privacy API. The settings answer as
-  // controllable by the extension and remember what it sets.
-  if (!isContent && !chromeApi.privacy) {
-    const setting = (initial, levelOfControl = "controllable_by_this_extension") => {
-      let value = initial;
-      const changed = makeEvent();
-      const details = () => ({ value, levelOfControl });
+  // Password managers turn the browser's own password filling off through
+  // chrome.privacy; WebKit has no privacy API. The browser keeps the settings
+  // it has, and answers the rest as not controllable.
+  if (hub && !chromeApi.privacy && declares("privacy")) {
+    const setting = (name) => {
+      const onChange = hub.event(`privacy.${name}.onChange`);
       return {
-        get: (_details, callback) => withCallback(Promise.resolve(details()), callback),
-        set: (next, callback) => {
-          if (next && "value" in next) value = next.value;
-          return withCallback(Promise.resolve(), callback);
-        },
-        clear: (_details, callback) => {
-          value = initial;
-          return withCallback(Promise.resolve(), callback);
-        },
-        onChange: changed,
+        get: (_details, callback) => withCallback(native("privacy.get", { setting: name }), callback),
+        set: (details, callback) =>
+          withCallback(native("privacy.set", { setting: name, value: details && details.value }), callback),
+        clear: (_details, callback) => withCallback(native("privacy.clear", { setting: name }), callback),
+        onChange,
       };
     };
+    const group = (prefix, names) => Object.fromEntries(names.map((name) => [name, setting(`${prefix}.${name}`)]));
     pin(chromeApi, "privacy", {
-      services: {
-        // Zephium has no password or form store of its own, so these are off
-        // and left to the extension, as when it has overridden Chrome's.
-        passwordSavingEnabled: setting(false, "controlled_by_this_extension"),
-        autofillEnabled: setting(false, "controlled_by_this_extension"),
-        autofillAddressEnabled: setting(false, "controlled_by_this_extension"),
-        autofillCreditCardEnabled: setting(false, "controlled_by_this_extension"),
-        alternateErrorPagesEnabled: setting(false),
-        safeBrowsingEnabled: setting(false),
-        searchSuggestEnabled: setting(true),
-        spellingServiceEnabled: setting(false),
-        translationServiceEnabled: setting(false),
-      },
-      network: {
-        networkPredictionEnabled: setting(true),
-        webRTCIPHandlingPolicy: setting("default"),
-      },
-      websites: {
-        thirdPartyCookiesAllowed: setting(true),
-        hyperlinkAuditingEnabled: setting(false),
-        referrersEnabled: setting(true),
-        doNotTrackEnabled: setting(false),
-        protectedContentEnabled: setting(true),
-      },
+      services: group("services", [
+        "passwordSavingEnabled", "autofillEnabled", "autofillAddressEnabled", "autofillCreditCardEnabled",
+        "alternateErrorPagesEnabled", "safeBrowsingEnabled", "safeBrowsingExtendedReportingEnabled",
+        "searchSuggestEnabled", "spellingServiceEnabled", "translationServiceEnabled",
+      ]),
+      network: group("network", ["networkPredictionEnabled", "webRTCIPHandlingPolicy"]),
+      websites: group("websites", [
+        "thirdPartyCookiesAllowed", "hyperlinkAuditingEnabled", "referrersEnabled", "doNotTrackEnabled",
+        "protectedContentEnabled", "topicsEnabled", "fledgeEnabled", "adMeasurementEnabled",
+      ]),
+      IPHandlingPolicy: Object.freeze({
+        DEFAULT: "default", DEFAULT_PUBLIC_AND_PRIVATE_INTERFACES: "default_public_and_private_interfaces",
+        DEFAULT_PUBLIC_INTERFACE_ONLY: "default_public_interface_only", DISABLE_NON_PROXIED_UDP: "disable_non_proxied_udp",
+      }),
+    });
+  }
+
+  // Browser data lives in the browser's own stores; WebKit has no API for it.
+  const dataEvent = (name) => (hub ? hub.event(name) : makeEvent());
+  const dataCall = (api) => (details, callback) => withCallback(native(api, { details }), callback);
+
+  if (!isContent && !chromeApi.history && declares("history")) {
+    pin(chromeApi, "history", {
+      TransitionType: Object.freeze({
+        LINK: "link", TYPED: "typed", AUTO_BOOKMARK: "auto_bookmark", AUTO_SUBFRAME: "auto_subframe",
+        MANUAL_SUBFRAME: "manual_subframe", GENERATED: "generated", AUTO_TOPLEVEL: "auto_toplevel",
+        FORM_SUBMIT: "form_submit", RELOAD: "reload", KEYWORD: "keyword", KEYWORD_GENERATED: "keyword_generated",
+      }),
+      search: dataCall("history.search"),
+      getVisits: dataCall("history.getVisits"),
+      addUrl: dataCall("history.addUrl"),
+      deleteUrl: dataCall("history.deleteUrl"),
+      deleteRange: dataCall("history.deleteRange"),
+      deleteAll: (callback) => dataCall("history.deleteAll")({}, callback),
+      onVisited: dataEvent("history.onVisited"),
+      onVisitRemoved: dataEvent("history.onVisitRemoved"),
+    });
+  }
+
+  // Recently closed tabs; the browser reopens tabs, not whole windows, and
+  // syncs no devices. A reopened tab is the active one, which tabs.query
+  // describes in full.
+  if (!isContent && !chromeApi.sessions && declares("sessions")) {
+    const restore = (sessionId) =>
+      native("sessions.restore", { sessionId }).then(async (restored) => {
+        try {
+          const [tab] = await chromeApi.tabs.query({ active: true, lastFocusedWindow: true });
+          if (tab && tab.url === restored.tab.url) restored.tab = tab;
+        } catch {}
+        return restored;
+      });
+    pin(chromeApi, "sessions", {
+      MAX_SESSION_RESULTS: 25,
+      getRecentlyClosed: (filter, callback) =>
+        typeof filter === "function"
+          ? withCallback(native("sessions.getRecentlyClosed", {}), filter)
+          : withCallback(native("sessions.getRecentlyClosed", { filter }), callback),
+      getDevices: (filter, callback) =>
+        withCallback(Promise.resolve([]), typeof filter === "function" ? filter : callback),
+      restore: (sessionId, callback) =>
+        typeof sessionId === "function" ? withCallback(restore(), sessionId) : withCallback(restore(sessionId), callback),
+      onChanged: dataEvent("sessions.onChanged"),
+    });
+  }
+
+  // Downloads go through the browser's download manager with the same
+  // admission and prompts as the page in front. It keeps a download's origin
+  // and file name, never its full address or path.
+  if (!isContent && !chromeApi.downloads && declares("downloads")) {
+    const MAX_DATA = 32 * 1024 * 1024;
+    const ask = (op, fields, callback) => withCallback(native(`downloads.${op}`, fields), callback);
+    const byId = (op) => (id, callback) => ask(op, { id }, callback);
+    const refuse = (message) => (_id, callback) => withCallback(Promise.reject(new Error(message)), callback);
+    // An extension's own blob: addresses can't be read by the page that
+    // downloads; they go over as data: addresses.
+    const readable = async (url) => {
+      if (!/^blob:/i.test(url)) return url;
+      const blob = await (await fetch(url)).blob();
+      if (blob.size > MAX_DATA) throw new Error("The data is too large to download.");
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+    };
+    const gesture = () => typeof navigator !== "undefined" && !!(navigator.userActivation && navigator.userActivation.isActive);
+    pin(chromeApi, "downloads", {
+      State: Object.freeze({ IN_PROGRESS: "in_progress", INTERRUPTED: "interrupted", COMPLETE: "complete" }),
+      DangerType: Object.freeze({
+        FILE: "file", URL: "url", CONTENT: "content", UNCOMMON: "uncommon", HOST: "host", UNWANTED: "unwanted",
+        SAFE: "safe", ACCEPTED: "accepted",
+      }),
+      FilenameConflictAction: Object.freeze({ UNIQUIFY: "uniquify", OVERWRITE: "overwrite", PROMPT: "prompt" }),
+      download: (options, callback) =>
+        withCallback(
+          readable(String((options && options.url) || "")).then((url) =>
+            native("downloads.download", { details: Object.assign({}, options, { url }) }),
+          ),
+          callback,
+        ),
+      search: (query, callback) => ask("search", { details: query || {} }, callback),
+      pause: byId("pause"),
+      resume: byId("resume"),
+      cancel: byId("cancel"),
+      erase: (query, callback) =>
+        withCallback(
+          native("downloads.search", { details: query || {} }).then(async (items) => {
+            const erased = [];
+            for (const item of items) {
+              if (item.state === "in_progress") continue;
+              try {
+                await native("downloads.erase", { id: item.id });
+                erased.push(item.id);
+              } catch {}
+            }
+            return erased;
+          }),
+          callback,
+        ),
+      // Chrome opens a download only on a user gesture.
+      open: (id, callback) =>
+        gesture() ? ask("open", { id }, callback) : refuse("User gesture required")(id, callback),
+      show: (id) => void native("downloads.show", { id }).catch(() => {}),
+      removeFile: refuse("Downloaded files are deleted only by the person."),
+      acceptDanger: refuse("Only the person can keep a file held for its type, from the downloads panel."),
+      onCreated: dataEvent("downloads.onCreated"),
+      onChanged: dataEvent("downloads.onChanged"),
+      onErased: dataEvent("downloads.onErased"),
+    });
+  }
+
+  if (!isContent && !chromeApi.topSites && declares("topSites")) {
+    pin(chromeApi, "topSites", { get: (callback) => withCallback(native("topSites.get", {}), callback) });
+  }
+
+  // Chrome's root "0" stands above the browser's top level; there is no
+  // bookmarks bar or other permanent folder.
+  if (!isContent && !chromeApi.bookmarks && declares("bookmarks")) {
+    const ask = (op, fields, callback) => withCallback(native(`bookmarks.${op}`, fields), callback);
+    const event = (name) => dataEvent(`bookmarks.${name}`);
+    pin(chromeApi, "bookmarks", {
+      getTree: (callback) => ask("getTree", {}, callback),
+      getSubTree: (id, callback) => ask("getSubTree", { id }, callback),
+      getChildren: (id, callback) => ask("getChildren", { id }, callback),
+      get: (ids, callback) => ask("get", { ids: [].concat(ids) }, callback),
+      getRecent: (count, callback) => ask("getRecent", { count }, callback),
+      search: (query, callback) => ask("search", { details: query }, callback),
+      create: (bookmark, callback) => ask("create", { details: bookmark || {} }, callback),
+      update: (id, changes, callback) => ask("update", { id, details: changes || {} }, callback),
+      move: (id, destination, callback) => ask("move", { id, details: destination || {} }, callback),
+      remove: (id, callback) => ask("remove", { id }, callback),
+      removeTree: (id, callback) => ask("removeTree", { id }, callback),
+      onCreated: event("onCreated"),
+      onChanged: event("onChanged"),
+      onMoved: event("onMoved"),
+      onRemoved: event("onRemoved"),
+      // The browser keeps no custom order apart from moves, which onMoved reports.
+      onChildrenReordered: makeEvent(),
+      onImportBegan: event("onImportBegan"),
+      onImportEnded: event("onImportEnded"),
     });
   }
 
@@ -485,38 +918,33 @@
     }
   }
 
-  if (!isContent && !chromeApi.notifications) {
-    const event = makeEvent;
+  // Notifications go to the Mac's notification center; clicks, buttons and
+  // dismissals come back as events.
+  if (hub && declares("notifications")) {
+    const target = chromeApi.notifications || {};
     let created = 0;
-    pin(chromeApi, "notifications", {
-      TemplateType: Object.freeze({ BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" }),
-      PermissionLevel: Object.freeze({ GRANTED: "granted", DENIED: "denied" }),
-      create(id, options, callback) {
-        if (typeof id === "object" && id !== null) {
-          callback = options;
-          options = id;
-          id = undefined;
-        }
-        const name = typeof id === "string" && id ? id : `zephium-${++created}`;
-        const shown = native("notify", {
-          id: name,
-          title: String((options && options.title) || ""),
-          message: String((options && options.message) || ""),
-        })
-          .catch(() => {})
-          .then(() => name);
-        return withCallback(shown, callback);
-      },
-      update: (_id, _options, callback) => withCallback(Promise.resolve(false), callback),
-      clear: (_id, callback) => withCallback(Promise.resolve(true), callback),
-      getAll: (callback) => withCallback(Promise.resolve({}), callback),
-      getPermissionLevel: (callback) => withCallback(Promise.resolve("granted"), callback),
-      onClicked: event(),
-      onClosed: event(),
-      onButtonClicked: event(),
-      onPermissionLevelChanged: event(),
-      onShowSettings: event(),
-    });
+    const listen = (name) => {
+      const ours = hub.event(`notifications.${name}`);
+      if (target[name] && typeof target[name].addListener === "function") adopt(target[name], ours);
+      else pin(target, name, ours);
+    };
+    const show = (id, options, callback) => {
+      if (typeof id === "object" && id !== null) [id, options, callback] = [undefined, id, options];
+      const name = typeof id === "string" && id ? id : `zephium-${Date.now()}-${++created}`;
+      return withCallback(native("notifications.create", { id: name, options: options || {} }), callback);
+    };
+    pin(target, "TemplateType", Object.freeze({ BASIC: "basic", IMAGE: "image", LIST: "list", PROGRESS: "progress" }));
+    pin(target, "PermissionLevel", Object.freeze({ GRANTED: "granted", DENIED: "denied" }));
+    pin(target, "create", show);
+    pin(target, "update", (id, options, callback) =>
+      withCallback(native("notifications.update", { id: String(id), options: options || {} }), callback),
+    );
+    pin(target, "clear", (id, callback) => withCallback(native("notifications.clear", { id: String(id) }), callback));
+    pin(target, "getAll", (callback) => withCallback(native("notifications.getAll", {}), callback));
+    pin(target, "getPermissionLevel", (callback) => withCallback(native("notifications.permission", {}), callback));
+    for (const name of ["onClicked", "onClosed", "onButtonClicked"]) listen(name);
+    for (const name of ["onPermissionLevelChanged", "onShowSettings"]) if (!target[name]) pin(target, name, makeEvent());
+    if (!chromeApi.notifications) pin(chromeApi, "notifications", target);
   }
 
   // Constants Chrome always defines. Extensions read them at startup, before
@@ -542,12 +970,39 @@
     for (const name of ["onUpdateAvailable", "onRestartRequired", "onBrowserUpdateAvailable"]) {
       if (!chromeRuntime[name]) pin(chromeRuntime, name, makeEvent());
     }
+    if (typeof chromeRuntime.getContexts !== "function") {
+      pin(chromeRuntime, "getContexts", (filter, callback) => {
+        const wanted = filter || {};
+        const keep = (list, value) => !Array.isArray(list) || list.includes(value);
+        const found = native("runtime.contexts", {}).then((contexts) =>
+          (contexts || []).filter(
+            (context) =>
+              keep(wanted.contextTypes, context.contextType) &&
+              keep(wanted.contextIds, context.contextId) &&
+              keep(wanted.tabIds, context.tabId) &&
+              keep(wanted.windowIds, context.windowId) &&
+              keep(wanted.frameIds, context.frameId) &&
+              keep(wanted.documentUrls, context.documentUrl) &&
+              keep(wanted.documentOrigins, context.documentOrigin) &&
+              (wanted.incognito === undefined || wanted.incognito === context.incognito),
+          ),
+        );
+        return withCallback(found, callback);
+      });
+    }
     if (typeof chromeRuntime.requestUpdateCheck !== "function") {
       pin(chromeRuntime, "requestUpdateCheck", (callback) => withCallback(Promise.resolve({ status: "no_update" }), callback));
     }
   }
 
   const webRequest = !isContent && namespace("webRequest");
+  if (webRequest && typeof webRequest.handlerBehaviorChanged !== "function") {
+    // WebKit keeps no in-memory cache of listener decisions to flush.
+    pin(webRequest, "handlerBehaviorChanged", (callback) => withCallback(Promise.resolve(), callback));
+    if (webRequest.MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES === undefined) {
+      pin(webRequest, "MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES", 20);
+    }
+  }
   if (webRequest) {
     const headers = { REQUEST_HEADERS: "requestHeaders", RESPONSE_HEADERS: "responseHeaders" };
     const BLOCKING = "blocking";
@@ -578,10 +1033,16 @@
       const add = event.addListener;
       pin(event, "addListener", function (listener, filter, ...rest) {
         const urls = filter && Array.isArray(filter.urls) ? filter.urls : null;
-        if (!urls || !urls.some((url) => socket.test(url))) return add.call(this, listener, filter, ...rest);
-        const usable = urls.filter((url) => !socket.test(url));
-        if (usable.length === 0) return undefined;
-        return add.call(this, listener, Object.assign({}, filter, { urls: usable }), ...rest);
+        const types = filter && Array.isArray(filter.types) ? filter.types : null;
+        const unknownType = (type) => type === "webbundle" || type === "webtransport";
+        if ((!urls || !urls.some((url) => socket.test(url))) && (!types || !types.some(unknownType))) {
+          return add.call(this, listener, filter, ...rest);
+        }
+        const usable = urls ? urls.filter((url) => !socket.test(url)) : urls;
+        const known = types ? types.filter((type) => !unknownType(type)) : types;
+        if ((usable && usable.length === 0) || (known && known.length === 0)) return undefined;
+        const narrowed = Object.assign({}, filter, usable ? { urls: usable } : {}, known ? { types: known } : {});
+        return add.call(this, listener, narrowed, ...rest);
       });
     }
   }
@@ -589,14 +1050,90 @@
   // WebKit rejects a whole rule update over one rule it can't apply, such as
   // one setting a header it doesn't know. Chrome would apply the rest.
   const netRequest = !isContent && namespace("declarativeNetRequest");
+  constants(netRequest, {
+    RuleActionType: { BLOCK: "block", REDIRECT: "redirect", ALLOW: "allow", UPGRADE_SCHEME: "upgradeScheme", MODIFY_HEADERS: "modifyHeaders", ALLOW_ALL_REQUESTS: "allowAllRequests" },
+    ResourceType: {
+      MAIN_FRAME: "main_frame", SUB_FRAME: "sub_frame", STYLESHEET: "stylesheet", SCRIPT: "script", IMAGE: "image", FONT: "font",
+      OBJECT: "object", XMLHTTPREQUEST: "xmlhttprequest", PING: "ping", CSP_REPORT: "csp_report", MEDIA: "media",
+      WEBSOCKET: "websocket", WEBTRANSPORT: "webtransport", WEBBUNDLE: "webbundle", OTHER: "other",
+    },
+    RequestMethod: { CONNECT: "connect", DELETE: "delete", GET: "get", HEAD: "head", OPTIONS: "options", PATCH: "patch", POST: "post", PUT: "put", OTHER: "other" },
+    DomainType: { FIRST_PARTY: "firstParty", THIRD_PARTY: "thirdParty" },
+    HeaderOperation: { APPEND: "append", SET: "set", REMOVE: "remove" },
+    UnsupportedRegexReason: { SYNTAX_ERROR: "syntaxError", MEMORY_LIMIT_EXCEEDED: "memoryLimitExceeded" },
+  });
   if (netRequest) {
+    for (const [name, value] of Object.entries({
+      GUARANTEED_MINIMUM_STATIC_RULES: 30000, MAX_NUMBER_OF_STATIC_RULESETS: 100, MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50,
+      MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_UNSAFE_DYNAMIC_RULES: 5000, MAX_NUMBER_OF_SESSION_RULES: 5000,
+      MAX_NUMBER_OF_UNSAFE_SESSION_RULES: 5000, MAX_NUMBER_OF_REGEX_RULES: 1000, SESSION_RULESET_ID: "_session", DYNAMIC_RULESET_ID: "_dynamic",
+    })) {
+      if (netRequest[name] === undefined) pin(netRequest, name, value);
+    }
+    // Chrome counts what is left of its guaranteed minimum; WebKit keeps no
+    // such pool, so the minimum is what is offered.
+    if (typeof netRequest.getAvailableStaticRuleCount !== "function") {
+      pin(netRequest, "getAvailableStaticRuleCount", (callback) =>
+        withCallback(Promise.resolve(netRequest.GUARANTEED_MINIMUM_STATIC_RULES), callback),
+      );
+    }
+    // WebKit can't switch off single static rules, so none ever are.
+    if (typeof netRequest.getDisabledRuleIds !== "function") {
+      pin(netRequest, "getDisabledRuleIds", (_options, callback) => withCallback(Promise.resolve([]), callback));
+    }
+    if (typeof netRequest.updateStaticRules !== "function") {
+      pin(netRequest, "updateStaticRules", (options, callback) => {
+        const disabling = options && Array.isArray(options.disableRuleIds) && options.disableRuleIds.length;
+        const result = disabling ? Promise.reject(new Error("Disabling single static rules is not supported.")) : Promise.resolve();
+        return withCallback(result, callback);
+      });
+    }
+    // WebKit's rule compiler takes JavaScript-like expressions without
+    // lookaround or backreferences.
+    const regexSupport = (options) => {
+      const source = String((options && options.regex) || "");
+      try {
+        new RegExp(source, options && options.isCaseSensitive === false ? "i" : "");
+      } catch {
+        return { isSupported: false, reason: "syntaxError" };
+      }
+      return /\(\?<?[=!]|\\[1-9]/.test(source) ? { isSupported: false, reason: "syntaxError" } : { isSupported: true };
+    };
+    const isRegexSupported = netRequest.isRegexSupported;
+    pin(netRequest, "isRegexSupported", (options, callback) => {
+      let native;
+      try {
+        native = typeof isRegexSupported === "function" ? isRegexSupported.call(netRequest, options) : undefined;
+      } catch {}
+      const answer = Promise.resolve(native)
+        .catch(() => undefined)
+        .then((result) => (result && typeof result.isSupported === "boolean" ? result : regexSupport(options)));
+      return withCallback(answer, callback);
+    });
+  }
+  if (netRequest) {
+    // Rules are checked one rejection at a time, so expressions WebKit's
+    // compiler can't take are dropped first, in one pass.
     const rejected = /rule at index (\d+)/;
+    const supported = async (rules) => {
+      const answers = new Map();
+      for (const rule of rules) {
+        const regex = rule && rule.condition && rule.condition.regexFilter;
+        if (typeof regex !== "string" || answers.has(regex)) continue;
+        answers.set(regex, netRequest.isRegexSupported({ regex }).then((answer) => answer.isSupported, () => true));
+      }
+      const unsupported = new Set();
+      for (const [regex, answer] of answers) if (!(await answer)) unsupported.add(regex);
+      return unsupported.size ? rules.filter((rule) => !unsupported.has(rule && rule.condition && rule.condition.regexFilter)) : rules;
+    };
     for (const method of ["updateSessionRules", "updateDynamicRules"]) {
       const original = netRequest[method];
       if (typeof original !== "function") continue;
       pin(netRequest, method, function (options, callback) {
-        let current = Object.assign({}, options);
-        const run = (attempts) => {
+        const rules = options && Array.isArray(options.addRules) ? options.addRules : [];
+        const skipped = [];
+        let dropped = 0;
+        const run = (current) => {
           let result;
           try {
             result = Promise.resolve(original.call(netRequest, current));
@@ -605,14 +1142,93 @@
           }
           return result.catch((error) => {
             const index = Number((rejected.exec(String(error && error.message)) || [])[1]);
-            const rules = Array.isArray(current.addRules) ? current.addRules : [];
-            if (!(index < rules.length) || attempts <= 0) throw error;
-            if (Z.report) Z.report("warning", `skipped a network rule WebKit can't apply: ${error.message}`);
-            current = Object.assign({}, current, { addRules: rules.filter((_, i) => i !== index) });
-            return run(attempts - 1);
+            const kept = Array.isArray(current.addRules) ? current.addRules : [];
+            if (!(index < kept.length)) throw error;
+            dropped++;
+            skipped.push(error.message);
+            return run(Object.assign({}, current, { addRules: kept.filter((_, i) => i !== index) }));
           });
         };
-        return withCallback(run(50), callback);
+        const done = (rules.length ? supported(rules) : Promise.resolve(rules))
+          .then((usable) => {
+            dropped = rules.length - usable.length;
+            if (dropped) skipped.push(`${dropped} with a regexFilter WebKit can't compile`);
+            return run(rules.length ? Object.assign({}, options, { addRules: usable }) : options);
+          })
+          .finally(() => {
+            if (dropped && Z.report) Z.report("warning", `skipped ${dropped} network rule(s) WebKit can't apply: ${skipped.slice(0, 3).join("; ")}`);
+          });
+        return withCallback(done, callback);
+      });
+    }
+    // WebKit fails a change that leaves no rules at all while its first
+    // compile of the static rulesets is still running; Chrome applies it.
+    const updateEnabledRulesets = netRequest.updateEnabledRulesets;
+    if (typeof updateEnabledRulesets === "function") {
+      const leavesNoRules = async (options) => {
+        const enabled = new Set(await netRequest.getEnabledRulesets());
+        for (const id of options.disableRulesetIds || []) enabled.delete(id);
+        for (const id of options.enableRulesetIds || []) enabled.add(id);
+        if (enabled.size) return false;
+        const [dynamic, session] = await Promise.all([netRequest.getDynamicRules(), netRequest.getSessionRules()]);
+        return !dynamic.length && !session.length;
+      };
+      pin(netRequest, "updateEnabledRulesets", function (options, callback) {
+        const run = (delay) =>
+          Promise.resolve()
+            .then(() => updateEnabledRulesets.call(netRequest, options))
+            .catch(async (error) => {
+              if (delay > 16000 || !/Failed to apply rules\.$/.test(String(error && error.message)) || !(await leavesNoRules(options || {}))) throw error;
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              return run(delay * 2);
+            });
+        return withCallback(run(500), callback);
+      });
+    }
+  }
+
+  // Every enabled extension's action is shown in Zephium's toolbar.
+  const action = !isContent && namespace("action");
+  // Zephium draws badges in its own toolbar colors; the text color an
+  // extension picks is kept and answered back.
+  if (action && typeof action.setBadgeTextColor !== "function") {
+    const colors = new Map();
+    pin(action, "setBadgeTextColor", (details, callback) => {
+      colors.set((details && details.tabId) ?? null, details && details.color);
+      return withCallback(Promise.resolve(), callback);
+    });
+    pin(action, "getBadgeTextColor", (details, callback) => {
+      const color = colors.get((details && details.tabId) ?? null) ?? colors.get(null) ?? [255, 255, 255, 255];
+      return withCallback(Promise.resolve(Array.isArray(color) ? color : [255, 255, 255, 255]), callback);
+    });
+  }
+  if (action && typeof action.getUserSettings !== "function") {
+    pin(action, "getUserSettings", (callback) => withCallback(Promise.resolve({ isOnToolbar: true }), callback));
+    if (!action.onUserSettingsChanged) pin(action, "onUserSettingsChanged", makeEvent());
+  }
+
+  // WebKit rejects a menu item whose URL patterns name ftp://; such pages
+  // never load here, so those patterns are dropped.
+  for (const name of ["contextMenus", "menus"]) {
+    const menus = !isContent && namespace(name);
+    if (!menus) continue;
+    const clean = (properties) => {
+      if (!properties || typeof properties !== "object") return properties;
+      const next = Object.assign({}, properties);
+      for (const key of ["documentUrlPatterns", "targetUrlPatterns"]) {
+        if (!Array.isArray(next[key]) || !next[key].some((pattern) => /^ftp:/i.test(pattern))) continue;
+        const kept = next[key].filter((pattern) => !/^ftp:/i.test(pattern));
+        next[key] = kept.length ? kept : ["https://ftp.invalid/*"];
+      }
+      return next;
+    };
+    for (const method of ["create", "update"]) {
+      const original = menus[method];
+      if (typeof original !== "function") continue;
+      pin(menus, method, function (...args) {
+        const at = method === "create" ? 0 : 1;
+        args[at] = clean(args[at]);
+        return original.apply(menus, args);
       });
     }
   }
@@ -626,6 +1242,18 @@
       const type = info && info.windowType;
       if (type !== undefined && type !== "normal" && type !== "popup") return withCallback(Promise.resolve([]), callback);
       return query.apply(this, arguments);
+    });
+  }
+
+  // Chrome's popup is in no tab; WebKit answers with the tab under it, and
+  // popups that size themselves (Proton Pass) then fill a tab's width.
+  if (tabsApi && typeof tabsApi.getCurrent === "function") {
+    const getCurrent = tabsApi.getCurrent;
+    const extension = namespace("extension");
+    pin(tabsApi, "getCurrent", function (callback) {
+      const views = extension && typeof extension.getViews === "function" ? extension.getViews({ type: "popup" }) : [];
+      if (views.includes(globalThis)) return withCallback(Promise.resolve(undefined), callback);
+      return getCurrent.apply(this, arguments);
     });
   }
 
@@ -795,7 +1423,7 @@
   }
 
   // ---- Offscreen documents and the clipboard -------------------------------
-  if (!isContent && !chromeApi.offscreen) {
+  if (!isContent && !chromeApi.offscreen && declares("offscreen")) {
     const reasons = [
       "TESTING", "AUDIO_PLAYBACK", "IFRAME_SCRIPTING", "DOM_SCRAPING", "BLOBS", "DOM_PARSER", "USER_MEDIA",
       "DISPLAY_MEDIA", "WEB_RTC", "CLIPBOARD", "LOCAL_STORAGE", "WORKERS", "BATTERY_STATUS", "MATCH_MEDIA",
@@ -998,4 +1626,37 @@
     Object.assign(WebSocket.prototype, states);
     g.WebSocket = WebSocket;
   }
+
+  // ---- Detached calls ------------------------------------------------------
+  // Chrome's API functions work apart from their namespace (`const { query }
+  // = chrome.tabs`); WebKit's answer nothing without it. Every method of the
+  // API, nested areas and events included, is bound to its owner.
+  const bound = new WeakSet();
+  const bindAll = (target, depth) => {
+    if (!target || typeof target !== "object" || bound.has(target) || depth > 3) return;
+    bound.add(target);
+    const names = new Set();
+    for (let level = target; level && level !== Object.prototype; level = Object.getPrototypeOf(level)) {
+      for (const name of Object.getOwnPropertyNames(level)) names.add(name);
+    }
+    for (const name of names) {
+      if (name === "constructor" || name === "lastError" || name.startsWith("__zephium")) continue;
+      let value;
+      try {
+        value = target[name];
+      } catch {
+        continue;
+      }
+      if (typeof value === "function") {
+        if (!bound.has(value)) {
+          const method = value.bind(target);
+          bound.add(method);
+          if (pin(target, name, method)) kept.push(target);
+        }
+      } else if (value && typeof value === "object" && !Object.isFrozen(value)) {
+        bindAll(value, depth + 1);
+      }
+    }
+  };
+  bindAll(chromeApi, 0);
 })();

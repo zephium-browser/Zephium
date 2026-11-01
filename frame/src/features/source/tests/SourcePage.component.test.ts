@@ -19,6 +19,24 @@ const document = (text: string, truncated = false) => ({
   truncated,
 });
 
+test("returning to a tab does not admit its earlier source request", async () => {
+  let finish!: (value: ReturnType<typeof document>) => void;
+  native.source
+    .mockReturnValueOnce(new Promise((resolve) => (finish = resolve)))
+    .mockResolvedValueOnce(document("second tab"))
+    .mockResolvedValueOnce(document("fresh source"));
+  const screen = await render(SourcePage, { props: { tab: "first" } });
+  await vi.waitFor(() => expect(native.source).toHaveBeenCalledTimes(1));
+  await screen.rerender({ tab: "second" });
+  await expect.element(page.getByText("second tab", { exact: true })).toBeVisible();
+  await screen.rerender({ tab: "first" });
+  await expect.element(page.getByText("fresh source", { exact: true })).toBeVisible();
+  finish(document("stale source"));
+  await new Promise(requestAnimationFrame);
+  await expect.element(page.getByText("fresh source", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("stale source", { exact: true })).not.toBeInTheDocument();
+});
+
 test("the source is drawn as text, one numbered line each, never as markup", async () => {
   native.source.mockResolvedValue(
     document("<!doctype html>\n<script>alert(1)</script>\n\n<p>hi</p>"),

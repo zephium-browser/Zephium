@@ -26,6 +26,7 @@ function review(reviewId: string): WebExtensionReview {
     version: "1.0",
     description: "",
     warnings: [],
+    limitations: [],
     icon: null,
     update: false,
     from_file: false,

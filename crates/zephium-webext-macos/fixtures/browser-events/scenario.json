@@ -1,0 +1,4 @@
+[{"compat":true,"load":"crates/zephium-webext-macos/fixtures/browser-events"},
+{"background":true},{"sleep":50000},
+{"page":"page.html"},
+{"eval":"const before = (await chrome.storage.local.get('boots')).boots; await chrome.privacy.services.passwordSavingEnabled.set({value:false}); await new Promise(r=>setTimeout(r,4000)); const s = await chrome.storage.local.get(null); return JSON.stringify({before, boots: s.boots, changed: s.changed})","in":"page","timeout":15000}]

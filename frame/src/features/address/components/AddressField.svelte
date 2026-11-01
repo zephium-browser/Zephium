@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import {
     Alert02Icon,
@@ -84,6 +85,19 @@
   $effect(() => {
     void listedId;
     removing = false;
+  });
+  $effect(() => {
+    if (compact || listedInstalled === null || !webext.isRemovalAsked(listedInstalled.id)) return;
+    removing = true;
+    webext.settleRemovalAsk();
+  });
+  // Asked from the store's own page, the question waits in the field; a
+  // hidden column comes out with it.
+  $effect(() => {
+    if (removing) return attention.hold();
+  });
+  $effect(() => {
+    if (webext.error() !== null && webext.review() === null) attention.pulse(4000);
   });
   let placeholder = $derived(
     activeContent === "extension_owned"

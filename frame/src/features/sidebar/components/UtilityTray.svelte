@@ -72,12 +72,15 @@
   */
   :global(.browser-sidebar[data-pointer-in="true"]) :global(.utilities-trigger) {
     opacity: 1;
-    transition-delay: 160ms, 0ms, 0ms;
+    transition-delay: 120ms, 0ms, 0ms;
   }
 
+  /* Over the field, with its panel or its keyboard, and on the card that
+     only comes out when wanted, there is nothing to wait for. */
   :global(.utilities-trigger[data-state="open"]),
   :global(.browser-sidebar[data-pointer-in="true"] .address-field:hover)
     :global(.utilities-trigger),
+  :global(.browser-sidebar[data-peek]) :global(.utilities-trigger),
   :global(.address-field:focus-within) :global(.utilities-trigger) {
     opacity: 1;
     transition-delay: 0ms;
@@ -96,7 +99,7 @@
     cursor: default;
     outline: none;
     transition:
-      opacity var(--motion-fast) var(--ease-out),
+      opacity var(--motion-slow) var(--ease-smooth),
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
   }

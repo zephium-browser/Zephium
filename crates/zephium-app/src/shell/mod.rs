@@ -14,6 +14,7 @@ mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod extension_store;
 mod favicon_probe;
 mod favicons;
@@ -229,6 +230,7 @@ pub struct Shell {
     favicons: FaviconState,
     history: history::HistoryState,
     bookmarks: bookmarks::BookmarkState,
+    extension_data: extension_data::ExtensionDataState,
     history_lists: history_list::HistoryListState,
     sources: page_source::SourceState,
     search: SearchState,
@@ -473,6 +475,7 @@ impl Shell {
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
             bookmarks: bookmarks::BookmarkState::default(),
+            extension_data: Default::default(),
             history_lists: history_list::HistoryListState::default(),
             sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
@@ -1279,6 +1282,7 @@ impl Shell {
             }
             Command::OpenExternal(urls) => self.open_external(urls),
             Command::Find(request) => self.find_in_page(request),
+            Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }
@@ -1408,7 +1412,7 @@ impl Shell {
                         "extensions: maintenance could not reconcile browser metadata"
                     );
                 }
-                let extension_actions = self.maintain_extension_actions();
+                let extension_actions = self.retry_extension_actions();
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
@@ -1906,6 +1910,7 @@ impl Shell {
                 self.fail_pending_history_calls();
                 self.fail_pending_history_lists();
                 self.fail_pending_bookmark_calls();
+                self.fail_pending_extension_data();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -2220,6 +2225,12 @@ impl Shell {
             } => self.on_bookmarks_read(token, profile, reply),
             StoreReadResult::Imported { token, added } => self.on_import_read(token, added),
             StoreReadResult::Exported { token, text } => self.on_export_read(token, text),
+            StoreReadResult::ExtensionData { token, reply } => {
+                self.on_extension_data_read(token, reply)
+            }
+            StoreReadResult::ExtensionDataChanged { profile, change } => {
+                self.on_extension_data_changed(profile, *change)
+            }
         }
     }
 }

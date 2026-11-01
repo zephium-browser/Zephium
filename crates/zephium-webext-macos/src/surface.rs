@@ -7,12 +7,13 @@ use block2::DynBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSError, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionTab, WKWebExtensionWindow, WKWebExtensionWindowState,
-    WKWebExtensionWindowType, WKWebView,
+    WKWebExtensionContext, WKWebExtensionTab, WKWebExtensionTabConfiguration, WKWebExtensionWindow,
+    WKWebExtensionWindowState, WKWebExtensionWindowType, WKWebView,
 };
 
 use crate::runtime::Shared;
@@ -44,6 +45,8 @@ pub(crate) struct TabIvars {
     webview: RefCell<Option<Weak<WKWebView>>>,
     snapshot: RefCell<TabSnapshot>,
     index: Cell<usize>,
+    /// Muted, and audible.
+    audio: Cell<(bool, bool)>,
 }
 
 define_class!(
@@ -202,6 +205,85 @@ define_class!(
             self.request(TabRequest::Forward { tab: self.id() }, completion);
         }
 
+        #[unsafe(method(isMutedForWebExtensionContext:))]
+        fn muted(&self, _context: &WKWebExtensionContext) -> bool {
+            self.ivars().audio.get().0
+        }
+
+        #[unsafe(method(isPlayingAudioForWebExtensionContext:))]
+        fn audible(&self, _context: &WKWebExtensionContext) -> bool {
+            self.ivars().audio.get().1
+        }
+
+        #[unsafe(method(setMuted:forWebExtensionContext:completionHandler:))]
+        fn set_muted(
+            &self,
+            muted: bool,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            self.request(
+                TabRequest::Mute {
+                    tab: self.id(),
+                    muted,
+                },
+                completion,
+            );
+        }
+
+        // WebKit would set the view's zoom behind the browser's back; the
+        // browser keeps the level for the site as if the person zoomed.
+        #[unsafe(method(setZoomFactor:forWebExtensionContext:completionHandler:))]
+        fn set_zoom(
+            &self,
+            factor: f64,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            self.request(
+                TabRequest::Zoom {
+                    tab: self.id(),
+                    factor: (factor > 0.0).then_some(factor),
+                },
+                completion,
+            );
+        }
+
+        #[unsafe(method(duplicateUsingConfiguration:forWebExtensionContext:completionHandler:))]
+        fn duplicate(
+            &self,
+            _configuration: &WKWebExtensionTabConfiguration,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)>,
+        ) {
+            let completion = completion.copy();
+            let Some(shared) = self.ivars().shared.upgrade() else {
+                let error = error("The browser is closing.");
+                return completion
+                    .call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+            };
+            let weak = std::rc::Rc::downgrade(&shared);
+            shared.host().tab_request(
+                TabRequest::Duplicate { tab: self.id() },
+                Box::new(move |result| {
+                    let copy = match (result, weak.upgrade()) {
+                        (Ok(Some(id)), Some(shared)) => shared.graph.borrow().tab(id),
+                        (Err(message), _) => {
+                            let error = error(&message);
+                            return completion
+                                .call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
+                        }
+                        _ => None,
+                    };
+                    match copy.map(ProtocolObject::<dyn WKWebExtensionTab>::from_retained) {
+                        Some(copy) => completion
+                            .call((Retained::as_ptr(&copy).cast_mut(), std::ptr::null_mut())),
+                        None => completion.call((std::ptr::null_mut(), std::ptr::null_mut())),
+                    }
+                }),
+            );
+        }
+
         #[unsafe(method(setPinned:forWebExtensionContext:completionHandler:))]
         fn set_pinned(
             &self,
@@ -232,6 +314,7 @@ impl Tab {
                 ..TabSnapshot::default()
             }),
             index: Cell::new(0),
+            audio: Cell::new((false, false)),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -289,6 +372,12 @@ impl Tab {
         changes
     }
 
+    /// Stores the muted and audible state, reporting which changed.
+    pub(crate) fn set_audio(&self, muted: bool, audible: bool) -> (bool, bool) {
+        let (was_muted, was_audible) = self.ivars().audio.replace((muted, audible));
+        (was_muted != muted, was_audible != audible)
+    }
+
     fn request(&self, request: TabRequest, completion: &DynBlock<dyn Fn(*mut NSError)>) {
         let completion = completion.copy();
         let Some(shared) = self.ivars().shared.upgrade() else {
@@ -328,6 +417,7 @@ pub(crate) struct WindowIvars {
     tabs: RefCell<Vec<Retained<Tab>>>,
     active: Cell<Option<u64>>,
     frame: Cell<(f64, f64, f64, f64)>,
+    native: RefCell<Option<Weak<NSWindow>>>,
 }
 
 define_class!(
@@ -368,7 +458,38 @@ define_class!(
 
         #[unsafe(method(windowStateForWebExtensionContext:))]
         fn window_state(&self, _context: &WKWebExtensionContext) -> WKWebExtensionWindowState {
-            WKWebExtensionWindowState::Normal
+            self.state()
+        }
+
+        #[unsafe(method(setWindowState:forWebExtensionContext:completionHandler:))]
+        fn set_window_state(
+            &self,
+            state: WKWebExtensionWindowState,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let Some(native) = self.native() else {
+                let error = error("The browser cannot change this window.");
+                return completion.call((Retained::as_ptr(&error).cast_mut(),));
+            };
+            let current = self.state();
+            if current == state {
+                return completion.call((std::ptr::null_mut(),));
+            }
+            let fullscreen = WKWebExtensionWindowState::Fullscreen;
+            if current == WKWebExtensionWindowState::Minimized {
+                native.deminiaturize(None);
+            }
+            if (current == fullscreen) != (state == fullscreen) {
+                native.toggleFullScreen(None);
+            }
+            match state {
+                WKWebExtensionWindowState::Minimized => native.miniaturize(None),
+                WKWebExtensionWindowState::Maximized if !native.isZoomed() => native.zoom(None),
+                WKWebExtensionWindowState::Normal if native.isZoomed() => native.zoom(None),
+                _ => {}
+            }
+            completion.call((std::ptr::null_mut(),));
         }
 
         #[unsafe(method(isPrivateForWebExtensionContext:))]
@@ -378,8 +499,91 @@ define_class!(
 
         #[unsafe(method(frameForWebExtensionContext:))]
         fn frame_for(&self, _context: &WKWebExtensionContext) -> NSRect {
+            if let Some(native) = self.native() {
+                return native.frame();
+            }
             let (x, y, width, height) = self.ivars().frame.get();
             NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+        }
+
+        // WebKit turns frames into Chrome's top-left screen coordinates
+        // with it.
+        #[unsafe(method(screenFrameForWebExtensionContext:))]
+        fn screen_frame_for(&self, _context: &WKWebExtensionContext) -> NSRect {
+            self.native()
+                .and_then(|native| native.screen())
+                .or_else(|| NSScreen::mainScreen(MainThreadMarker::from(self)))
+                .map_or(NSRect::ZERO, |screen| screen.frame())
+        }
+
+        #[unsafe(method(setFrame:forWebExtensionContext:completionHandler:))]
+        fn move_to(
+            &self,
+            frame: NSRect,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let usable = frame.size.width.is_finite()
+                && frame.size.height.is_finite()
+                && frame.origin.x.is_finite()
+                && frame.origin.y.is_finite();
+            match self.native() {
+                Some(native)
+                    if usable
+                        && !native.isMiniaturized()
+                        && !native.styleMask().contains(NSWindowStyleMask::FullScreen) =>
+                {
+                    native.setFrame_display(frame, true);
+                    completion.call((std::ptr::null_mut(),));
+                }
+                Some(_) if usable => {
+                    let error = error("A minimized or full screen window cannot be moved.");
+                    completion.call((Retained::as_ptr(&error).cast_mut(),));
+                }
+                _ => {
+                    let error = error("The browser cannot change this window.");
+                    completion.call((Retained::as_ptr(&error).cast_mut(),));
+                }
+            }
+        }
+
+        /// The window an extension opened is a tab of the browser's window,
+        /// so closing "its" window closes only the tabs it opened there
+        /// (Bitwarden's unlock and passkey pop-outs). The browser's window
+        /// itself is never closed for an extension.
+        #[unsafe(method(closeForWebExtensionContext:completionHandler:))]
+        fn close(
+            &self,
+            context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let Some(shared) = self.ivars().shared.upgrade() else {
+                completion.call((std::ptr::null_mut(),));
+                return;
+            };
+            let extension = unsafe { context.uniqueIdentifier() }.to_string();
+            let closing: Vec<u64> = {
+                let mut popouts = shared.popouts.borrow_mut();
+                let owned = popouts.entry(extension).or_default();
+                let mine: Vec<u64> = owned
+                    .iter()
+                    .copied()
+                    .filter(|tab| self.tab(*tab).is_some())
+                    .collect();
+                owned.retain(|tab| !mine.contains(tab));
+                mine
+            };
+            if closing.is_empty() {
+                let error = error("The browser's window can't be closed by an extension.");
+                completion.call((Retained::as_ptr(&error).cast_mut(),));
+                return;
+            }
+            for tab in closing {
+                shared
+                    .host()
+                    .tab_request(TabRequest::Close { tab }, Box::new(|_| {}));
+            }
+            completion.call((std::ptr::null_mut(),));
         }
 
         #[unsafe(method(focusForWebExtensionContext:completionHandler:))]
@@ -409,6 +613,7 @@ impl Window {
             tabs: RefCell::new(Vec::new()),
             active: Cell::new(None),
             frame: Cell::new((0.0, 0.0, 0.0, 0.0)),
+            native: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -448,6 +653,29 @@ impl Window {
 
     pub(crate) fn set_frame(&self, frame: (f64, f64, f64, f64)) {
         self.ivars().frame.set(frame);
+    }
+
+    pub(crate) fn set_native(&self, native: Option<&NSWindow>) {
+        *self.ivars().native.borrow_mut() = native.map(Weak::new);
+    }
+
+    fn native(&self) -> Option<Retained<NSWindow>> {
+        self.ivars().native.borrow().as_ref().and_then(Weak::load)
+    }
+
+    fn state(&self) -> WKWebExtensionWindowState {
+        let Some(native) = self.native() else {
+            return WKWebExtensionWindowState::Normal;
+        };
+        if native.isMiniaturized() {
+            WKWebExtensionWindowState::Minimized
+        } else if native.styleMask().contains(NSWindowStyleMask::FullScreen) {
+            WKWebExtensionWindowState::Fullscreen
+        } else if native.isZoomed() {
+            WKWebExtensionWindowState::Maximized
+        } else {
+            WKWebExtensionWindowState::Normal
+        }
     }
 }
 

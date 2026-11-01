@@ -351,6 +351,15 @@ pub(crate) struct FakeEngine {
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
+    pub(crate) extension_data_answers: Mutex<
+        Vec<(
+            ProfileId,
+            u64,
+            zephium_core::extension_data::ExtensionDataReply,
+        )>,
+    >,
+    pub(crate) extension_data_changes:
+        Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
 }
 
 impl FakeEngine {
@@ -644,6 +653,29 @@ impl Engine for FakeEngine {
         }
         admission
     }
+    fn answer_web_extension_data(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        reply: zephium_core::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        self.extension_data_answers
+            .lock()
+            .unwrap()
+            .push((profile, request, reply));
+        NativeDispatch::Scheduled
+    }
+    fn web_extension_data_changed(
+        &self,
+        profile: ProfileId,
+        change: zephium_core::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        self.extension_data_changes
+            .lock()
+            .unwrap()
+            .push((profile, change));
+        NativeDispatch::Scheduled
+    }
     fn settle_extension_browser_request(
         &self,
         profile: ProfileId,
@@ -852,6 +884,12 @@ impl Engine for FakeEngine {
             None => self.log(format!("find {id} end")),
         }
         self.native_admission()
+    }
+    fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+        self.log(format!(
+            "store-button {id} {} {:?}",
+            button.extension, button.state
+        ));
     }
     fn capture(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -1589,6 +1627,44 @@ impl Store for FakeStore {
                 .collect(),
         )
     }
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::{HistoryEntry, HistoryReply, HistoryRequest};
+        let visits = self.recorded_visits.lock().unwrap();
+        let entry = |url: &str| {
+            let of: Vec<_> = visits.iter().filter(|visit| visit.url == url).collect();
+            of.first().map(|first| HistoryEntry {
+                id: first.id,
+                url: url.to_owned(),
+                title: of.last().map(|last| last.title.clone()).unwrap_or_default(),
+                last_visit: of
+                    .iter()
+                    .map(|visit| visit.visited_at)
+                    .max()
+                    .unwrap_or_default(),
+                visits: of.len() as u32,
+            })
+        };
+        match request {
+            HistoryRequest::Address { url } => {
+                HistoryReply::Entries(entry(&url).into_iter().collect())
+            }
+            HistoryRequest::Search { text, .. } => {
+                let mut urls: Vec<&str> = visits
+                    .iter()
+                    .rev()
+                    .map(|visit| visit.url.as_str())
+                    .filter(|url| url.contains(text.as_str()))
+                    .collect();
+                urls.dedup();
+                HistoryReply::Entries(urls.into_iter().filter_map(entry).collect())
+            }
+            _ => HistoryReply::Failed,
+        }
+    }
     fn history_page(
         &self,
         _profile: ProfileId,
@@ -1978,6 +2054,8 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActionShortcut(_) => {}
         Projection::PagePermissionPrompt(_) => {}
         Projection::WebExtensionAccessRequest(_) => {}
+        Projection::WebExtensionAccessRemoved(_) => {}
+        Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
@@ -2297,6 +2375,7 @@ mod export;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod favicons;
 mod fullscreen;
 mod history;

@@ -55,9 +55,13 @@ mod resources;
 mod scripts;
 mod site_permissions;
 mod stages;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod store_button;
 mod style_worker;
 #[cfg(target_os = "macos")]
 mod webext;
+#[cfg(target_os = "macos")]
+mod webext_downloads;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(
@@ -84,6 +88,8 @@ pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::try_perform_extension_command;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
@@ -274,6 +280,8 @@ struct ObservedView {
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // Before `view`, so a running search is stopped while its view lives.
     find: Option<crate::platform::imp::FindSession>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    store_button: store_button::StoreButtonSlot,
     // Before `view`: the Ask panel's reader removes its scripts and
     // handlers from the view's controller while the view lives.
     #[cfg(all(

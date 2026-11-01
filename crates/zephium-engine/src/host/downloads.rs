@@ -35,6 +35,7 @@ use crate::navigation_epoch::{NavigationActivity, NavigationEpochTracker};
 
 type SharedStore = Arc<dyn Store + Send + Sync>;
 type Notify = Arc<dyn Fn(ProfileId) + Send + Sync>;
+type Watch = Box<dyn Fn(ProfileId)>;
 struct DestinationReply(Option<Box<dyn FnOnce(Option<PathBuf>)>>);
 impl DestinationReply {
     fn new(done: impl FnOnce(Option<PathBuf>) + 'static) -> Self {
@@ -157,6 +158,9 @@ struct Transfer {
     /// A pause the person asked for is in flight; the native stop that
     /// follows is theirs, not a failure.
     user_pausing: bool,
+    /// The name an extension asked for, in place of the server's.
+    #[cfg(target_os = "macos")]
+    name: Option<String>,
     /// What WebKit gave back to continue a stopped download from where it
     /// was. Memory only: it names a partial file this run owns.
     #[cfg(target_os = "macos")]
@@ -225,6 +229,10 @@ pub(crate) struct Downloads {
     directory_panels: RefCell<HashMap<u64, (DirectoryPanel, DialogLease)>>,
     #[cfg(target_os = "windows")]
     retained_views: RefCell<Vec<super::ObservedView>>,
+    /// Hears every change the shell hears, on this thread.
+    watch: RefCell<Option<Watch>>,
+    #[cfg(target_os = "macos")]
+    extension_admission: Cell<bool>,
 }
 
 impl Downloads {
@@ -256,6 +264,18 @@ impl Downloads {
                 .any(|call| call.partition.profile() == profile)
         })
     }
+    fn changed(&self, profile: ProfileId) {
+        (self.notify)(profile);
+        if let Some(watch) = &*self.watch.borrow() {
+            watch(profile);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_watch(&self, watch: Watch) {
+        *self.watch.borrow_mut() = Some(watch);
+    }
+
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
         let (sender, receiver) = mpsc::channel();
         let manager = Rc::new(Self {
@@ -282,6 +302,9 @@ impl Downloads {
             directory_panels: RefCell::new(HashMap::new()),
             #[cfg(target_os = "windows")]
             retained_views: RefCell::new(Vec::new()),
+            watch: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            extension_admission: Cell::new(false),
         });
         manager.initialize_recovery();
         manager
@@ -393,7 +416,7 @@ impl Downloads {
                 let profile = transfer.partition.profile();
                 drop(active);
                 self.persist(id);
-                (self.notify)(profile);
+                self.changed(profile);
                 return;
             }
             transfer.record.state = DownloadState::Finalizing;
@@ -421,7 +444,7 @@ impl Downloads {
                 return;
             }
         };
-        (self.notify)(profile);
+        self.changed(profile);
         self.work.set(self.work.get() + 1);
         let sender = self.sender.clone();
         if std::thread::Builder::new()
@@ -465,7 +488,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
         true
     }
 
@@ -663,7 +686,7 @@ impl Downloads {
         changed.sort();
         changed.dedup();
         for profile in changed {
-            (self.notify)(profile);
+            self.changed(profile);
         }
         #[cfg(target_os = "windows")]
         self.release_retained_views();
@@ -829,7 +852,7 @@ impl Downloads {
                             }
                         }
                         drop(recent);
-                        (self.notify)(profile);
+                        self.changed(profile);
                         self.schedule_recovery(profile);
                     }
                 } else if saved {
@@ -857,7 +880,7 @@ impl Downloads {
                         if let Some(started) = on_started {
                             started();
                         }
-                        (self.notify)(profile);
+                        self.changed(profile);
                     }
                 } else {
                     self.cancel(id, Some(DownloadError::Storage));

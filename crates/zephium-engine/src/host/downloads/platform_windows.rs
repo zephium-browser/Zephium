@@ -572,7 +572,7 @@ impl Downloads {
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         self.ensure_recovery(partition);
         let cached = self.preferences.borrow().get(&partition.profile()).cloned();
         if let Some(preferences) = cached {
@@ -691,7 +691,7 @@ impl Downloads {
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
-            (self.notify)(transfer.partition.profile());
+            self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
                 transfer.destination_reply.take(),
@@ -789,7 +789,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
         true
     }
 
@@ -851,7 +851,7 @@ impl Downloads {
             return Err(DownloadError::Unavailable);
         }
         self.ensure_timer();
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         Ok(())
     }
 

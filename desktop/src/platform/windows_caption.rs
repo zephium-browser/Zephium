@@ -24,11 +24,10 @@ const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
 const WATCH: usize = ID + 5;
 // How often the pointer is read for the top of the window. A page's WebView2
-// belongs to another process, so no move over it reaches this thread.
+// belongs to another process, so no move over it reaches this thread. With
+// another window in front, or this one minimized, there is nothing to read:
+// the watch stops and activation starts it again.
 const WATCH_MS: u32 = 50;
-// With another window in front there is nothing to read, only a moment to
-// notice this one has come back.
-const WAITING_MS: u32 = 250;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
 const TOP_REACH: f64 = 20.0;
@@ -84,7 +83,8 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
-    watch_ms: u32,
+    // The pointer watch is running.
+    watching: bool,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -190,7 +190,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
-            watch_ms: WATCH_MS,
+            watching: true,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -1242,6 +1242,17 @@ unsafe extern "system" fn owner_proc(
     if matches!(msg, WM_THEMECHANGED | WM_SETTINGCHANGE) {
         let _ = render(p);
     }
+    // The foreground may not have settled yet, so the first tick decides
+    // whether the watch keeps running.
+    if matches!(
+        msg,
+        WM_ACTIVATE | WM_ACTIVATEAPP | WM_NCACTIVATE | WM_SIZE | WM_SHOWWINDOW
+    ) && !(*p).watching
+        && !IsIconic(hwnd).as_bool()
+    {
+        (*p).watching = true;
+        SetTimer(Some((*p).strip), WATCH, WATCH_MS, None);
+    }
     result
 }
 unsafe extern "system" fn strip_proc(
@@ -1337,14 +1348,9 @@ unsafe extern "system" fn strip_proc(
                 SetTimer(Some(hwnd), HIDE, 450, None);
             }
             (*p).near_top = near;
-            let interval = if in_front((*p).owner) {
-                WATCH_MS
-            } else {
-                WAITING_MS
-            };
-            if (*p).watch_ms != interval {
-                (*p).watch_ms = interval;
-                SetTimer(Some(hwnd), WATCH, interval, None);
+            if IsIconic((*p).owner).as_bool() || !in_front((*p).owner) {
+                let _ = KillTimer(Some(hwnd), WATCH);
+                (*p).watching = false;
             }
             return LRESULT(0);
         }

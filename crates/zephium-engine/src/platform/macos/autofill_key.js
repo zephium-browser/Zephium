@@ -20,6 +20,7 @@
     "focusin",
     (event) => {
       const input = target(event);
+      if (globalThis.__zephiumFillingOff) return;
       if (input instanceof HTMLInputElement && signIn(input)) {
         input.autofillButtonType = "credentials";
       }

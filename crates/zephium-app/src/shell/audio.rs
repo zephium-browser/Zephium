@@ -12,6 +12,7 @@ impl Shell {
                 self.watch_tab_media(id);
             }
             self.project_tab(id);
+            self.sync_extension_browser_surface_metadata(id);
         }
         if let Some(deadline) = self.items.tab(id).and_then(|tab| tab.audio.deadline()) {
             self.audio_quiet.insert(id);
@@ -32,6 +33,7 @@ impl Shell {
         for id in std::mem::take(&mut self.audio_quiet) {
             if self.items.settle_audio(id, now) {
                 self.project_tab(id);
+                self.sync_extension_browser_surface_metadata(id);
             }
             if let Some(deadline) = self.items.tab(id).and_then(|tab| tab.audio.deadline()) {
                 self.audio_quiet.insert(id);
@@ -48,6 +50,7 @@ impl Shell {
         self.audio_quiet.remove(&id);
         if self.items.silence_audio(id) {
             self.project_tab(id);
+            self.sync_extension_browser_surface_metadata(id);
         }
         self.forget_tab_media(id);
     }
@@ -84,6 +87,7 @@ impl Shell {
             let _ = self.engine.set_muted(id, muted);
         }
         self.project_tab(id);
+        self.sync_extension_browser_surface_metadata(id);
         operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
     }
 
