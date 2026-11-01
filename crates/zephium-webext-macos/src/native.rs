@@ -7,10 +7,11 @@
 //! gets a host of its own that ends after the first reply.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::ptr::NonNull;
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -21,7 +22,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message;
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSError, NSString, NSTimer};
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionMessagePort};
 use serde_json::Value;
 
@@ -38,6 +39,8 @@ const MAX_OUTBOUND_FRAMES: usize = 32;
 const MAX_QUEUED_BYTES: usize = 128 * 1024 * 1024;
 const MAX_INBOUND_EVENTS: usize = 8;
 const MAX_INBOUND_BYTES: usize = 2 * MAX_FROM_HOST;
+/// Well inside the time WebKit lets a background sit idle before unloading it.
+const KEEP_AWAKE_SECONDS: f64 = 20.0;
 static PHYSICAL_HOSTS: AtomicUsize = AtomicUsize::new(0);
 static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,6 +49,7 @@ type Reply = RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>;
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<usize, Rc<Connection>>> = RefCell::new(HashMap::new());
     static HOST_COUNTS: RefCell<HashMap<(usize, String), std::sync::Weak<AtomicUsize>>> = RefCell::new(HashMap::new());
+    static KEEP_AWAKE: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
 }
 
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
@@ -89,7 +93,59 @@ pub(crate) fn connect(
         port.setMessageHandler(Some(&on_message));
         port.setDisconnectHandler(Some(&on_disconnect));
     }
+    keep_awake();
     Ok(())
+}
+
+/// Chrome keeps a background running while a host is connected to it; WebKit
+/// unloads it when idle all the same, and the host's session goes with it (a
+/// desktop app's unlock handshake, rebuilt late on the next popup). While any
+/// port is open its background is woken before it can count as idle.
+fn keep_awake() {
+    if KEEP_AWAKE.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    let tick = RcBlock::new(|timer: NonNull<NSTimer>| {
+        let mut seen = HashSet::new();
+        let open: Vec<_> = CONNECTIONS.with(|connections| {
+            connections
+                .borrow()
+                .values()
+                .filter(|connection| connection.port.is_some())
+                .filter(|connection| {
+                    seen.insert((
+                        connection.shared.as_ptr() as usize,
+                        connection.extension.clone(),
+                    ))
+                })
+                .map(|connection| (connection.shared.clone(), connection.extension.clone()))
+                .collect()
+        });
+        if open.is_empty() {
+            unsafe { timer.as_ref().invalidate() };
+            KEEP_AWAKE.with(|timer| timer.borrow_mut().take());
+            return;
+        }
+        for (shared, extension) in open {
+            let Some(shared) = shared.upgrade() else {
+                continue;
+            };
+            let context = shared
+                .loaded
+                .borrow()
+                .get(&extension)
+                .map(|loaded| loaded.context.clone());
+            if let Some(context) = context {
+                let done = RcBlock::new(|_error: *mut NSError| {});
+                unsafe { context.loadBackgroundContentWithCompletionHandler(&done) };
+            }
+        }
+    });
+    let timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(KEEP_AWAKE_SECONDS, true, &tick)
+    };
+    timer.setTolerance(KEEP_AWAKE_SECONDS / 4.0);
+    KEEP_AWAKE.with(|slot| *slot.borrow_mut() = Some(timer));
 }
 
 /// Sends one message for `runtime.sendNativeMessage` and replies with the
