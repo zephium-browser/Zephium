@@ -190,13 +190,36 @@ fn error(error: NoteError) -> NoteResponse {
 pub struct Library {
     folder: Folder,
     index: Index,
+    vault: bool,
+}
+
+/// The vault folder chosen for a profile, if one is set and still exists.
+pub fn vault_root(base: &Path, profile: &str) -> Option<std::path::PathBuf> {
+    let pointer = base.join("vault").join(format!("{profile}.root"));
+    let text = std::fs::read_to_string(pointer).ok()?;
+    let root = std::path::PathBuf::from(text.trim());
+    (root.is_absolute() && std::fs::metadata(&root).is_ok_and(|meta| meta.is_dir())).then_some(root)
 }
 
 impl Library {
     /// `base` is the application data directory; the profile's notes live in
     /// `notes/<profile>/Notes` and its index beside them, outside the folder
     /// so that moving or syncing the notes never carries a database along.
+    ///
+    /// When the person chose a vault folder (`vault/<profile>.root`), notes are
+    /// the Markdown files in that folder instead, indexed in a separate
+    /// database beside the default one.
     pub fn open(base: &Path, profile: &str) -> Result<Self> {
+        if let Some(root) = vault_root(base, profile) {
+            let folder = Folder::at(&root)?;
+            let index_dir = Folder::open(base, &["notes", profile])?;
+            let index = Index::open(&index_dir.root().join("vault-index.sqlite"))?;
+            return Ok(Self {
+                folder,
+                index,
+                vault: true,
+            });
+        }
         let folder = Folder::open(base, &["notes", profile, "Notes"])?;
         let index_path = folder
             .root()
@@ -204,7 +227,17 @@ impl Library {
             .map(|parent| parent.join("index.sqlite"))
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
         let index = Index::open(&index_path)?;
-        Ok(Self { folder, index })
+        Ok(Self {
+            folder,
+            index,
+            vault: false,
+        })
+    }
+
+    /// A vault belongs to the person and may be shared with other apps, so
+    /// its trash is never emptied automatically.
+    pub fn is_vault(&self) -> bool {
+        self.vault
     }
 
     #[cfg(test)]
@@ -212,6 +245,7 @@ impl Library {
         Self {
             folder,
             index: Index::memory(),
+            vault: false,
         }
     }
 

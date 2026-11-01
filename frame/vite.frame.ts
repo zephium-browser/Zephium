@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import type { UserConfig } from "vite";
 import { alias } from "./aliases.ts";
 import { i18nLocales } from "./i18n-locales.ts";
+import { vendorCss } from "./vendor-css.ts";
 import { bootstrapReport, type Page } from "./bootstrap-report.ts";
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
@@ -27,6 +28,7 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
         strategy: ["baseLocale"],
       }),
       i18nLocales(),
+      vendorCss(),
       svelte(),
       tailwindcss(),
     ],

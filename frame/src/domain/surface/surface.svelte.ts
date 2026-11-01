@@ -12,6 +12,7 @@ export type BrowserPage =
   | "work"
   | "tasks"
   | "notes"
+  | "vault"
   | "time"
   | "source";
 let page = $state<BrowserPage | null>(null);
@@ -54,13 +55,14 @@ async function initialize(epoch: number) {
               destination === "downloads" ||
               destination === "tasks" ||
               destination === "notes" ||
+              destination === "vault" ||
               destination === "time" ||
               destination === "source"
             ? destination
             : undefined;
       if (confirmed !== undefined) {
         navigationEpoch++;
-        if (confirmed === null || confirmed === "work") underneath = null;
+        if (confirmed === null || confirmed === "work" || confirmed === "vault") underneath = null;
         else if (page === "work") underneath = "work";
         flushSync(() => {
           error = false;
@@ -126,5 +128,5 @@ export async function open(next: BrowserPage | null) {
 
 /** Closes the current page, returning to the one it was opened over. */
 export function close() {
-  return open(page === "work" ? null : underneath);
+  return open(page === "work" || page === "vault" ? null : underneath);
 }

@@ -132,6 +132,8 @@ zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-store.workspace = true
 zephium-notes.workspace = true
+zephium-vault.workspace = true
+dirs = "6"
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true

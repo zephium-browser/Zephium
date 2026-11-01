@@ -40,6 +40,8 @@ enum Command {
         done: NoteDone,
     },
     Touched(ProfileId),
+    /// The profile's folder changed (a vault was chosen); open it afresh.
+    Reopen(ProfileId),
     Wake,
     Stop,
 }
@@ -149,6 +151,12 @@ impl NoteService {
             }
             Err(_) => {}
         }
+    }
+
+    /// Forgets the open library so the next call opens the profile's current
+    /// folder (after a vault folder is chosen).
+    pub fn reopen(&self, profile: ProfileId) -> bool {
+        self.sender.try_send(Command::Reopen(profile)).is_ok()
     }
 
     /// Closes a profile's notes for good in this process, before its data is
@@ -276,6 +284,9 @@ impl Worker {
                         open.due.get_or_insert_with(|| Instant::now() + SETTLE);
                     }
                 }
+                Ok(Command::Reopen(profile)) => {
+                    self.open.remove(&profile);
+                }
                 Ok(Command::Wake) => {}
                 Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => self.settle(),
@@ -363,7 +374,7 @@ impl Worker {
         let instant = now();
         self.import_legacy(profile, &mut library, instant);
         let mut changes = library.reconcile(instant).ok()?;
-        if let Ok(expired) = library.expire_trash(instant) {
+        if let Some(Ok(expired)) = (!library.is_vault()).then(|| library.expire_trash(instant)) {
             changes.ids.extend(expired.ids);
             changes.reset |= expired.reset;
         }

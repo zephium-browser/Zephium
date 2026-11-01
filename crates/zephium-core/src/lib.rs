@@ -38,6 +38,7 @@ pub mod split;
 /// Time on the web and focus sessions.
 pub mod time;
 pub mod userscripts;
+pub mod vault;
 pub mod webkitgtk;
 pub mod webview2;
 pub mod windows;

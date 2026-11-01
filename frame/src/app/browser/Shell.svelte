@@ -9,6 +9,7 @@
   // Dynamic like the panel's own path to Notes, so the feature's entry is
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
+  const loadVaultPage = () => import("$features/vault").then((vault) => vault.loadVaultPage());
   import LazyView from "$shared/ui/LazyView";
   import type { TabView } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
@@ -602,6 +603,17 @@
               {:else if browserPage.currentPage() === "notes"}
                 {#key tabs.profile()?.id}<LazyView
                     loader={loadNotesPage}
+                    loadingLabel={m.surface_loading()}
+                    failureLabel={m.surface_render_failed()}
+                    retryLabel={m.surface_retry()}
+                    >{#snippet children(View)}<View
+                        profile={tabs.profile()?.id ?? ""}
+                        onclose={() => void browserPage.close()}
+                      />{/snippet}</LazyView
+                  >{/key}
+              {:else if browserPage.currentPage() === "vault"}
+                {#key tabs.profile()?.id}<LazyView
+                    loader={loadVaultPage}
                     loadingLabel={m.surface_loading()}
                     failureLabel={m.surface_render_failed()}
                     retryLabel={m.surface_retry()}

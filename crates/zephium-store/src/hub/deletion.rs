@@ -557,6 +557,12 @@ fn remove_extension_profile_artifacts(dir: &Path, profile: ProfileId) -> rusqlit
 /// first renamed aside so a partial removal can never be mistaken for a live
 /// folder, then removed without following any link inside it.
 fn remove_notes_directory(dir: &Path, profile: ProfileId) -> std::io::Result<()> {
+    // The vault pointer names the person's own folder; only the pointer goes.
+    match std::fs::remove_file(dir.join("vault").join(format!("{profile}.root"))) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let notes = dir.join("notes");
     let live = notes.join(profile.to_string());
     let erasing = notes.join(format!(".erasing-{profile}"));

@@ -1,6 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Briefcase02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import { Briefcase02Icon, Folder01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
   import { surface } from "$domain/surface";
   import { preferences } from "$domain/preferences";
   import SegmentedControl from "$shared/ui/SegmentedControl";
@@ -17,10 +17,13 @@
   } = $props();
 
   let inWork = $derived(surface.currentPage() === "work");
-  const options = [
+  let inVault = $derived(surface.currentPage() === "vault");
+  let workEnabled = $derived(preferences.enabled("work"));
+  let options = $derived([
     { value: "browse", label: m.mode_browse(), icon: Globe02Icon },
-    { value: "work", label: m.mode_work(), icon: Briefcase02Icon },
-  ];
+    { value: "vault", label: m.mode_vault(), icon: Folder01Icon },
+    ...(workEnabled ? [{ value: "work", label: m.mode_work(), icon: Briefcase02Icon }] : []),
+  ]);
 </script>
 
 <!--
@@ -29,17 +32,15 @@
   request, so the thumb only travels once the environment has actually
   changed and can never be left on a side native refused.
 -->
-{#if !preferences.enabled("work")}{:else if compact}<ModeWord {standalone} />{:else}<div
-    class="modes"
-  >
+{#if compact}{#if workEnabled}<ModeWord {standalone} />{/if}{:else}<div class="modes">
     <SegmentedControl
       label={m.ui_mode_work_hint()}
       {options}
       full
       size="regular"
       bind:value={
-        () => (inWork ? "work" : "browse"),
-        (next) => void surface.open(next === "work" ? "work" : null)
+        () => (inWork ? "work" : inVault ? "vault" : "browse"),
+        (next) => void surface.open(next === "work" ? "work" : next === "vault" ? "vault" : null)
       }
     />
   </div>{/if}

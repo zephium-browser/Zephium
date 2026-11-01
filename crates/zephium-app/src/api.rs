@@ -163,6 +163,8 @@ pub enum BrowserPage {
     Downloads,
     Tasks,
     Notes,
+    /// The person's vault folder as a file explorer and workspace.
+    Vault,
     Time,
     /// The source of the tab in front. Chrome never asks for it by name: a
     /// source tab being in front is what shows it.
@@ -179,6 +181,7 @@ impl BrowserPage {
             Self::Downloads => "browser.downloads",
             Self::Tasks => "browser.tasks",
             Self::Notes => "browser.notes",
+            Self::Vault => "browser.vault",
             Self::Time => "browser.time",
             Self::Source => "browser.source",
         }

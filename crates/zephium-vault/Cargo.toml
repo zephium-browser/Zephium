@@ -1,0 +1,13 @@
+[package]
+name = "zephium-vault"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zephium-core.workspace = true
+base64.workspace = true
+notify = { version = "=8.2.0", default-features = false, features = ["macos_fsevent"] }
+
+[dev-dependencies]
+tempfile.workspace = true

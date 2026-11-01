@@ -11,6 +11,7 @@ import type {
   FaviconsView,
   NoteOpenRequested,
   NoteChanges,
+  VaultChanged,
   ResourceChanged,
   DownloadsChanged,
   BlockerStatusChanged,
@@ -69,6 +70,7 @@ export const nativeEventNames = {
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
   notesChanged: "zephium:notes-changed",
+  vaultChanged: "zephium:vault-changed",
   downloadsChanged: "zephium:downloads-changed",
   resourceClose: "zephium:resource-close",
   resourceCloseCancelled: "zephium:resource-close-cancelled",
@@ -120,6 +122,7 @@ export const events = {
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
   resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),
   notesChanged: scopedEvent<NoteChanges>(nativeEventNames.notesChanged),
+  vaultChanged: scopedEvent<VaultChanged>(nativeEventNames.vaultChanged),
   downloadsChanged: scopedEvent<DownloadsChanged>(nativeEventNames.downloadsChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(

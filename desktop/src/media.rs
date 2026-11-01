@@ -176,7 +176,7 @@ pub(crate) async fn media_open(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn open_with_os(path: &std::path::Path) -> bool {
+pub(crate) fn open_with_os(path: &std::path::Path) -> bool {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = std::process::Command::new("open");
@@ -196,7 +196,7 @@ fn open_with_os(path: &std::path::Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn open_with_os(path: &std::path::Path) -> bool {
+pub(crate) fn open_with_os(path: &std::path::Path) -> bool {
     windows_shell_path(path, false)
 }
 

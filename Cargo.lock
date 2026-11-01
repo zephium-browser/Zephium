@@ -7615,6 +7615,7 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "block2",
+ "dirs",
  "dispatch2",
  "futures-lite",
  "getrandom 0.4.3",
@@ -7669,6 +7670,7 @@ dependencies = [
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
+ "zephium-vault",
  "zephium-voice",
  "zephium-webext",
  "zephium-webext-macos",
@@ -7854,6 +7856,16 @@ dependencies = [
  "time",
  "tough",
  "url",
+]
+
+[[package]]
+name = "zephium-vault"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "notify",
+ "tempfile",
+ "zephium-core",
 ]
 
 [[package]]

@@ -61,6 +61,11 @@ export const architecture = {
               },
             },
           },
+          // The vault opens Markdown files in the notes editor.
+          {
+            from: { element: { type: "features", captured: { module: "vault" } } },
+            allow: { to: { element: { type: "features", captured: { module: "notes" } } } },
+          },
           // Settings edits the sites focus shuts with the same control as Time.
           {
             from: { element: { type: "features", captured: { module: "settings" } } },
