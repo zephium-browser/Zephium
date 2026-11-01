@@ -7857,6 +7857,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-vault"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "notify",
+ "tempfile",
+ "zephium-core",
+]
+
+[[package]]
 name = "zephium-voice"
 version = "0.1.0"
 dependencies = [

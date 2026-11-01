@@ -33,6 +33,7 @@ zephium-credentials = { path = "crates/zephium-credentials", version = "=0.1.0" 
 zephium-ipc = { path = "crates/zephium-ipc", version = "=0.1.0" }
 zephium-engine = { path = "crates/zephium-engine", version = "=0.1.0" }
 zephium-notes = { path = "crates/zephium-notes", version = "=0.1.0" }
+zephium-vault = { path = "crates/zephium-vault", version = "=0.1.0" }
 zephium-import = { path = "crates/zephium-import", version = "=0.1.0" }
 zephium-private-fs = { path = "crates/zephium-private-fs", version = "=0.1.0" }
 zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
