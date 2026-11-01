@@ -54,6 +54,15 @@
   onMount(() => {
     void open();
     document.addEventListener("selectionchange", selectionChanged);
+    // A pane opening beside this one narrows it; keep a fitted page fitted.
+    const observer = new ResizeObserver(() => {
+      const mode = viewer?.currentScaleValue;
+      if (viewer && (mode === "page-width" || mode === "page-fit" || mode === "auto")) {
+        viewer.currentScaleValue = mode;
+      }
+    });
+    if (container) observer.observe(container);
+    return () => observer.disconnect();
   });
 
   onDestroy(() => {

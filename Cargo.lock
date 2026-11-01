@@ -7615,6 +7615,7 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "block2",
+ "dirs",
  "dispatch2",
  "futures-lite",
  "getrandom 0.4.3",

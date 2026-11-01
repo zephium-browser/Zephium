@@ -15,6 +15,7 @@
   import { ancestors } from "../lib/tree";
   import { Workspace, type Layout } from "../lib/workspace.svelte";
   import ContextMenu, { type ContextItem } from "./ContextMenu.svelte";
+  import DownloadsShelf from "./DownloadsShelf.svelte";
   import FileTree from "./FileTree.svelte";
   import Palette, { type PaletteItem, type PaletteMode } from "./Palette.svelte";
   import PaneGrid from "./PaneGrid.svelte";
@@ -26,6 +27,8 @@
   const session = untrack(() => vaultSession(profile));
   const workspace = untrack(() => new Workspace(profile, storage));
   const tips = new KeyTips();
+  /** Marks a palette target that is a file in the system Downloads folder. */
+  const DOWNLOAD = "download:";
   const EXPANDED = `zephium.vault.expanded.${untrack(() => profile)}`;
 
   let root = $state<HTMLDivElement | null>(null);
@@ -174,6 +177,14 @@
       label: m.vault_undo(),
       run: () => void move(moved, parentOf(path)),
     });
+  }
+
+  /** Copies a file from Downloads into a vault folder and opens it. */
+  async function fileDownload(name: string, dest: string) {
+    const result = await session.change({ kind: "import", source: name, dest }, [dest]);
+    if (!result.ok || !result.value) return say(errorText(result.ok ? "io" : result.error));
+    openPath(result.value.path);
+    say(m.vault_filed({ name: result.value.name, folder: dest || m.vault_root_name() }));
   }
 
   async function trash(entry: VaultEntry) {
@@ -351,6 +362,8 @@
         reveal(item.id);
         toggle(item.id, true);
       } else openPath(item.id, alternate);
+    } else if (state.mode === "move" && state.target?.startsWith(DOWNLOAD)) {
+      void fileDownload(state.target.slice(DOWNLOAD.length), item.id);
     } else if (state.mode === "move" && state.target !== null) void move(state.target, item.id);
     else if (state.mode === "layout") {
       if (alternate || !item.id) {
@@ -569,6 +582,10 @@
             ontrash={(entry) => void trash(entry)}
             ontoggle={toggle}
           />
+          <DownloadsShelf
+            {session}
+            onfile={(name) => (palette = { mode: "move", target: `${DOWNLOAD}${name}` })}
+          />
         </aside>
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="resize" onpointerdown={resizeStart}></div>
@@ -628,7 +645,9 @@
       placeholder={palette.mode === "open"
         ? m.vault_palette_open()
         : palette.mode === "move"
-          ? m.vault_palette_move({ name: displayName(nameOf(palette.target ?? "")) })
+          ? m.vault_palette_move({
+              name: displayName(nameOf((palette.target ?? "").replace(DOWNLOAD, ""))),
+            })
           : m.vault_palette_layout()}
       search={paletteSearch}
       onpick={palettePick}

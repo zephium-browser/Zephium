@@ -106,7 +106,7 @@
     position: fixed;
     inset: 0;
     z-index: 50;
-    background: var(--color-visor);
+    background: color-mix(in srgb, var(--color-canvas) 45%, transparent);
   }
 
   .palette {
@@ -161,8 +161,8 @@
   }
 
   button.on {
-    background: var(--row-active);
-    color: var(--row-active-ink);
+    background: var(--color-fill-active);
+    color: var(--color-text);
   }
 
   .title {

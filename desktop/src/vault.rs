@@ -258,14 +258,29 @@ fn run(open: &Open, call: VaultCall) -> VaultResponse {
         VaultCall::Rename { path, name } => entry(vault.rename(&path, &name)),
         VaultCall::Move { path, dest } => entry(vault.move_to(&path, &dest)),
         VaultCall::Trash { path } => entry(vault.trash(&path)),
+        VaultCall::Downloads => match recent_downloads() {
+            Some(entries) => VaultResponse::Entries { entries },
+            None => VaultResponse::Error {
+                error: VaultError::NotFound,
+            },
+        },
         VaultCall::Import { source, dest } => {
-            let source = PathBuf::from(source);
-            if !source.is_absolute() {
+            let Some(folder) = dirs::download_dir() else {
                 return VaultResponse::Error {
-                    error: VaultError::Invalid,
+                    error: VaultError::NotFound,
                 };
+            };
+            let source = folder.join(source);
+            // Only a regular file directly in Downloads, never a link out of it.
+            match std::fs::symlink_metadata(&source) {
+                Ok(meta) if meta.is_file() => entry(vault.import(&source, &dest)),
+                Ok(_) => VaultResponse::Error {
+                    error: VaultError::Invalid,
+                },
+                Err(_) => VaultResponse::Error {
+                    error: VaultError::NotFound,
+                },
             }
-            entry(vault.import(&source, &dest))
         }
         VaultCall::Read { path } => match vault.read(&path, MAX_VAULT_READ_BYTES) {
             Ok((bytes, modified)) => VaultResponse::Bytes {
@@ -339,6 +354,59 @@ fn run(open: &Open, call: VaultCall) -> VaultResponse {
             Err(error) => VaultResponse::Error { error },
         },
     }
+}
+
+/// The newest files directly in the system Downloads folder, for filing.
+fn recent_downloads() -> Option<Vec<zephium_core::vault::VaultEntry>> {
+    use zephium_core::vault::{valid_name, VaultEntry, VaultEntryKind};
+    const LIMIT: usize = 40;
+    let folder = dirs::download_dir()?;
+    let mut entries: Vec<(std::time::SystemTime, VaultEntry)> = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .filter_map(|item| {
+            let name = item.file_name().to_str()?.to_owned();
+            if zephium_vault::hidden(&name)
+                || !valid_name(&name)
+                || name.ends_with(".crdownload")
+                || name.ends_with(".partial")
+            {
+                return None;
+            }
+            let meta = std::fs::symlink_metadata(item.path()).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            let modified = meta.modified().ok()?;
+            let millis = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis());
+            let ext = std::path::Path::new(&name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            Some((
+                modified,
+                VaultEntry {
+                    path: name.clone(),
+                    name,
+                    kind: VaultEntryKind::File,
+                    ext,
+                    size: meta.len().to_string(),
+                    modified: millis.to_string(),
+                },
+            ))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    Some(
+        entries
+            .into_iter()
+            .take(LIMIT)
+            .map(|(_, entry)| entry)
+            .collect(),
+    )
 }
 
 /// `zephium-vault://localhost/<percent-encoded "<profile>/<vault path>">` serves a file's

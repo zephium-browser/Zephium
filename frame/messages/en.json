@@ -3972,5 +3972,10 @@
   "vault_next_tab": "Next tab",
   "vault_next_area": "Next area",
   "vault_key_tips": "Key tips",
-  "mode_vault": "Vault"
+  "mode_vault": "Vault",
+  "vault_downloads": "Downloads",
+  "vault_file_download": "File into the vault",
+  "vault_downloads_empty": "No recent downloads.",
+  "vault_downloads_unavailable": "The Downloads folder can’t be read.",
+  "vault_filed": "Filed “{name}” in {folder}"
 }

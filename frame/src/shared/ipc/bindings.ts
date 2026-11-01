@@ -3433,7 +3433,15 @@ export type VaultCall = { kind: "list"; dir: string } | { kind: "stat"; path: st
  *  trashed entry (under `.trash/`) so the person can undo.
  */
 { kind: "trash"; path: string } |
-/**  Copies a file from outside the vault (a download) into `dest`. */
+/**
+ *  Recent files in the system Downloads folder, newest first. Entry
+ *  paths are file names in that folder.
+ */
+{ kind: "downloads" } |
+/**
+ *  Copies a file from the system Downloads folder, named by its file
+ *  name there, into `dest`. Nothing else outside the vault is readable.
+ */
 { kind: "import"; source: string; dest: string } |
 /**  Base64 contents, bounded by `MAX_VAULT_READ_BYTES`. */
 { kind: "read"; path: string } |

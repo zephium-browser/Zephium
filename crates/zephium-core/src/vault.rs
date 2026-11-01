@@ -80,7 +80,11 @@ pub enum VaultCall {
     Trash {
         path: String,
     },
-    /// Copies a file from outside the vault (a download) into `dest`.
+    /// Recent files in the system Downloads folder, newest first. Entry
+    /// paths are file names in that folder.
+    Downloads,
+    /// Copies a file from the system Downloads folder, named by its file
+    /// name there, into `dest`. Nothing else outside the vault is readable.
     Import {
         source: String,
         dest: String,
@@ -167,9 +171,8 @@ impl VaultCall {
             }
             Self::Rename { path, name } => valid_path(path, false) && valid_name(name),
             Self::Move { path, dest } => valid_path(path, false) && valid_path(dest, true),
-            Self::Import { source, dest } => {
-                !source.is_empty() && source.len() <= 4096 && valid_path(dest, true)
-            }
+            Self::Downloads => true,
+            Self::Import { source, dest } => valid_name(source) && valid_path(dest, true),
             Self::Write {
                 path,
                 base64,

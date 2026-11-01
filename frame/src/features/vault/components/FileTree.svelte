@@ -293,8 +293,8 @@
   }
 
   .row.active {
-    background: var(--row-active);
-    color: var(--row-active-ink);
+    background: var(--color-fill-active);
+    color: var(--color-text);
   }
 
   .tree:focus-visible .row.selected,

@@ -63,7 +63,9 @@
 
 <style>
   .markdown {
+    box-sizing: border-box;
     block-size: 100%;
+    padding: 24px clamp(20px, 6%, 64px) 0;
     overflow: hidden;
   }
 
