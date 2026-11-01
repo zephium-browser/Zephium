@@ -93,6 +93,10 @@ fn renames_moves_and_trashes() {
         vault.move_to("DBKF", "DBKF/Year 2").unwrap_err(),
         VaultError::Invalid
     );
+    let trashed = vault.trash("DBKF/CA1 Brief.pdf").unwrap();
+    assert_eq!(trashed.path, ".trash/CA1 Brief.pdf");
+    let restored = vault.move_to(&trashed.path, "DBKF").unwrap();
+    assert_eq!(restored.path, "DBKF/CA1 Brief.pdf");
     vault.trash("DBKF/CA1 Brief.pdf").unwrap();
     assert!(dir.path().join(TRASH).join("CA1 Brief.pdf").exists());
     assert_eq!(

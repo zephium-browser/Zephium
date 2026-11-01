@@ -286,7 +286,8 @@ impl Vault {
     }
 
     /// Moves into `.trash`, keeping the folder structure flat like Obsidian.
-    pub fn trash(&self, path: &str) -> Result<()> {
+    /// Answers the trashed entry, so the move can be undone.
+    pub fn trash(&self, path: &str) -> Result<VaultEntry> {
         let from = self.resolve_existing(path)?;
         let trash = self.root.join(TRASH);
         match fs::symlink_metadata(&trash) {
@@ -299,7 +300,9 @@ impl Vault {
             .and_then(|name| name.to_str())
             .ok_or(VaultError::Invalid)?;
         let name = self.free_name(&trash, name)?;
-        move_path(&from, &trash.join(name))
+        let to = trash.join(&name);
+        move_path(&from, &to)?;
+        self.entry(format!("{TRASH}/{name}"), &to)
     }
 
     /// Copies a regular file from anywhere into `dest`.

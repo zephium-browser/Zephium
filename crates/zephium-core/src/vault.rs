@@ -75,7 +75,8 @@ pub enum VaultCall {
         path: String,
         dest: String,
     },
-    /// Moves into the vault's `.trash` folder; never permanent.
+    /// Moves into the vault's `.trash` folder; never permanent. Answers the
+    /// trashed entry (under `.trash/`) so the person can undo.
     Trash {
         path: String,
     },

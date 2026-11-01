@@ -3428,7 +3428,10 @@ export type VaultChanged = {
 };
 
 export type VaultCall = { kind: "list"; dir: string } | { kind: "stat"; path: string } | { kind: "create_folder"; dir: string; name: string } | { kind: "create_file"; dir: string; name: string; text: string } | { kind: "rename"; path: string; name: string } | { kind: "move"; path: string; dest: string } |
-/**  Moves into the vault's `.trash` folder; never permanent. */
+/**
+ *  Moves into the vault's `.trash` folder; never permanent. Answers the
+ *  trashed entry (under `.trash/`) so the person can undo.
+ */
 { kind: "trash"; path: string } |
 /**  Copies a file from outside the vault (a download) into `dest`. */
 { kind: "import"; source: string; dest: string } |

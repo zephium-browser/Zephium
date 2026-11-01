@@ -257,16 +257,7 @@ fn run(open: &Open, call: VaultCall) -> VaultResponse {
         }
         VaultCall::Rename { path, name } => entry(vault.rename(&path, &name)),
         VaultCall::Move { path, dest } => entry(vault.move_to(&path, &dest)),
-        VaultCall::Trash { path } => match vault.trash(&path) {
-            Ok(()) => {
-                open.names
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .invalidate();
-                VaultResponse::Done
-            }
-            Err(error) => VaultResponse::Error { error },
-        },
+        VaultCall::Trash { path } => entry(vault.trash(&path)),
         VaultCall::Import { source, dest } => {
             let source = PathBuf::from(source);
             if !source.is_absolute() {
@@ -350,7 +341,7 @@ fn run(open: &Open, call: VaultCall) -> VaultResponse {
     }
 }
 
-/// `zephium-vault://<profile>/<percent-encoded vault path>` serves a file's
+/// `zephium-vault://localhost/<percent-encoded "<profile>/<vault path>">` serves a file's
 /// bytes to the main chrome view only, for viewers (PDF, images, Office).
 pub(crate) fn serve(
     ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
@@ -363,7 +354,7 @@ pub(crate) fn serve(
     let app = ctx.app_handle().clone();
     let uri = request.uri().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        responder.respond(resolve(&app, uri.host(), uri.path()));
+        responder.respond(resolve(&app, uri.path()));
     });
 }
 
@@ -384,25 +375,21 @@ fn decode(text: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn resolve(
-    app: &AppHandle,
-    host: Option<&str>,
-    path: &str,
-) -> tauri::http::Response<Cow<'static, [u8]>> {
+fn resolve(app: &AppHandle, path: &str) -> tauri::http::Response<Cow<'static, [u8]>> {
     let not_found = || respond(404, Vec::new(), "text/plain");
-    // macOS/Linux: zephium-vault://<profile>/<path>; Windows:
-    // http://zephium-vault.localhost/<profile>/<path>.
-    let path = path.trim_start_matches('/');
-    let (profile_text, rest) = match host {
-        Some(host) if host != "localhost" && !host.starts_with(SCHEME) => (host, path),
-        _ => match path.split_once('/') {
-            Some(split) => split,
-            None => return not_found(),
-        },
-    };
-    let (Some(profile), Some(relative)) = (profile_of(profile_text), decode(rest)) else {
+    // The frame builds URLs with `convertFileSrc("<profile>/<path>")`, which
+    // percent-encodes the separators: `zephium-vault://localhost/<encoded>` on
+    // macOS and `http://zephium-vault.localhost/<encoded>` on Windows.
+    let Some(decoded) = decode(path.trim_start_matches('/')) else {
         return not_found();
     };
+    let Some((profile_text, relative)) = decoded.split_once('/') else {
+        return not_found();
+    };
+    let Some(profile) = profile_of(profile_text) else {
+        return not_found();
+    };
+    let relative = relative.to_owned();
     let Some(state) = app.try_state::<VaultState>() else {
         return not_found();
     };
