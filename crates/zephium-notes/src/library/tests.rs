@@ -495,3 +495,41 @@ fn wiki_links_resolve_and_report_backlinks() {
         other => panic!("expected a page, got {other:?}"),
     }
 }
+
+#[test]
+fn a_chosen_vault_folder_is_the_notes_folder() {
+    let base = tempfile::tempdir().unwrap();
+    let vault = tempfile::tempdir().unwrap();
+    fs::create_dir_all(vault.path().join("ITF/CA1")).unwrap();
+    fs::write(
+        vault.path().join("ITF/CA1/Tips.md"),
+        "# Tips\n\nStart early",
+    )
+    .unwrap();
+    fs::write(vault.path().join("ITF/CA1/Brief.pdf"), "%PDF").unwrap();
+    fs::create_dir_all(base.path().join("vault")).unwrap();
+    fs::write(
+        base.path().join("vault/profile.root"),
+        vault.path().to_str().unwrap(),
+    )
+    .unwrap();
+    let mut library = Library::open(base.path(), "profile").unwrap();
+    assert!(library.is_vault());
+    library.reconcile(NOW).unwrap();
+    let (response, _) = library.call(
+        NoteCall::List {
+            query: NoteQuery {
+                search: String::new(),
+                trashed: false,
+                after: None,
+                limit: 50,
+            },
+        },
+        NOW,
+    );
+    let NoteResponse::Page { items: notes, .. } = response else {
+        panic!("expected a page, got {response:?}");
+    };
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].path, "ITF/CA1/Tips.md");
+}

@@ -9,4 +9,5 @@ mod markdown;
 mod names;
 mod service;
 
+pub use library::vault_root;
 pub use service::{Host, NoteService};

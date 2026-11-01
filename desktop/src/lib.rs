@@ -124,6 +124,7 @@ mod startup_styles;
 mod swipe;
 mod system_time;
 mod updates;
+mod vault;
 mod voice;
 mod webext;
 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
@@ -1845,6 +1846,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tab_drag_over,
             resource_call,
             notes::note_call,
+            vault::vault_root,
+            vault::vault_choose_root,
+            vault::vault_call,
             history_call,
             browsing_data_call,
             favicon_probe,
@@ -1904,6 +1908,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             FaviconsChanged,
             ResourceChanged,
             notes::NotesChanged,
+            vault::VaultChanged,
             DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
@@ -3879,6 +3884,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             "downloads" => Some(zephium_app::BrowserPage::Downloads),
             "tasks" => Some(zephium_app::BrowserPage::Tasks),
             "notes" => Some(zephium_app::BrowserPage::Notes),
+            "vault" => Some(zephium_app::BrowserPage::Vault),
             "time" => Some(zephium_app::BrowserPage::Time),
             "return" => None,
             _ => return rejected_operation(),
@@ -6447,6 +6453,7 @@ pub fn run() {
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
+        .register_asynchronous_uri_scheme_protocol(vault::SCHEME, vault::serve)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Must register first: a second launch (file association, dock, a
@@ -7221,6 +7228,7 @@ pub fn run() {
             }
             #[cfg(feature = "work-product")]
             page_assist::install(app.handle(), engine.clone(), store.clone());
+            app.manage(vault::VaultState::new(&data_dir));
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
             external_links::adopt(app.handle());
             #[cfg(feature = "work-product")]

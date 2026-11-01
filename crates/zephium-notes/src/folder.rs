@@ -156,6 +156,15 @@ impl Folder {
         Ok(Self { root: current })
     }
 
+    /// An existing folder chosen by the person, used as it is.
+    pub fn at(root: &Path) -> io::Result<Self> {
+        let root = fs::canonicalize(root)?;
+        if !fs::metadata(&root)?.is_dir() {
+            return Err(invalid_path());
+        }
+        Ok(Self { root })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

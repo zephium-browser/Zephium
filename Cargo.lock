@@ -7669,6 +7669,7 @@ dependencies = [
  "zephium-ipc",
  "zephium-notes",
  "zephium-store",
+ "zephium-vault",
  "zephium-voice",
  "zephium-webext",
  "zephium-webext-macos",

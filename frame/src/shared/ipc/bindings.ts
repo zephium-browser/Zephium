@@ -548,6 +548,14 @@ export const commands = {
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
+	/**  Where the profile's vault is, if one is chosen. */
+	vaultRoot: (expectedProfile: string) => __TAURI_INVOKE<string | null>("vault_root", { expectedProfile }),
+	/**
+	 *  Asks for a folder and makes it the profile's vault. `Ok(None)` when the
+	 *  person cancelled.
+	 */
+	vaultChooseRoot: (expectedProfile: string) => typedError<string | null, VaultError>(__TAURI_INVOKE("vault_choose_root", { expectedProfile })),
+	vaultCall: (expectedProfile: string, call: VaultCall) => __TAURI_INVOKE<VaultResponse>("vault_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
 	/**
 	 *  Clears what the focused profile's pages stored, or lists and removes it
@@ -708,6 +716,7 @@ export const events = {
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
+	vaultChanged: makeEvent<VaultChanged>("vault-changed"),
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
 	webExtensionStoreClicked: makeEvent<WebExtensionStoreClicked>("web-extension-store-clicked"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
@@ -3411,6 +3420,47 @@ export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+
+/**  Folders whose listing changed. An empty `dirs` means reload everything. */
+export type VaultChanged = {
+	profile: string,
+	dirs: string[],
+};
+
+export type VaultCall = { kind: "list"; dir: string } | { kind: "stat"; path: string } | { kind: "create_folder"; dir: string; name: string } | { kind: "create_file"; dir: string; name: string; text: string } | { kind: "rename"; path: string; name: string } | { kind: "move"; path: string; dest: string } |
+/**  Moves into the vault's `.trash` folder; never permanent. */
+{ kind: "trash"; path: string } |
+/**  Copies a file from outside the vault (a download) into `dest`. */
+{ kind: "import"; source: string; dest: string } |
+/**  Base64 contents, bounded by `MAX_VAULT_READ_BYTES`. */
+{ kind: "read"; path: string } |
+/**  Replaces a file atomically if it still has `expected_modified`. */
+{ kind: "write"; path: string; base64: string; expected_modified: string } |
+/**  Fuzzy file and folder names. */
+{ kind: "search"; query: string; limit: number; folders_only: boolean } | { kind: "open_native"; path: string } | { kind: "reveal"; path: string };
+
+export type VaultEntry = {
+	name: string,
+	/**  Vault-relative path with `/` separators. */
+	path: string,
+	kind: VaultEntryKind,
+	/**  Lower-case extension without the dot; empty for folders. */
+	ext: string,
+	/**  Bytes, as a decimal string so large files survive JavaScript numbers. */
+	size: string,
+	/**  Milliseconds since the Unix epoch, as a decimal string. */
+	modified: string,
+};
+
+export type VaultEntryKind = "folder" | "file";
+
+export type VaultError = 
+/**  No vault folder is chosen for this profile. */
+"no_root" | "invalid" | "not_found" | "exists" | 
+/**  The file changed on disk since it was read. */
+"changed" | "too_large" | "unavailable" | "io";
+
+export type VaultResponse = { kind: "entries"; entries: VaultEntry[] } | { kind: "entry"; entry: VaultEntry } | { kind: "bytes"; base64: string; modified: string } | { kind: "done" } | { kind: "error"; error: VaultError };
 
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {

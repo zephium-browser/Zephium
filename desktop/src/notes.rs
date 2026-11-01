@@ -84,6 +84,11 @@ impl Host for DesktopHost {
     }
 }
 
+/// Shows a vault file or folder in the system file manager.
+pub(crate) fn reveal_path(path: &Path) {
+    reveal(path);
+}
+
 /// A folder opens; a note is selected in its folder.
 #[cfg(target_os = "macos")]
 fn reveal(path: &Path) {
@@ -137,7 +142,11 @@ pub(crate) fn install(
     });
     match NoteService::start(data_dir.to_path_buf(), host) {
         Ok(service) => {
-            let service: zephium_core::ports::notes::SharedNotes = Arc::new(service);
+            let service = Arc::new(service);
+            if let Some(vault) = app.try_state::<crate::vault::VaultState>() {
+                vault.attach_notes(service.clone());
+            }
+            let service: zephium_core::ports::notes::SharedNotes = service;
             if !shell.dispatch(Command::AttachNotes(zephium_app::NotesAttachment(service))) {
                 crate::write_diagnostic(format_args!("notes: the shell refused its notes service"));
             }
