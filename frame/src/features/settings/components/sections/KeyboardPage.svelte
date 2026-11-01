@@ -2,8 +2,8 @@
   import * as m from "$shared/i18n/messages";
   import { keymap, type KeymapEntry, type KeymapOutcome } from "$domain/keymap";
   import { preferences } from "$domain/preferences";
-  import { IS_MAC } from "$shared/platform";
-  import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { acceleratorKeys, heldModifiers, keymapAcceleratorFrom } from "$shared/lib/accelerator";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
@@ -88,7 +88,7 @@
       void bind(id, null);
       return;
     }
-    const accelerator = acceleratorFrom(event, IS_MAC);
+    const accelerator = keymapAcceleratorFrom(event, IS_MAC, IS_WINDOWS);
     if (accelerator === null) {
       held = heldModifiers(event, IS_MAC);
       return;
