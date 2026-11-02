@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -86,7 +87,8 @@ pub(crate) struct ContentPolicyRegistration {
     core: Option<ICoreWebView2>,
     core22: Option<ICoreWebView2_22>,
     token: Option<i64>,
-    installed_filters: usize,
+    installed_filters: Rc<Cell<usize>>,
+    pause: Option<crate::platform::content_pause::PauseRegistration>,
 }
 
 impl ContentPolicyRegistration {
@@ -95,7 +97,8 @@ impl ContentPolicyRegistration {
             core: None,
             core22: None,
             token: None,
-            installed_filters: 0,
+            installed_filters: Rc::default(),
+            pause: None,
         }
     }
 
@@ -104,8 +107,10 @@ impl ContentPolicyRegistration {
     }
 
     fn cleanup(&mut self) -> Result<(), ContentRuleApplyFailure> {
+        // A retired cohort must not reinstall filters on a later pause change.
+        self.pause = None;
         if self.core.is_none() && self.core22.is_none() {
-            return if self.token.is_none() && self.installed_filters == 0 {
+            return if self.token.is_none() && self.installed_filters.get() == 0 {
                 Ok(())
             } else {
                 Err(ContentRuleApplyFailure::NativeCleanup)
@@ -125,8 +130,8 @@ impl ContentPolicyRegistration {
             }
             self.token = None;
         }
-        while self.installed_filters != 0 {
-            let index = self.installed_filters - 1;
+        while self.installed_filters.get() != 0 {
+            let index = self.installed_filters.get() - 1;
             let Some((pattern, context)) = filter_registration(index) else {
                 return Err(ContentRuleApplyFailure::NativeCleanup);
             };
@@ -140,7 +145,7 @@ impl ContentPolicyRegistration {
                 eprintln!("content blocker: WebView2 filter removal failed: {error}");
                 return Err(ContentRuleApplyFailure::NativeCleanup);
             }
-            self.installed_filters = index;
+            self.installed_filters.set(index);
         }
         self.core = None;
         self.core22 = None;
@@ -272,9 +277,16 @@ pub(crate) fn install_scoped_on_view(
         core: Some(core.clone()),
         core22: Some(core22.clone()),
         token: None,
-        installed_filters: 0,
+        installed_filters: Rc::default(),
+        pause: None,
     };
-    for index in 0..FILTER_REGISTRATION_COUNT {
+    // A view paused from the start installs its filters only when resumed.
+    let wanted = if pause.paused() {
+        0
+    } else {
+        FILTER_REGISTRATION_COUNT
+    };
+    for index in 0..wanted {
         let Some((pattern, context)) = filter_registration(index) else {
             return Err(match registration.cleanup() {
                 Ok(()) => ContentRuleApplyFailure::NativeInstallation,
@@ -295,7 +307,7 @@ pub(crate) fn install_scoped_on_view(
                 Err(_) => ContentRuleApplyFailure::NativeCleanup,
             });
         }
-        registration.installed_filters += 1;
+        registration.installed_filters.set(index + 1);
     }
     let mut token = 0;
     if unsafe { core.add_WebResourceRequested(&handler, &mut token) }.is_err() {
@@ -305,7 +317,49 @@ pub(crate) fn install_scoped_on_view(
         });
     }
     registration.token = Some(token);
+    let (installed, filters) = (registration.installed_filters.clone(), core22);
+    registration.pause = pause.register(move |paused| follow_pause(&filters, &installed, paused));
     Ok(registration)
+}
+
+/// Pausing removes the cohort's filters, so a paused view's requests never
+/// wait on this thread; resuming installs them again. A failure leaves the
+/// filters as they are and the callback's own pause check in charge.
+fn follow_pause(core22: &ICoreWebView2_22, installed: &Cell<usize>, paused: bool) {
+    let target = if paused { 0 } else { FILTER_REGISTRATION_COUNT };
+    while installed.get() != target {
+        let adding = installed.get() < target;
+        let index = if adding {
+            installed.get()
+        } else {
+            installed.get() - 1
+        };
+        let Some((pattern, context)) = filter_registration(index) else {
+            return;
+        };
+        let changed = if adding {
+            unsafe {
+                core22.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                    pattern,
+                    context,
+                    FILTER_SOURCE_KINDS,
+                )
+            }
+        } else {
+            unsafe {
+                core22.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
+                    pattern,
+                    context,
+                    FILTER_SOURCE_KINDS,
+                )
+            }
+        };
+        if let Err(error) = changed {
+            eprintln!("content blocker: WebView2 filter change on pause failed: {error}");
+            return;
+        }
+        installed.set(if adding { index + 1 } else { index });
+    }
 }
 
 #[derive(Default)]
@@ -477,7 +531,8 @@ mod tests {
         assert!(registration.core.is_none());
         assert!(registration.core22.is_none());
         assert!(registration.token.is_none());
-        assert_eq!(registration.installed_filters, 0);
+        assert_eq!(registration.installed_filters.get(), 0);
+        assert!(registration.pause.is_none());
     }
 
     #[test]
