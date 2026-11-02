@@ -215,6 +215,10 @@ impl FinalDiscard {
 
 #[cfg(target_os = "windows")]
 const MAX_CONCURRENT_SUSPENDS: usize = 8;
+/// How long a page whose suspension was refused runs before it is asked once
+/// more. A busy page settles, or the pause shows it is genuinely in use.
+#[cfg(target_os = "windows")]
+const SUSPEND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
 fn queue_final_discard(
@@ -1281,6 +1285,7 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
             self.suspend_failed.retain(|id| next.contains(id));
+            self.suspend_retries.retain(|id, _| next.contains(id));
             let cancelled: Vec<_> = self
                 .views
                 .iter()
@@ -1354,7 +1359,7 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
-        self.suspend_failed.insert(id);
+        self.suspend_refused(id);
         let timer = self
             .views
             .get_mut(&id)
@@ -1469,10 +1474,38 @@ impl EngineHost {
                 }
             }
             if self.desired_dormant.contains(&id) {
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
             }
         }
         self.refresh_missed_styles(id);
+        self.pump_suspends();
+    }
+
+    /// A refused suspension is asked once more after a pause; refused again,
+    /// the page runs until it is shown or no longer meant to sleep.
+    #[cfg(target_os = "windows")]
+    fn suspend_refused(&mut self, id: ItemId) {
+        self.suspend_failed.insert(id);
+        match self.suspend_retries.get(&id) {
+            None => {
+                let timer =
+                    crate::platform::imp::schedule_browser_timeout(SUSPEND_RETRY, move || {
+                        let _ = super::try_with(move |host| host.retry_suspend(id));
+                    });
+                self.suspend_retries.insert(id, timer);
+            }
+            Some(Some(_)) => {}
+            Some(None) => eprintln!("suspend: refused after its retry; the page stays awake"),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retry_suspend(&mut self, id: ItemId) {
+        let Some(retry) = self.suspend_retries.get_mut(&id) else {
+            return;
+        };
+        *retry = None;
+        self.suspend_failed.remove(&id);
         self.pump_suspends();
     }
 
@@ -1492,11 +1525,11 @@ impl EngineHost {
                 .min();
             let Some(id) = candidate else { break };
             let Some(view) = self.views.get(&id) else {
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 continue;
             };
             let Some(epoch) = view.navigation.current_committed() else {
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 continue;
             };
             let attempt = std::sync::Arc::new(SuspendAttempt {
@@ -1528,7 +1561,7 @@ impl EngineHost {
             );
             let Some(timer) = timer else {
                 self.suspending.remove(&id);
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 if let Some(view) = self.views.get_mut(&id) {
                     view.suspend_attempt = None;
                 }
@@ -1570,7 +1603,7 @@ impl EngineHost {
             });
             if !started {
                 self.suspending.remove(&id);
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 let timer = self.views.get_mut(&id).and_then(|view| {
                     view.suspend_attempt = None;
                     view.suspend_deadline.take()

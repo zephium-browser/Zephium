@@ -1133,7 +1133,7 @@ fn performance_preferences_load_durably_and_pressure_restores_preferred_targets(
     // Lossless suspension never waits longer than its own short grace.
     assert_eq!(
         shell.residency.dormant_min,
-        std::time::Duration::from_secs(5 * 60)
+        std::time::Duration::from_secs(30)
     );
     shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
     assert_eq!(shell.residency.warm_view_limit, 0);

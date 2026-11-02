@@ -498,6 +498,8 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
+            suspend_retries: HashMap::new(),
+            #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             styles_missed: std::collections::HashSet::new(),

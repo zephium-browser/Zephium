@@ -677,8 +677,8 @@ pub(crate) struct EngineHost {
     webext: webext::WebextHost,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
-    // Off-screen views carrying the low-memory hint, and the subset the
-    // shell's idle policy asked WebView2 to suspend.
+    // Off-screen views, and the subset the shell's idle policy asked WebView2
+    // to suspend.
     #[cfg(target_os = "windows")]
     hidden: std::collections::HashSet<ItemId>,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -689,6 +689,9 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    // A refused view's one retry: its timer while waiting, none once used.
+    #[cfg(target_os = "windows")]
+    suspend_retries: HashMap<ItemId, Option<crate::platform::imp::ContentPolicyTimeout>>,
     #[cfg(target_os = "windows")]
     suspend_uncertain: std::collections::HashSet<ItemId>,
     // Dormant views that skipped a cosmetic refresh, owed one when they wake.

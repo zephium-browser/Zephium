@@ -11,14 +11,15 @@ use zephium_core::ports::engine::MemoryPressure;
 // budget; it is a backstop for kept-awake and protected pages, while OS
 // memory pressure is the real budget. Pages are never force-discarded: the
 // engine probe still vetoes anything a reload would lose.
-pub(super) const WARM_VIEW_LIMIT: usize = 4;
+pub(super) const WARM_VIEW_LIMIT: usize = 2;
 pub(super) const LIVE_VIEW_PRESSURE_LIMIT: usize = 24;
 pub(super) const LIVE_VIEW_ABSOLUTE_LIMIT: usize = 64;
 const _: () = assert!(LIVE_VIEW_ABSOLUTE_LIMIT >= LIVE_VIEW_PRESSURE_LIMIT + MAX_VISIBLE_PANES);
 pub(super) const MAX_CONCURRENT_DISCARD_PROBES: usize = 4;
-pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-// Suspension keeps page state, so it can start well before a discard.
-const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+// Suspension keeps page state and resumes in an instant, so a hidden page
+// stops running soon after the person leaves it.
+const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 // A system memory warning can last for hours on small machines; a short
 // grace keeps tabs the user is actively switching between from reloading.
 const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
@@ -139,7 +140,7 @@ impl ResidencyState {
         match key {
             "performance.sleep" => self.sleeping = value == "true",
             "performance.after" => {
-                let minutes = value.parse::<u64>().unwrap_or(15);
+                let minutes = value.parse::<u64>().unwrap_or(30);
                 self.discard_idle_min = std::time::Duration::from_secs(minutes * 60);
                 self.dormant_min = self.discard_idle_min.min(DORMANT_GRACE);
             }
@@ -389,7 +390,7 @@ impl Shell {
         }
     }
 
-    // Sleeping-tabs model: hidden views carry a low-memory hint, then a
+    // Sleeping-tabs model: hidden idle views are suspended, then a
     // bounded set of exact-generation/epoch probes may authorize full native
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
