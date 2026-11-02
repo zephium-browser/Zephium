@@ -60,6 +60,10 @@ pub(super) struct Record {
     #[serde(flatten)]
     pub(super) resources: Resources,
     pub(super) duration_s: f64,
+    /// The page alone's frame time in the run that measured `frames_ms`,
+    /// which is what that frame time is compared through.
+    #[serde(default)]
+    pub(super) page_frames_ms: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -85,23 +89,26 @@ impl Results {
     }
 
     /// Keeps this run's records. Frame times are only comparable with the
-    /// page-only run they were measured beside, so without an accepted
-    /// baseline each extension keeps the frame time it was last saved with.
+    /// page-only run they were measured beside, so each keeps that run's page
+    /// frame time with it; without an accepted baseline an extension keeps
+    /// the pair it was last saved with.
     pub(super) fn record(
         &mut self,
         mut now: BTreeMap<String, Record>,
         baseline: Option<&Resources>,
     ) {
-        match baseline {
-            Some(baseline) => self.baseline = Some(baseline.clone()),
-            None => {
-                for (name, record) in &mut now {
-                    record.resources.frames_ms = self
-                        .extensions
-                        .get(name)
-                        .and_then(|before| before.resources.frames_ms);
+        for (name, record) in &mut now {
+            match baseline {
+                Some(baseline) => record.page_frames_ms = baseline.frames_ms,
+                None => {
+                    let before = self.extensions.get(name);
+                    record.resources.frames_ms = before.and_then(|b| b.resources.frames_ms);
+                    record.page_frames_ms = before.and_then(|b| b.page_frames_ms);
                 }
             }
+        }
+        if let Some(baseline) = baseline {
+            self.baseline = Some(baseline.clone());
         }
         self.extensions.extend(now);
     }
@@ -115,13 +122,7 @@ impl Results {
         now: &BTreeMap<String, Record>,
         baseline: Option<&Resources>,
     ) -> Vec<String> {
-        let machine = match (
-            self.baseline.as_ref().and_then(|b| b.frames_ms),
-            baseline.and_then(|b| b.frames_ms),
-        ) {
-            (Some(was), Some(is)) if was > 0.0 => (is / was).max(1.0),
-            _ => 1.0,
-        };
+        let page_now = baseline.and_then(|b| b.frames_ms);
         let mut found = Vec::new();
         for (name, record) in now {
             let Some(before) = self.extensions.get(name) else {
@@ -151,6 +152,14 @@ impl Results {
             }
             if let (Some(was), Some(is)) = (before.resources.frames_ms, record.resources.frames_ms)
             {
+                // Records saved before the pairing used the shared baseline.
+                let page_then = before
+                    .page_frames_ms
+                    .or_else(|| self.baseline.as_ref().and_then(|b| b.frames_ms));
+                let machine = match (page_then, page_now) {
+                    (Some(then), Some(now)) if then > 0.0 => (now / then).max(1.0),
+                    _ => 1.0,
+                };
                 let was = was * machine;
                 if is > was * MAX_GROWTH && is - was > MIN_FRAMES_GROWTH_MS {
                     found.push(format!("{name}: frames {was:.0} ms -> {is:.0} ms"));
@@ -180,6 +189,7 @@ mod tests {
                 soak_mb: None,
             },
             duration_s: 30.0,
+            page_frames_ms: None,
         }
     }
 
@@ -256,6 +266,39 @@ mod tests {
         results.record(now, Some(&fresh));
         assert_eq!(results.extensions["A"].resources.frames_ms, Some(900.0));
         assert_eq!(results.baseline.as_ref().unwrap().frames_ms, Some(450.0));
+    }
+
+    #[test]
+    fn targeted_runs_compare_each_extension_through_its_own_page_time() {
+        let timed = |frames_ms| {
+            let mut record = record(Status::Ok, 100.0);
+            record.resources.frames_ms = Some(frames_ms);
+            record
+        };
+        let page = |frames_ms| timed(frames_ms).resources;
+        let mut results = Results::default();
+        let mut first = BTreeMap::new();
+        first.insert("A".into(), timed(400.0));
+        first.insert("B".into(), timed(400.0));
+        results.record(first, Some(&page(200.0)));
+
+        // Only A runs, on a machine twice as busy.
+        let mut only_a = BTreeMap::new();
+        only_a.insert("A".into(), timed(800.0));
+        assert!(results.regressions(&only_a, Some(&page(400.0))).is_empty());
+        results.record(only_a, Some(&page(400.0)));
+        assert_eq!(results.extensions["B"].page_frames_ms, Some(200.0));
+
+        // B later runs on that same busy machine: it slowed as the page did.
+        let mut only_b = BTreeMap::new();
+        only_b.insert("B".into(), timed(800.0));
+        assert!(results.regressions(&only_b, Some(&page(400.0))).is_empty());
+        let mut worse = BTreeMap::new();
+        worse.insert("B".into(), timed(1200.0));
+        assert_eq!(
+            results.regressions(&worse, Some(&page(400.0))),
+            ["B: frames 800 ms -> 1200 ms"]
+        );
     }
 
     #[test]

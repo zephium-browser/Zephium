@@ -354,6 +354,7 @@ fn record(outcome: &Outcome) -> Record {
         reasons: outcome.problems.clone(),
         resources: outcome.resources.clone(),
         duration_s: (outcome.duration.as_secs_f64() * 10.0).round() / 10.0,
+        page_frames_ms: None,
     }
 }
 
