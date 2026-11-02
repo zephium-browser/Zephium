@@ -116,6 +116,76 @@
   if (g.scheduler && typeof g.scheduler.yield !== "function") {
     g.scheduler.yield = () => new Promise((resolve) => setTimeout(resolve, 0));
   }
+  // WebKit has no idle callbacks. Extensions then fall back to a 1 ms timer
+  // and redo work meant for quiet moments after every change the page makes,
+  // in the middle of the page's own work. Chrome holds that work until the
+  // page is idle or the callback's timeout passes; so does this, waiting a
+  // second at most.
+  if (!isWorker && typeof g.requestIdleCallback !== "function") {
+    const QUIET = 50;
+    const LATE = 10;
+    const LONGEST = 1000;
+    const pending = new Map();
+    let next = 0;
+    let timer = 0;
+    let expected = 0;
+    let flushing = false;
+    const fail = (error) => {
+      if (typeof g.reportError === "function") g.reportError(error);
+      else setTimeout(() => { throw error; });
+    };
+    const arm = () => {
+      if (timer || flushing || !pending.size) return;
+      let delay = QUIET;
+      const now = performance.now();
+      for (const entry of pending.values()) delay = Math.min(delay, entry.latest - now);
+      delay = Math.max(0, delay);
+      expected = now + delay;
+      timer = setTimeout(flush, delay);
+    };
+    const flush = () => {
+      timer = 0;
+      const start = performance.now();
+      const busy = start - expected > LATE;
+      const end = start + QUIET;
+      flushing = true;
+      for (const [id, entry] of [...pending]) {
+        if (!pending.has(id)) continue;
+        const didTimeout = entry.due <= start;
+        if (entry.latest > start && (busy || performance.now() >= end)) continue;
+        pending.delete(id);
+        try {
+          entry.callback({ didTimeout, timeRemaining: () => (didTimeout ? 0 : Math.max(0, end - performance.now())) });
+        } catch (error) {
+          fail(error);
+        }
+      }
+      flushing = false;
+      arm();
+    };
+    const define = (name, value) => {
+      try {
+        Object.defineProperty(g, name, { value, configurable: true, writable: true });
+      } catch {}
+    };
+    define("requestIdleCallback", function requestIdleCallback(callback, options) {
+      if (typeof callback !== "function") throw new TypeError("requestIdleCallback requires a function");
+      const timeout = options && Number(options.timeout) > 0 ? Number(options.timeout) : Infinity;
+      const id = ++next;
+      const now = performance.now();
+      const latest = now + Math.min(timeout, LONGEST);
+      pending.set(id, { callback, due: now + timeout, latest });
+      if (timer && latest < expected) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+      arm();
+      return id;
+    });
+    define("cancelIdleCallback", function cancelIdleCallback(id) {
+      pending.delete(id);
+    });
+  }
   if (typeof Symbol.dispose !== "symbol") {
     Object.defineProperty(Symbol, "dispose", { value: Symbol.for("Symbol.dispose") });
   }
