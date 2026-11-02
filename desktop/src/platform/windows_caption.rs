@@ -1191,6 +1191,12 @@ unsafe extern "system" fn owner_proc(
         show_system_menu(p, origin);
         return LRESULT(0);
     }
+    // Alt alone asks for keyboard menu mode. With no menu bar it shows
+    // nothing, yet holds the window until the next key, and a close asked
+    // for meanwhile timed out waiting for its drafts to save.
+    if msg == WM_SYSCOMMAND && w.0 as u32 & 0xfff0 == SC_KEYMENU && l.0 == 0 {
+        return LRESULT(0);
+    }
     if msg == WM_TIMER && w.0 == CLOSE_SETTLED {
         let _ = KillTimer(Some(hwnd), CLOSE_SETTLED);
         (*p).changing_state = false;
