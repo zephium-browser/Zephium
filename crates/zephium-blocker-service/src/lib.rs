@@ -30,7 +30,7 @@ use zephium_blocker_update::{
     RefreshAdmission, ShutdownOutcome as UpdateShutdownOutcome, StatusSnapshot, UnavailableReason,
     UpdateStatus,
 };
-use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration};
+use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration, PageActivity};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::blocker::{
     BlockerCatalog, BlockerCatalogFailure, BlockerCatalogPhase, BlockerCatalogProvenance,
@@ -96,9 +96,24 @@ pub struct ManagedBlocker {
     /// They share one compiler thread and WebKit's compile queue, and the
     /// profile's policy is what holds the first pages.
     startup_candidate_yield: Option<(Instant, Arc<AtomicBool>)>,
+    /// A downloaded list then waits until no page has been loading for a
+    /// moment, so its compile never competes with one. The wait started here.
+    page_activity: Arc<PageActivity>,
+    candidate_quiet_wait: Mutex<Option<Instant>>,
 }
 
 const STARTUP_CANDIDATE_YIELD: Duration = Duration::from_secs(10);
+const CANDIDATE_QUIET_PAGES: Duration = Duration::from_secs(2);
+const CANDIDATE_QUIET_WAIT_CAP: Duration = Duration::from_secs(2 * 60);
+
+fn candidate_may_prepare_while_browsing(
+    quiet_for: Option<Duration>,
+    waiting_since: Instant,
+    now: Instant,
+) -> bool {
+    quiet_for.is_some_and(|quiet| quiet >= CANDIDATE_QUIET_PAGES)
+        || now.saturating_duration_since(waiting_since) >= CANDIDATE_QUIET_WAIT_CAP
+}
 
 fn startup_candidate_may_prepare(
     startup_yield: Option<&(Instant, Arc<AtomicBool>)>,
@@ -288,6 +303,8 @@ impl ManagedBlocker {
             sealed: AtomicBool::new(false),
             compile_marker: None,
             startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -339,6 +356,8 @@ impl ManagedBlocker {
             sealed: AtomicBool::new(false),
             compile_marker: None,
             startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -429,6 +448,8 @@ impl ManagedBlocker {
             sealed: AtomicBool::new(false),
             compile_marker: Some(compile_marker),
             startup_candidate_yield,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -497,6 +518,8 @@ impl ManagedBlocker {
             sealed: AtomicBool::new(false),
             compile_marker: None,
             startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -611,6 +634,20 @@ impl ManagedBlocker {
         state.snapshot
     }
 
+    fn pages_allow_candidate(&self, now: Instant) -> bool {
+        let mut waiting = self
+            .candidate_quiet_wait
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let since = *waiting.get_or_insert(now);
+        let allowed =
+            candidate_may_prepare_while_browsing(self.page_activity.quiet_for(now), since, now);
+        if allowed {
+            *waiting = None;
+        }
+        allowed
+    }
+
     fn drive_catalog_transition(&self) {
         enum Action {
             Prepare(ActivatedCatalog),
@@ -662,6 +699,7 @@ impl ManagedBlocker {
                                 self.startup_candidate_yield.as_ref(),
                                 Instant::now(),
                             )
+                            && self.pages_allow_candidate(Instant::now())
                     })
                     .map(Action::Prepare)
             }
@@ -1422,6 +1460,7 @@ impl ServiceState {
     /// left by the previous run names it: that list stopped the browser while
     /// it compiled or while WebKit checked it, so it is refused and the current
     /// list stays. Returns whether the candidate was admitted.
+    #[cfg_attr(not(feature = "official-https"), allow(dead_code))]
     fn admit_startup_candidate(
         &mut self,
         candidate: ActivatedCatalog,
@@ -1460,7 +1499,6 @@ impl ServiceState {
                 CatalogTransition::Repairing(repairing)
                     if activation.identity.revision > repairing.revision
             )
-    #[cfg_attr(not(feature = "official-https"), allow(dead_code))]
         });
         let newest = self
             .candidate
@@ -2268,6 +2306,89 @@ mod tests {
         ));
         compiled.store(true, Ordering::Release);
         assert!(startup_candidate_may_prepare(Some(&startup), started));
+    }
+
+    #[test]
+    fn a_downloaded_list_waits_for_quiet_pages_or_the_cap() {
+        let since = Instant::now();
+        let quiet = Some(CANDIDATE_QUIET_PAGES);
+        assert!(candidate_may_prepare_while_browsing(quiet, since, since));
+        assert!(!candidate_may_prepare_while_browsing(
+            Some(CANDIDATE_QUIET_PAGES - Duration::from_millis(1)),
+            since,
+            since
+        ));
+        assert!(!candidate_may_prepare_while_browsing(None, since, since));
+        assert!(!candidate_may_prepare_while_browsing(
+            None,
+            since,
+            since + CANDIDATE_QUIET_WAIT_CAP - Duration::from_millis(1)
+        ));
+        assert!(candidate_may_prepare_while_browsing(
+            None,
+            since,
+            since + CANDIDATE_QUIET_WAIT_CAP
+        ));
+    }
+
+    #[test]
+    fn a_page_loading_holds_a_downloaded_list_until_the_cap() {
+        use zephium_blocker::{PolicySource, SourceFormat, SourceId};
+        use zephium_core::ports::engine::{
+            ContentRuleValidationCompletion, ContentRuleValidationOutcome,
+        };
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut current = identity(1, 1);
+        current.created_unix = now_unix();
+        current.expires_unix = now_unix() + 86400;
+        let catalog = |hash| {
+            PolicyCatalog::authenticated(
+                [hash; 32],
+                StaticPolicyCatalog::new(vec![PolicySource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example.invalid^\n##.ad"),
+                )])
+                .unwrap(),
+            )
+        };
+        let mut service = ManagedBlocker::with_release_seed(
+            ReleaseCatalogSeed {
+                identity: current.clone(),
+                catalog: catalog(1),
+            },
+            CompiledArtifactCacheConfig::new(root.path().join("compiled")).unwrap(),
+        )
+        .unwrap();
+        let activity = Arc::new(PageActivity::new());
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ContentRuleValidationCompletion>(1);
+        {
+            let service = Arc::get_mut(&mut service).unwrap();
+            service.page_activity = Arc::clone(&activity);
+            service.native_validation = Some(Arc::new(move |_, done| tx.send(done).unwrap()));
+        }
+        let mut candidate = current.clone();
+        candidate.revision = 2;
+        candidate.manifest_sha256 = [2; 32];
+        service.lock_state().admit_activation(
+            ActivatedCatalog {
+                identity: candidate,
+                catalog: catalog(2),
+            },
+            now_unix(),
+        );
+        let loading = activity.begin_load();
+        service.drive_locked(false);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(service.lock_state().transition.is_none());
+
+        *service.candidate_quiet_wait.lock().unwrap() =
+            Some(Instant::now() - CANDIDATE_QUIET_WAIT_CAP);
+        service.drive_locked(false);
+        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(service.candidate_quiet_wait.lock().unwrap().is_none());
+        drop(loading);
+        completion.finish(ContentRuleValidationOutcome::Valid);
     }
 
     fn cache() -> (tempfile::TempDir, CompiledArtifactCacheConfig) {
@@ -3383,6 +3504,7 @@ mod tests {
         assert!(!before.source_refresh_due);
         assert!(after.source_refresh_due);
     }
+    #[cfg(feature = "official-https")]
     #[test]
     fn a_list_that_crashes_webkits_check_is_refused_at_the_next_launch() {
         use zephium_blocker::{PolicySource, SourceFormat, SourceId};
@@ -3463,6 +3585,7 @@ mod tests {
         assert!(!marker.exists(), "a settled check is not a crash");
     }
 
+    #[cfg(feature = "official-https")]
     #[test]
     fn a_clean_shutdown_does_not_mark_a_compiling_list_as_crashed() {
         let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -3504,7 +3627,6 @@ mod tests {
         current.expires_unix = now_unix() + 86400;
         let catalog = |hash| {
             PolicyCatalog::authenticated(
-    #[cfg(feature = "official-https")]
                 [hash; 32],
                 StaticPolicyCatalog::new(vec![PolicySource::new(
                     SourceId::new("test").unwrap(),
@@ -3585,7 +3707,6 @@ mod tests {
             last_refresh_attempt_unix: Some(10),
             status: UpdateStatus::Ready(CatalogAvailability::Stale(current.clone())),
         };
-    #[cfg(feature = "official-https")]
         state.observe_official_verification(&old, Some((1, true)));
         state.publish_with_supply(&old, Some(([0; 32], true)));
         assert_eq!(state.snapshot.package_stale, Some(true));

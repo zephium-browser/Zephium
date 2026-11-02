@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::ProfileId;
 
+mod activity;
+pub use activity::{ActivePageLoad, PageActivity};
 mod statistics;
 pub use statistics::{BlockedLoadCounter, BlockerStatistics};
 

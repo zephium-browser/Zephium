@@ -1689,6 +1689,8 @@ impl EngineHost {
                     );
                 });
         }
+        // Held while this view's main frame loads; list updates wait for quiet.
+        let page_load = Cell::new(None::<zephium_core::blocker::ActivePageLoad>);
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
@@ -1728,6 +1730,9 @@ impl EngineHost {
                         &load_page_permission_pending,
                     );
                     if load_navigation.is_current(epoch) {
+                        page_load.set(Some(
+                            zephium_core::blocker::PageActivity::shared().begin_load(),
+                        ));
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
@@ -1773,6 +1778,7 @@ impl EngineHost {
                 }
                 NavigationTransition::Finished(epoch) => {
                     if load_navigation.is_current(epoch) {
+                        page_load.set(None);
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
                         // Completion is a presentation signal, but it is not
@@ -1798,6 +1804,7 @@ impl EngineHost {
                     // The transition was current when accepted. End its
                     // loading state even when a provisional failure restored
                     // the still-visible previous committed document.
+                    page_load.set(None);
                     load_permit.emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
                     if let Some(request) = request {
                         load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
