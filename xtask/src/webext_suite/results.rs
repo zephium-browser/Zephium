@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 const MIN_GROWTH_MB: f64 = 10.0;
 const MAX_GROWTH: f64 = 1.25;
 const MIN_BUSY_GROWTH_MS: f64 = 40.0;
+const MIN_FRAMES_GROWTH_MS: f64 = 200.0;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +44,9 @@ pub(super) struct Resources {
     /// over a few loads.
     #[serde(default)]
     pub(super) busy_ms: Option<f64>,
+    /// Time the last hundred of many frames added and removed one by one took.
+    #[serde(default)]
+    pub(super) frames_ms: Option<f64>,
     /// Memory gained over many page loads and closes, with `--soak`.
     #[serde(default)]
     pub(super) soak_mb: Option<f64>,
@@ -109,6 +113,12 @@ impl Results {
                     found.push(format!("{name}: page busy {was:.0} ms -> {is:.0} ms"));
                 }
             }
+            if let (Some(was), Some(is)) = (before.resources.frames_ms, record.resources.frames_ms)
+            {
+                if is > was * MAX_GROWTH && is - was > MIN_FRAMES_GROWTH_MS {
+                    found.push(format!("{name}: frames {was:.0} ms -> {is:.0} ms"));
+                }
+            }
         }
         found
     }
@@ -129,6 +139,7 @@ mod tests {
                 idle_cpu_s: Some(0.1),
                 processes: 3,
                 busy_ms: None,
+                frames_ms: None,
                 soak_mb: None,
             },
             duration_s: 30.0,
@@ -160,5 +171,21 @@ mod tests {
             before.regressions(&now),
             ["A: ok -> limited", "B: memory 200 MB -> 260 MB (+30%)"]
         );
+    }
+
+    #[test]
+    fn flags_frames_that_got_slower() {
+        let timed = |frames_ms| {
+            let mut record = record(Status::Ok, 100.0);
+            record.resources.frames_ms = Some(frames_ms);
+            record
+        };
+        let mut before = Results::default();
+        before.extensions.insert("A".into(), timed(400.0));
+        before.extensions.insert("B".into(), timed(400.0));
+        let mut now = BTreeMap::new();
+        now.insert("A".into(), timed(900.0));
+        now.insert("B".into(), timed(550.0));
+        assert_eq!(before.regressions(&now), ["A: frames 400 ms -> 900 ms"]);
     }
 }

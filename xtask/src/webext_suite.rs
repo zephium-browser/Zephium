@@ -37,6 +37,10 @@ const SETTLE: Duration = Duration::from_millis(2500);
 const POPUP_WAIT: u64 = 10_000;
 /// Loads of the ordinary page timed per run; the least busy counts.
 const LOADS: usize = 3;
+/// Frames added and removed one by one; the time the last hundred take is
+/// what a page that has been open a while pays per frame.
+const FRAMES: usize = 400;
+const FRAMES_WAIT: u64 = 90_000;
 /// Page loads and closes in a `--soak` run, after which memory should be back.
 const SOAK_LOADS: usize = 30;
 /// What an API the runtime lacks or gets wrong looks like when it reaches an
@@ -220,8 +224,16 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
         .collect();
 
     println!(
-        "{:<8} {:<26} {:>6} {:>6} {:>9} {:>7} {:>7} {:>5}",
-        "status", "extension", "mem MB", "rss MB", "idle cpu", "busy ms", "soak MB", "time"
+        "{:<8} {:<26} {:>6} {:>6} {:>9} {:>7} {:>9} {:>7} {:>5}",
+        "status",
+        "extension",
+        "mem MB",
+        "rss MB",
+        "idle cpu",
+        "busy ms",
+        "frames ms",
+        "soak MB",
+        "time"
     );
     if let Some(baseline) = baseline.first() {
         println!(
@@ -280,6 +292,10 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
         "most page time taken: {}",
         heaviest(|r| r.busy_ms, " ms", 0)
     );
+    println!(
+        "slowest frames after a while: {}",
+        heaviest(|r| r.frames_ms, " ms", 0)
+    );
     if soak {
         println!(
             "most memory kept after closing pages: {}",
@@ -318,11 +334,12 @@ fn figures(resources: &Resources, duration: Duration) -> String {
         value.map_or("-".to_string(), |value| format!("{value:.places$}"))
     };
     format!(
-        "{:>6} {:>6} {:>9} {:>7} {:>7} {:>4}s",
+        "{:>6} {:>6} {:>9} {:>7} {:>9} {:>7} {:>4}s",
         cell(resources.footprint_mb, 0),
         cell(resources.rss_mb, 0),
         cell(resources.idle_cpu_s, 2),
         cell(resources.busy_ms, 0),
+        cell(resources.frames_ms, 0),
         cell(resources.soak_mb, 0),
         duration.as_secs()
     )
@@ -378,23 +395,24 @@ struct Run {
 fn baseline(lab: &Path, cache: &Path, origin: &str, soak: bool) -> Outcome {
     let mut steps = vec![serde_json::json!({ "tab": format!("{origin}/blank.html") })];
     steps.extend(load_steps(origin));
+    steps.extend(frame_steps(origin));
     if soak {
         steps.extend(soak_steps(origin));
     }
     steps.extend(idle_steps());
-    let (problems, resources, duration) =
-        match launch(lab, cache, "baseline", &steps, START_TIMEOUT) {
-            // Figures from a run that never finished would replace good ones.
-            Ok(run) if run.output.lines().any(|line| line == "DONE") => {
-                (Vec::new(), timed(run.resources, &run.output), run.duration)
-            }
-            Ok(run) => (
-                vec!["baseline did not finish in time".to_string()],
-                timed(run.resources, &run.output),
-                run.duration,
-            ),
-            Err(error) => (vec![error], Resources::default(), Duration::ZERO),
-        };
+    let budget = START_TIMEOUT + Duration::from_millis(FRAMES_WAIT);
+    let (problems, resources, duration) = match launch(lab, cache, "baseline", &steps, budget) {
+        // Figures from a run that never finished would replace good ones.
+        Ok(run) if run.output.lines().any(|line| line == "DONE") => {
+            (Vec::new(), timed(run.resources, &run.output), run.duration)
+        }
+        Ok(run) => (
+            vec!["baseline did not finish in time".to_string()],
+            timed(run.resources, &run.output),
+            run.duration,
+        ),
+        Err(error) => (vec![error], Resources::default(), Duration::ZERO),
+    };
     Outcome {
         name: String::new(),
         id: String::new(),
@@ -415,7 +433,8 @@ fn check(lab: &Path, cache: &Path, origin: &str, entry: &Expectation, soak: bool
                 .iter()
                 .map(|check| check.wait + 12_000)
                 .sum::<u64>()
-                + if entry.popup { POPUP_WAIT + 5000 } else { 0 },
+                + if entry.popup { POPUP_WAIT + 5000 } else { 0 }
+                + FRAMES_WAIT,
         )
         + Duration::from_secs(if soak { 120 } else { 20 });
     let steps = steps(entry, &crx, origin, soak);
@@ -467,6 +486,7 @@ fn steps(entry: &Expectation, crx: &Path, origin: &str, soak: bool) -> Vec<serde
         steps.push(serde_json::json!({ "sleep": SETTLE.as_millis() as u64 }));
     }
     steps.extend(load_steps(origin));
+    steps.extend(frame_steps(origin));
     for (index, check) in entry.check.iter().enumerate() {
         let url = if check.url.starts_with('/') {
             format!("{origin}{}", check.url)
@@ -507,6 +527,19 @@ fn load_steps(origin: &str) -> Vec<serde_json::Value> {
     steps
 }
 
+fn frame_steps(origin: &str) -> [serde_json::Value; 3] {
+    [
+        serde_json::json!({ "tab": format!("{origin}/frames.html") }),
+        serde_json::json!({
+            "eval": format!("const times = await churn({FRAMES}, 100); return Math.round(times[times.length - 1]);"),
+            "in": "tab",
+            "timeout": FRAMES_WAIT,
+            "as": "frames"
+        }),
+        serde_json::json!({ "close": "tabs" }),
+    ]
+}
+
 /// Pages opened and closed many times; memory the extension keeps after the
 /// last one closes is what it would leak over a day.
 fn soak_steps(origin: &str) -> Vec<serde_json::Value> {
@@ -532,6 +565,7 @@ fn timed(mut resources: Resources, output: &str) -> Resources {
     resources.busy_ms = (0..LOADS)
         .filter_map(|index| result(output, &format!("load{index}"))?.parse::<f64>().ok())
         .min_by(f64::total_cmp);
+    resources.frames_ms = result(output, "frames").and_then(|value| value.parse().ok());
     resources
 }
 
