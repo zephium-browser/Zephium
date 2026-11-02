@@ -466,6 +466,22 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     Ok(pids)
 }
 
+/// A process's resource coalition. Only a process that has exited has none;
+/// any other failure could hide one of the app's own helpers, so it fails the
+/// measurement.
+#[cfg(any(target_os = "macos", test))]
+fn coalition_lookup(
+    pid: i32,
+    coalition: u64,
+    error: Option<std::io::Error>,
+) -> Result<Option<u64>, String> {
+    match error {
+        None => Ok(Some(coalition)),
+        Some(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Some(error) => Err(format!("cannot read the coalition of PID {pid}: {error}")),
+    }
+}
+
 /// The processes of `listed[..count]` in the `root` resource coalition. A
 /// full buffer may have cut the list short, so it is refused rather than
 /// measured as a smaller family.
@@ -508,10 +524,11 @@ fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
-        coalition_members, parse_coalition_pids, parse_integer_value, parse_single_asn,
-        parse_string_value, role_for_process, KernelCounters, MeasurementArguments,
-        MeasurementReport, MemorySample, ProcessIdentity, ProcessRole, ProcessSample,
-        RoleAccumulator, RoleReport, TrackedProcess, UsageCounters, MAX_APPLICATION_NAME_BYTES,
+        coalition_lookup, coalition_members, parse_coalition_pids, parse_integer_value,
+        parse_single_asn, parse_string_value, role_for_process, KernelCounters,
+        MeasurementArguments, MeasurementReport, MemorySample, ProcessIdentity, ProcessRole,
+        ProcessSample, RoleAccumulator, RoleReport, TrackedProcess, UsageCounters,
+        MAX_APPLICATION_NAME_BYTES,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::c_void;
@@ -764,7 +781,8 @@ mod platform {
                 size,
             )
         };
-        Ok((written == size).then_some(info.coalition_id[0]))
+        let error = (written != size).then(std::io::Error::last_os_error);
+        coalition_lookup(pid, info.coalition_id[0], error)
     }
 
     fn application_info(asn: &str) -> Result<String, String> {
@@ -954,9 +972,9 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalition_members, parse_arguments, parse_coalition_pids, parse_integer_value,
-        parse_single_asn, parse_string_value, role_for_process, KernelCounters, ProcessRole,
-        UsageCounters, MAX_COALITION_PROCESSES,
+        coalition_lookup, coalition_members, parse_arguments, parse_coalition_pids,
+        parse_integer_value, parse_single_asn, parse_string_value, role_for_process,
+        KernelCounters, ProcessRole, UsageCounters, MAX_COALITION_PROCESSES,
     };
 
     #[test]
@@ -1020,6 +1038,15 @@ mod tests {
             vec![45010, 45011, 45012]
         );
         assert!(parse_coalition_pids("\"LSApplicationCoalitionPIDsKey\"=( 2, 2)\n").is_err());
+    }
+
+    #[test]
+    fn only_an_exited_process_has_no_coalition() {
+        assert_eq!(coalition_lookup(7, 42, None), Ok(Some(42)));
+        let exited = std::io::Error::from_raw_os_error(libc::ESRCH);
+        assert_eq!(coalition_lookup(7, 0, Some(exited)), Ok(None));
+        let denied = std::io::Error::from_raw_os_error(libc::EPERM);
+        assert!(coalition_lookup(7, 0, Some(denied)).is_err());
     }
 
     #[test]
