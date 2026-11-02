@@ -92,7 +92,7 @@
   // broken browser API, without stacks; the browser keeps their wording,
   // stripped of addresses and quoted text, for bug reports.
   if (!config.diagnostics && !isContent && typeof runtime.sendNativeMessage === "function") {
-    const gap = /is not a function|is not an object|is not defined|Cannot read propert|Invalid call to|is not supported|not implemented/i;
+    const gap = /is not a function|is not an object|is not defined|Can't find variable|Cannot read propert|Invalid call to|is not supported|not implemented/i;
     let left = 8;
     const where = isWorker ? "worker" : location.pathname;
     const report = (value) => {
