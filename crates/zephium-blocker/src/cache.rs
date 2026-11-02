@@ -7,17 +7,19 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(feature = "webkit")]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "webkit")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-#[cfg(feature = "webkit")]
-use zephium_core::blocker::DeclarativeRuleFormat;
 use zephium_core::blocker::{
     ContentRuleCoverage, ContentRuleDigest, ContentRules, ContentRulesPayload,
 };
+#[cfg(feature = "webkit")]
+use zephium_core::blocker::{DeclarativeRuleFormat, DeclarativeRuleText};
 
 #[cfg(feature = "runtime")]
 use crate::compiler::prepare_and_validate_runtime_engine;
@@ -159,7 +161,7 @@ pub(crate) enum LoadedArtifact {
         digest: ContentRuleDigest,
         coverage: ContentRuleCoverage,
         artifact_digest: [u8; 32],
-        encoded: Arc<str>,
+        encoded: Arc<dyn DeclarativeRuleText>,
         cosmetics: Option<PreparedCosmetics>,
     },
 }
@@ -189,6 +191,14 @@ impl PersistentArtifactCache {
     ) -> Result<Option<LoadedArtifact>, CacheError> {
         let max_record_bytes = max_record_bytes(target);
         for name in [CURRENT_FILE, PREVIOUS_FILE] {
+            #[cfg(feature = "webkit")]
+            if target == CompileTarget::WebKit {
+                match load_webkit_record(&self.root.join(name), key, limits) {
+                    Ok(Some(artifact)) => return Ok(Some(artifact)),
+                    Ok(None) | Err(CacheError::Invalid) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
             let bytes = match read_bounded_regular(&self.root.join(name), max_record_bytes) {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) | Err(CacheError::Invalid) => continue,
@@ -316,6 +326,8 @@ fn encode_compiled_record(
     {
         return None;
     }
+    #[cfg(feature = "webkit")]
+    let text;
     let (payload, native_digest, rule_count, payload_limit): (
         Cow<'_, [u8]>,
         [u8; 32],
@@ -335,7 +347,10 @@ fn encode_compiled_record(
             artifact_digest,
             encoded,
         } => (
-            Cow::Borrowed(encoded.as_bytes()),
+            {
+                text = encoded.load()?;
+                Cow::Borrowed(text.as_bytes())
+            },
             *artifact_digest.as_bytes(),
             compiled.webkit()?.rule_count(),
             MAX_WEBKIT_PAYLOAD_BYTES,
@@ -444,21 +459,32 @@ fn encode_record_with_cosmetics(
     Some(bytes)
 }
 
-fn decode_record(
-    bytes: &[u8],
+struct RecordHeader {
+    target: CompileTarget,
+    policy_digest: [u8; 32],
+    native_digest: [u8; 32],
+    payload_digest: [u8; 32],
+    coverage: ContentRuleCoverage,
+    rule_count: usize,
+    payload_len: usize,
+    cosmetics_len: usize,
+}
+
+impl RecordHeader {
+    fn record_len(&self) -> Option<usize> {
+        RECORD_HEADER_BYTES
+            .checked_add(self.payload_len)?
+            .checked_add(self.cosmetics_len)?
+            .checked_add(RECORD_CHECKSUM_BYTES)
+    }
+}
+
+fn decode_header(
+    header: &[u8],
     expected_key: CacheKey,
     expected_target: CompileTarget,
-) -> Option<DecodedRecord<'_>> {
-    if bytes.len() < RECORD_HEADER_BYTES + RECORD_CHECKSUM_BYTES
-        || bytes.len() > max_record_bytes(expected_target)
-    {
-        return None;
-    }
-    let (record, checksum) = bytes.split_at(bytes.len() - RECORD_CHECKSUM_BYTES);
-    if Sha256::digest(record).as_slice() != checksum {
-        return None;
-    }
-    let mut reader = RecordReader::new(record);
+) -> Option<RecordHeader> {
+    let mut reader = RecordReader::new(header.get(..RECORD_HEADER_BYTES)?);
     if reader.take::<8>()? != *CACHE_MAGIC
         || reader.u32()? != CACHE_FORMAT_VERSION
         || reader.u32()? != POLICY_FORMAT_VERSION
@@ -476,7 +502,7 @@ fn decode_record(
     }
     let policy_digest = reader.take::<32>()?;
     let native_digest = reader.take::<32>()?;
-    let expected_payload_digest = reader.take::<32>()?;
+    let payload_digest = reader.take::<32>()?;
     let mut coverage_values = [0; COVERAGE_FIELD_COUNT];
     for value in &mut coverage_values {
         *value = reader.u64()?;
@@ -485,26 +511,199 @@ fn decode_record(
     let rule_count = usize::try_from(reader.u64()?).ok()?;
     let payload_len = usize::try_from(reader.u64()?).ok()?;
     let cosmetics_len = usize::try_from(reader.u64()?).ok()?;
-    if cosmetics_len > MAX_COSMETIC_PAYLOAD_BYTES {
+    if cosmetics_len > MAX_COSMETIC_PAYLOAD_BYTES
+        || reader.remaining() != 0
+        || payload_len > payload_limit(target)
+    {
         return None;
     }
-    if reader.position() != RECORD_HEADER_BYTES || payload_len > payload_limit(target) {
-        return None;
-    }
-    let payload = reader.slice(payload_len)?;
-    let cosmetics = reader.slice(cosmetics_len)?;
-    if reader.remaining() != 0 || Sha256::digest(payload).as_slice() != expected_payload_digest {
-        return None;
-    }
-    Some(DecodedRecord {
+    Some(RecordHeader {
         target,
         policy_digest,
         native_digest,
+        payload_digest,
         coverage,
         rule_count,
+        payload_len,
+        cosmetics_len,
+    })
+}
+
+fn decode_record(
+    bytes: &[u8],
+    expected_key: CacheKey,
+    expected_target: CompileTarget,
+) -> Option<DecodedRecord<'_>> {
+    if bytes.len() < RECORD_HEADER_BYTES + RECORD_CHECKSUM_BYTES
+        || bytes.len() > max_record_bytes(expected_target)
+    {
+        return None;
+    }
+    let (record, checksum) = bytes.split_at(bytes.len() - RECORD_CHECKSUM_BYTES);
+    if Sha256::digest(record).as_slice() != checksum {
+        return None;
+    }
+    let header = decode_header(record, expected_key, expected_target)?;
+    if header.record_len()? != bytes.len() {
+        return None;
+    }
+    let mut reader = RecordReader::new(record);
+    reader.slice(RECORD_HEADER_BYTES)?;
+    let payload = reader.slice(header.payload_len)?;
+    let cosmetics = reader.slice(header.cosmetics_len)?;
+    if reader.remaining() != 0 || Sha256::digest(payload).as_slice() != header.payload_digest {
+        return None;
+    }
+    Some(DecodedRecord {
+        target: header.target,
+        policy_digest: header.policy_digest,
+        native_digest: header.native_digest,
+        coverage: header.coverage,
+        rule_count: header.rule_count,
         payload,
         cosmetics,
     })
+}
+
+/// Checks a WebKit record without bringing its rule text into memory: one
+/// streaming pass verifies the record checksum and both payload digests, and
+/// only the cosmetic section is kept. The text itself is read again, and
+/// validated, only if the native store has lost the compiled list.
+#[cfg(feature = "webkit")]
+fn load_webkit_record(
+    path: &Path,
+    key: CacheKey,
+    limits: CompileLimits,
+) -> Result<Option<LoadedArtifact>, CacheError> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+
+    let mut file = match file_identity::open_verified_regular(path) {
+        Some(file) => file,
+        None => match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => return Err(CacheError::Unsafe),
+        },
+    };
+    let length = file.metadata().map_err(|_| CacheError::Io)?.len();
+    let length = usize::try_from(length).map_err(|_| CacheError::Unsafe)?;
+    if length < RECORD_HEADER_BYTES + RECORD_CHECKSUM_BYTES
+        || length > max_record_bytes(CompileTarget::WebKit)
+    {
+        return Err(CacheError::Invalid);
+    }
+    let mut header_bytes = [0; RECORD_HEADER_BYTES];
+    file.read_exact(&mut header_bytes)
+        .map_err(|_| CacheError::Io)?;
+    let Some(header) = decode_header(&header_bytes, key, CompileTarget::WebKit) else {
+        return Ok(None);
+    };
+    if header.record_len() != Some(length)
+        || !coverage_within_limits(header.coverage, limits)
+        || header.rule_count == 0
+        || header.rule_count > limits.max_webkit_rules()
+        || header.payload_len == 0
+        || header.payload_len > limits.max_webkit_json_bytes()
+        || header.coverage.platform_source_kind_approximated_rules != 0
+    {
+        return Ok(None);
+    }
+
+    let mut record_digest = Sha256::new();
+    record_digest.update(header_bytes);
+    let mut payload_digest = Sha256::new();
+    let mut native_digest = webkit_artifact_digest_prefix();
+    let mut chunk = vec![0; CHUNK_BYTES];
+    let mut remaining = header.payload_len;
+    while remaining != 0 {
+        let part = &mut chunk[..remaining.min(CHUNK_BYTES)];
+        file.read_exact(part).map_err(|_| CacheError::Io)?;
+        record_digest.update(&*part);
+        payload_digest.update(&*part);
+        native_digest.update(&*part);
+        remaining -= part.len();
+    }
+    let mut cosmetics = vec![0; header.cosmetics_len];
+    file.read_exact(&mut cosmetics)
+        .map_err(|_| CacheError::Io)?;
+    record_digest.update(&cosmetics);
+    let mut checksum = [0; RECORD_CHECKSUM_BYTES];
+    file.read_exact(&mut checksum).map_err(|_| CacheError::Io)?;
+    let artifact_digest: [u8; 32] = native_digest.finalize().into();
+    if record_digest.finalize().as_slice() != checksum
+        || payload_digest.finalize().as_slice() != header.payload_digest
+        || artifact_digest != header.native_digest
+    {
+        return Ok(None);
+    }
+    let cosmetics = if cosmetics.is_empty() {
+        None
+    } else {
+        let Some(prepared) = crate::CosmeticPolicy::decode(&cosmetics)
+            .ok()
+            .and_then(|policy| PreparedCosmetics::new(policy, CompileTarget::WebKit).ok())
+        else {
+            return Ok(None);
+        };
+        Some(prepared)
+    };
+    Ok(Some(LoadedArtifact::WebKit {
+        digest: ContentRuleDigest::from_bytes(header.policy_digest),
+        coverage: header.coverage,
+        artifact_digest,
+        encoded: Arc::new(CachedWebKitRules {
+            file: Mutex::new(file),
+            len: header.payload_len,
+            rule_count: header.rule_count,
+            blocking_entries: header.coverage.blocking_rule_entries,
+            artifact_digest,
+        }),
+        cosmetics,
+    }))
+}
+
+/// WebKit rule text left on disk in a checked cache record. The open file
+/// keeps the exact record readable after the cache rotates its names, and
+/// every read re-checks the text against the artifact digest.
+#[cfg(feature = "webkit")]
+struct CachedWebKitRules {
+    file: Mutex<File>,
+    len: usize,
+    rule_count: usize,
+    blocking_entries: u64,
+    artifact_digest: [u8; 32],
+}
+
+#[cfg(feature = "webkit")]
+impl DeclarativeRuleText for CachedWebKitRules {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn load(&self) -> Option<Arc<str>> {
+        let mut payload = vec![0; self.len];
+        {
+            let mut file = self.file.lock().ok()?;
+            file.seek(SeekFrom::Start(RECORD_HEADER_BYTES as u64))
+                .ok()?;
+            file.read_exact(&mut payload).ok()?;
+        }
+        let mut digest = webkit_artifact_digest_prefix();
+        digest.update(&payload);
+        if digest.finalize().as_slice() != self.artifact_digest {
+            return None;
+        }
+        let (encoded, blocking_entries) =
+            validate_canonical_webkit_payload(&payload, self.rule_count)?;
+        (u64::try_from(blocking_entries).ok()? == self.blocking_entries).then_some(encoded)
+    }
+}
+
+#[cfg(feature = "webkit")]
+fn webkit_artifact_digest_prefix() -> Sha256 {
+    let mut digest = Sha256::new();
+    digest.update(WEBKIT_DIGEST_DOMAIN);
+    digest.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
+    digest
 }
 
 fn validate_payload(record: DecodedRecord<'_>, limits: CompileLimits) -> Option<LoadedArtifact> {
@@ -524,7 +723,8 @@ fn validate_payload(record: DecodedRecord<'_>, limits: CompileLimits) -> Option<
     };
     match record.target {
         CompileTarget::Runtime => validate_runtime_payload(record, limits, cosmetics),
-        CompileTarget::WebKit => validate_webkit_payload(record, limits, cosmetics),
+        // WebKit records stream through `load_webkit_record` instead.
+        CompileTarget::WebKit => None,
     }
 }
 
@@ -556,50 +756,6 @@ fn validate_runtime_payload(
 
 #[cfg(not(feature = "runtime"))]
 fn validate_runtime_payload(
-    _record: DecodedRecord<'_>,
-    _limits: CompileLimits,
-    _cosmetics: Option<PreparedCosmetics>,
-) -> Option<LoadedArtifact> {
-    None
-}
-
-#[cfg(feature = "webkit")]
-fn validate_webkit_payload(
-    record: DecodedRecord<'_>,
-    limits: CompileLimits,
-    cosmetics: Option<PreparedCosmetics>,
-) -> Option<LoadedArtifact> {
-    if record.rule_count == 0
-        || record.rule_count > limits.max_webkit_rules()
-        || record.payload.len() > limits.max_webkit_json_bytes()
-        || record.coverage.platform_source_kind_approximated_rules != 0
-    {
-        return None;
-    }
-    let (encoded, blocking_entries) =
-        validate_canonical_webkit_payload(record.payload, record.rule_count)?;
-    if u64::try_from(blocking_entries).ok()? != record.coverage.blocking_rule_entries {
-        return None;
-    }
-    let mut digest = Sha256::new();
-    digest.update(WEBKIT_DIGEST_DOMAIN);
-    digest.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
-    digest.update(record.payload);
-    let artifact_digest: [u8; 32] = digest.finalize().into();
-    if record.native_digest != artifact_digest {
-        return None;
-    }
-    Some(LoadedArtifact::WebKit {
-        digest: ContentRuleDigest::from_bytes(record.policy_digest),
-        coverage: record.coverage,
-        artifact_digest,
-        encoded,
-        cosmetics,
-    })
-}
-
-#[cfg(not(feature = "webkit"))]
-fn validate_webkit_payload(
     _record: DecodedRecord<'_>,
     _limits: CompileLimits,
     _cosmetics: Option<PreparedCosmetics>,
@@ -729,10 +885,6 @@ impl<'a> RecordReader<'a> {
 
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_be_bytes(self.take()?))
-    }
-
-    const fn position(&self) -> usize {
-        self.position
     }
 
     const fn remaining(&self) -> usize {
@@ -1717,6 +1869,73 @@ mod tests {
     }
 
     #[cfg(feature = "webkit")]
+    #[cfg(feature = "webkit")]
+    fn load_webkit_bytes(
+        record: &[u8],
+        cache_key: CacheKey,
+    ) -> (tempfile::TempDir, Option<LoadedArtifact>) {
+        let root = private_root();
+        let path = root.path().join(CURRENT_FILE);
+        write_new_private_file(&path, record).unwrap();
+        let loaded = load_webkit_record(&path, cache_key, CompileLimits::default()).unwrap();
+        (root, loaded)
+    }
+
+    #[cfg(feature = "webkit")]
+    #[test]
+    fn webkit_text_is_validated_only_when_read() {
+        let payload = br#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#;
+        let mut artifact = Sha256::new();
+        artifact.update(WEBKIT_DIGEST_DOMAIN);
+        artifact.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
+        artifact.update(payload);
+        let record = encode_record(
+            key(5),
+            CompileTarget::WebKit,
+            [5; 32],
+            artifact.finalize().into(),
+            coverage(),
+            1,
+            payload,
+        )
+        .unwrap();
+        let (_root, loaded) = load_webkit_bytes(&record, key(5));
+        let Some(LoadedArtifact::WebKit { encoded, .. }) = loaded else {
+            panic!("an intact record must load without reading its text");
+        };
+        assert_eq!(encoded.len(), payload.len());
+        assert!(encoded.load().is_none());
+    }
+
+    #[cfg(feature = "webkit")]
+    #[test]
+    fn webkit_text_changed_on_disk_after_loading_is_refused() {
+        let record = webkit_record(key(6), 6);
+        let (root, loaded) = load_webkit_bytes(&record, key(6));
+        let Some(LoadedArtifact::WebKit { encoded, .. }) = loaded else {
+            panic!("WebKit record did not load");
+        };
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(root.path().join(CURRENT_FILE))
+            .unwrap();
+        file.seek(SeekFrom::Start(RECORD_HEADER_BYTES as u64 + 40))
+            .unwrap();
+        file.write_all(b"X").unwrap();
+        drop(file);
+        assert!(encoded.load().is_none());
+    }
+
+    #[cfg(feature = "webkit")]
+    #[test]
+    fn webkit_record_with_a_corrupt_checksum_is_skipped() {
+        let mut record = webkit_record(key(7), 7);
+        let last = record.len() - 1;
+        record[last] ^= 1;
+        let (_root, loaded) = load_webkit_bytes(&record, key(7));
+        assert!(loaded.is_none());
+    }
+
     fn webkit_record(cache_key: CacheKey, policy: u8) -> Vec<u8> {
         let payload = br#"[{"action":{"type":"block"},"trigger":{"url-filter":"ads\\.invalid"}}]"#;
         let mut artifact = Sha256::new();
@@ -1854,7 +2073,18 @@ mod tests {
             let decoded = decode_record(&record, cache_key, target).unwrap();
             assert_eq!(decoded.target, target);
             assert_eq!(decoded.policy_digest, *compiled.digest().as_bytes());
-            assert!(validate_payload(decoded, CompileLimits::default()).is_some());
+            match target {
+                CompileTarget::Runtime => {
+                    assert!(validate_payload(decoded, CompileLimits::default()).is_some());
+                }
+                CompileTarget::WebKit => {
+                    let (_root, loaded) = load_webkit_bytes(&record, cache_key);
+                    let Some(LoadedArtifact::WebKit { encoded, .. }) = loaded else {
+                        panic!("WebKit record did not load");
+                    };
+                    assert!(encoded.load().is_some());
+                }
+            }
         }
     }
 
@@ -1910,8 +2140,11 @@ mod tests {
     #[test]
     fn webkit_loader_requires_exact_canonical_typed_structure() {
         let valid = webkit_record(key(1), 7);
-        let record = decode_record(&valid, key(1), CompileTarget::WebKit).unwrap();
-        assert!(validate_payload(record, CompileLimits::default()).is_some());
+        let (_root, loaded) = load_webkit_bytes(&valid, key(1));
+        let Some(LoadedArtifact::WebKit { encoded, .. }) = loaded else {
+            panic!("WebKit record did not load");
+        };
+        assert!(encoded.load().is_some());
 
         let forbidden =
             br#"[{"action":{"type":"css-display-none","selector":"body"},"trigger":{"url-filter":".*"}}]"#;

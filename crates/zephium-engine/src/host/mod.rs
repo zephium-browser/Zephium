@@ -464,7 +464,7 @@ struct QueuedContentPolicy {
 #[cfg(not(target_os = "windows"))]
 struct DeclarativeContentPolicyJob {
     digest: [u8; 32],
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     encoded_bytes: usize,
 }
 

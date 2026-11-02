@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use block2::RcBlock;
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQoS, DispatchQueue, GlobalQueueIdentifier, MainThreadBound};
 use objc2::rc::Retained;
 use objc2_foundation::{MainThreadMarker, NSArray, NSError, NSString, NSURL};
 use objc2_web_kit::{
@@ -196,7 +196,7 @@ struct CompilationContext<F> {
     store: Cell<Option<Retained<WKContentRuleListStore>>>,
     identifier: Arc<str>,
     native_identifier: Cell<Option<Retained<NSString>>>,
-    encoded: Cell<Option<Arc<str>>>,
+    encoded: Cell<Option<Arc<dyn zephium_core::blocker::DeclarativeRuleText>>>,
     artifact_digest: [u8; 32],
     phase: Cell<CompilationPhase>,
     cancelled: Rc<Cell<bool>>,
@@ -442,7 +442,7 @@ fn transition_phase(
 
 pub(crate) fn compile(
     cache: &Path,
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     artifact_digest: [u8; 32],
     done: impl FnOnce(Result<NativeContentPolicy, ContentRuleApplyFailure>) + 'static,
 ) -> ContentPolicyCompilationCancellation {
@@ -620,6 +620,57 @@ where
     if context.phase.get() != CompilationPhase::Compiling {
         return;
     }
+    let Some(encoded) = context.encoded.take() else {
+        context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
+        return;
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
+        return;
+    };
+    // A cached artifact reads, re-checks and validates tens of megabytes
+    // before it can be compiled; none of that may hold the main thread.
+    let resume = MainThreadBound::new(context, mtm);
+    DispatchQueue::global_queue(GlobalQueueIdentifier::QualityOfService(
+        DispatchQoS::UserInitiated,
+    ))
+    .exec_async(move || {
+        let text = encoded
+            .load()
+            .map(|text| ImmutableText(NSString::from_str(&text)));
+        drop(encoded);
+        DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let context = resume.into_inner(mtm);
+            match text {
+                Some(ImmutableText(text)) => submit_content_rule_list(context, text),
+                None => context.finish(Err(ContentRuleApplyFailure::InvalidArtifact)),
+            }
+        });
+    });
+}
+
+/// A string built on a background queue for the main-thread compiler.
+struct ImmutableText(Retained<NSString>);
+
+// SAFETY: `NSString::from_str` creates a new immutable string with no other
+// reference; immutable Foundation strings are safe to use from any thread, and
+// this one moves to the main queue exactly once without being touched here.
+unsafe impl Send for ImmutableText {}
+
+fn submit_content_rule_list<F>(context: Rc<CompilationContext<F>>, encoded: Retained<NSString>)
+where
+    F: FnOnce(Result<NativeContentPolicy, ContentRuleApplyFailure>) + 'static,
+{
+    if context.phase.get() != CompilationPhase::Compiling {
+        return;
+    }
+    if context.cancelled.get() {
+        context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
+        return;
+    }
     let Some(store) = clone_cell_value(&context.store) else {
         context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
         return;
@@ -628,11 +679,6 @@ where
         context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
         return;
     };
-    let Some(encoded) = clone_cell_value(&context.encoded) else {
-        context.finish(Err(ContentRuleApplyFailure::NativeCompilation));
-        return;
-    };
-    let encoded = NSString::from_str(&encoded);
     let retained_encoded = Cell::new(Some(encoded.clone()));
     let context_for_compile = context.clone();
     let compiled = RcBlock::new(
@@ -968,8 +1014,8 @@ mod tests {
         );
         assert_eq!(
             compiler.matches(".cancelled.get()").count(),
-            3,
-            "timeout must stop lookup, stale-removal, and compilation callbacks"
+            4,
+            "timeout must stop lookup, stale-removal, text loading and compilation callbacks"
         );
         let finish = production
             .find("fn finish(&self, result:")
