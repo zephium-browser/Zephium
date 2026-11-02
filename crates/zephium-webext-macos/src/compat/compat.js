@@ -264,6 +264,138 @@
     };
   };
 
+  // ---- Frame lifetime ------------------------------------------------------
+  // WebKit keeps a removed frame alive through the listeners it registered
+  // and the ports its scripts still hold: every later frame in the tab gets
+  // slower and the page's memory grows without bound. Chrome lets the frame
+  // go. A hidden document's listeners leave, and return if the back/forward
+  // cache restores it; its ports close, as in Chrome, and scripts hold
+  // stand-ins that let go of the real ones.
+  const eventProto = isContent && runtime.onMessage && Object.getPrototypeOf(runtime.onMessage);
+  const nativeAdd = eventProto && eventProto.addListener;
+  const nativeRemove = eventProto && eventProto.removeListener;
+  if (typeof nativeAdd === "function" && typeof nativeRemove === "function") {
+    const registered = new Map();
+    const relays = new Map();
+    const open = new Map();
+    let closed = [];
+    let hidden = false;
+    const onConnect = runtime.onConnect;
+    const received = new WeakMap();
+    const quietly = (apply, event, listener) => {
+      try {
+        apply.call(event, listener);
+      } catch {}
+    };
+    const standIn = (native) => {
+      const onMessage = makeEvent();
+      const onDisconnect = makeEvent();
+      let live = native;
+      const relay = (message) => onMessage.dispatch(message, port);
+      const ended = () => {
+        release();
+        onDisconnect.dispatch(port);
+      };
+      const release = () => {
+        if (!live) return null;
+        const was = live;
+        quietly(nativeRemove, was.onMessage, relay);
+        quietly(nativeRemove, was.onDisconnect, ended);
+        live = null;
+        open.delete(port);
+        return was;
+      };
+      const facade = (event) => ({
+        addListener: event.addListener,
+        removeListener: event.removeListener,
+        hasListener: event.hasListener,
+        hasListeners: event.hasListeners,
+      });
+      const port = {
+        name: native.name,
+        sender: native.sender,
+        onMessage: facade(onMessage),
+        onDisconnect: facade(onDisconnect),
+        postMessage(message) {
+          if (!live) throw new Error("Attempting to use a disconnected port object");
+          live.postMessage(message);
+        },
+        disconnect() {
+          const was = release();
+          if (was) quietly(was.disconnect, was);
+        },
+      };
+      quietly(nativeAdd, native.onMessage, relay);
+      quietly(nativeAdd, native.onDisconnect, ended);
+      open.set(port, () => {
+        port.disconnect();
+        closed.push(() => onDisconnect.dispatch(port));
+      });
+      return port;
+    };
+    const nativeListener = (event, listener) => {
+      if (event !== onConnect) return listener;
+      let relay = relays.get(listener);
+      if (!relay) {
+        relay = (native, ...rest) => {
+          let port = received.get(native);
+          if (!port) received.set(native, (port = standIn(native)));
+          return listener(port, ...rest);
+        };
+        relays.set(listener, relay);
+      }
+      return relay;
+    };
+    const define = (target, name, value) => {
+      try {
+        Object.defineProperty(target, name, { value, configurable: true, writable: true });
+      } catch {}
+    };
+    define(eventProto, "addListener", function (listener) {
+      if (typeof listener !== "function") return nativeAdd.call(this, listener);
+      const target = nativeListener(this, listener);
+      let listeners = registered.get(this);
+      if (!listeners) registered.set(this, (listeners = new Set()));
+      listeners.add(target);
+      return hidden ? undefined : nativeAdd.call(this, target);
+    });
+    define(eventProto, "removeListener", function (listener) {
+      const target = this === onConnect ? relays.get(listener) || listener : listener;
+      if (target !== listener) relays.delete(listener);
+      const listeners = registered.get(this);
+      if (listeners) {
+        listeners.delete(target);
+        if (!listeners.size) registered.delete(this);
+      }
+      return nativeRemove.call(this, target);
+    });
+    define(eventProto, "hasListener", function (listener) {
+      const listeners = registered.get(this);
+      return !!listeners && listeners.has(this === onConnect ? relays.get(listener) : listener);
+    });
+    if (typeof runtime.connect === "function" && namespace("runtime")) {
+      const connect = runtime.connect;
+      pin(runtime, "connect", (...args) => standIn(connect.apply(runtime, args)));
+    }
+    const each = (apply) => {
+      for (const [event, listeners] of registered) for (const listener of listeners) quietly(apply, event, listener);
+    };
+    g.addEventListener("pagehide", () => {
+      if (hidden) return;
+      hidden = true;
+      each(nativeRemove);
+      for (const close of [...open.values()]) close();
+    });
+    g.addEventListener("pageshow", () => {
+      if (!hidden) return;
+      hidden = false;
+      each(nativeAdd);
+      const ended = closed;
+      closed = [];
+      for (const notify of ended) notify();
+    });
+  }
+
   // ---- Browser events ------------------------------------------------------
   // Events of the APIs the browser implements reach listening contexts over a
   // port; the browser starts the worker for events it listens to, and resends
