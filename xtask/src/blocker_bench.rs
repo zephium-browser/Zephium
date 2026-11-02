@@ -834,6 +834,11 @@ impl Context {
                 ),
                 format!("--blocker-bench-session={}", qa.label),
             ]);
+            // The shipped app gets this from LSEnvironment; a direct launch
+            // must match it or the footprint keeps freed large buffers.
+            if cfg!(target_os = "macos") {
+                command.env("MallocLargeCache", "0");
+            }
         } else {
             command
                 .args([
