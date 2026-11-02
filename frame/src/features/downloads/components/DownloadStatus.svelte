@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import { Cancel01Icon, FolderOpenIcon, PauseIcon } from "@hugeicons/core-free-icons";
   import { DownloadSession, downloadProgress, formatDownloadBytes } from "$domain/downloads";
+  import * as attention from "$session/attention.svelte";
   import type { DownloadState, DownloadView } from "$shared/ipc/bindings";
   import IconButton from "$shared/ui/IconButton";
   import * as m from "$shared/i18n/messages";
@@ -41,6 +42,20 @@
   let active = $derived(session.entries.filter(live));
   let current = $derived(active[0] ?? session.entries[0]);
   let progress = $derived(current ? downloadProgress(current) : undefined);
+  // A hidden column comes out as a download sets off, and stays while one
+  // waits on a decision.
+  // Bookkeeping only; nothing redraws from it.
+  const announced: Record<string, true> = {};
+  $effect(() => {
+    for (const entry of active) {
+      if (announced[entry.id]) continue;
+      announced[entry.id] = true;
+      if (entry.state === "pending" || entry.state === "receiving") attention.pulse(3500);
+    }
+  });
+  $effect(() => {
+    if (active.some((entry) => entry.state === "held")) return attention.hold();
+  });
   let problem = $derived(
     current?.state === "failed" ||
       current?.state === "interrupted" ||

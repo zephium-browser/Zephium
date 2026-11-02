@@ -2,6 +2,10 @@
 
 use super::*;
 
+use zephium_core::extension_data::{
+    HistoryEntry, HistoryReply, HistoryRequest, TopSite, VisitEntry,
+    MAX_HISTORY_RESULTS as MAX_EXTENSION_RESULTS, MAX_REMOVED_URLS, MAX_TOP_SITES, MAX_VISITS,
+};
 use zephium_core::item::sanitize_page_title;
 use zephium_core::ports::store::{
     HistoryHit, HistoryPageError, HistoryVisit, ImportedVisit, MAX_IMPORTED_VISITS,
@@ -23,6 +27,8 @@ const MAX_SUBMITTED_SEARCHES: i64 = 1024;
 pub(crate) const MAX_HISTORY_PAGE: u32 = 200;
 /// Addresses one forget request may name.
 pub(crate) const MAX_HISTORY_FORGET_URLS: usize = 100;
+/// The most visited sites are counted over this much recent history.
+const MOST_VISITED_WINDOW_SECONDS: i64 = 90 * 24 * 60 * 60;
 /// A title arriving later than this belongs to a different visit.
 const TITLE_AMENDMENT_WINDOW_SECONDS: i64 = 60;
 
@@ -740,5 +746,502 @@ mod connection_hardening_tests {
             .unwrap();
         assert!(after <= 150_000);
         assert!(oldest > 0, "oldest rows must be pruned first");
+    }
+}
+
+/// One address of history: the oldest visit kept names it, the newest gives
+/// its title.
+const ENTRY_SELECT: &str = "SELECT g.first, g.url, t.title, g.latest, g.visits
+     FROM (
+         SELECT h.url AS url, MIN(h.id) AS first, MAX(h.id) AS newest,
+                MAX(h.visited_at) AS latest, COUNT(*) AS visits
+         FROM history h JOIN picked p ON p.url = h.url
+         GROUP BY h.url
+     ) g JOIN history t ON t.id = g.newest JOIN picked p ON p.url = g.url
+     ORDER BY p.rank DESC, g.newest DESC";
+
+fn history_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
+    Ok(HistoryEntry {
+        id: row.get(0)?,
+        url: row.get(1)?,
+        title: row.get(2)?,
+        last_visit: row.get(3)?,
+        visits: row.get(4)?,
+    })
+}
+
+fn allowed_entries(entries: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| navigation::is_allowed_str(&entry.url))
+        .map(|mut entry| {
+            entry.title = sanitize_page_title(&entry.title);
+            entry
+        })
+        .collect()
+}
+
+impl Hub {
+    pub(crate) fn extension_history(
+        &mut self,
+        profile: ProfileId,
+        request: HistoryRequest,
+    ) -> HistoryReply {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+        {
+            return HistoryReply::Failed;
+        }
+        let removes = matches!(
+            request,
+            HistoryRequest::RemoveUrl { .. }
+                | HistoryRequest::RemoveRange { .. }
+                | HistoryRequest::RemoveAll
+        );
+        if removes {
+            if let Err(error) = self.discard_session_backup(profile) {
+                eprintln!(
+                    "store: history removal backup disposal failed for profile {profile}: {error}"
+                );
+                return HistoryReply::Failed;
+            }
+        }
+        let result = self
+            .profile_conn(profile)
+            .and_then(|conn| extension_history(conn, request));
+        result.unwrap_or_else(|error| {
+            eprintln!("store: extension history failed for profile {profile}: {error}");
+            HistoryReply::Failed
+        })
+    }
+}
+
+fn extension_history(
+    conn: &mut Connection,
+    request: HistoryRequest,
+) -> rusqlite::Result<HistoryReply> {
+    match request {
+        HistoryRequest::Search {
+            text,
+            start,
+            end,
+            limit,
+        } => {
+            let fts = if text.trim().is_empty() {
+                None
+            } else {
+                match fts_query(&text) {
+                    Some(fts) => Some(fts),
+                    None => return Ok(HistoryReply::Entries(Vec::new())),
+                }
+            };
+            let matching = if fts.is_some() {
+                "AND id IN (SELECT rowid FROM history_fts WHERE history_fts MATCH ?5)"
+            } else {
+                "AND ?5 = ''"
+            };
+            let entries = conn
+                .prepare_cached(&format!(
+                    "WITH picked AS (
+                         SELECT url, MAX(visited_at) AS rank FROM history
+                         WHERE visited_at >= ?1 AND visited_at < ?2
+                           AND length(CAST(url AS BLOB)) <= ?4 {matching}
+                         GROUP BY url ORDER BY rank DESC LIMIT ?3
+                     ) {ENTRY_SELECT}"
+                ))?
+                .query_map(
+                    params![
+                        start,
+                        end,
+                        limit.min(MAX_EXTENSION_RESULTS),
+                        MAX_URL_BYTES as i64,
+                        fts.unwrap_or_default()
+                    ],
+                    history_entry,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(HistoryReply::Entries(allowed_entries(entries)))
+        }
+        HistoryRequest::Address { url } => {
+            let entries = conn
+                .prepare_cached(&format!(
+                    "WITH picked AS (SELECT ?1 AS url, 0 AS rank) {ENTRY_SELECT}"
+                ))?
+                .query_map([url], history_entry)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(HistoryReply::Entries(allowed_entries(entries)))
+        }
+        HistoryRequest::Visits { url } => {
+            let first: Option<i64> = conn.query_row(
+                "SELECT MIN(id) FROM history WHERE url = ?1",
+                [&url],
+                |row| row.get(0),
+            )?;
+            let Some(first) = first else {
+                return Ok(HistoryReply::Visits(Vec::new()));
+            };
+            let mut visits = conn
+                .prepare_cached(
+                    "SELECT id, visited_at FROM history WHERE url = ?1 ORDER BY id DESC LIMIT ?2",
+                )?
+                .query_map(params![url, MAX_VISITS], |row| {
+                    Ok(VisitEntry {
+                        id: row.get(0)?,
+                        entry: first,
+                        visited_at: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            visits.reverse();
+            Ok(HistoryReply::Visits(visits))
+        }
+        HistoryRequest::MostVisited { limit } => {
+            let limit = limit.min(MAX_TOP_SITES);
+            let since = now_secs().saturating_sub(MOST_VISITED_WINDOW_SECONDS);
+            let sites = conn
+                .prepare_cached(
+                    "SELECT g.url, t.title FROM (
+                         SELECT url, COUNT(*) AS visits, MAX(id) AS newest FROM history
+                         WHERE visited_at >= ?1 AND length(CAST(url AS BLOB)) <= ?3
+                           AND (url LIKE 'https://%' OR url LIKE 'http://%')
+                         GROUP BY url ORDER BY visits DESC, newest DESC LIMIT ?2
+                     ) g JOIN history t ON t.id = g.newest
+                     ORDER BY g.visits DESC, g.newest DESC",
+                )?
+                .query_map(params![since, limit * 2, MAX_URL_BYTES as i64], |row| {
+                    Ok(TopSite {
+                        url: row.get(0)?,
+                        title: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|site| navigation::is_allowed_str(&site.url))
+                .map(|mut site| {
+                    site.title = sanitize_page_title(&site.title);
+                    site
+                })
+                .take(limit as usize)
+                .collect();
+            Ok(HistoryReply::Sites(sites))
+        }
+        HistoryRequest::RemoveUrl { url } => {
+            let tx = conn.transaction()?;
+            let visits = tx.execute("DELETE FROM history WHERE url = ?1", [&url])?;
+            forget_page_icons(&tx, std::slice::from_ref(&url))?;
+            tx.commit()?;
+            Ok(HistoryReply::Removed {
+                visits: u32::try_from(visits).unwrap_or(u32::MAX),
+                urls: if visits > 0 { vec![url] } else { Vec::new() },
+                all: false,
+            })
+        }
+        HistoryRequest::RemoveRange { start, end } => {
+            let tx = conn.transaction()?;
+            let candidates: Vec<String> = tx
+                .prepare_cached(
+                    "SELECT DISTINCT url FROM history
+                     WHERE visited_at >= ?1 AND visited_at < ?2 LIMIT ?3",
+                )?
+                .query_map(params![start, end, MAX_REMOVED_URLS as i64 + 1], |row| {
+                    row.get(0)
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let visits = tx.execute(
+                "DELETE FROM history WHERE visited_at >= ?1 AND visited_at < ?2",
+                params![start, end],
+            )?;
+            tx.execute(
+                "DELETE FROM search_queries WHERE last_used >= ?1 AND last_used < ?2",
+                params![start, end],
+            )?;
+            let all = candidates.len() > MAX_REMOVED_URLS;
+            let urls = if all {
+                Vec::new()
+            } else {
+                let listed = serde_json::to_string(&candidates).unwrap_or_default();
+                let kept: HashSet<String> = tx
+                    .prepare_cached(
+                        "SELECT DISTINCT url FROM history
+                         WHERE url IN (SELECT value FROM json_each(?1))",
+                    )?
+                    .query_map([listed], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                candidates
+                    .into_iter()
+                    .filter(|url| !kept.contains(url))
+                    .collect::<Vec<_>>()
+            };
+            forget_page_icons(&tx, &urls)?;
+            tx.commit()?;
+            Ok(HistoryReply::Removed {
+                visits: u32::try_from(visits).unwrap_or(u32::MAX),
+                urls,
+                all,
+            })
+        }
+        // Visits are recorded through the visit mailbox, not here.
+        HistoryRequest::Add { .. } => Ok(HistoryReply::Failed),
+        HistoryRequest::RemoveAll => {
+            let tx = conn.transaction()?;
+            let visits = tx.execute("DELETE FROM history", [])?;
+            tx.execute("DELETE FROM search_queries", [])?;
+            tx.execute("DELETE FROM page_favicons", [])?;
+            tx.commit()?;
+            Ok(HistoryReply::Removed {
+                visits: u32::try_from(visits).unwrap_or(u32::MAX),
+                urls: Vec::new(),
+                all: true,
+            })
+        }
+    }
+}
+
+/// A page's own icon is kept under its address, which is history.
+fn forget_page_icons(tx: &rusqlite::Transaction<'_>, urls: &[String]) -> rusqlite::Result<()> {
+    let mut forget = tx.prepare_cached("DELETE FROM page_favicons WHERE page = ?1")?;
+    for url in urls {
+        if let Some(page) = url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| zephium_core::icon::page_key(&parsed))
+        {
+            forget.execute([page])?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    fn connection(visits: &[(&str, &str, i64)]) -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        migrations::apply(&mut connection, migrations::PROFILE).unwrap();
+        for (url, title, at) in visits {
+            connection
+                .execute(
+                    "INSERT INTO history(url, title, visited_at) VALUES (?1, ?2, ?3)",
+                    params![url, title, at],
+                )
+                .unwrap();
+        }
+        connection
+    }
+
+    fn entries(reply: HistoryReply) -> Vec<HistoryEntry> {
+        match reply {
+            HistoryReply::Entries(entries) => entries,
+            other => panic!("expected entries, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_search_names_each_address_once_with_its_visits_and_newest_title() {
+        let mut conn = connection(&[
+            ("https://a.example/", "Old A", 100),
+            ("https://b.example/", "B", 200),
+            ("https://a.example/", "New A", 300),
+            ("https://c.example/docs", "Docs", 50),
+        ]);
+        let found = entries(
+            extension_history(
+                &mut conn,
+                HistoryRequest::Search {
+                    text: String::new(),
+                    start: 0,
+                    end: i64::MAX,
+                    limit: 10,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            found,
+            vec![
+                HistoryEntry {
+                    id: 1,
+                    url: "https://a.example/".into(),
+                    title: "New A".into(),
+                    last_visit: 300,
+                    visits: 2
+                },
+                HistoryEntry {
+                    id: 2,
+                    url: "https://b.example/".into(),
+                    title: "B".into(),
+                    last_visit: 200,
+                    visits: 1
+                },
+                HistoryEntry {
+                    id: 4,
+                    url: "https://c.example/docs".into(),
+                    title: "Docs".into(),
+                    last_visit: 50,
+                    visits: 1
+                },
+            ]
+        );
+        // The range picks addresses by their visits in it; what is reported
+        // about them is every visit.
+        let ranged = entries(
+            extension_history(
+                &mut conn,
+                HistoryRequest::Search {
+                    text: String::new(),
+                    start: 90,
+                    end: 150,
+                    limit: 10,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            ranged
+                .iter()
+                .map(|entry| (entry.id, entry.visits))
+                .collect::<Vec<_>>(),
+            vec![(1, 2)]
+        );
+        let worded = entries(
+            extension_history(
+                &mut conn,
+                HistoryRequest::Search {
+                    text: "docs".into(),
+                    start: 0,
+                    end: i64::MAX,
+                    limit: 10,
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(worded.len(), 1);
+        assert_eq!(
+            entries(
+                extension_history(
+                    &mut conn,
+                    HistoryRequest::Address {
+                        url: "https://b.example/".into()
+                    }
+                )
+                .unwrap()
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            extension_history(
+                &mut conn,
+                HistoryRequest::Visits {
+                    url: "https://a.example/".into()
+                }
+            )
+            .unwrap(),
+            HistoryReply::Visits(vec![
+                VisitEntry {
+                    id: 1,
+                    entry: 1,
+                    visited_at: 100
+                },
+                VisitEntry {
+                    id: 3,
+                    entry: 1,
+                    visited_at: 300
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn removing_a_range_names_only_addresses_left_without_visits() {
+        let now = now_secs();
+        let mut conn = connection(&[
+            ("https://a.example/", "A", now - 30),
+            ("https://a.example/", "A", now - 10),
+            ("https://b.example/", "B", now - 10),
+            ("https://b.example/", "B", now - 5),
+            ("https://b.example/", "B", now - 4),
+        ]);
+        assert_eq!(
+            extension_history(&mut conn, HistoryRequest::MostVisited { limit: 5 }).unwrap(),
+            HistoryReply::Sites(vec![
+                TopSite {
+                    url: "https://b.example/".into(),
+                    title: "B".into()
+                },
+                TopSite {
+                    url: "https://a.example/".into(),
+                    title: "A".into()
+                },
+            ])
+        );
+        assert_eq!(
+            extension_history(
+                &mut conn,
+                HistoryRequest::RemoveRange {
+                    start: now - 11,
+                    end: now - 4
+                }
+            )
+            .unwrap(),
+            HistoryReply::Removed {
+                visits: 3,
+                urls: vec![],
+                all: false
+            }
+        );
+        assert_eq!(
+            extension_history(
+                &mut conn,
+                HistoryRequest::RemoveRange {
+                    start: now - 100,
+                    end: now - 20
+                }
+            )
+            .unwrap(),
+            HistoryReply::Removed {
+                visits: 1,
+                urls: vec!["https://a.example/".into()],
+                all: false
+            }
+        );
+        assert_eq!(
+            extension_history(
+                &mut conn,
+                HistoryRequest::RemoveUrl {
+                    url: "https://b.example/".into()
+                }
+            )
+            .unwrap(),
+            HistoryReply::Removed {
+                visits: 1,
+                urls: vec!["https://b.example/".into()],
+                all: false
+            }
+        );
+        assert_eq!(
+            extension_history(
+                &mut conn,
+                HistoryRequest::RemoveUrl {
+                    url: "https://b.example/".into()
+                }
+            )
+            .unwrap(),
+            HistoryReply::Removed {
+                visits: 0,
+                urls: vec![],
+                all: false
+            }
+        );
+        assert_eq!(
+            extension_history(&mut conn, HistoryRequest::RemoveAll).unwrap(),
+            HistoryReply::Removed {
+                visits: 0,
+                urls: vec![],
+                all: true
+            }
+        );
     }
 }

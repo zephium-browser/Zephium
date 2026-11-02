@@ -51,3 +51,14 @@ test("disabled slider is not focusable", async () => {
   const track = screen.getByRole("slider", { name: "Zoom" });
   await expect.element(track).toHaveAttribute("tabindex", "-1");
 });
+
+test("clearing the typed value does not reset the slider to zero", async () => {
+  const oncommit = vi.fn();
+  const screen = await render(Slider, { label: "Tint", value: 40, oncommit });
+  await screen.getByRole("button", { name: "40", exact: true }).click();
+  await userEvent.keyboard("{Control>}a{/Control}{Backspace}{Enter}");
+  await expect
+    .element(screen.getByRole("slider", { name: "Tint" }))
+    .toHaveAttribute("aria-valuenow", "40");
+  expect(oncommit).not.toHaveBeenCalled();
+});

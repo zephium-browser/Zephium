@@ -1,4 +1,5 @@
 mod log;
+mod popover_close;
 mod sidebar_edge;
 mod sidebar_resize;
 mod swipe;
@@ -637,6 +638,7 @@ pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
             }
         });
         sidebar_edge::watch(&owner, hidden);
+        popover_close::watch(&owner, hidden);
         super::window_controls::set_in_card(&owner, false);
         super::window_controls::set_tucked(&owner, hidden);
     });
@@ -943,8 +945,8 @@ thread_local! {
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
 /// key equivalent, so a local monitor matches them before the focused web
-/// view sees the keystroke. Only the main window's keys are considered; the
-/// launcher panel keeps its own.
+/// view sees the keystroke, and extensions' commands after them. Only the main
+/// window's keys are considered; the launcher panel keeps its own.
 pub fn install_key_monitor(
     window: &WebviewWindow,
     table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,
@@ -994,6 +996,9 @@ pub fn install_key_monitor(
                 }
                 std::ptr::null_mut()
             }
+            // Extension commands come after the browser's keys (these and
+            // the menus') and before the page's, as in Chrome.
+            None if zephium_engine::perform_extension_command(event_ref) => std::ptr::null_mut(),
             None => event.as_ptr(),
         }
     });

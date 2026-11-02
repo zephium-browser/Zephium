@@ -459,7 +459,7 @@ impl Downloads {
                 state.queue.push_back(profile);
             }
         }
-        (self.notify)(profile);
+        self.changed(profile);
         self.next_recovery_profile();
     }
 }

@@ -225,6 +225,15 @@ pub(crate) fn close(shared: &Shared, extension: &str) -> bool {
     page.inspect(Page::close).is_some()
 }
 
+/// The open offscreen document's address.
+pub(crate) fn url(shared: &Shared, extension: &str) -> Option<String> {
+    let documents = shared.offscreen.0.borrow();
+    let page = documents.get(extension)?;
+    unsafe { page.view.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+}
+
 pub(crate) fn has(shared: &Shared, extension: &str) -> bool {
     shared.offscreen.0.borrow().contains_key(extension)
 }

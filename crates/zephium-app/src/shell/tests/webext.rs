@@ -8,6 +8,7 @@ fn load() -> WebExtensionLoad {
         extension_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         root: "/fixture".into(),
         external_native_messaging: false,
+        native_messaging_grantable: false,
         permissions: vec![],
         match_patterns: vec![],
         start_background: false,
@@ -131,4 +132,79 @@ fn final_install_target_validation_rejects_a_deleted_profile() {
     assert_eq!(shell.web_extension_target(None).unwrap().profile, profile);
     shell.apply_profile_tombstone(profile);
     assert!(shell.web_extension_target(None).is_none());
+}
+
+#[test]
+fn the_store_button_answers_only_for_the_listing_in_front() {
+    use zephium_core::ports::engine::{StoreButton, StoreButtonState};
+    const LISTED: &str = "dbepggeogbaibhgnhhndojpepiihcmeb";
+    let engine = Arc::new(FakeEngine::default());
+    let clicks: Arc<Mutex<Vec<zephium_ipc::WebExtensionStoreClickView>>> = Arc::default();
+    let screen: Screen = Arc::new(Mutex::new(ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }));
+    let (sink, view) = (clicks.clone(), screen.clone());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| match projection {
+            Projection::WebExtensionStoreClick(click) => sink.lock().unwrap().push(click),
+            other => apply_projection(&mut view.lock().unwrap(), other),
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let listing = active_id(&screen);
+    commit_url(
+        &mut shell,
+        listing,
+        &format!("https://chromewebstore.google.com/detail/vimium/{LISTED}"),
+    );
+    let show = |tab, extension: &str| Command::ShowStoreButton {
+        tab,
+        button: StoreButton {
+            extension: extension.into(),
+            state: StoreButtonState::Add,
+            label: "Add to Zephium".into(),
+        },
+    };
+    let click = |id, extension: &str| {
+        Command::Engine(EngineEvent::StoreButtonClicked {
+            id,
+            extension: extension.into(),
+        })
+    };
+    let other = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    shell.handle(show(listing, LISTED));
+    shell.handle(show(listing, other));
+    shell.handle(click(listing, other));
+    shell.handle(click(listing, LISTED));
+    shell.handle(Command::Run("tab.new".into()));
+    shell.handle(show(listing, LISTED));
+    shell.handle(click(listing, LISTED));
+
+    let shown: Vec<String> = engine
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("store-button"))
+        .collect();
+    assert_eq!(shown, [format!("store-button {listing} {LISTED} Add")]);
+    assert_eq!(
+        *clicks.lock().unwrap(),
+        [zephium_ipc::WebExtensionStoreClickView {
+            tab_id: listing.to_string(),
+            extension_id: LISTED.into(),
+        }]
+    );
 }

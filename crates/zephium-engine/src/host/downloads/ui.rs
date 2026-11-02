@@ -377,7 +377,7 @@ impl Downloads {
                         forgotten.pop_back();
                     }
                 }
-                (self.notify)(partition.profile());
+                self.changed(partition.profile());
                 done.finish(DownloadResponse::Applied);
             }
             (
@@ -406,7 +406,7 @@ impl Downloads {
                     forgotten.pop_back();
                 }
                 drop(forgotten);
-                (self.notify)(partition.profile());
+                self.changed(partition.profile());
                 done.finish(DownloadResponse::Applied);
             }
             (_, DownloadStoreReply::Record(None)) => done.finish(DownloadResponse::Error {

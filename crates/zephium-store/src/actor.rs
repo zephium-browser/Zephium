@@ -401,6 +401,19 @@ enum Cmd {
         zephium_core::bookmarks::BookmarkRequest,
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
+    BookmarksObserved(
+        ProfileId,
+        zephium_core::bookmarks::BookmarkRequest,
+        Sender<(
+            zephium_core::bookmarks::BookmarkReply,
+            Option<zephium_core::bookmarks::BookmarkChange>,
+        )>,
+    ),
+    ExtensionHistory(
+        ProfileId,
+        zephium_core::extension_data::HistoryRequest,
+        Sender<zephium_core::extension_data::HistoryReply>,
+    ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     DiscardSessionBackup(ProfileId, Box<dyn FnOnce(bool) + Send>),
     Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
@@ -1459,6 +1472,50 @@ impl Store for SqliteStore {
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::bookmarks::BookmarkRequest,
+    ) -> (
+        zephium_core::bookmarks::BookmarkReply,
+        Option<zephium_core::bookmarks::BookmarkChange>,
+    ) {
+        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply, BookmarkRequest};
+        let timeout = if matches!(request, BookmarkRequest::Import { .. }) {
+            IMPORT_RPC_TIMEOUT
+        } else {
+            STORE_RPC_TIMEOUT
+        };
+        let failed = (BookmarkReply::Failed(BookmarkFailure::Unavailable), None);
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::BookmarksObserved(profile, request, tx))
+            .is_err()
+        {
+            return failed;
+        }
+        rx.recv_timeout(timeout).unwrap_or(failed)
+    }
+
+    fn extension_history(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::HistoryReply;
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ExtensionHistory(profile, request, tx))
+            .is_err()
+        {
+            return HistoryReply::Failed;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT)
+            .unwrap_or(HistoryReply::Failed)
+    }
+
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
         self.clear_history_checked(profile, since)
             .unwrap_or_default()
@@ -2057,6 +2114,32 @@ fn actor(
             }
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));
+            }
+            Some(Cmd::BookmarksObserved(profile, request, reply)) => {
+                let _ = reply.send(hub.bookmarks_observed(profile, request));
+            }
+            Some(Cmd::ExtensionHistory(profile, request, reply)) => {
+                use zephium_core::extension_data::{HistoryReply, HistoryRequest};
+                // A removal must also take visits still waiting to be written.
+                let removes = matches!(
+                    request,
+                    HistoryRequest::RemoveUrl { .. }
+                        | HistoryRequest::RemoveRange { .. }
+                        | HistoryRequest::RemoveAll
+                );
+                let durable = !removes
+                    || ((hub.knows(profile) || flush(&mut hub, &mut pending))
+                        && flush_profile_visits(
+                            &mut hub,
+                            &pending_visits,
+                            &mut visit_retry,
+                            profile,
+                        ));
+                let _ = reply.send(if durable {
+                    hub.extension_history(profile, request)
+                } else {
+                    HistoryReply::Failed
+                });
             }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
                 let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);

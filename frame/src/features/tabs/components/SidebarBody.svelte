@@ -10,18 +10,21 @@
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
 
   let {
     pinned,
     today,
     splitting,
     onSelect,
+    extras,
   }: {
     pinned: SidebarEntry[];
     today: SidebarEntry[];
     splitting: boolean;
     onSelect: (id: string) => void;
+    /** Set beside the way to open a tab: pinned extensions. */
+    extras?: Snippet;
   } = $props();
 
   // Private browsing keeps one space, so it has no switcher.
@@ -71,11 +74,12 @@
   the difference by having no close control.
 -->
 <!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
+{#if spaced}<SpaceBar {extras} />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
     </button>
+    {@render extras?.()}
   </div>{/if}
 
 <div
@@ -153,7 +157,10 @@
   }
 
   .new-tab-slot {
+    display: flex;
     flex: none;
+    align-items: center;
+    gap: 2px;
     padding-inline: var(--sidebar-inset);
     padding-block: 2px calc(var(--sidebar-row-gap) + 2px);
   }

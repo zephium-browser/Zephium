@@ -5,11 +5,14 @@
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import Icon from "$shared/ui/Icon";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import SpaceGlyph from "./SpaceGlyph.svelte";
   import SpaceFlowBody from "./SpaceFlowBody.svelte";
   import * as requests from "../lib/space-requests.svelte";
   import { SpaceFlow } from "../lib/space-flow.svelte";
+
+  /** What the browser sets beside the plus: pinned extensions. */
+  let { extras }: { extras?: Snippet } = $props();
 
   // The switcher loads the first time the chip is approached or opened, and
   // stays, so reopening is the panel's motion alone.
@@ -81,13 +84,16 @@
     <span class="space-name">{flow.active?.name ?? ""}</span>
     <span class="space-chevron"><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span>
   </button>
-  <button
-    type="button"
-    class="space-new-tab"
-    title={m.new_tab()}
-    aria-label={m.new_tab()}
-    onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
-  >
+  <div class="space-end">
+    {@render extras?.()}
+    <button
+      type="button"
+      class="space-new-tab"
+      title={m.new_tab()}
+      aria-label={m.new_tab()}
+      onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
+    >
+  </div>
   <div
     bind:this={panel}
     class="ui-menu ui-disclosure-panel ui-popover space-panel sidebar-softens"
@@ -167,12 +173,19 @@
     rotate: 180deg;
   }
 
+  .space-end {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    margin-inline-start: auto;
+  }
+
   .space-new-tab {
     display: grid;
     flex: none;
     width: 30px;
     height: 30px;
-    margin-inline-start: auto;
     padding: 0;
     border: 0;
     border-radius: 50%;

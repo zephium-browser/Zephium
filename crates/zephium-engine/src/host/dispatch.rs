@@ -590,6 +590,21 @@ pub(super) fn try_open_native_tab(
     })
 }
 
+/// Synchronous: a key monitor must answer whether it consumed the event.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        slot.as_ref()
+            .is_some_and(|host| host.webext.perform_command(event))
+    })
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn try_open_windows_extension_tab(
     runtime: zephium_core::extensions::ExtensionRuntimeInstance,

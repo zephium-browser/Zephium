@@ -2,6 +2,7 @@ import {
   commands,
   type WebExtensionAccessRequestView,
   type WebExtensionReview,
+  type WebExtensionStoreButtonState,
   type WebExtensionView,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -18,6 +19,10 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 // Extensions ask for access one request at a time; later ones wait.
 let accessQueue = $state<WebExtensionAccessRequestView[]>([]);
 let answering = $state(false);
+// An installed extension whose in-page Remove button was clicked; the browser's
+// own remove control asks to confirm.
+let removalAsked = $state<string | null>(null);
+let removalTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const isAvailable = () => available === true;
 export const list = () => installed;
@@ -29,6 +34,40 @@ export const error = () => failure;
 export const accessRequest = () => accessQueue[0] ?? null;
 export const isAnswering = () => answering;
 export const named = (id: string) => installed.find((extension) => extension.id === id) ?? null;
+export const byInstall = (install: string) =>
+  installed.find((extension) => extension.install_id === install) ?? null;
+/** Buttons the address field has room for beside the tray. */
+export const MAX_PINNED = 3;
+export const pinnedCount = () =>
+  installed.filter((extension) => extension.pinned && extension.enabled).length;
+export const isRemovalAsked = (id: string) => removalAsked === id;
+export const settleRemovalAsk = () => (removalAsked = null);
+
+/** What the store's in-page button shows on the listing `extensionId` in
+ * `tabId`; native shows it only on that listing in front. */
+export function showStoreButton(
+  tabId: string,
+  extensionId: string,
+  label: (state: WebExtensionStoreButtonState) => string,
+): void {
+  const state: WebExtensionStoreButtonState =
+    named(extensionId) !== null ? "remove" : isInstalling() ? "adding" : "add";
+  void commands.webExtensionStoreButton(tabId, extensionId, state, label(state));
+}
+
+/** A click on the in-page button starts the same review as the address
+ * field's, or asks to confirm removal in the browser's own controls. */
+export function listenForStoreClicks(): Promise<() => void> {
+  return events.webExtensionStoreClicked.listen(({ payload }) => {
+    if (named(payload.extension_id) === null) {
+      void prepare(payload.tab_id);
+      return;
+    }
+    removalAsked = payload.extension_id;
+    clearTimeout(removalTimer);
+    removalTimer = setTimeout(() => (removalAsked = null), 3000);
+  });
+}
 
 export function listenForAccess(): Promise<() => void> {
   return events.webExtensionAccessRequested.listen((event) => {
@@ -122,6 +161,18 @@ export async function setEnabled(id: string, enabled: boolean): Promise<void> {
   const result = await commands.webExtensionSetEnabled(id, enabled);
   failure = result.status === "ok" ? null : result.error;
   await refresh();
+}
+
+export async function setPinned(id: string, pinned: boolean): Promise<void> {
+  if (pinned && pinnedCount() >= MAX_PINNED) return;
+  installed = installed.map((extension) =>
+    extension.id === id ? { ...extension, pinned } : extension,
+  );
+  const result = await commands.webExtensionSetPinned(id, pinned);
+  if (result.status !== "ok") {
+    failure = result.error;
+    await refresh();
+  }
 }
 
 export async function setAccess(id: string, mode: string, sites: string[] = []): Promise<void> {

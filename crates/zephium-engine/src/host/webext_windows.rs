@@ -1018,6 +1018,11 @@ impl super::EngineHost {
         &mut self,
         request: ExtensionActionRequest,
     ) -> ExtensionActionSettlement {
+        if request.is_menu() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::UnsupportedPlatform,
+            );
+        }
         let result = self.present_windows_extension_popup(request);
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }

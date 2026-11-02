@@ -545,6 +545,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
+        /// Opens the action's context menu rather than clicking it.
+        menu: bool,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
@@ -597,6 +599,11 @@ pub enum Command {
     RemoveWebExtension {
         profile: ProfileId,
         extension: Box<zephium_core::ports::engine::WebExtensionLoad>,
+    },
+    /// What the install button on the Web Store listing in `tab` shows.
+    ShowStoreButton {
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
     },
     /// The profile an installation from `tab` would go to.
     ResolveWebExtensionTarget {

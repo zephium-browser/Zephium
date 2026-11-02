@@ -594,6 +594,27 @@ pub trait Store {
     ) -> crate::bookmarks::BookmarkReply {
         crate::bookmarks::BookmarkReply::Failed(crate::bookmarks::BookmarkFailure::Unavailable)
     }
+    /// [`Self::bookmarks`], also describing what a write changed for the
+    /// extensions listening. Blocking; callers run it off the shell.
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: crate::bookmarks::BookmarkRequest,
+    ) -> (
+        crate::bookmarks::BookmarkReply,
+        Option<crate::bookmarks::BookmarkChange>,
+    ) {
+        (self.bookmarks(profile, request), None)
+    }
+    /// History as extensions read and change it. Blocking; callers run it
+    /// off the shell.
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        _request: crate::extension_data::HistoryRequest,
+    ) -> crate::extension_data::HistoryReply {
+        crate::extension_data::HistoryReply::Failed
+    }
     /// Removes visits at or after `since`, or all of them when it is absent.
     fn load_blocker_statistics(
         &self,

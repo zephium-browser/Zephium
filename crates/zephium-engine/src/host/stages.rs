@@ -473,6 +473,7 @@ impl EngineHost {
             for id in woken {
                 self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);
+                self.resume_store_button_poll(id);
             }
         }
         self.refresh_visible_generic_styles();
