@@ -302,7 +302,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             heaviest(|r| r.soak_mb, " MB", 0)
         );
     }
-    let regressions = results.regressions(&records);
+    let regressions = results.regressions(&records, baseline.first().and_then(accepted_baseline));
     for regression in &regressions {
         println!("regressed since the last run: {regression}");
     }
