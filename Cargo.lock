@@ -7591,6 +7591,7 @@ dependencies = [
 name = "zephium-credentials"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.10.1",
  "dirs",
  "security-framework",
  "security-framework-sys",
