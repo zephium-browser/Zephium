@@ -1466,6 +1466,63 @@ fn toggle_completion_waits_for_exact_native_settlement_and_reports_failure() {
 }
 
 #[test]
+fn disabling_does_not_wait_behind_an_enabled_compile_in_flight() {
+    let (mut shell, _engine, compiler, store, operations) = controlled_shell_with_operation_log();
+    store.saved.lock().unwrap().take();
+    store.blocker_configs.lock().unwrap().take();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let provisional = initial_installation(&shell, profile);
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    assert_eq!(compiler.requests.lock().unwrap().len(), 1);
+    assert!(compiler.request(0).2.enabled);
+
+    shell.handle(blocker_operation("disable", false));
+    assert_eq!(
+        compiler.requests.lock().unwrap().len(),
+        1,
+        "turning protection off needs no compiler"
+    );
+    shell.handle(Command::BlockerReady(profile));
+    let BlockerProfileState::Installing {
+        desired: disabled, ..
+    } = shell.blocker.profiles[&profile].state
+    else {
+        panic!("the allow-all must go straight to native installation");
+    };
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: disabled,
+        settlement: ContentRuleSettlement::Applied {
+            generation: disabled,
+        },
+    }));
+    let status = shell.focused_blocker_status_view();
+    assert_eq!(status.phase, BlockerPhase::Ready);
+    assert_eq!(status.desired_enabled, Some(false));
+    assert_eq!(status.applied_enabled, Some(false));
+    assert!(operations
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|operation| operation.operation_id == "disable"
+            && operation.outcome == OperationOutcome::Applied));
+
+    // The replaced compile finishing late changes nothing.
+    compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    let status = shell.focused_blocker_status_view();
+    assert_eq!(status.phase, BlockerPhase::Ready);
+    assert_eq!(status.applied_enabled, Some(false));
+}
+
+#[test]
 fn disabling_waits_for_the_exact_native_allow_all_settlement() {
     let (mut shell, _engine, compiler, _store, operations) = controlled_shell_with_operation_log();
     shell.handle(Command::Bootstrap);

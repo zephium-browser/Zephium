@@ -605,12 +605,21 @@ impl BlockerCoordinator {
         // generation the engine actually applied. A future live-settings path
         // can coalesce a bounded latest desired config outside this state
         // machine; it must not displace the in-flight authority.
-        if matches!(
-            previous,
-            BlockerProfileState::Compiling { .. }
-                | BlockerProfileState::Installing { .. }
-                | BlockerProfileState::Retired
-        ) {
+        //
+        // Turning protection off is the exception before native work starts:
+        // it needs no compiler, and must not wait behind an enabled compile
+        // that can take seconds on a cold launch. That compile's late result
+        // is stale by generation.
+        let supersedes_compile =
+            !config.enabled && matches!(previous, BlockerProfileState::Compiling { .. });
+        if !supersedes_compile
+            && matches!(
+                previous,
+                BlockerProfileState::Compiling { .. }
+                    | BlockerProfileState::Installing { .. }
+                    | BlockerProfileState::Retired
+            )
+        {
             return false;
         }
         if let Some(entry) = self.profiles.get_mut(&profile) {
@@ -635,6 +644,38 @@ impl BlockerCoordinator {
             return false;
         };
         let retained = Self::retained_generation(previous);
+        if supersedes_compile {
+            if let Some(entry) = self.profiles.get_mut(&profile) {
+                entry.desired_config = config;
+                entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
+                entry.compiling_catalog = None;
+                entry.state = BlockerProfileState::Compiling {
+                    desired: generation,
+                    retained,
+                    retries_remaining,
+                };
+            }
+            self.inbox
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .results
+                .insert(
+                    profile,
+                    PendingCompileResult {
+                        generation,
+                        outcome: BlockerCompileOutcome::Compiled(
+                            zephium_core::blocker::ContentRules::allow_all(
+                                ContentRuleDigest::from_bytes([0; 32]),
+                            ),
+                        ),
+                    },
+                );
+            if let Some(callback) = callback {
+                let _ = callback.dispatch(Command::BlockerReady(profile));
+            }
+            return true;
+        }
         if self.compiler_terminal {
             if let Some(entry) = self.profiles.get_mut(&profile) {
                 entry.desired_config = config;
@@ -2051,6 +2092,10 @@ impl Shell {
             return;
         };
         match entry.state {
+            // Turning protection off replaces an enabled compile still in
+            // flight instead of waiting for it.
+            BlockerProfileState::Compiling { .. }
+                if !target.enabled && entry.desired_config != target => {}
             BlockerProfileState::Compiling { desired, .. }
             | BlockerProfileState::Installing { desired, .. } => {
                 if entry.desired_config == target {
