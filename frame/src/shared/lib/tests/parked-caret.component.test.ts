@@ -1,13 +1,19 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parkCaret } from "../parked-caret";
 
-vi.mock("$shared/platform", () => ({ IS_MAC: true }));
+const platform = vi.hoisted(() => ({ mac: true }));
+vi.mock("$shared/platform", () => ({
+  get IS_MAC() {
+    return platform.mac;
+  },
+}));
 
 let field: HTMLFormElement;
 let input: HTMLInputElement;
 let stop: () => void;
 
 beforeEach(() => {
+  platform.mac = true;
   vi.useFakeTimers();
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   field = document.createElement("form");
@@ -20,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   stop();
+  platform.mac = true;
   field.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -65,4 +72,16 @@ test("a field with text keeps its caret, and clicking elsewhere lets go", () => 
   document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
   expect(caret()).toBeNull();
   expect(document.activeElement).not.toBe(input);
+});
+
+test("on macOS the drawn caret blinks; elsewhere it stands still", () => {
+  vi.advanceTimersByTime(4100);
+  expect(caret()?.getAnimations()).toHaveLength(1);
+  stop();
+  platform.mac = false;
+  input.focus();
+  stop = parkCaret(input);
+  vi.advanceTimersByTime(4100);
+  expect(document.activeElement).not.toBe(input);
+  expect(caret()?.getAnimations()).toHaveLength(0);
 });
