@@ -15,8 +15,11 @@ pub struct Appearance {
     pub hot: Option<usize>,
     pub pressed: Option<usize>,
     pub focused: Option<usize>,
-    /// Window, text, highlight and highlighted text, in COLORREF order.
-    pub contrast: Option<[u32; 4]>,
+    /// A button the window's styles withdraw is drawn dim and never lights.
+    pub enabled: [bool; 3],
+    /// Window, text, highlight, highlighted text and disabled text, in
+    /// COLORREF order.
+    pub contrast: Option<[u32; 5]>,
 }
 
 pub fn dimensions(dpi: u32) -> (i32, i32, i32, i32) {
@@ -231,7 +234,8 @@ fn raster(pixels: &mut [u32], appearance: Appearance) {
                     - button as f64 / 2.0)
                     / scale;
                 let y = (row as f64 + 0.5 - height as f64 / 2.0) / scale;
-                let hot = appearance.hot == Some(index);
+                let live = appearance.enabled[index];
+                let hot = live && appearance.hot == Some(index);
                 let pressed = appearance.pressed == Some(index) && hot;
                 let edge = rounded_distance(
                     x,
@@ -255,7 +259,14 @@ fn raster(pixels: &mut [u32], appearance: Appearance) {
                     over(&mut pixel, rgb, alpha * coverage);
                 }
                 let ink = if let Some(colors) = appearance.contrast {
-                    color(colors[if hot { 3 } else { 1 }])
+                    let slot = if !live {
+                        4
+                    } else if hot {
+                        3
+                    } else {
+                        1
+                    };
+                    color(colors[slot])
                 } else {
                     [if appearance.dark || (hot && index == 2) {
                         255.0
@@ -265,6 +276,8 @@ fn raster(pixels: &mut [u32], appearance: Appearance) {
                 };
                 let ink_alpha = if appearance.contrast.is_some() {
                     1.0
+                } else if !live {
+                    0.36
                 } else if hot || appearance.active {
                     0.9
                 } else {
@@ -325,6 +338,7 @@ mod tests {
                 hot: Some(1),
                 pressed: None,
                 focused: None,
+                enabled: [true; 3],
                 contrast: None,
             };
             let (_, height, _, _) = dimensions(dpi);
@@ -345,6 +359,7 @@ mod tests {
                 hot: Some(1),
                 pressed: None,
                 focused: None,
+                enabled: [true; 3],
                 contrast: None,
             };
             let (width, height, _, _) = dimensions(dpi);
@@ -361,6 +376,41 @@ mod tests {
         }
     }
     #[test]
+    fn a_withdrawn_button_is_dim_and_never_lights() {
+        let appearance = |hot, enabled| Appearance {
+            dpi: 96,
+            dark: true,
+            active: true,
+            maximized: false,
+            hot,
+            pressed: None,
+            focused: None,
+            enabled,
+            contrast: None,
+        };
+        let (width, height, _, _) = dimensions(96);
+        let render = |appearance| {
+            let mut pixels = vec![0; (width * height) as usize];
+            raster(&mut pixels, appearance);
+            pixels
+        };
+        let withdrawn = [true, false, true];
+        assert_eq!(
+            render(appearance(Some(1), withdrawn)),
+            render(appearance(None, withdrawn))
+        );
+        // Ink is the only thing painted when the pointer is elsewhere.
+        let ink = |pixels: &[u32]| {
+            pixels
+                .iter()
+                .map(|pixel| u64::from(pixel >> 24))
+                .sum::<u64>()
+        };
+        assert!(
+            ink(&render(appearance(None, withdrawn))) < ink(&render(appearance(None, [true; 3])))
+        );
+    }
+    #[test]
     fn caption_bitmap_is_bounded_and_high_contrast_is_opaque() {
         let appearance = Appearance {
             dpi: 192,
@@ -370,7 +420,8 @@ mod tests {
             hot: Some(2),
             pressed: Some(2),
             focused: Some(0),
-            contrast: Some([0, 0xffffff, 0xffffff, 0]),
+            enabled: [true, false, true],
+            contrast: Some([0, 0xffffff, 0xffffff, 0, 0x808080]),
         };
         let (width, height, _, _) = dimensions(appearance.dpi);
         let mut pixels = vec![0; (width * height) as usize];

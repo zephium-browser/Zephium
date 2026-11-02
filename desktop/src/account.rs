@@ -300,6 +300,9 @@ pub(crate) struct AccountV1 {
     /// The server asks for a newer Zephium than this one.
     pub(crate) update_required: bool,
     pub(crate) signed_in: bool,
+    /// Signed in, but the Keychain or Credential Manager will not give up the
+    /// session, so hosted calls cannot run until the person signs in again.
+    pub(crate) vault_fault: bool,
     /// The address a sign-in code was sent to, while waiting for it.
     pub(crate) pending_email: Option<String>,
     pub(crate) resend_in: Option<u32>,
@@ -614,6 +617,7 @@ fn project(view: View) -> AccountV1 {
         signup_open: config.map(|c| c.signup_open).or(ours),
         update_required: view.update_required,
         signed_in: view.signed_in,
+        vault_fault: view.vault_fault,
         pending_email: view.pending_email,
         resend_in: view.resend_in,
         email: view.profile.as_ref().map(|p| p.email.clone()),
@@ -766,6 +770,7 @@ fn unavailable_view() -> AccountV1 {
         signup_open: None,
         update_required: false,
         signed_in: false,
+        vault_fault: false,
         pending_email: None,
         resend_in: None,
         email: None,
@@ -1518,6 +1523,18 @@ mod tests {
         assert_eq!(change.charge.unwrap().amount_minor, 0);
         assert_eq!(change.recurring.unwrap().amount_minor, 2000);
         assert_eq!(change.error, None);
+    }
+
+    #[test]
+    fn a_session_the_vault_will_not_give_up_reaches_the_frame_still_signed_in() {
+        let account = project(View {
+            signed_in: true,
+            vault_fault: true,
+            ..Default::default()
+        });
+        assert!(account.signed_in && account.vault_fault);
+        assert!(!project(View::default()).vault_fault);
+        assert!(!unavailable_view().vault_fault);
     }
 
     #[test]

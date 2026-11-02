@@ -554,6 +554,38 @@ fn native_operation_facts_are_bounded_latest_per_view() {
 }
 
 #[test]
+fn zoom_gestures_keep_only_the_latest_and_never_replace_a_settlement() {
+    let id = ItemId::from(7);
+    let queue = CommandQueue::new();
+    for command in [
+        EngineEvent::ZoomSettled {
+            id,
+            request: ZoomRequestId(1),
+            applied_scale: 1.1,
+            succeeded: true,
+        },
+        EngineEvent::ZoomGesture { id, scale: 0.9 },
+        EngineEvent::ZoomGesture { id, scale: 0.8 },
+    ] {
+        queue.try_push(Command::Engine(command)).ok().unwrap();
+    }
+
+    let mut settlements = 0;
+    let mut gestures = Vec::new();
+    while let Some(command) = queue.try_recv() {
+        match command {
+            Command::Engine(EngineEvent::ZoomSettled {
+                request: ZoomRequestId(1),
+                ..
+            }) => settlements += 1,
+            Command::Engine(EngineEvent::ZoomGesture { scale, .. }) => gestures.push(scale),
+            _ => panic!("only zoom facts were queued"),
+        }
+    }
+    assert_eq!((settlements, gestures), (1, vec![0.8]));
+}
+
+#[test]
 fn overloaded_queue_never_blocks_and_reserves_lifecycle_capacity() {
     let id = ItemId::from(7);
     let queue = CommandQueue::new();

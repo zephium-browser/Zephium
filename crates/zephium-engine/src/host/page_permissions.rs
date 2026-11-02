@@ -31,7 +31,9 @@ use super::permits::EventPermit;
 use super::EngineHost;
 
 pub(super) use zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS;
-const PAGE_PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// Outlives the Shell's two-minute prompt deadline, so a prompt still on
+// screen always has its native request behind it.
+const PAGE_PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(125);
 
 struct PendingPagePermissionRequest {
     profile: ProfileId,
@@ -146,10 +148,24 @@ fn core_request_from_components(
         WryRequestKind::Single(wry::PermissionKind::Microphone) => {
             PagePermissionRequestKind::Single(PagePermissionKind::Microphone)
         }
+        WryRequestKind::Single(wry::PermissionKind::Geolocation) => {
+            PagePermissionRequestKind::Single(PagePermissionKind::Geolocation)
+        }
         WryRequestKind::CameraAndMicrophone => PagePermissionRequestKind::CameraAndMicrophone,
         _ => return None,
     };
-    Some(PagePermissionRequest { id, origin, kind })
+    #[cfg(target_os = "macos")]
+    let blocked_by_system = kind
+        == PagePermissionRequestKind::Single(PagePermissionKind::Geolocation)
+        && crate::platform::imp::location_blocked_by_system();
+    #[cfg(not(target_os = "macos"))]
+    let blocked_by_system = false;
+    Some(PagePermissionRequest {
+        id,
+        origin,
+        kind,
+        blocked_by_system,
+    })
 }
 
 pub(super) fn admit_native_request(
@@ -292,6 +308,7 @@ impl EngineHost {
             EngineEvent::PermissionRequested {
                 id: item,
                 profile,
+                navigation: epoch.presentation_id(),
                 request,
             },
         );
@@ -396,7 +413,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_request_mapping_accepts_only_supported_structured_media() {
+    fn native_request_mapping_accepts_only_supported_structured_kinds() {
         let camera = core_request_from_components(
             7,
             "https",
@@ -410,6 +427,18 @@ mod tests {
         assert_eq!(
             camera.kind,
             PagePermissionRequestKind::Single(PagePermissionKind::Camera)
+        );
+        assert_eq!(
+            core_request_from_components(
+                11,
+                "https",
+                "maps.example",
+                None,
+                WryRequestKind::Single(wry::PermissionKind::Geolocation),
+            )
+            .unwrap()
+            .kind,
+            PagePermissionRequestKind::Single(PagePermissionKind::Geolocation)
         );
         assert_eq!(
             core_request_from_components(
@@ -446,10 +475,17 @@ mod tests {
                 None,
                 WryRequestKind::Single(wry::PermissionKind::Other),
             ),
+            core_request_from_components(
+                12,
+                "https",
+                "example.com",
+                None,
+                WryRequestKind::Single(wry::PermissionKind::Notifications),
+            ),
         ] {
             assert!(request.is_none());
         }
         assert_eq!(MAX_PENDING_PAGE_PERMISSION_REQUESTS, 8);
-        assert_eq!(PAGE_PERMISSION_REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(PAGE_PERMISSION_REQUEST_TIMEOUT, Duration::from_secs(125));
     }
 }

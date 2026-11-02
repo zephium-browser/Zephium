@@ -102,7 +102,7 @@ impl PreparedAgentWork {
         if self.controller.profile_storage_binding()?
             != (binding.profile(), binding.storage_class())
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.browser_profile = Some(binding);
         Ok(self)
@@ -686,7 +686,7 @@ impl ApplicationWork {
     }
 
     pub(crate) fn refuse_attachment(&mut self) {
-        self.fail(AgentWorkFailure::Contract);
+        self.fail(crate::contract_failure!());
     }
 
     pub(crate) fn admit(
@@ -703,7 +703,7 @@ impl ApplicationWork {
         if !Arc::ptr_eq(&run.engine, &self.engine)
             || !std::ptr::addr_eq(Arc::as_ptr(&run.audit), Arc::as_ptr(&self.journal))
         {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             return;
         }
         if self.used || self.stopping {
@@ -718,7 +718,7 @@ impl ApplicationWork {
         self.staged = Some(run);
         if !profile_valid {
             self.stopping = true;
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             self.abort_staged();
         }
         self.poll();
@@ -998,7 +998,7 @@ impl ApplicationWork {
                         _ => Err(AgentWorkFailure::Audit),
                     }
                 } else {
-                    Err(AgentWorkFailure::Contract)
+                    Err(crate::contract_failure!())
                 };
                 continue_audit = status.is_ok_and(|status| status.pending() > 0);
                 lock(&self.projection).snapshot.recovery_audit = Some(status);
@@ -1079,7 +1079,7 @@ impl ApplicationWork {
                 } else if let Some(AgentWorkOutcome::Recovery(recovery)) = &self.unstarted {
                     recovery.journal_admission(owner)
                 } else {
-                    Err(AgentWorkFailure::Contract)
+                    Err(crate::contract_failure!())
                 };
                 match admission {
                     Ok(mutation) => {
@@ -1105,7 +1105,7 @@ impl ApplicationWork {
             return;
         }
         let Some(mut staged) = self.staged.take() else {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             return;
         };
         if self.stopping || Instant::now() >= staged.deadline {

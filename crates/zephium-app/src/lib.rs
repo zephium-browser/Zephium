@@ -18,6 +18,19 @@ macro_rules! diagnostic {
 
 pub(crate) use diagnostic;
 
+/// `AgentWorkFailure::Contract`, remembering where it was raised so a failed
+/// page task names its cause in the log.
+#[allow(unused_macros)]
+macro_rules! contract_failure {
+    () => {{
+        #[cfg(feature = "work-execution")]
+        zephium_agent_controller::mark_contract_site(concat!(file!(), ":", line!()));
+        AgentWorkFailure::Contract
+    }};
+}
+#[allow(unused_imports)]
+pub(crate) use contract_failure;
+
 mod actor;
 mod api;
 mod lookup;
@@ -130,7 +143,9 @@ mod work_synthesis;
 #[cfg(any(feature = "work-execution", feature = "work-runtime"))]
 pub mod work_trace;
 pub use api::{
-    BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion,
-    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion, SpaceCommand, TabAction,
-    TabCompletion, TimeCompletion,
+    BookmarkCompletion, BrowsingDataCompletion, ExportCompletion, FaviconPageSource, FaviconProbe,
+    FaviconProber, FaviconProberAttachment, HistoryCompletion, HistoryListCompletion,
+    ImportCompletion, ImportDestination, ImportDestinationCompletion, NoteCompletion,
+    NotesAttachment, PageSource, ResourceCompletion, SourceCompletion, SpaceCommand, TabAction,
+    TabCompletion, TimeCompletion, ZoomCompletion,
 };

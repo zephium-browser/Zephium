@@ -249,6 +249,13 @@ export type WorkAgentGrantV1_Deserialize = {
 	 *  this skill loaded. A name it does not know is ignored.
 	 */
 	skill?: string | null,
+	/**  The canvas draft the person pressed Send on: this run sends it. */
+	draft?: WorkArtifactId | null,
+	/**
+	 *  What a browser search falls back to when a results page cannot be
+	 *  used; only a browser search grant names one.
+	 */
+	search_fallback?: WorkSearchFallbackV1 | null,
 };
 
 export type WorkAgentGrantV1_Serialize = {
@@ -279,6 +286,13 @@ export type WorkAgentGrantV1_Serialize = {
 	 *  this skill loaded. A name it does not know is ignored.
 	 */
 	skill?: string | null,
+	/**  The canvas draft the person pressed Send on: this run sends it. */
+	draft?: WorkArtifactId | null,
+	/**
+	 *  What a browser search falls back to when a results page cannot be
+	 *  used; only a browser search grant names one.
+	 */
+	search_fallback?: WorkSearchFallbackV1 | null,
 };
 
 export type WorkApprovalRequestV1 = {
@@ -309,48 +323,50 @@ export type WorkAreaPlacement = {
 
 export type WorkArtifactDataV1 = WorkArtifactDataV1_Serialize | WorkArtifactDataV1_Deserialize;
 
-export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+export type WorkArtifactDataV1_Deserialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Decimal strings preserve values independently of renderer floating point. */
-({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[];
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Deserialize[]; basis?: WorkMeasurementBasis_Deserialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Deserialize[]; entries?: WorkSourceEntry_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Deserialize[]; criteria: WorkCriterion[];
 /**  Dense: `cells[subject][criterion]`. */
-cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+cells: WorkCell_Deserialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Deserialize[]; items: WorkFinding_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A descriptive card, not an interactive native context or navigation grant. */
-({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Boxes and arrows: an architecture, system, flow or pipeline. */
-({ kind: "diagram"; nodes: WorkDiagramNode_Deserialize[]; edges: WorkDiagramEdge_Deserialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "diagram"; nodes: WorkDiagramNode_Deserialize[]; edges: WorkDiagramEdge_Deserialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  An excerpt of source code with notes on line ranges. */
 ({ kind: "code";
 /**  One of `CODE_LANGUAGES`. */
-language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**
  *  The reply a careful expert would write, in a closed Markdown subset
  *  (see `answer_faults`); the other objects of its set stand beside it.
  */
-({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  The answer, set on the canvas as typography above the result. */
 ({ kind: "reply"; headline: string;
 /**  Inline bold and code only. */
-text: string; figures?: WorkFigureV1_Deserialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+text: string; figures?: WorkFigureV1_Deserialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Things to choose between, photo-led. */
-({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Time-ordered steps, drawn as a timeline. */
-({ kind: "plan"; steps: WorkPlanStepV1_Deserialize[]; total?: WorkLabelledV1 | null; checkable?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "plan"; steps: WorkPlanStepV1_Deserialize[]; total?: WorkLabelledV1 | null; checkable?: boolean;
+/**  Drawn as a calendar of its days whatever it holds. */
+calendar?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Items without time order. */
-({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Deserialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Real data in typed columns; no sentences. */
-({ kind: "sheet"; columns: WorkSheetColumnV1_Deserialize[]; rows: WorkSheetRowV1_Deserialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "sheet"; columns: WorkSheetColumnV1_Deserialize[]; rows: WorkSheetRowV1_Deserialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A chart in one of the catalogue's styles; maps onto the frame's ChartSpec. */
 ({ kind: "plot"; style: WorkPlotStyleV1; x: WorkPlotXV1_Deserialize; y: WorkPlotYV1_Deserialize; series: WorkPlotSeriesV1_Deserialize[]; headline?: WorkLabelledV1 | null;
 /**  What the values are and where they come from. */
 basis: string;
 /**  The values are the model's knowledge, not observed. */
-knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } |
+knowledge?: boolean }) & { alternatives?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; state?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } |
 /**  A change to one file, read like a code review. */
 ({ kind: "diff"; path: string;
 /**  One of `CODE_LANGUAGES`. */
-language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; labels?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A message in the shape of its destination; sent only through Confirm. */
-({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**
  *  A folder's overview: what it is, its stack, its structure, its
  *  scripts and its state.
@@ -361,52 +377,67 @@ summary: string;
 /**  The folder, as an absolute path. */
 root: string; stack?: WorkProjectStackV1_Deserialize[]; tree: WorkProjectEntryV1_Deserialize[];
 /**  Entries at the root beyond those listed. */
-more?: number | null; scripts?: WorkProjectScriptV1_Deserialize[]; git?: WorkProjectGitV1_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; rows?: never; series?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media";
+more?: number | null; scripts?: WorkProjectScriptV1_Deserialize[]; git?: WorkProjectGitV1_Deserialize | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; rows?: never; series?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media";
 /**  Image, video or audio; `kind` is the object's own tag. */
-medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
+medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+/**
+ *  The one thing a request is about, in the shape of its service: a pull
+ *  request, an issue, a thread, an email, a ticket, a page.
+ */
+({ kind: "subject";
+/**  The service's own word for it: Pull request, Issue, Thread. */
+noun: string;
+/**  Its handle there: crynta/terax#1337, UBER-5671. */
+reference?: string | null; title: string; state?: WorkSubjectStateV1 | null;
+/**  Roles and names: Author, Assignee, From. */
+people?: WorkLabelledV1[]; facts?: WorkLabelledV1[]; labels?: string[];
+/**  Inline bold and code only. */
+summary?: string | null; url: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
 
-export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+export type WorkArtifactDataV1_Serialize = ({ kind: "document"; paragraphs: string[]; formatted?: NoteDocument_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "table"; columns: string[]; rows: string[][] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison"; criteria: string[]; alternatives: WorkComparisonAlternative[] }) & { basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Decimal strings preserve values independently of renderer floating point. */
-({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[];
+({ kind: "chart"; x_label: string; y_label: string; series: WorkChartSeries_Serialize[]; basis?: WorkMeasurementBasis_Serialize | null; general_knowledge?: boolean }) & { alternatives?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; y?: never } | ({ kind: "checklist"; items: WorkChecklistItem[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "evidence_collection"; summary: string; subjects?: WorkSubject_Serialize[]; entries?: WorkSourceEntry_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "comparison_matrix"; subjects: WorkSubject_Serialize[]; criteria: WorkCriterion[];
 /**  Dense: `cells[subject][criterion]`. */
-cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+cells: WorkCell_Serialize[][]; notes?: string[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; checkable?: never; columns?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "findings"; subjects?: WorkSubject_Serialize[]; items: WorkFinding_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A descriptive card, not an interactive native context or navigation grant. */
-({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "browser_resource_preview"; title: string; url: string; summary: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Boxes and arrows: an architecture, system, flow or pipeline. */
-({ kind: "diagram"; nodes: WorkDiagramNode_Serialize[]; edges: WorkDiagramEdge_Serialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "diagram"; nodes: WorkDiagramNode_Serialize[]; edges: WorkDiagramEdge_Serialize[]; layers?: WorkDiagramLayer[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; markdown?: never; medium?: never; more?: never; name?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  An excerpt of source code with notes on line ranges. */
 ({ kind: "code";
 /**  One of `CODE_LANGUAGES`. */
-language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+language: string; text: string; notes?: WorkCodeNote[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**
  *  The reply a careful expert would write, in a closed Markdown subset
  *  (see `answer_faults`); the other objects of its set stand beside it.
  */
-({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "answer"; markdown: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  The answer, set on the canvas as typography above the result. */
 ({ kind: "reply"; headline: string;
 /**  Inline bold and code only. */
-text: string; figures?: WorkFigureV1_Serialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+text: string; figures?: WorkFigureV1_Serialize[]; points?: string[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Things to choose between, photo-led. */
-({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "picks"; facet: WorkPickFacetV1; items: WorkPickV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Time-ordered steps, drawn as a timeline. */
-({ kind: "plan"; steps: WorkPlanStepV1_Serialize[]; total?: WorkLabelledV1 | null; checkable?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "plan"; steps: WorkPlanStepV1_Serialize[]; total?: WorkLabelledV1 | null; checkable?: boolean;
+/**  Drawn as a calendar of its days whatever it holds. */
+calendar?: boolean }) & { alternatives?: never; basis?: never; body?: never; cells?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Items without time order. */
-({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "list"; style: WorkListStyleV1; items: WorkListItemV1_Serialize[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  Real data in typed columns; no sentences. */
-({ kind: "sheet"; columns: WorkSheetColumnV1_Serialize[]; rows: WorkSheetRowV1_Serialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "sheet"; columns: WorkSheetColumnV1_Serialize[]; rows: WorkSheetRowV1_Serialize[]; note?: string | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A chart in one of the catalogue's styles; maps onto the frame's ChartSpec. */
 ({ kind: "plot"; style: WorkPlotStyleV1; x: WorkPlotXV1_Serialize; y: WorkPlotYV1_Serialize; series: WorkPlotSeriesV1_Serialize[]; headline?: WorkLabelledV1 | null;
 /**  What the values are and where they come from. */
 basis: string;
 /**  The values are the model's knowledge, not observed. */
-knowledge?: boolean }) & { alternatives?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } |
+knowledge?: boolean }) & { alternatives?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; hunks?: never; items?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; stack?: never; start_secs?: never; state?: never; steps?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x_label?: never; y_label?: never } |
 /**  A change to one file, read like a code review. */
 ({ kind: "diff"; path: string;
 /**  One of `CODE_LANGUAGES`. */
-language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+language: string; summary: string; hunks: WorkDiffHunkV1[] }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; items?: never; knowledge?: never; labels?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**  A message in the shape of its destination; sent only through Confirm. */
-({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+({ kind: "draft"; destination: WorkDraftDestinationV1; to?: string | null; subject?: string | null; body: string; target_url?: string | null }) & { alternatives?: never; basis?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; state?: never; steps?: never; style?: never; subjects?: never; summary?: never; text?: never; title?: never; total?: never; tree?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
 /**
  *  A folder's overview: what it is, its stack, its structure, its
  *  scripts and its state.
@@ -417,9 +448,22 @@ summary: string;
 /**  The folder, as an absolute path. */
 root: string; stack?: WorkProjectStackV1_Serialize[]; tree: WorkProjectEntryV1_Serialize[];
 /**  Entries at the root beyond those listed. */
-more?: number | null; scripts?: WorkProjectScriptV1_Serialize[]; git?: WorkProjectGitV1_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; rows?: never; series?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media";
+more?: number | null; scripts?: WorkProjectScriptV1_Serialize[]; git?: WorkProjectGitV1_Serialize | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; medium?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; poster?: never; provider?: never; reference?: never; rows?: never; series?: never; start_secs?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; title?: never; to?: never; total?: never; url?: never; x?: never; x_label?: never; y?: never; y_label?: never } | ({ kind: "media";
 /**  Image, video or audio; `kind` is the object's own tag. */
-medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
+medium: WorkMediaKindV1; url: string; title?: string | null; provider?: WorkMediaProviderV1 | null; poster?: string | null; duration?: string | null; start_secs?: number | null }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; edges?: never; entries?: never; facet?: never; facts?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; labels?: never; language?: never; layers?: never; markdown?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; noun?: never; paragraphs?: never; path?: never; people?: never; points?: never; reference?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; state?: never; steps?: never; style?: never; subject?: never; subjects?: never; summary?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never } |
+/**
+ *  The one thing a request is about, in the shape of its service: a pull
+ *  request, an issue, a thread, an email, a ticket, a page.
+ */
+({ kind: "subject";
+/**  The service's own word for it: Pull request, Issue, Thread. */
+noun: string;
+/**  Its handle there: crynta/terax#1337, UBER-5671. */
+reference?: string | null; title: string; state?: WorkSubjectStateV1 | null;
+/**  Roles and names: Author, Assignee, From. */
+people?: WorkLabelledV1[]; facts?: WorkLabelledV1[]; labels?: string[];
+/**  Inline bold and code only. */
+summary?: string | null; url: string }) & { alternatives?: never; basis?: never; body?: never; calendar?: never; cells?: never; checkable?: never; columns?: never; criteria?: never; destination?: never; duration?: never; edges?: never; entries?: never; facet?: never; figures?: never; formatted?: never; general_knowledge?: never; git?: never; headline?: never; hunks?: never; items?: never; knowledge?: never; language?: never; layers?: never; markdown?: never; medium?: never; more?: never; name?: never; nodes?: never; note?: never; notes?: never; paragraphs?: never; path?: never; points?: never; poster?: never; provider?: never; root?: never; rows?: never; scripts?: never; series?: never; stack?: never; start_secs?: never; steps?: never; style?: never; subject?: never; subjects?: never; target_url?: never; text?: never; to?: never; total?: never; tree?: never; x?: never; x_label?: never; y?: never; y_label?: never };
 
 export type WorkArtifactDecision = "accepted" | "rejected";
 
@@ -508,6 +552,8 @@ export type WorkAskPurposeV1 =
 "question" |
 /**  Whether the agent may work in the person's session on a site. */
 "entry" |
+/**  Screenshot consent for one origin. This grants no account entry or action. */
+"screenshot" |
 /**  The run spent its budget: keep going or stop. */
 "budget" |
 /**  Whether the agent may read the person's history, notes or tabs. */
@@ -520,7 +566,12 @@ export type WorkAskPurposeV1 =
  *  Whether the agent may read a folder on this Mac the request named;
  *  the step's local fact carries the folder.
  */
-"folder";
+"folder" |
+/**
+ *  Whether to open a page address the agent wrote itself after reading
+ *  the person's own information; the prompt is the address.
+ */
+"address";
 
 export type WorkAttemptFact = {
 	id: WorkAttemptId,
@@ -882,7 +933,9 @@ export type WorkConfirmCategoryV1 =
 /**  Save or submit a change. */
 "save" |
 /**  Type into a document that saves as it is typed. */
-"edit";
+"edit" |
+/**  Type into a site the person did not name, in a run holding their data. */
+"type";
 
 export type WorkConfirmDecisionV1 = "approved" |
 /**  Approved, and later edits on this site in this run need no question. */
@@ -1003,6 +1056,8 @@ export type WorkContextDisclosureV1_Deserialize = {
 	 *  cards without a read.
 	 */
 	tabs?: WorkContextTabV1_Deserialize[],
+	/**  Request-bound canvas access for uniquely resolved block tools. */
+	blocks?: boolean,
 };
 
 /**
@@ -1021,6 +1076,8 @@ export type WorkContextDisclosureV1_Serialize = {
 	 *  cards without a read.
 	 */
 	tabs?: WorkContextTabV1_Serialize[],
+	/**  Request-bound canvas access for uniquely resolved block tools. */
+	blocks?: boolean,
 };
 
 export type WorkContextItemKind = "note" | "task" | "object" | "tab" | "objective" | "artifact" | "subject" | "finding" | "source" |
@@ -1087,6 +1144,11 @@ export type WorkContextSelectionV1_Deserialize = {
 	 *  the current window as context: title, host and path, never content.
 	 */
 	tabs?: boolean,
+	/**
+	 *  This request may resolve a specifically referenced block on its canvas.
+	 *  No other block bodies or titles are disclosed implicitly.
+	 */
+	blocks?: boolean,
 };
 
 /**
@@ -1101,6 +1163,11 @@ export type WorkContextSelectionV1_Serialize = {
 	 *  the current window as context: title, host and path, never content.
 	 */
 	tabs?: boolean,
+	/**
+	 *  This request may resolve a specifically referenced block on its canvas.
+	 *  No other block bodies or titles are disclosed implicitly.
+	 */
+	blocks?: boolean,
 };
 
 /**  One open tab: never its page content or query. */
@@ -1252,6 +1319,7 @@ export type WorkElementPlacement_Deserialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
@@ -1269,6 +1337,7 @@ export type WorkElementPlacement_Serialize = {
 	/**
 	 *  0: an absolute position from before lanes, which the canvas re-derives;
 	 *  2: `x, y` are the card's offset from its lane-derived position.
+	 *  3: the person pinned the block relative to its result's corner.
 	 */
 	revision?: number,
 };
@@ -1294,7 +1363,12 @@ export type WorkEnvironmentChangedV1 = {
 
 export type WorkEnvironmentEdit = { kind: "rename"; title: string } | { kind: "set_lifecycle"; lifecycle: WorkLifecycle } | { kind: "add"; reference: WorkEnvironmentReference; area: WorkAreaId | null } | { kind: "remove"; element: WorkElementId } | { kind: "create_area"; title: string } | { kind: "rename_area"; area: WorkAreaId; title: string } | { kind: "remove_area"; area: WorkAreaId } | { kind: "assign_area"; element: WorkElementId; area: WorkAreaId | null } | { kind: "relate"; from: WorkElementId; to: WorkElementId; relation: WorkRelationKind } | { kind: "unrelate"; relation: WorkRelationId } |
 /**  Records or replaces the user's choice about one element. */
-{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId };
+{ kind: "decide"; element: WorkElementId; choice: string } | { kind: "undecide"; element: WorkElementId } |
+/**
+ *  Names a placed link by what its page says it is; a video's title is
+ *  followed by its channel on the next line.
+ */
+{ kind: "name_link"; element: WorkElementId; title: string };
 
 export type WorkEnvironmentElement = {
 	id: WorkElementId,
@@ -1801,8 +1875,15 @@ export type WorkListItemV1_Deserialize = {
 	detail?: string | null,
 	due?: string | null,
 	priority?: WorkListPriorityV1 | null,
+	done?: boolean,
 	from?: WorkListFromV1_Deserialize | null,
 	source?: number | null,
+	/**  Exact native collection-row evidence, independent of the prose citation. */
+	record_source?: number | null,
+	/**  Host-only immutable native image; never accepted from model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  The selected native row attempted media; no URL fallback is implied. */
+	media_attempted?: boolean,
 };
 
 export type WorkListItemV1_Serialize = {
@@ -1810,13 +1891,20 @@ export type WorkListItemV1_Serialize = {
 	detail?: string | null,
 	due?: string | null,
 	priority?: WorkListPriorityV1 | null,
+	done?: boolean,
 	from?: WorkListFromV1_Serialize | null,
 	source?: number | null,
+	/**  Exact native collection-row evidence, independent of the prose citation. */
+	record_source?: number | null,
+	/**  Host-only immutable native image; never accepted from model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  The selected native row attempted media; no URL fallback is implied. */
+	media_attempted?: boolean,
 };
 
 export type WorkListPriorityV1 = "high";
 
-export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements";
+export type WorkListStyleV1 = "todo" | "messages" | "reading" | "requirements" | "questions";
 
 export type WorkLocalStepV1 = WorkLocalStepV1_Serialize | WorkLocalStepV1_Deserialize;
 
@@ -1827,7 +1915,7 @@ export type WorkLocalStepV1_Deserialize = {
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
 	before_digest?: string | null,
-	/**  The folder a `folder` question asks to read, as an absolute path. */
+	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
 };
 
@@ -1838,7 +1926,7 @@ export type WorkLocalStepV1_Serialize = {
 	output?: WorkCommandOutputV1 | null,
 	proposal?: string | null,
 	before_digest?: string | null,
-	/**  The folder a `folder` question asks to read, as an absolute path. */
+	/**  A folder question's known starting path; absent for a choose-any-folder picker. */
 	folder?: string | null,
 };
 
@@ -1862,7 +1950,34 @@ export type WorkMediaKindV1 = "image" | "video" | "audio";
 
 export type WorkMediaProviderV1 = "youtube" | "vimeo" | "file";
 
-export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" |
+/**  What stopped a model turn, as the person can fix it. */
+export type WorkModelFaultV1 =
+/**  No key is set for the chosen model. */
+"missing_key" |
+/**  The provider refused the person's key. */
+"key_refused" |
+/**  The person's own provider account is out of credit. */
+"provider_credit" |
+/**  The provider plan's per-minute limit is smaller than one request. */
+"plan_limit" |
+/**  The account's included Zephium AI usage, and any extra, is spent. */
+"hosted_usage" |
+/**  The chosen Zephium AI model needs another plan. */
+"plan_required" |
+/**  The Zephium account is under billing review. */
+"billing_review" |
+/**  The account's daily Zephium AI limit is reached. */
+"daily_limit" |
+/**  Free Zephium AI usage is paused for now; credits and keys still work. */
+"free_usage_paused" |
+/**  Earlier Zephium AI requests are still being confirmed. */
+"hosted_busy" |
+/**  Zephium AI is paused as a spending protection. */
+"hosted_paused" |
+/**  The Zephium account's session ended. */
+"signed_out" | "rate_limited" | "provider_down" | "unreachable" | "too_large";
+
+export type WorkModelProvider = "open_ai" | "anthropic" | "google" | "deep_seek" | "open_router" | "xai" | "mistral" | "groq" | "cerebras" |
 /**  Any OpenAI-compatible chat endpoint the person configured. */
 "compatible" |
 /**  Zephium Cloud: the upstream's native body, our base URL and bearer. */
@@ -1984,11 +2099,27 @@ export type WorkPageAccountV1 = {
 	badge: boolean,
 };
 
+export type WorkPageFailureStageV1 = "admission" | "observation" | "action" | "navigation" | "extraction" | "provider" | "storage" | "runtime";
+
 export type WorkPageFrameV1 = {
 	generation: number,
 	width: number,
 	height: number,
 };
+
+export type WorkPageHandoffKindV1 = "sign_in" | "check" | "sign_in_and_check";
+
+/**
+ *  Conservative provenance after model-image dispatch, including unknown
+ *  transmission. It never grants account entry, effects or later disclosure.
+ */
+export type WorkPageImageDisclosureV1 =
+/**  Native fresh-isolated public proof authorized the exact image. */
+"public_isolated" |
+/**  An exact site screenshot consent authorized the exact image. */
+"site_consent";
+
+export type WorkPageOutcomeV1 = { kind: "completed" } | { kind: "incomplete" } | { kind: "needs_sign_in" } | { kind: "needs_check" } | { kind: "needs_approval" } | { kind: "needs_interaction" } | { kind: "too_many_steps" } | { kind: "redirected" } | { kind: "refused"; stage: WorkPageFailureStageV1 } | { kind: "site_error" } | { kind: "cancelled" } | { kind: "outcome_unknown" };
 
 /**
  *  A page one browser step opened, with its newest bounded frame for the
@@ -2063,10 +2194,14 @@ export type WorkPartNeedV1 = WorkPartNeedV1_Serialize | WorkPartNeedV1_Deseriali
  *  thing it concerns. The fix sits on the part's row.
  */
 export type WorkPartNeedV1_Deserialize =
-/**  Sign in on the site, then the part can run again. */
+/**  Sign in on the retained page so the part can continue. */
 ({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } |
+/**  Pass the site's human check on the retained page. */
+({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } |
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } |
+/**  Choose a folder in the native picker before this part can work. */
+({ kind: "choose_folder" }) & { connection?: never; host?: never; path?: never; reason?: never } |
 /**  Let the agent read a folder on this Mac. */
 ({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } |
 /**
@@ -2087,10 +2222,14 @@ export type WorkPartNeedV1_Deserialize =
  *  thing it concerns. The fix sits on the part's row.
  */
 export type WorkPartNeedV1_Serialize =
-/**  Sign in on the site, then the part can run again. */
+/**  Sign in on the retained page so the part can continue. */
 ({ kind: "sign_in"; host: string }) & { connection?: never; path?: never; reason?: never } |
+/**  Pass the site's human check on the retained page. */
+({ kind: "check"; host: string }) & { connection?: never; path?: never; reason?: never } |
 /**  Let the agent work on the site as the person. */
 ({ kind: "allow_site"; host: string }) & { connection?: never; path?: never; reason?: never } |
+/**  Choose a folder in the native picker before this part can work. */
+({ kind: "choose_folder" }) & { connection?: never; host?: never; path?: never; reason?: never } |
 /**  Let the agent read a folder on this Mac. */
 ({ kind: "allow_folder"; path: string }) & { connection?: never; host?: never; reason?: never } |
 /**
@@ -2160,6 +2299,10 @@ export type WorkPickV1_Deserialize = {
 	subtitle?: string | null,
 	/**  Public HTTPS pictures of the subject itself, from its sources. */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
+	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
 	url?: string | null,
@@ -2181,6 +2324,10 @@ export type WorkPickV1_Serialize = {
 	subtitle?: string | null,
 	/**  Public HTTPS pictures of the subject itself, from its sources. */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
+	media_attempted?: boolean,
 	/**  A bare public host whose logo stands for the subject. */
 	logo_host?: string | null,
 	url?: string | null,
@@ -2277,6 +2424,8 @@ export type WorkPlanStepV1 = WorkPlanStepV1_Serialize | WorkPlanStepV1_Deseriali
 
 export type WorkPlanStepV1_Deserialize = {
 	when?: string | null,
+	/**  The day it falls on, `YYYY-MM-DD`, when it has one. */
+	date?: string | null,
 	title: string,
 	detail?: string | null,
 	kind: WorkPlanStepKindV1,
@@ -2289,6 +2438,8 @@ export type WorkPlanStepV1_Deserialize = {
 
 export type WorkPlanStepV1_Serialize = {
 	when?: string | null,
+	/**  The day it falls on, `YYYY-MM-DD`, when it has one. */
+	date?: string | null,
 	title: string,
 	detail?: string | null,
 	kind: WorkPlanStepKindV1,
@@ -2514,14 +2665,35 @@ export type WorkProjectStackV1_Serialize = {
 	manifest?: string | null,
 };
 
-export type WorkProviderSearchCitation = {
+export type WorkProviderSearchCitation = WorkProviderSearchCitation_Serialize | WorkProviderSearchCitation_Deserialize;
+
+export type WorkProviderSearchCitation_Deserialize = {
 	url: string,
 	title: string,
 	start_index: number,
 	end_index: number,
+	/**
+	 *  The engine's own text under a browser search result. A browser search
+	 *  has no answer, so its results span nothing.
+	 */
+	snippet?: string | null,
 };
 
-export type WorkProviderSearchEvidenceV1 = {
+export type WorkProviderSearchCitation_Serialize = {
+	url: string,
+	title: string,
+	start_index: number,
+	end_index: number,
+	/**
+	 *  The engine's own text under a browser search result. A browser search
+	 *  has no answer, so its results span nothing.
+	 */
+	snippet?: string | null,
+};
+
+export type WorkProviderSearchEvidenceV1 = WorkProviderSearchEvidenceV1_Serialize | WorkProviderSearchEvidenceV1_Deserialize;
+
+export type WorkProviderSearchEvidenceV1_Deserialize = {
 	version: number,
 	provider: WorkSearchProvider,
 	model: string,
@@ -2529,8 +2701,27 @@ export type WorkProviderSearchEvidenceV1 = {
 	response_model: string,
 	response_id: string,
 	search_call_id: string,
+	/**  Empty for a browser search: a results page gives no answer. */
 	answer: string,
-	citations: WorkProviderSearchCitation[],
+	/**  For a browser search, its results in the engine's order. */
+	citations: WorkProviderSearchCitation_Deserialize[],
+	/**  Provider-reported usage, distinct from fixed billed search-content units. */
+	actual_input_tokens: number,
+	actual_output_tokens: number,
+};
+
+export type WorkProviderSearchEvidenceV1_Serialize = {
+	version: number,
+	provider: WorkSearchProvider,
+	model: string,
+	/**  Catalog-validated actual snapshot returned by the provider. */
+	response_model: string,
+	response_id: string,
+	search_call_id: string,
+	/**  Empty for a browser search: a results page gives no answer. */
+	answer: string,
+	/**  For a browser search, its results in the engine's order. */
+	citations: WorkProviderSearchCitation_Serialize[],
 	/**  Provider-reported usage, distinct from fixed billed search-content units. */
 	actual_input_tokens: number,
 	actual_output_tokens: number,
@@ -2550,7 +2741,7 @@ export type WorkProviderSearchRecordV1_Deserialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
-	evidence: WorkProviderSearchEvidenceV1,
+	evidence: WorkProviderSearchEvidenceV1_Deserialize,
 	ranking?: WorkPublicSearchRanking | null,
 };
 
@@ -2562,7 +2753,7 @@ export type WorkProviderSearchRecordV1_Serialize = {
 	id: WorkArtifactId,
 	node: WorkPlanNodeId,
 	attempt: WorkAttemptId,
-	evidence: WorkProviderSearchEvidenceV1,
+	evidence: WorkProviderSearchEvidenceV1_Serialize,
 	ranking?: WorkPublicSearchRanking | null,
 };
 
@@ -2620,6 +2811,25 @@ export type WorkRatingV1_Serialize = {
 	value: string,
 	max: number,
 	count?: number | null,
+};
+
+export type WorkRecordMediaOriginV1 =
+/**  Exact anonymous HTTPS source, retrieved under the original public-read grant. */
+"public_fetch" | "native_fetch" | "native_crop";
+
+export type WorkRecordMediaRefV1 = {
+	profile: ProfileId,
+	work: WorkId,
+	execution: WorkExecutionId,
+	attempt: WorkAttemptId,
+	step: WorkStepId,
+	extraction: WorkArtifactId,
+	record: number,
+	source: string,
+	digest: string,
+	width: number,
+	height: number,
+	origin: WorkRecordMediaOriginV1,
 };
 
 export type WorkRelation = {
@@ -2800,7 +3010,23 @@ export type WorkRuntimeProjection_Serialize = {
 /** Store incarnation; never serialized as execution authority. */
 export type WorkRuntimeSessionId = string;
 
-export type WorkSearchProvider = "open_ai";
+/**
+ *  The search a browser search falls back to when it cannot use a results
+ *  page.
+ */
+export type WorkSearchFallbackV1 = {
+	provider: WorkSearchProvider,
+	model: string,
+};
+
+export type WorkSearchProvider = "open_ai" |
+/**  The web search built into the chosen model's own provider. */
+"native" |
+/**
+ *  The person's search engine's results page, read in the agent browser
+ *  with no model call.
+ */
+"browser";
 
 export type WorkSheetBestV1 = "max" | "min";
 
@@ -2827,11 +3053,17 @@ export type WorkSheetColumnV1_Serialize = {
 export type WorkSheetEntityV1 = WorkSheetEntityV1_Serialize | WorkSheetEntityV1_Deserialize;
 
 export type WorkSheetEntityV1_Deserialize = {
+	/**  Exact native row image, copied only by the host from admitted records. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	media_attempted?: boolean,
 	logo_host?: string | null,
 	image?: string | null,
 };
 
 export type WorkSheetEntityV1_Serialize = {
+	/**  Exact native row image, copied only by the host from admitted records. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	media_attempted?: boolean,
 	logo_host?: string | null,
 	image?: string | null,
 };
@@ -2957,13 +3189,18 @@ export type WorkStepFact_Deserialize = {
 	evidence?: WorkArtifactId | null,
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
-	/**  Closed measurements of a settled browser step; absent for other kinds. */
-	measurements?: WorkStepMeasurementsV1 | null,
+	/**
+	 *  Browser measurements; a running read may carry conservative image
+	 *  disclosure provenance before its final measurements settle.
+	 */
+	measurements?: WorkStepMeasurementsV1_Deserialize | null,
 	local?: WorkLocalStepV1_Deserialize | null,
 	/**  A page opened in the person's own session on its site. */
 	account?: WorkPageAccountV1 | null,
 	/**  The part of a lead run this step works for. */
 	part?: WorkPartId | null,
+	/**  Why a model turn failed, in closed words the person can act on. */
+	model_fault?: WorkModelFaultV1 | null,
 };
 
 export type WorkStepFact_Serialize = {
@@ -2978,13 +3215,18 @@ export type WorkStepFact_Serialize = {
 	evidence?: WorkArtifactId | null,
 	/**  A short line for people: what the agent said or what this step found. */
 	note?: string | null,
-	/**  Closed measurements of a settled browser step; absent for other kinds. */
-	measurements?: WorkStepMeasurementsV1 | null,
+	/**
+	 *  Browser measurements; a running read may carry conservative image
+	 *  disclosure provenance before its final measurements settle.
+	 */
+	measurements?: WorkStepMeasurementsV1_Serialize | null,
 	local?: WorkLocalStepV1_Serialize | null,
 	/**  A page opened in the person's own session on its site. */
 	account?: WorkPageAccountV1 | null,
 	/**  The part of a lead run this step works for. */
 	part?: WorkPartId | null,
+	/**  Why a model turn failed, in closed words the person can act on. */
+	model_fault?: WorkModelFaultV1 | null,
 };
 
 /** One admitted agent operation inside an execution. */
@@ -2994,82 +3236,149 @@ export type WorkStepKindV1 = WorkStepKindV1_Serialize | WorkStepKindV1_Deseriali
 
 export type WorkStepKindV1_Deserialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null;
+({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null;
 /**  A page task: the agent works toward this goal on the url's site. */
-goal?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+goal?: string | null;
+/**
+ *  Words a page task types or posts exactly as written, line breaks
+ *  included; the goal stays a short instruction.
+ */
+verbatim?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
+/**  A revision-checked edit of an admitted owned block. */
+({ kind: "edit_block"; resource: string; expected_revision: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null;
+({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null;
 /**  Why it asks, so the question shows where it belongs. */
-purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A message the person sent while the agent ran; the agent reads it at
  *  its next turn.
  */
-({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  Directory listing inside a granted folder. */
-({ kind: "list"; path: string; depth?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset?: number | null; limit?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob?: string | null; regex?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "list"; path: string; depth?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "read_file"; path: string; offset?: number | null; limit?: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "search_files"; path: string; query: string; glob?: string | null; regex?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  A proposed whole-file write; `decision` is the person's answer. */
-({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  A proposed replacement of one exact passage. */
-({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; url?: never } | ({ kind: "delete_file"; path: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs?: number | null; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; title?: never; to?: never; url?: never } | ({ kind: "finish";
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "move_file"; from: string; to: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; url?: never; verbatim?: never } | ({ kind: "delete_file"; path: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs?: number | null; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "finish";
 /**  Up to three short next requests the person may choose. */
 followups?: string[];
 /**  The work's name, given by its first run: a short noun phrase. */
-title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } |
+title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A step on a site that commits something for the person, held until
  *  they decide. Every field is Rust's reading of the page, never the
  *  model's words; the status is the receipt once it settles.
  */
-({ kind: "confirm"; confirm: WorkConfirmV1_Deserialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "confirm"; confirm: WorkConfirmV1_Deserialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A call to an installed tool or connected service, settled as it is
  *  recorded; the note is its row for people.
  */
-({ kind: "call"; call: WorkConnectionCallV1_Deserialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never };
+({ kind: "call"; call: WorkConnectionCallV1_Deserialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never };
 
 export type WorkStepKindV1_Serialize =
 /**  One model turn; `note` on the step is what the agent said. */
-({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null;
+({ kind: "turn" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "search"; query: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "read"; url: string; collection?: WorkBrowseCollection | null;
 /**  A page task: the agent works toward this goal on the url's site. */
-goal?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+goal?: string | null;
+/**
+ *  Words a page task types or posts exactly as written, line breaks
+ *  included; the goal stays a short instruction.
+ */
+verbatim?: string | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never } | ({ kind: "discover"; query: string; collection?: WorkBrowseCollection | null }) & { answer?: never; call?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
+/**  A revision-checked edit of an admitted owned block. */
+({ kind: "edit_block"; resource: string; expected_revision: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  Objects the agent placed on the canvas from this turn. */
-({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null;
+({ kind: "publish" }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "ask"; prompt: string; options: string[]; answer?: string | null;
 /**  Why it asks, so the question shows where it belongs. */
-purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+purpose?: WorkAskPurposeV1 | null }) & { call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; path?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A message the person sent while the agent ran; the agent reads it at
  *  its next turn.
  */
-({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "steer"; text: string }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  Directory listing inside a granted folder. */
-({ kind: "list"; path: string; depth: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "read_file"; path: string; offset: number | null; limit: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "search_files"; path: string; query: string; glob: string | null; regex: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "list"; path: string; depth: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "read_file"; path: string; offset: number | null; limit: number | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; new?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "search_files"; path: string; query: string; glob: string | null; regex: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  A proposed whole-file write; `decision` is the person's answer. */
-({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "write_file"; path: string; content: string; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**  A proposed replacement of one exact passage. */
-({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "move_file"; from: string; to: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; url?: never } | ({ kind: "delete_file"; path: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs: number | null; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; title?: never; to?: never; url?: never } | ({ kind: "finish";
+({ kind: "edit_file"; path: string; old: string; new: string; replacements?: WorkFileReplacementV1[]; decision?: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; offset?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "move_file"; from: string; to: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; url?: never; verbatim?: never } | ({ kind: "delete_file"; path: string; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "run_command"; cwd: string; command: string; timeout_secs: number | null; decision: boolean | null }) & { answer?: never; call?: never; collection?: never; confirm?: never; content?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; title?: never; to?: never; url?: never; verbatim?: never } | ({ kind: "finish";
 /**  Up to three short next requests the person may choose. */
 followups?: string[];
 /**  The work's name, given by its first run: a short noun phrase. */
-title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; to?: never; url?: never } |
+title?: string | null }) & { answer?: never; call?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A step on a site that commits something for the person, held until
  *  they decide. Every field is Rust's reading of the page, never the
  *  model's words; the status is the receipt once it settles.
  */
-({ kind: "confirm"; confirm: WorkConfirmV1_Serialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never } |
+({ kind: "confirm"; confirm: WorkConfirmV1_Serialize }) & { answer?: never; call?: never; collection?: never; command?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never } |
 /**
  *  A call to an installed tool or connected service, settled as it is
  *  recorded; the note is its row for people.
  */
-({ kind: "call"; call: WorkConnectionCallV1_Serialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never };
+({ kind: "call"; call: WorkConnectionCallV1_Serialize }) & { answer?: never; collection?: never; command?: never; confirm?: never; content?: never; cwd?: never; decision?: never; depth?: never; expected_revision?: never; followups?: never; from?: never; glob?: never; goal?: never; limit?: never; new?: never; offset?: never; old?: never; options?: never; path?: never; prompt?: never; purpose?: never; query?: never; regex?: never; replacements?: never; resource?: never; text?: never; timeout_secs?: never; title?: never; to?: never; url?: never; verbatim?: never };
 
 /**
  *  Closed counts for one browser step: durations, call counts and exact
  *  accounting beside the conservative ceiling in `usage`. Never page, model
  *  or provider text.
  */
-export type WorkStepMeasurementsV1 = {
+export type WorkStepMeasurementsV1 = WorkStepMeasurementsV1_Serialize | WorkStepMeasurementsV1_Deserialize;
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1_Deserialize = {
+	/**
+	 *  Work revision assigned by Store when this page step settled. Never an
+	 *  adapter clock or claim; absent on older or unfinished records.
+	 */
+	settled_revision?: WorkRevision | null,
+	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
+	outcome?: WorkPageOutcomeV1 | null,
+	/**  A wall verified clear before the same retained task resumed. */
+	resolved_handoff?: WorkPageHandoffKindV1 | null,
+	/**  Sticky model-image disclosure provenance, absent on older/text-only steps. */
+	image_disclosure?: WorkPageImageDisclosureV1 | null,
+	/**  Wall time from the step's resource launch to its settled outcome. */
+	wall_millis: number,
+	/**  Typed decision calls answered by the recommended backend. */
+	decision_calls: number,
+	/**  Typed decision calls answered by the LLM emulation. */
+	emulation_calls: number,
+	/**  Page-model calls, including focused generation and extraction. */
+	planner_calls: number,
+	/**  Native actions the page agent started. */
+	native_actions: number,
+	/**  Tokens charged by settled provider calls. */
+	model_tokens: number,
+	/**  Micro-USD charged by settled provider calls. */
+	cost_micro_usd: number,
+	/**  How exactly `cost_micro_usd` is known. */
+	cost_basis: WorkCostBasis,
+};
+
+/**
+ *  Closed counts for one browser step: durations, call counts and exact
+ *  accounting beside the conservative ceiling in `usage`. Never page, model
+ *  or provider text.
+ */
+export type WorkStepMeasurementsV1_Serialize = {
+	/**
+	 *  Work revision assigned by Store when this page step settled. Never an
+	 *  adapter clock or claim; absent on older or unfinished records.
+	 */
+	settled_revision?: WorkRevision | null,
+	/**  Closed page outcome, independent of explanatory text. Absent on older steps. */
+	outcome?: WorkPageOutcomeV1 | null,
+	/**  A wall verified clear before the same retained task resumed. */
+	resolved_handoff?: WorkPageHandoffKindV1 | null,
+	/**  Sticky model-image disclosure provenance, absent on older/text-only steps. */
+	image_disclosure?: WorkPageImageDisclosureV1 | null,
 	/**  Wall time from the step's resource launch to its settled outcome. */
 	wall_millis: number,
 	/**  Typed decision calls answered by the recommended backend. */
@@ -3093,6 +3402,24 @@ export type WorkStepStatus = "running" | "succeeded" | "failed" | "cancelled" | 
 /**  A named thing the work is about: a library, a listing, a flight, a concept. */
 export type WorkSubject = WorkSubject_Serialize | WorkSubject_Deserialize;
 
+/**  Where a subject stands, in its service's word, and the tone it reads in. */
+export type WorkSubjectStateV1 = {
+	label: string,
+	tone: WorkSubjectToneV1,
+};
+
+export type WorkSubjectToneV1 =
+/**  Open, in progress, unread. */
+"active" |
+/**  Merged, resolved, done. */
+"done" |
+/**  Waiting on review, on hold, draft. */
+"waiting" |
+/**  Failing, blocked, changes requested. */
+"blocked" |
+/**  Closed without being done, archived. */
+"closed";
+
 /**  A named thing the work is about: a library, a listing, a flight, a concept. */
 export type WorkSubject_Deserialize = {
 	name: string,
@@ -3105,6 +3432,10 @@ export type WorkSubject_Deserialize = {
 	 *  copy with provenance before anything renders.
 	 */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
+	media_attempted?: boolean,
 };
 
 /**  A named thing the work is about: a library, a listing, a flight, a concept. */
@@ -3119,6 +3450,10 @@ export type WorkSubject_Serialize = {
 	 *  copy with provenance before anything renders.
 	 */
 	image_candidates?: string[],
+	/**  Host-only immutable native record image; never supplied by model tools. */
+	record_media?: WorkRecordMediaRefV1 | null,
+	/**  Host withheld remote fallback for privacy/account authority; not an enrichment failure. */
+	media_attempted?: boolean,
 };
 
 export type WorkSummary = {

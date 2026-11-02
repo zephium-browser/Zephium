@@ -74,6 +74,28 @@ impl Downloads {
             }
             return;
         }
+        if let DownloadCall::Keep { id } | DownloadCall::Discard { id } = &call {
+            let id = DownloadId::parse(id).expect("validated download id");
+            let result = if matches!(call, DownloadCall::Keep { .. }) {
+                self.keep(partition, id)
+            } else {
+                self.discard(partition, id)
+            };
+            done.finish(match result {
+                Ok(()) => DownloadResponse::Accepted,
+                Err(error) => DownloadResponse::Error { error },
+            });
+            return;
+        }
+        if let DownloadCall::Pause { id } = &call {
+            let id = DownloadId::parse(id).expect("validated download id");
+            let result = self.user_pause(partition, id);
+            done.finish(match result {
+                Ok(()) => DownloadResponse::Accepted,
+                Err(error) => DownloadResponse::Error { error },
+            });
+            return;
+        }
         if let DownloadCall::Resume { id } = &call {
             let id = DownloadId::parse(id).expect("validated download id");
             let result = self.resume(partition, id);
@@ -195,8 +217,18 @@ impl Downloads {
                     self.ui_store(token, partition, DownloadStoreCall::Clear);
                 }
             }
+            DownloadCall::ClearSince { since } => {
+                if private {
+                    self.ui_reply(token, DownloadStoreReply::Saved);
+                } else {
+                    self.ui_store(token, partition, DownloadStoreCall::ClearSince(since));
+                }
+            }
             DownloadCall::Cancel { .. }
+            | DownloadCall::Pause { .. }
             | DownloadCall::Resume { .. }
+            | DownloadCall::Keep { .. }
+            | DownloadCall::Discard { .. }
             | DownloadCall::Updates
             | DownloadCall::RetryCleanup => {
                 unreachable!()
@@ -345,13 +377,22 @@ impl Downloads {
                         forgotten.pop_back();
                     }
                 }
-                (self.notify)(partition.profile());
+                self.changed(partition.profile());
                 done.finish(DownloadResponse::Applied);
             }
-            (DownloadCall::Clear, DownloadStoreReply::Saved) => {
+            (
+                call @ (DownloadCall::Clear | DownloadCall::ClearSince { .. }),
+                DownloadStoreReply::Saved,
+            ) => {
+                let since = match call {
+                    DownloadCall::ClearSince { since } => since,
+                    _ => i64::MIN,
+                };
                 let mut cleared = Vec::new();
                 self.recent.borrow_mut().retain(|(owner, record)| {
-                    let keep = owner.profile() != partition.profile() || !record.state.terminal();
+                    let keep = owner.profile() != partition.profile()
+                        || !record.state.terminal()
+                        || record.created_at < since;
                     if !keep {
                         cleared.push(record.id);
                     }
@@ -365,7 +406,7 @@ impl Downloads {
                     forgotten.pop_back();
                 }
                 drop(forgotten);
-                (self.notify)(partition.profile());
+                self.changed(partition.profile());
                 done.finish(DownloadResponse::Applied);
             }
             (_, DownloadStoreReply::Record(None)) => done.finish(DownloadResponse::Error {

@@ -14,7 +14,10 @@ import Shell from "../Shell.svelte";
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -141,4 +144,43 @@ test("a private window names itself at the foot of the column", async () => {
   await shot("private-window");
   expect(document.querySelector("[data-essentials-drop]")).toBeNull();
   expect(document.querySelector("[role=group][aria-label=Private]")).not.toBeNull();
+});
+
+test("a page replaced by an error document is covered by the explanation", async () => {
+  await page.viewport(1100, 720);
+  launch.dispose();
+  await surface.init();
+  await tabs.init();
+  await favicons.init();
+  const covered = tabFixture({
+    id: "covered",
+    title: "Example",
+    url: "https://example.com/",
+    loading: true,
+    failure: { url: "https://example.com/down", reason: "unreachable", covers_page: true },
+  });
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision(50),
+    profile: null,
+    spaces: [],
+    active_space_id: null,
+    nodes: [
+      {
+        id: covered.id,
+        parent_id: null,
+        section: "today",
+        kind: { type: "tab", tab_id: covered.id },
+      },
+    ],
+    tabs: [covered],
+    active: covered.id,
+    split_group: null,
+  });
+  const screen = await render(Shell);
+  await settle();
+  // The pane stands where the page was, also while a retry loads, and the
+  // address is named once, in the pane, not again in a notice.
+  expect(document.querySelector(".failed-page h1")?.textContent).toContain("example.com");
+  expect(document.body.textContent).not.toContain("Couldn't open example.com");
+  screen.unmount();
 });

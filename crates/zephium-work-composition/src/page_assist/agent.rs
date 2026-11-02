@@ -956,15 +956,49 @@ async fn settled(ports: &super::Ports, tab: &str) {
 async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> ToolOutcome {
     let ports = reply.service.ports().clone();
     let target = target.trim();
+    let mut search = None;
     let url = if let Some(query) = target
         .strip_prefix("search:")
         .map(str::trim)
         .filter(|query| !query.is_empty())
     {
-        ports
+        if query.chars().count() > 512
+            || query != text::clean(query)
+            || zephium_agentic::contains_recognized_secret(query)
+        {
+            return Err(
+                "That search cannot be safely reviewed. Use a shorter query without credentials."
+                    .into(),
+            );
+        }
+        let url = ports
             .tabs
             .search_url(&reply.profile, query)
-            .ok_or_else(|| "That search cannot be made.".to_owned())?
+            .ok_or_else(|| "That search cannot be made.".to_owned())?;
+        let destination = zephium_agentic::SemanticOrigin::parse(&url)
+            .map_err(|_| "That search destination cannot be safely reviewed.".to_owned())?
+            .as_url()
+            .origin()
+            .ascii_serialization();
+        let proposal = |state| PageAssistBlockV1::Search {
+            destination: destination.clone(),
+            query: query.to_owned(),
+            state,
+        };
+        let block = reply.add_block(text, proposal(PageAssistStepStateV1::Confirm));
+        let state = match decision(reply, block).await {
+            Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
+                PageAssistStepStateV1::Running
+            }
+            Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+            _ => PageAssistStepStateV1::Skipped,
+        };
+        reply.set_block(block, proposal(state));
+        if state != PageAssistStepStateV1::Running {
+            return Err("The search was not approved. Do not send the query another way.".into());
+        }
+        search = Some((block, destination, query.to_owned()));
+        url
     } else if let Some(reference) = refs::parse(target) {
         reply
             .record_of(reference)
@@ -984,10 +1018,25 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
         target.to_owned()
     };
     let working = reply.with_data(|data| data.working.clone()).flatten();
-    match working.filter(|_| !new_tab) {
+    let result = match working.filter(|_| !new_tab) {
         Some(tab) => move_tab(reply, text, &ports, &tab, &url).await,
         None => open_in_front(reply, text, &ports, &url).await,
+    };
+    if let Some((block, destination, query)) = search {
+        reply.set_block(
+            block,
+            PageAssistBlockV1::Search {
+                destination,
+                query,
+                state: if result.is_ok() {
+                    PageAssistStepStateV1::Done
+                } else {
+                    PageAssistStepStateV1::Failed
+                },
+            },
+        );
     }
+    result
 }
 
 /// Follows `url` in the tab the reply works in, as a step on that page.

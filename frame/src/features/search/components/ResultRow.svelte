@@ -1,3 +1,10 @@
+<script lang="ts" module>
+  /** Where the pointer last moved. A list that scrolls or reflows under a
+   *  resting pointer is sent a move from the same spot, and that is the list
+   *  moving, not the user choosing a row. */
+  let pointerAt: readonly [number, number] | null = null;
+</script>
+
 <script lang="ts">
   import {
     Search01Icon,
@@ -5,6 +12,7 @@
     CommandLineIcon,
     Clock01Icon,
     Note01Icon,
+    StarIcon,
   } from "@hugeicons/core-free-icons";
   import type { IconSvgElement } from "@hugeicons/svelte";
   import * as m from "$shared/i18n/messages";
@@ -75,6 +83,12 @@
     variant?: "compact" | "launcher";
   } = $props();
 
+  function pointermove(event: PointerEvent) {
+    if (pointerAt?.[0] === event.screenX && pointerAt[1] === event.screenY) return;
+    pointerAt = [event.screenX, event.screenY];
+    onhover();
+  }
+
   let launcher = $derived(variant === "launcher");
   let detail = $derived(result ? resultDetail(result) : "");
   let range = $derived(matchRange(title, query));
@@ -98,6 +112,8 @@
         return Search01Icon;
       case "search_history":
         return Clock01Icon;
+      case "bookmark":
+        return StarIcon;
       case "note":
         return Note01Icon;
       case "command":
@@ -120,6 +136,8 @@
         return m.launcher_kind_history();
       case "search_history":
         return m.launcher_kind_recent();
+      case "bookmark":
+        return m.launcher_kind_bookmark();
       case "suggestion":
         return m.launcher_kind_suggestion();
       case "note":
@@ -147,7 +165,7 @@
   aria-posinset={index + 1}
   aria-setsize={setsize}
   aria-keyshortcuts={shortcut.length ? shortcut.join("+") : undefined}
-  onpointermove={onhover}
+  onpointermove={pointermove}
   onpointerdown={(event) => {
     // Keep the field focused so the list does not dismiss itself out from
     // under the pointer before the click lands.

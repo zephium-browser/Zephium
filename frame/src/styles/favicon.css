@@ -64,12 +64,25 @@
   display: grid;
   place-items: center;
   color: var(--color-faint);
+  transition:
+    opacity var(--motion-base) var(--ease-out),
+    scale var(--motion-base) var(--ease-out);
 }
 
 .favicon-blank {
   margin: 22%;
   border-radius: var(--radius-capsule);
   background: var(--color-fill-strong);
+}
+
+/* A sound badge rides the bottom inline-end corner (AudioControl); the mark
+   gives way around it, and steps aside while the speaker takes its place. */
+.favicon[data-notched] > :is(.favicon-plate, .favicon-fallback) {
+  mask: radial-gradient(circle at calc(100% - 1px) calc(100% - 1px), transparent 7.5px, black 8px);
+}
+
+.favicon[data-notched]:dir(rtl) > :is(.favicon-plate, .favicon-fallback) {
+  mask: radial-gradient(circle at 1px calc(100% - 1px), transparent 7.5px, black 8px);
 }
 
 /*
@@ -106,6 +119,14 @@
   to {
     rotate: 1turn;
   }
+}
+
+/* Two selectors, not one :is(): WebKit does not restyle on hover through
+   :has(:is(...)). */
+[data-audio-host]:has(button[data-audio-mark]:hover) .favicon > *,
+[data-audio-host]:has(button[data-audio-mark]:focus-visible) .favicon > * {
+  opacity: 0;
+  scale: 0.6;
 }
 
 @media (prefers-reduced-motion: reduce) {

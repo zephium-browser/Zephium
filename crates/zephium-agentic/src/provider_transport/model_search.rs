@@ -69,7 +69,11 @@ impl ModelNativeSearch {
             u64::from(input_tokens),
             u64::from(OUTPUT_TOKENS),
         )
-        .checked_add(SEARCH_FEE_MICROS)
+        .checked_add(if self.entry.is_free_compatible() {
+            0
+        } else {
+            SEARCH_FEE_MICROS
+        })
         .ok_or(WorkError::Capacity)?;
         Ok(WorkUsage {
             model_tokens: input_tokens
@@ -112,6 +116,7 @@ impl ModelNativeSearch {
             .saturating_add(usage.output_tokens)
             .min(u64::from(u32::MAX)) as u32;
         let (cost, accounting) = match (usage.cost_micros, self.entry.price.is_some()) {
+            _ if self.entry.is_free_compatible() => (0, WorkUsageAccounting::Exact),
             (Some(cost), true) => (cost, WorkUsageAccounting::Exact),
             _ => (
                 cost_micros(self.price(), usage.input_tokens, usage.output_tokens)

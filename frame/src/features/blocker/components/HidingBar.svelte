@@ -57,7 +57,7 @@
     flex: none;
     align-items: center;
     gap: 6px;
-    margin: 2px 8px 6px;
+    margin: 2px var(--sidebar-inset) 6px;
     padding: 8px 8px 8px 12px;
     border-radius: var(--radius-row);
     background: var(--color-card);

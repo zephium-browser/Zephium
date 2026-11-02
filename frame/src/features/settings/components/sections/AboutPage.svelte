@@ -20,6 +20,10 @@
   let confirming = $state(false);
   let resetting = $state(false);
   let outcome = $state<"done" | "failed" | null>(null);
+  let report = $state<string | null>(null);
+  let reviewing = $state(false);
+  let reading = $state<"copy" | "review" | null>(null);
+  let copyOutcome = $state<"failed" | "blocked" | null>(null);
 
   onMount(() => {
     let live = true;
@@ -65,15 +69,61 @@
     updatable ? systemUpdateTarget(runtime.status().security_advisories) : null,
   );
 
-  async function copyDetails() {
-    if (!about) return;
-    const details = `Zephium ${about.version}\n${about.os} (${about.arch})`;
+  const readReport = () => commands.diagnosticsReport().catch(() => null);
+
+  /** The clipboard is written inside the click, with the text still to come:
+   *  WebKit refuses a write that waits for the native read first. */
+  async function copyDiagnostics() {
+    reading = "copy";
+    copyOutcome = null;
+    const read = readReport();
+    let copied = false;
     try {
-      await navigator.clipboard.writeText(details);
-      notices.show(m.about_details_copied());
+      const plain = read.then((text) => {
+        if (text === null) throw new Error("unavailable");
+        return new Blob([text], { type: "text/plain" });
+      });
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": plain })]);
+      copied = true;
     } catch {
-      // A denied clipboard leaves the details on screen to read.
+      // Tried again below, as text, once the report is in hand.
     }
+    const text = await read;
+    reading = null;
+    if (text === null) {
+      copyOutcome = "failed";
+      return;
+    }
+    report = text;
+    if (!copied) {
+      copied = await navigator.clipboard.writeText(text).then(
+        () => true,
+        () => false,
+      );
+    }
+    if (copied) {
+      notices.show(m.about_diagnostics_copied());
+    } else {
+      copyOutcome = "blocked";
+      reviewing = true;
+    }
+  }
+
+  async function toggleReview() {
+    if (reviewing) {
+      reviewing = false;
+      return;
+    }
+    reading = "review";
+    copyOutcome = null;
+    const text = await readReport();
+    reading = null;
+    if (text === null) {
+      copyOutcome = "failed";
+      return;
+    }
+    report = text;
+    reviewing = true;
   }
 
   async function reset() {
@@ -158,11 +208,41 @@
         >{/if}
     </SettingsRow>
   {/if}
-  <SettingsRow title={m.pref_about_diagnostics()} description={m.about_copy_details_help()}>
-    <Button size="compact" disabled={!about} onclick={() => void copyDetails()}
-      >{m.about_copy_details()}</Button
-    >
+  <SettingsRow
+    settingId="about.diagnostics"
+    title={m.pref_about_diagnostics()}
+    description={copyOutcome === "failed"
+      ? m.about_diagnostics_failed()
+      : copyOutcome === "blocked"
+        ? m.about_diagnostics_blocked()
+        : m.pref_about_diagnostics_help()}
+  >
+    <div class="actions">
+      <Button
+        size="compact"
+        variant="ghost"
+        pending={reading === "review"}
+        disabled={reading === "copy"}
+        aria-expanded={reviewing}
+        aria-controls="about-diagnostics-report"
+        onclick={() => void toggleReview()}
+        >{reviewing ? m.about_diagnostics_hide() : m.about_diagnostics_review()}</Button
+      >
+      <Button
+        size="compact"
+        pending={reading === "copy"}
+        disabled={reading === "review"}
+        onclick={() => void copyDiagnostics()}>{m.about_diagnostics_copy()}</Button
+      >
+    </div>
   </SettingsRow>
+  {#if reviewing && report !== null}
+    <div class="report" id="about-diagnostics-report">
+      <textarea readonly rows="12" spellcheck="false" aria-label={m.pref_about_diagnostics()}
+        >{report}</textarea
+      >
+    </div>
+  {/if}
   <SettingsRow title={m.about_logs()} description={m.about_logs_help()}>
     <Button size="compact" onclick={() => void commands.diagnosticsShowLogs().catch(() => false)}
       >{m.about_logs_show()}</Button
@@ -239,7 +319,44 @@
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
+  }
+
+  .report {
+    padding: 0 18px 14px;
+  }
+
+  .report + :global(.ui-settings-row)::before {
+    content: "";
+    position: absolute;
+    inset-inline: 16px 0;
+    top: 0;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  .report textarea {
+    box-sizing: border-box;
+    inline-size: 100%;
+    margin: 0;
+    padding: 12px 14px;
+    resize: vertical;
+    border: 0;
+    border-radius: var(--radius-field);
+    background: var(--color-field);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: var(--text-label);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .report textarea:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 </style>

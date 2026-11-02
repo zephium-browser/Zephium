@@ -3,6 +3,7 @@ resolver = "2"
 members = ["crates/*", "desktop", "xtask"]
 exclude = [
     "vendor/adblock",
+    "vendor/tao",
     "vendor/tauri",
     "vendor/tauri-runtime-wry",
     "vendor/tauri-plugin-updater",
@@ -74,6 +75,7 @@ tough = { version = "=0.24.0", default-features = false }
 [patch.crates-io]
 tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
 adblock = { path = "vendor/adblock" }
+tao = { path = "vendor/tao" }
 tauri = { path = "vendor/tauri" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
 wry = { path = "vendor/wry" }

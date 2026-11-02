@@ -110,7 +110,7 @@
   {/each}
 {/snippet}
 
-<div class="text" bind:this={root}>
+<div class="text" data-selectable bind:this={root}>
   {@render blocks(tree)}
 </div>
 
@@ -136,7 +136,11 @@
 {/if}
 
 <style>
+  /* The sidebar around it is not selectable; the words to read and copy are. */
   .text {
+    /* stylelint-disable-next-line property-no-vendor-prefix */
+    -webkit-user-select: text;
+    user-select: text;
     color: var(--color-text);
     font-size: var(--text-page-title);
     letter-spacing: -0.003em;
@@ -260,6 +264,9 @@
 
   /* A source marker: small enough to sit in a line of text, solid enough to hit. */
   .cite {
+    /* stylelint-disable-next-line property-no-vendor-prefix */
+    -webkit-user-select: none;
+    user-select: none;
     position: relative;
     display: inline-grid;
     place-items: center;

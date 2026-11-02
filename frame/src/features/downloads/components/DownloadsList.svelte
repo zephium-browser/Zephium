@@ -5,6 +5,7 @@
     Delete02Icon,
     Download04Icon,
     FolderOpenIcon,
+    PauseIcon,
   } from "@hugeicons/core-free-icons";
   import {
     DownloadSession,
@@ -37,6 +38,7 @@
     pending: m.download_pending,
     receiving: m.download_receiving,
     paused: m.download_paused,
+    held: m.download_held,
     cancelling: m.download_cancelling,
     finalizing: m.download_finalizing,
     completed: m.download_completed,
@@ -65,7 +67,7 @@
 
   /** Newest first, under the day each began. */
   let days = $derived.by(() => {
-    rates.retain(session.entries.map((entry) => entry.id));
+    rates.retain(session.entries);
     const grouped: { label: string; entries: DownloadView[] }[] = [];
     const newest = session.entries.toSorted((a, b) => Number(b.created_at) - Number(a.created_at));
     for (const entry of newest) {
@@ -91,6 +93,8 @@
       const rate = rates.observe(entry.id, Number(entry.received));
       return transferLine(entry, rate) || labels.receiving();
     }
+    if (entry.state === "paused" && !entry.error) return m.download_user_paused();
+    if (entry.state === "held") return m.download_held_prompt();
     if (entry.state === "failed" || entry.state === "interrupted" || entry.state === "paused")
       return entry.error
         ? downloadReason(entry.error, entry.state === "paused")
@@ -161,7 +165,10 @@
       {#each group.entries as entry (entry.id)}
         {@const progress = downloadProgress(entry)}
         {@const problem =
-          entry.state === "failed" || entry.state === "interrupted" || entry.state === "paused"}
+          entry.state === "failed" ||
+          entry.state === "interrupted" ||
+          entry.state === "held" ||
+          (entry.state === "paused" && entry.error !== null)}
         <li data-state={entry.state}>
           {#if entry.state === "completed"}<button
               type="button"
@@ -209,12 +216,33 @@
               >
             </div>{/if}
           <div class="actions">
+            {#if entry.state === "held"}<Button
+                size="compact"
+                variant="secondary"
+                disabled={session.busy}
+                onclick={() => void session.perform({ kind: "keep", id: entry.id })}
+                >{m.download_keep()}</Button
+              ><Button
+                size="compact"
+                variant="ghost"
+                disabled={session.busy}
+                onclick={() => void session.perform({ kind: "discard", id: entry.id })}
+                >{m.download_discard()}</Button
+              >{/if}
+            {#if entry.state === "receiving"}<IconButton
+                icon={PauseIcon}
+                label={m.download_pause()}
+                size={14}
+                buttonSize={26}
+                disabled={session.busy}
+                onclick={() => void session.perform({ kind: "pause", id: entry.id })}
+              />{/if}
             {#if entry.state === "paused"}<Button
                 size="compact"
                 variant="secondary"
                 disabled={session.busy}
                 onclick={() => void session.perform({ kind: "resume", id: entry.id })}
-                >{m.download_resume()}</Button
+                >{entry.error ? m.download_resume() : m.download_resume_paused()}</Button
               >{/if}
             {#if entry.state === "pending" || entry.state === "receiving" || entry.state === "paused"}<IconButton
                 icon={Cancel01Icon}

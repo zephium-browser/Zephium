@@ -1,24 +1,32 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod archive;
+mod audio;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
 mod bookmarks;
 mod bootstrap;
+mod browsing_data;
+mod certificates;
 mod effects;
 mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod extension_store;
 mod favicon_probe;
 mod favicons;
 mod fullscreen;
 mod history;
+mod history_list;
+mod media;
+mod network;
 mod operations;
 mod page_permissions;
 mod page_requests;
+mod page_source;
 mod persistence;
 mod presentation;
 mod private;
@@ -27,6 +35,7 @@ mod profile_roster;
 mod projections;
 mod scope;
 mod search;
+mod site_permissions;
 mod tabs;
 mod time;
 mod user_content_status;
@@ -40,9 +49,9 @@ mod zoom;
 use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
-use favicons::{origin_of, FaviconState};
 #[cfg(test)]
-use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
+use favicons::ICON_CACHE_CAPACITY;
+use favicons::{origin_of, FaviconState};
 use page_permissions::PagePermissionPromptState;
 #[cfg(test)]
 use presentation::PendingPresentation;
@@ -58,11 +67,11 @@ use view_lifecycle::{CrashState, PendingDiscardProbe, ResidencyState, LIVE_VIEW_
 #[cfg(test)]
 use view_lifecycle::{LIVE_VIEW_PRESSURE_LIMIT, MAX_CONCURRENT_DISCARD_PROBES};
 use window_layout::GrabbedDivider;
-use zoom::ZoomState;
+use zoom::{ZoomOrigin, ZoomState, ZoomStep};
 
 use persistence::PersistenceState;
 #[cfg(test)]
-use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
+use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_DELAY};
 
 #[cfg(test)]
 use crate::actor::{spawn, Handle, TryPushError};
@@ -221,17 +230,38 @@ pub struct Shell {
     favicons: FaviconState,
     history: history::HistoryState,
     bookmarks: bookmarks::BookmarkState,
+    extension_data: extension_data::ExtensionDataState,
+    history_lists: history_list::HistoryListState,
+    sources: page_source::SourceState,
     search: SearchState,
     tab_preferences: tabs::TabPreferences,
+    proxy: network::ProxyPreference,
     presentation: PresentationState,
     zoom: ZoomState,
+    /// Tabs gone quiet whose speaker is still held.
+    audio_quiet: std::collections::HashSet<ItemId>,
+    /// What each watched tab's media is doing, for the sidebar's player.
+    media: zephium_core::media::MediaPlayers,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    private_projected: (bool, Option<u32>),
+    /// The Recently Closed entries the menus were last told of.
+    closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
     roster: profile_roster::RosterState,
     space_memory: spaces::SpaceMemory,
     /// Sites allowed to open a kind of application link without asking,
     /// for this run only.
     external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
+    /// Sites each saved profile lets open new tabs without a click, as read
+    /// from the store; a profile is absent until its list has been read.
+    popup_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
+    >,
+    /// Local https origins whose refused certificate the person continued
+    /// past, for this run only; their pages never look secure.
+    continued_certificates:
+        std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -445,6 +475,9 @@ impl Shell {
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
             bookmarks: bookmarks::BookmarkState::default(),
+            extension_data: Default::default(),
+            history_lists: history_list::HistoryListState::default(),
+            sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
@@ -459,13 +492,20 @@ impl Shell {
                 ..SearchState::default()
             },
             tab_preferences: tabs::TabPreferences::load(&*store),
+            proxy: network::ProxyPreference::load(&*store),
             presentation: PresentationState::default(),
-            zoom: ZoomState::default(),
+            zoom: ZoomState::load(&*store),
+            audio_quiet: std::collections::HashSet::new(),
+            media: zephium_core::media::MediaPlayers::default(),
             divider: None,
             private: None,
+            private_projected: (false, None),
+            closed_projected: Vec::new(),
             roster: profile_roster::RosterState::default(),
             space_memory: spaces::SpaceMemory::default(),
             external_apps_allowed: std::collections::HashSet::new(),
+            popup_sites: std::collections::HashMap::new(),
+            continued_certificates: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
@@ -691,6 +731,23 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::SetSitePermission {
+                    origin,
+                    kind,
+                    decision,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_site_permission_change(
+                        operation_id.clone(),
+                        origin.clone(),
+                        *kind,
+                        *decision,
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if let Command::ChangeBlockerSite { context, action } = &command {
                     if let Some(mut completion) =
                         self.begin_blocker_site_mutation(operation_id.clone(), context, action)
@@ -717,7 +774,9 @@ impl Shell {
             Command::SetWebExtensions {
                 profile,
                 extensions,
-            } => self.set_web_extensions(profile, extensions),
+                failures,
+                retry,
+            } => self.set_prepared_web_extensions(profile, extensions, failures, retry),
             Command::OpenWebExtensionOptions {
                 profile,
                 extension_id,
@@ -805,12 +864,27 @@ impl Shell {
             Command::AnswerPageRequest { id, decision } => {
                 let _ = self.operation_answer_page_request(id, decision);
             }
+            Command::AnswerHttpAuth {
+                id,
+                request,
+                credentials,
+            } => {
+                let _ = self.operation_answer_http_auth(id, request, credentials);
+            }
+            Command::ContinuePastCertificate(id) => {
+                let _ = self.operation_continue_past_certificate(id);
+            }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);
             }
             Command::GoForward(id) => {
                 let _ = self.operation_history(id, true);
             }
+            Command::GoToHistoryEntry { id, offset, url } => {
+                let _ = self.operation_go_to_history_entry(id, offset, url);
+            }
+            Command::HistoryList { id, done } => self.history_list(id, done),
+            Command::PageSource { id, done } => self.page_source(id, done),
             Command::SplitWith { other, axis } => {
                 let _ = self.operation_split(other, axis);
             }
@@ -843,6 +917,12 @@ impl Shell {
             }
             Command::StopMediaCapture { item, navigation } => {
                 let _ = self.operation_stop_media_capture(item, navigation);
+            }
+            Command::SetTabMuted { id, muted } => {
+                let _ = self.operation_set_tab_muted(id, muted);
+            }
+            Command::MediaPlayer { id, action } => {
+                let _ = self.operation_media_player(id, action);
             }
             Command::SetWindowVisible(visible) => {
                 if self.window_visible != visible {
@@ -879,6 +959,33 @@ impl Shell {
                     }
                 }
                 let _ = self.relayout_with(animate);
+            }
+            Command::SetSidebarHidden(hidden) => {
+                let Some(win) = self.windows.focused_mut() else {
+                    return;
+                };
+                if win.metrics.sidebar_hidden == hidden {
+                    return;
+                }
+                win.metrics.sidebar_hidden = hidden;
+                let id = win.id;
+                // A sidebar shown from its card leaves the chrome over the
+                // page until the page has slid out from under the column;
+                // the frame puts it back beneath then.
+                let _ = self.engine.hint_stage_motion(id, StageMotion::Slide);
+                let _ = self.relayout_with(true);
+            }
+            Command::PeekSidebar { peek, slide } => {
+                if let Some(win) = self.windows.focused() {
+                    // Only a hidden sidebar is beneath the page to come over it.
+                    if !peek || win.metrics.sidebar_hidden {
+                        let card = layout::hidden_card(win.size, win.metrics);
+                        let _ = self.engine.raise_chrome(win.id, peek, card, slide);
+                    }
+                }
+            }
+            Command::SetPagePermissionCardHost(available) => {
+                self.set_page_permission_card_host(available)
             }
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {
@@ -934,12 +1041,23 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::BrowsingDataCall {
+                expected_profile,
+                call,
+                done,
+            } => self.browsing_data_call(expected_profile, *call, done),
             Command::BookmarkCall {
                 expected_profile,
                 call,
                 done,
             } => self.bookmark_call(expected_profile, *call, done),
-            Command::Import { work, done } => self.import_into_focused(*work, done),
+            Command::ImportDestination { done } => done.finish(self.import_destination()),
+            Command::Import {
+                destination,
+                work,
+                done,
+            } => self.import_into_profile(destination, *work, done),
+            Command::Export { kind, done } => self.export_from_focused(kind, done),
             Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
@@ -947,6 +1065,12 @@ impl Shell {
                 origin,
                 rgba,
             } => self.favicon_probed(profile, origin, rgba),
+            Command::FaviconFetched {
+                ticket,
+                rgba,
+                source,
+                failed,
+            } => self.favicon_fetched(ticket, rgba, source, failed),
             Command::AttachNotes(attachment) => {
                 self.notes.get_or_insert(attachment.0);
             }
@@ -1088,6 +1212,29 @@ impl Shell {
             // This privileged mutation must carry a desktop operation id.
             Command::InvokeExtensionAction { .. } => {}
             Command::RespondToPagePermissionPrompt { .. } => {}
+            Command::SetSitePermission { .. } => {}
+            Command::SitePermissions { origin, reply } => {
+                self.query_site_permissions(origin, reply)
+            }
+            Command::SitePermissionCatalogLoaded {
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                outcome,
+            } => self.site_permission_catalog_loaded(
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                *outcome,
+            ),
+            Command::SitePermissionSettled {
+                operation_id,
+                applied,
+            } => self.site_permission_settled(operation_id, applied),
             Command::PagePermissionCatalogLoaded {
                 profile,
                 item,
@@ -1119,6 +1266,9 @@ impl Shell {
             } => self.search_additional(*context, query, results),
             Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::PanelLoaded => {
+                self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+            }
             Command::RunSearchAction {
                 context,
                 action,
@@ -1132,6 +1282,7 @@ impl Shell {
             }
             Command::OpenExternal(urls) => self.open_external(urls),
             Command::Find(request) => self.find_in_page(request),
+            Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }
@@ -1261,7 +1412,7 @@ impl Shell {
                         "extensions: maintenance could not reconcile browser metadata"
                     );
                 }
-                let extension_actions = self.maintain_extension_actions();
+                let extension_actions = self.retry_extension_actions();
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
@@ -1277,6 +1428,11 @@ impl Shell {
                 call,
                 done,
             } => self.time_call(expected_profile, *call, done),
+            Command::ZoomCall {
+                expected_profile,
+                call,
+                done,
+            } => self.zoom_call(expected_profile, *call, done),
             Command::TimeReportRead {
                 profile,
                 report,
@@ -1286,6 +1442,7 @@ impl Shell {
             Command::SetSystemAwake(awake) => self.set_system_awake(awake),
             Command::SetMemoryPressure(pressure) => self.on_memory_pressure(pressure),
             Command::FocusWake => self.focus_wake(),
+            Command::AudioWake => self.audio_wake(),
             // Accepted only through `Command::Operation`.
             Command::Focus(_) => {}
         }
@@ -1751,7 +1908,9 @@ impl Shell {
                 self.discard_blocker_inbox_for_shutdown();
                 self.finish_pending_blocker_operations_for_shutdown();
                 self.fail_pending_history_calls();
+                self.fail_pending_history_lists();
                 self.fail_pending_bookmark_calls();
+                self.fail_pending_extension_data();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -2026,15 +2185,16 @@ impl Shell {
                 profile,
                 query,
                 hits,
-            } => self.on_history_read(generation, profile, query, hits),
+                bookmarks,
+            } => self.on_history_read(generation, profile, query, hits, bookmarks),
             StoreReadResult::Favicon {
                 generation,
                 id,
                 profile,
                 origin,
-                rgba,
-                stale,
-            } => self.on_favicon_read(generation, id, profile, origin, rgba, stale),
+                icon,
+                page,
+            } => self.on_favicon_read(generation, id, profile, origin, icon, page),
             StoreReadResult::FaviconBatch {
                 generation,
                 profile,
@@ -2064,6 +2224,13 @@ impl Shell {
                 reply,
             } => self.on_bookmarks_read(token, profile, reply),
             StoreReadResult::Imported { token, added } => self.on_import_read(token, added),
+            StoreReadResult::Exported { token, text } => self.on_export_read(token, text),
+            StoreReadResult::ExtensionData { token, reply } => {
+                self.on_extension_data_read(token, reply)
+            }
+            StoreReadResult::ExtensionDataChanged { profile, change } => {
+                self.on_extension_data_changed(profile, *change)
+            }
         }
     }
 }

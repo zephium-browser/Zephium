@@ -9,6 +9,7 @@
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
+  import { pageSite } from "$domain/site-data";
   import { extensions } from "$domain/extensions";
   import { webext } from "$domain/webext";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -48,6 +49,11 @@
     const anchor = target.getBoundingClientRect();
     menuAnchor = anchor;
     const { siteProtected, canHide } = siteMenuState(blocker.status());
+    // A private window keeps nothing to clear, and only a web page has a site.
+    const canClearData =
+      tabs.profile()?.kind !== "incognito" &&
+      (active?.content ?? "web") === "web" &&
+      pageSite(active?.url) !== null;
     const listed = extensions
       .activeActions(tabs.profile()?.id ?? null, tabs.activeId())
       .map((action) => ({
@@ -61,9 +67,17 @@
       anchor.bottom,
       siteProtected,
       canHide,
+      canClearData,
       listed,
       webext.isAvailable(),
     );
+  }
+
+  // Back and Forward hold the pages behind and ahead; a held press or a right
+  // click lists them in a native menu.
+  function openHistoryMenu(forward: boolean, anchor: DOMRect) {
+    const id = tabs.activeId();
+    if (id) void commands.historyMenuPopup(id, forward, anchor.left, anchor.bottom);
   }
 
   let handledCommand = 0;
@@ -154,6 +168,7 @@
           size={16}
           disabled={active?.can_go_back !== true}
           onclick={tabs.backActive}
+          onmenu={(anchor) => openHistoryMenu(false, anchor)}
         />
         <IconButton
           icon={ArrowRight02Icon}
@@ -163,6 +178,7 @@
           size={16}
           disabled={active?.can_go_forward !== true}
           onclick={tabs.forwardActive}
+          onmenu={(anchor) => openHistoryMenu(true, anchor)}
         />
         <IconButton
           icon={Refresh01Icon}

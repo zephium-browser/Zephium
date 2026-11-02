@@ -138,7 +138,11 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
+  "CFArray",
   "CFCGTypes",
+  "CFData",
+  "CFError",
+  "CFString",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -184,6 +188,14 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-security = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "SecBase",
+  "SecCertificate",
+  "SecPolicy",
+  "SecTrust",
+] }
+sha2 = "0.10"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "objc2-core-foundation",

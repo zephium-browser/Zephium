@@ -49,6 +49,66 @@ beforeEach(() => {
   host.listener = null;
 });
 
+test.each([false, true])(
+  "loading more reconciles a previously observed download (newer live update: %s)",
+  async (liveUpdate) => {
+    const first = { ...entry, id: "00000000000000000000000050" };
+    const older = { ...entry, id: "00000000000000000000000001" };
+    const completed: DownloadView = {
+      ...entry,
+      revision: "00000002",
+      state: "completed",
+      received: "100",
+    };
+    host.call.mockResolvedValueOnce({
+      kind: "page",
+      entries: [first],
+      next: first.id,
+      supported: true,
+      cleanup: { running: false, error: null },
+    });
+    const { DownloadSession } = await import("../downloads.svelte");
+    const session = new DownloadSession(profile);
+    await session.reload();
+    host.call.mockResolvedValueOnce({
+      kind: "updates",
+      entries: [entry],
+      removed: [],
+      cleanup: { running: false, error: null },
+    });
+    await session.refresh();
+
+    const page = deferred();
+    host.call.mockReturnValueOnce(page.promise);
+    const loading = session.reload(true);
+    expect(host.call).toHaveBeenLastCalledWith(profile, {
+      kind: "list",
+      before: first.id,
+      limit: 50,
+    });
+    if (liveUpdate) {
+      host.call.mockResolvedValueOnce({
+        kind: "updates",
+        entries: [completed],
+        removed: [],
+        cleanup: { running: false, error: null },
+      });
+      await session.refresh();
+    }
+    page.resolve({
+      kind: "page",
+      entries: [liveUpdate ? entry : completed, older],
+      next: null,
+      supported: true,
+      cleanup: { running: false, error: null },
+    });
+    await loading;
+    expect(session.entries).toEqual([first, completed, older]);
+    expect(session.next).toBeNull();
+    session.stop();
+  },
+);
+
 test("the status indicator reads a bounded snapshot on subscribe and ignores another profile", async () => {
   host.call.mockResolvedValue({
     kind: "updates",

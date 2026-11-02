@@ -179,16 +179,21 @@ fn a_permission_prompt_takes_fullscreen_away() {
         PageOrigin, PagePermissionRequest, PagePermissionRequestId, PagePermissionRequestKind,
     };
     let (mut shell, engine, _screen, host, page) = ready(true);
-    shell.page_permissions.remember_enabled = false;
     let profile = shell.windows.focused().unwrap().profile;
+    // A private profile asks at once, without reading saved decisions.
+    let mut private = shell.profiles.remove(profile).unwrap();
+    private.kind = ProfileKind::Incognito;
+    assert!(shell.profiles.insert(private));
     fullscreen(&mut shell, page, true);
     shell.handle(Command::Engine(EngineEvent::PermissionRequested {
         id: page,
         profile,
+        navigation: shell.presentation.presented_navigations[&page].0,
         request: PagePermissionRequest {
             id: PagePermissionRequestId::new(7).unwrap(),
             origin: PageOrigin::parse_exact("https://video.example").unwrap(),
             kind: PagePermissionRequestKind::CameraAndMicrophone,
+            blocked_by_system: false,
         },
     }));
     assert!(shell.page_permissions.is_visible());

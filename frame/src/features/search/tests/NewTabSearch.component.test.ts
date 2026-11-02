@@ -159,6 +159,50 @@ test("Enter runs what was typed even when a local match exists", async () => {
   );
 });
 
+test("Enter pressed before the answer runs what was typed once it lands", async () => {
+  const screen = await mount({ tabId: "tab" });
+  const input = screen.getByRole("combobox");
+  await input.fill("rus");
+  await reply("rus", [search("rus")]);
+  // The list still shows the answer for "rus" when Enter is pressed.
+  const seen = issued();
+  await userEvent.type(input, "t");
+  await userEvent.keyboard("{Enter}");
+  expect(native.run).not.toHaveBeenCalled();
+  const context = await replyToNew(seen, "rust", [search("rust")]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(search("rust").action, context),
+  );
+});
+
+test("an Enter that commits a composition does not run the row", async () => {
+  const screen = await mount({ tabId: "tab" });
+  const field = screen.getByRole("combobox");
+  const input = field.element() as HTMLInputElement;
+  await field.fill("にほんご");
+  await reply("にほんご", [search("にほんご")]);
+  const seen = issued();
+  // WebKit ends the composition before the keydown that committed it, which
+  // then reports isComposing false and the IME's keyCode 229.
+  input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: input.value }));
+  const commit = new KeyboardEvent("keydown", {
+    key: "Enter",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  input.dispatchEvent(commit);
+  expect(commit.defaultPrevented).toBe(false);
+  const context = await replyToNew(seen, "にほんご", [search("にほんご")]);
+  await new Promise((done) => setTimeout(done, 50));
+  expect(native.run).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(search("にほんご").action, context),
+  );
+});
+
 test("selection moves without wrapping and returns to the typed action", async () => {
   const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");

@@ -13,9 +13,12 @@ import { commandId, validRevision } from "$domain/work";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
+import { onDraftsForgotten, readDraft, writeDraft } from "$shared/lib/drafts";
 import { SvelteMap } from "svelte/reactivity";
 
 type Pending = Extract<WorkEnvironmentCall, { kind: "command" | "checkpoint" }>;
+const DRAFT_KIND = "work-composer";
+const DRAFT_PAUSE_MS = 500;
 /** Profile/Space-scoped native projections plus document-lifetime unresolved operands. */
 export class WorkEnvironmentSession {
   readonly profile: string;
@@ -32,7 +35,9 @@ export class WorkEnvironmentSession {
   running = $state<string | null>(null);
   remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);
   private remoteSequence = 0;
-  composer = $state("");
+  /** The words in the ask bar. Kept across a relaunch, per profile and space. */
+  #composer = $state("");
+  #draftTimer: ReturnType<typeof setTimeout> | undefined;
   objectiveSubmission = $state.raw<{
     objective: string;
     command: string;
@@ -59,20 +64,34 @@ export class WorkEnvironmentSession {
   constructor(profile: string, space: string) {
     this.profile = profile;
     this.space = space;
+    this.#composer = readDraft(DRAFT_KIND, [profile, space]) ?? "";
     this.removeCloseTask = registerCloseTask(async () => {
+      // Words in the ask bar are kept and restored, so they never hold up a
+      // close; only a save that has not landed does.
+      this.keepComposer();
       if (this.writing) await this.writing;
       if (this.pending && !(await this.retry())) return false;
-      return (await this.flushView()) && !this.composer && !this.objectiveToAttach;
+      return this.flushView();
     });
+  }
+  get composer() {
+    return this.#composer;
+  }
+  set composer(text: string) {
+    if (text === this.#composer) return;
+    this.#composer = text;
+    clearTimeout(this.#draftTimer);
+    // Sending or clearing is final at once; typing is written once it pauses.
+    if (text) this.#draftTimer = setTimeout(() => this.keepComposer(), DRAFT_PAUSE_MS);
+    else this.keepComposer();
+  }
+  private keepComposer() {
+    clearTimeout(this.#draftTimer);
+    writeDraft(DRAFT_KIND, [this.profile, this.space], this.#composer);
   }
   get disposable() {
     return (
-      !this.active &&
-      !this.pending &&
-      !this.viewDraft &&
-      !this.writing &&
-      !this.composer &&
-      !this.objectiveToAttach
+      !this.active && !this.pending && !this.viewDraft && !this.writing && !this.objectiveToAttach
     );
   }
   async start(defaultTitle: string) {
@@ -145,6 +164,7 @@ export class WorkEnvironmentSession {
   }
   dispose() {
     this.stopObserving();
+    this.keepComposer();
     this.removeCloseTask();
   }
   private async call(request: WorkEnvironmentCall): Promise<WorkReplyV1> {
@@ -510,6 +530,12 @@ function arranged(before: WorkEnvironmentView, after: WorkEnvironmentView) {
   );
 }
 const sessions = new SvelteMap<string, WorkEnvironmentSession>();
+// A deleted profile or space takes the words in its ask bar with it.
+onDraftsForgotten((profile, space) => {
+  for (const session of sessions.values())
+    if (session.profile === profile && (space === undefined || session.space === space))
+      session.composer = "";
+});
 export function environmentSession(profile: string, space: string): WorkEnvironmentSession | null {
   const key = `${profile}:${space}`;
   const existing = sessions.get(key);

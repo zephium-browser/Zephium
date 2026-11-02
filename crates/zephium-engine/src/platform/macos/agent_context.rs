@@ -104,6 +104,8 @@ fn new_owned_agent_configuration(
             if Retained::as_ptr(&actual_store) != Retained::as_ptr(&store) {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
+            super::proxy::apply(&configuration, crate::network::current().as_ref())
+                .map_err(|_| AgentOwnedViewConstructionError::Native)?;
             Ok(configuration)
         }
         // A durable class with its own store is Work's persistent store.
@@ -123,6 +125,8 @@ fn new_owned_agent_configuration(
             if Retained::as_ptr(&actual_store) != Retained::as_ptr(store) {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
+            super::proxy::apply(&configuration, crate::network::current().as_ref())
+                .map_err(|_| AgentOwnedViewConstructionError::Native)?;
             Ok(configuration)
         }
         (ContextProfileStorageClass::Ephemeral, None) => {

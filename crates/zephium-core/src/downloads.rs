@@ -17,6 +17,9 @@ pub enum DownloadState {
     Receiving,
     // The retained native transfer can resume; never replay its request URL.
     Paused,
+    // Fully received but of a type that can harm the computer. It stays in
+    // its hidden staging folder until the person keeps or deletes it.
+    Held,
     Cancelling,
     Finalizing,
     Completed,
@@ -218,17 +221,50 @@ impl DownloadPreferences {
 pub enum DownloadCall {
     Updates,
     RetryCleanup,
-    List { before: Option<String>, limit: u32 },
-    Cancel { id: String },
-    Resume { id: String },
-    Open { id: String },
-    Reveal { id: String },
-    Forget { id: String },
+    List {
+        before: Option<String>,
+        limit: u32,
+    },
+    Cancel {
+        id: String,
+    },
+    /// Stops receiving and keeps what was received for `Resume`.
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+    /// Publishes a finished download that was held for its type.
+    Keep {
+        id: String,
+    },
+    /// Deletes a finished download that was held for its type.
+    Discard {
+        id: String,
+    },
+    Open {
+        id: String,
+    },
+    Reveal {
+        id: String,
+    },
+    Forget {
+        id: String,
+    },
     // Forgets every finished download; files on disk are untouched.
     Clear,
+    // Forgets the finished downloads started at or after `since` (unix
+    // seconds). Only the shell sends it; a frame cannot.
+    #[serde(skip)]
+    ClearSince {
+        since: i64,
+    },
     Preferences,
     ChooseDirectory,
-    SetAskDestination { enabled: bool },
+    SetAskDestination {
+        enabled: bool,
+    },
 }
 impl DownloadCall {
     pub fn validate(&self) -> bool {
@@ -239,14 +275,169 @@ impl DownloadCall {
                     && before.as_ref().is_none_or(|id| canonical_id(id))
             }
             Self::Cancel { id }
+            | Self::Pause { id }
             | Self::Resume { id }
+            | Self::Keep { id }
+            | Self::Discard { id }
             | Self::Open { id }
             | Self::Reveal { id }
             | Self::Forget { id } => canonical_id(id),
+            Self::ClearSince { since } => *since > 0,
             _ => true,
         }
     }
 }
+/// Types an operating system runs, installs or opens as a program, or that
+/// carry macros or scripts a click can start: the ones other browsers also
+/// ask about before keeping. Archives and documents are not here; the system
+/// checks what they hold when they are opened.
+const DANGEROUS_EXTENSIONS: &[&str] = &[
+    // Windows programs, installers and shortcuts
+    "exe",
+    "msi",
+    "msp",
+    "mst",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "dll",
+    "sys",
+    "drv",
+    "ocx",
+    "lnk",
+    "url",
+    "scf",
+    "gadget",
+    "application",
+    "appref-ms",
+    "appx",
+    "appxbundle",
+    "msix",
+    "msixbundle",
+    "msu",
+    "xll",
+    "wll",
+    "xnk",
+    "ade",
+    "adp",
+    "mde",
+    "mdb",
+    "mda",
+    "mdz",
+    "mdt",
+    "mdw",
+    // Scripts and shells
+    "bat",
+    "cmd",
+    "ps1",
+    "ps1xml",
+    "ps2",
+    "ps2xml",
+    "psc1",
+    "psc2",
+    "psm1",
+    "psd1",
+    "msh",
+    "msh1",
+    "msh2",
+    "mshxml",
+    "msh1xml",
+    "msh2xml",
+    "vb",
+    "vbe",
+    "vbs",
+    "vbscript",
+    "jse",
+    "ws",
+    "wsc",
+    "wsf",
+    "wsh",
+    "hta",
+    "inf",
+    "ins",
+    "isp",
+    "reg",
+    "sct",
+    "shb",
+    "shs",
+    "pcd",
+    "plg",
+    "prf",
+    "prg",
+    "ops",
+    "sh",
+    "bash",
+    "zsh",
+    "csh",
+    "ksh",
+    "command",
+    "tool",
+    "terminal",
+    "scpt",
+    "scptd",
+    "workflow",
+    "action",
+    // Java, browser and office carriers
+    "jar",
+    "jnlp",
+    "class",
+    "xbap",
+    "crx",
+    "vsmacros",
+    "vss",
+    "vst",
+    "vsw",
+    "docm",
+    "dotm",
+    "xlsm",
+    "xltm",
+    "xlam",
+    "pptm",
+    "potm",
+    "ppam",
+    "ppsm",
+    "sldm",
+    // macOS and Linux packages and applications
+    "app",
+    "dmg",
+    "pkg",
+    "mpkg",
+    "iso",
+    "apk",
+    "deb",
+    "rpm",
+    "appimage",
+    "run",
+    "bin",
+    "mobileconfig",
+];
+
+/// Script types Windows runs from a double click, which other platforms open
+/// in an editor; a developer's `.js` or `.py` on a Mac is not a warning.
+const WINDOWS_SCRIPT_EXTENSIONS: &[&str] = &["js", "py", "pyw", "pyc", "pyo", "rb", "rbw", "pl"];
+
+/// Whether a download of this name must be confirmed before it is kept. The
+/// last extension decides, after the trailing dots and spaces Windows ignores
+/// are dropped, so `report.pdf.exe` and `setup.exe.` are caught and
+/// `exe.txt` is not.
+pub fn is_dangerous_file(name: &str) -> bool {
+    is_dangerous_file_on(name, cfg!(target_os = "windows"))
+}
+
+pub fn is_dangerous_file_on(name: &str, windows: bool) -> bool {
+    let name = name.trim_end_matches(['.', ' ']);
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        let known = |list: &[&str]| {
+            list.iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        };
+        !stem.is_empty()
+            && !extension.is_empty()
+            && (known(DANGEROUS_EXTENSIONS) || (windows && known(WINDOWS_SCRIPT_EXTENSIONS)))
+    })
+}
+
 pub fn canonical_id(id: &str) -> bool {
     DownloadId::parse(id).is_some_and(|value| value.to_string() == id)
 }
@@ -347,6 +538,8 @@ pub enum DownloadStoreCall {
     Forget(DownloadId),
     /// Deletes every terminal record. Transfers still writing keep theirs.
     Clear,
+    /// Deletes the terminal records created at or after the unix second.
+    ClearSince(i64),
     ClearStaging {
         id: DownloadId,
         expected: FileIdentity,
@@ -540,6 +733,85 @@ mod tests {
             limit: 100
         }
         .validate());
+    }
+    #[test]
+    fn pause_keep_and_discard_name_a_canonical_download_like_cancel() {
+        let id = DownloadId::generate().to_string();
+        for call in [
+            DownloadCall::Pause { id: id.clone() },
+            DownloadCall::Keep { id: id.clone() },
+            DownloadCall::Discard { id: id.clone() },
+        ] {
+            assert!(call.validate());
+        }
+        for bad in ["../x", "", "not-an-id"] {
+            assert!(!DownloadCall::Pause { id: bad.into() }.validate());
+            assert!(!DownloadCall::Keep { id: bad.into() }.validate());
+            assert!(!DownloadCall::Discard { id: bad.into() }.validate());
+        }
+        assert!(!DownloadState::Held.terminal());
+    }
+    #[test]
+    fn programs_installers_and_scripts_are_held_and_documents_are_not() {
+        for name in [
+            "setup.exe",
+            "Setup.EXE",
+            "installer.msi",
+            "Zephium.dmg",
+            "tool.pkg",
+            "run.bat",
+            "run.cmd",
+            "profile.ps1",
+            "screensaver.scr",
+            "app.jar",
+            "archive.app",
+            "script.vbs",
+            "macro.docm",
+            "tool.sh",
+            "link.url",
+            "drive.iso",
+            "a.b.exe",
+        ] {
+            assert!(is_dangerous_file(name), "{name}");
+        }
+        for name in [
+            "report.pdf",
+            "photo.jpg",
+            "notes.txt",
+            "bundle.zip",
+            "data.csv",
+            "exe.txt",
+            "exe",
+            ".exe",
+            "download",
+            "page.html",
+            "movie.mp4",
+            "README",
+        ] {
+            assert!(!is_dangerous_file(name), "{name}");
+        }
+    }
+    #[test]
+    fn scripts_that_only_windows_runs_on_a_double_click_are_held_only_there() {
+        for name in ["build.js", "tool.py", "gem.rb", "x.pl"] {
+            assert!(is_dangerous_file_on(name, true), "{name}");
+            assert!(!is_dangerous_file_on(name, false), "{name}");
+        }
+        // Programs are held everywhere.
+        assert!(is_dangerous_file_on("setup.exe", false));
+        assert!(is_dangerous_file_on("setup.exe", true));
+    }
+    #[test]
+    fn a_disguised_extension_is_judged_by_what_the_system_will_run() {
+        // The last extension decides, however the name is dressed.
+        assert!(is_dangerous_file("invoice.pdf.exe"));
+        assert!(is_dangerous_file("setup.exe."));
+        assert!(is_dangerous_file("setup.exe  "));
+        assert!(is_dangerous_file("setup.exe. . "));
+        assert!(!is_dangerous_file("setup.exe.txt"));
+        assert!(!is_dangerous_file("setup.exe.pdf"));
+        // A name that sanitizing leaves is still judged by its extension.
+        assert!(is_dangerous_file(&safe_filename("..\\..\\evil.EXE")));
     }
     #[test]
     fn abandoned_native_calls_complete_with_unavailable_once() {

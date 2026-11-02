@@ -5,6 +5,7 @@
 //! authority, and therefore does not appear in this module.
 
 mod page;
+mod site;
 
 pub use page::{
     PageOrigin, PageOriginError, PagePermissionApplyError, PagePermissionCatalog,
@@ -16,4 +17,8 @@ pub use page::{
     RememberedPagePermission, MAX_PAGE_ORIGIN_BYTES, MAX_PAGE_PERMISSION_CATALOG_RETAINED_BYTES,
     MAX_PAGE_PERMISSION_GRANTS_PER_PROFILE, MAX_PAGE_PERMISSION_PATCH_CHANGES,
     MAX_PENDING_PAGE_PERMISSION_REQUESTS,
+};
+pub use site::{
+    SitePermission, SitePermissionKind, SitePermissionSetDone, SitePermissionsDone,
+    MAX_SITE_PERMISSIONS,
 };

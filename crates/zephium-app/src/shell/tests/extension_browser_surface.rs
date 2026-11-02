@@ -56,7 +56,7 @@ fn active_profile_publishes_all_logical_tabs_before_native_creation() {
     let other_space = ItemId::from(3);
     assert!(shell
         .items
-        .insert_tab(favorite, Placement::Favorites { profile }));
+        .insert_tab(favorite, Placement::Favorites { space: first_space }));
     assert!(shell.items.insert_tab(
         active,
         Placement::Space {
@@ -308,7 +308,7 @@ fn reactivation_advances_past_the_empty_retirement_generation() {
 }
 
 #[test]
-fn ambiguous_multiwindow_ownership_refuses_view_creation() {
+fn ambiguous_multiwindow_ownership_still_opens_the_page() {
     let (mut shell, engine, _) = setup();
     let profile = ProfileId::from(1);
     let space = SpaceId::from(10);
@@ -331,12 +331,12 @@ fn ambiguous_multiwindow_ownership_refuses_view_creation() {
     ));
     let effects = shell.items.navigate(item, "https://example.invalid/");
 
-    let native = shell.apply(effects);
+    shell.apply(effects);
 
-    assert!(native.rejected);
-    assert!(!shell.items.tab(item).unwrap().has_view());
+    // Extensions cannot see an ambiguous window, but browsing never waits on them.
+    assert!(shell.items.tab(item).unwrap().has_view());
     assert!(engine.extension_browser_surfaces().is_empty());
-    assert!(!engine
+    assert!(engine
         .calls()
         .iter()
         .any(|call| call.starts_with("create ")));

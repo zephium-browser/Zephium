@@ -31,6 +31,16 @@ pub struct ImportedVisit {
 /// Visits one import may carry; the history budget prunes the oldest after.
 pub const MAX_IMPORTED_VISITS: usize = 50_000;
 
+/// A failed read is distinct from a successfully empty history page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryPageError {
+    Invalid,
+    Unavailable,
+    NotAdmitted,
+    TimedOut,
+    Failed,
+}
+
 /// One recorded visit. Unlike `HistoryHit` these are not deduplicated by
 /// address: a history list shows every time a page was opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +61,8 @@ pub struct ChatSummary {
 }
 
 /// Conversations kept per profile; saving a new one past this drops the oldest.
+/// Sites one profile may let open new tabs without a click.
+pub const MAX_POPUP_SITES: usize = 512;
 pub const MAX_CHATS: usize = 200;
 /// A conversation id is 1 to this many bytes of `[A-Za-z0-9-]`.
 pub const MAX_CHAT_ID_BYTES: usize = 40;
@@ -543,8 +555,25 @@ pub trait Store {
         before: Option<i64>,
         limit: u32,
     ) -> Vec<HistoryVisit>;
+    /// Completeness-sensitive readers must use this method. Adapters without
+    /// a typed read fail closed rather than treating failures as EOF.
+    fn history_page_checked(
+        &self,
+        _profile: ProfileId,
+        _query: &str,
+        _since: Option<i64>,
+        _before: Option<i64>,
+        _limit: u32,
+    ) -> Result<Vec<HistoryVisit>, HistoryPageError> {
+        Err(HistoryPageError::Unavailable)
+    }
     /// Removes every visit to each address; returns how many rows went.
     fn forget_history_urls(&self, profile: ProfileId, urls: &[String]) -> u32;
+    /// `None` means the deletion or recovery-copy disposal failed. Zero is
+    /// a successful deletion with no matching visits.
+    fn forget_history_urls_checked(&self, profile: ProfileId, urls: &[String]) -> Option<u32> {
+        Some(self.forget_history_urls(profile, urls))
+    }
     /// Visits from another browser, kept with their own times. A visit
     /// already present at the same time is skipped, so importing again adds
     /// only what is new. Returns how many were added, or None when the
@@ -564,6 +593,27 @@ pub trait Store {
         _request: crate::bookmarks::BookmarkRequest,
     ) -> crate::bookmarks::BookmarkReply {
         crate::bookmarks::BookmarkReply::Failed(crate::bookmarks::BookmarkFailure::Unavailable)
+    }
+    /// [`Self::bookmarks`], also describing what a write changed for the
+    /// extensions listening. Blocking; callers run it off the shell.
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: crate::bookmarks::BookmarkRequest,
+    ) -> (
+        crate::bookmarks::BookmarkReply,
+        Option<crate::bookmarks::BookmarkChange>,
+    ) {
+        (self.bookmarks(profile, request), None)
+    }
+    /// History as extensions read and change it. Blocking; callers run it
+    /// off the shell.
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        _request: crate::extension_data::HistoryRequest,
+    ) -> crate::extension_data::HistoryReply {
+        crate::extension_data::HistoryReply::Failed
     }
     /// Removes visits at or after `since`, or all of them when it is absent.
     fn load_blocker_statistics(
@@ -624,9 +674,21 @@ pub trait Store {
     fn clear_history_checked(&self, profile: ProfileId, since: Option<i64>) -> Option<u32> {
         Some(self.clear_history(profile, since))
     }
+    /// Disposes recovery copies that may contain this profile's browsing
+    /// data. False means queue refusal, with no completion; admitted calls
+    /// report whether disposal committed. Call for site-data erasure too.
+    fn discard_session_backup(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(bool) + Send>,
+    ) -> bool {
+        false
+    }
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
-    /// Age in seconds of the cached icon for a page origin, None when absent.
+    /// Age in seconds of the cached icon for a favicon key, None when absent.
+    /// A key is a page origin, or one page of it (`icon::page_key`) whose own
+    /// icon differs from its origin's.
     fn favicon_age(&self, profile: ProfileId, origin: &str) -> Option<i64>;
     fn save_favicon(
         &self,
@@ -636,6 +698,8 @@ pub trait Store {
         bytes: Vec<u8>,
     );
     fn favicon_bytes(&self, profile: ProfileId, origin: &str) -> Option<(Option<String>, Vec<u8>)>;
+    /// Drops the icon kept for one page, as when it now matches its origin's.
+    fn forget_page_favicon(&self, _profile: ProfileId, _page: String) {}
 
     /// Loads one already-decoded favicon with the age of the stored copy.
     /// Age decides whether to refresh, never whether to display: an old
@@ -662,6 +726,23 @@ pub trait Store {
                     .map(|(_, bytes)| (origin.clone(), bytes))
             })
             .collect()
+    }
+
+    /// The page zoom a profile saved per site, newest first.
+    fn zoom_levels(&self, _profile: ProfileId) -> Vec<crate::zoom::SavedLevel> {
+        Vec::new()
+    }
+    /// Saves a site's page zoom, or forgets it when `percent` is none. The
+    /// oldest sites beyond `zoom::MAX_SITE_LEVELS` are dropped. False when
+    /// not admitted. Clearing history clears the levels it covers.
+    fn save_zoom_level(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        _percent: Option<u16>,
+        _set_at: i64,
+    ) -> bool {
+        false
     }
 
     /// Assistant conversations, newest first, at most `limit` (never more than
@@ -697,6 +778,21 @@ pub trait Store {
     /// them when it is absent. Returns how many went.
     fn clear_chats(&self, _profile: ProfileId, _since: Option<i64>) -> u32 {
         0
+    }
+    /// The sites `profile` lets open new tabs without a click, or None when
+    /// they cannot be read.
+    fn popup_sites(&self, _profile: ProfileId) -> Option<Vec<crate::permissions::PageOrigin>> {
+        None
+    }
+    /// Adds or removes one site from that list. False when nothing was
+    /// written, including when the list is full.
+    fn set_popup_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _allowed: bool,
+    ) -> bool {
+        false
     }
 
     /// Returns the bounded, durable deletion work that survived the previous

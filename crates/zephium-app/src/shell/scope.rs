@@ -14,15 +14,13 @@ impl Shell {
     }
 
     pub(super) fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
-        match self.items.get(id)?.placement {
-            Placement::Favorites { profile } => Some(profile),
-            Placement::Space { space, .. } => self.spaces.get(space).map(|s| s.profile),
-        }
+        let (Placement::Favorites { space } | Placement::Space { space, .. }) =
+            self.items.get(id)?.placement;
+        self.spaces.get(space).map(|s| s.profile)
     }
 
-    /// A space is an authorization boundary for UI-directed item IDs. Tabs
-    /// placed in a space require an exact match; profile-wide favorites may
-    /// appear in any space owned by that same profile.
+    /// A space is an authorization boundary for UI-directed item IDs: its
+    /// Essentials and its tabs both require an exact match.
     pub(super) fn item_in_scope(&self, id: ItemId, profile: ProfileId, space: SpaceId) -> bool {
         if self.profile_deletion_quarantines(profile) {
             return false;
@@ -37,14 +35,11 @@ impl Shell {
         let Some(item) = self.items.get(id).filter(|item| item.tab().is_some()) else {
             return false;
         };
-        match item.placement {
-            Placement::Favorites {
-                profile: item_profile,
-            } => item_profile == profile,
-            Placement::Space {
-                space: item_space, ..
-            } => item_space == space,
-        }
+        let (Placement::Favorites { space: item_space }
+        | Placement::Space {
+            space: item_space, ..
+        }) = item.placement;
+        item_space == space
     }
 
     pub(super) fn item_in_focused_scope(&self, id: ItemId) -> bool {
@@ -112,30 +107,36 @@ impl Shell {
         self.tab_metadata(profile, &ids)
     }
 
-    /// Tabs in the order the sidebar reads top to bottom: favorites, pinned
+    /// Tabs in the order the sidebar reads top to bottom: Essentials, pinned
     /// (folders opened in place), then today. Keyboard selection and cycling
     /// walk this one list so a pinned tab is never a dead end.
-    pub(super) fn keyboard_tabs(&self, profile: ProfileId, space: SpaceId) -> Vec<ItemId> {
+    pub(super) fn keyboard_tabs(&self, space: SpaceId) -> Vec<ItemId> {
+        let mut ordered = self.placement_tabs(Placement::Favorites { space });
+        ordered.extend(self.placement_tabs(Placement::Space {
+            space,
+            section: SpaceSection::Pinned,
+        }));
+        ordered.extend(self.regular_tabs(space));
+        ordered
+    }
+
+    /// The tabs of a space's Today section in sidebar order, folders opened
+    /// in place: the ones a closing tab may hand the window to.
+    pub(super) fn regular_tabs(&self, space: SpaceId) -> Vec<ItemId> {
+        self.placement_tabs(Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        })
+    }
+
+    fn placement_tabs(&self, placement: Placement) -> Vec<ItemId> {
         let mut ordered = Vec::new();
-        for placement in [
-            Placement::Favorites { profile },
-            Placement::Space {
-                space,
-                section: SpaceSection::Pinned,
-            },
-            Placement::Space {
-                space,
-                section: SpaceSection::Today,
-            },
-        ] {
-            let mut pending: Vec<ItemId> =
-                self.items.roots(placement).iter().rev().copied().collect();
-            while let Some(id) = pending.pop() {
-                if self.items.tab(id).is_some() {
-                    ordered.push(id);
-                } else {
-                    pending.extend(self.items.children(id).iter().rev().copied());
-                }
+        let mut pending: Vec<ItemId> = self.items.roots(placement).iter().rev().copied().collect();
+        while let Some(id) = pending.pop() {
+            if self.items.tab(id).is_some() {
+                ordered.push(id);
+            } else {
+                pending.extend(self.items.children(id).iter().rev().copied());
             }
         }
         ordered

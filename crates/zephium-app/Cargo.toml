@@ -8,7 +8,7 @@ license.workspace = true
 # Dormant composition seam for the production agent browser runtime. The
 # ordinary desktop graph does not enable it until a concrete lifecycle owner
 # and its full platform qualification are integrated.
-work-planning = ["dep:tokio", "dep:zephium-agentic", "zephium-agentic/provider-transport", "dep:lopdf"]
+work-planning = ["dep:serde", "dep:tokio", "dep:zephium-agentic", "zephium-agentic/provider-transport", "dep:lopdf"]
 work-runtime = ["work-planning", "dep:reqwest", "dep:socket2", "dep:serde", "dep:sha2", "dep:sha1", "dep:flate2", "dep:regex", "dep:globset", "dep:libc", "dep:ignore", "dep:grep-searcher", "dep:grep-regex", "dep:grep-matcher", "dep:similar", "dep:zephium-mcp", "dep:tempfile", "dep:zephium-private-fs", "dep:objc2-foundation", "dep:objc2"]
 # Explicit public synthesis diagnostics; agentic refuses probe-harness in optimized builds.
 work-synthesis-probe = ["work-runtime", "zephium-agentic/probe-harness"]

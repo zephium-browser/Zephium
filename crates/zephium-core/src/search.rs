@@ -211,7 +211,7 @@ pub fn kind_capacity(kind: &str) -> usize {
         "search" | "url" => 1,
         "suggestion" => 3,
         "tab" => 3,
-        "history" => 4,
+        "history" | "bookmark" => 4,
         // A past query is not a destination, and retyping it is cheap.
         "search_history" => 1,
         "note" => 2,
@@ -220,11 +220,20 @@ pub fn kind_capacity(kind: &str) -> usize {
     }
 }
 
+/// Kinds that draw on one allowance. A bookmark is a page the user has been
+/// to, so adding bookmarks to the list never makes it longer.
+pub fn capacity_group(kind: &str) -> &str {
+    match kind {
+        "bookmark" => "history",
+        other => other,
+    }
+}
+
 /// The wire `kind` is the single source of a result's section.
 pub fn result_section(kind: &str) -> ResultSection {
     match kind {
         "tab" => ResultSection::Tabs,
-        "history" | "search_history" => ResultSection::History,
+        "history" | "bookmark" | "search_history" => ResultSection::History,
         "note" => ResultSection::Notes,
         "command" => ResultSection::Commands,
         _ => ResultSection::Search,
@@ -292,6 +301,24 @@ pub fn match_quality(query: &str, title: &str, address: &str) -> u16 {
     0
 }
 
+/// Merges bookmarks into visited pages, each scored by `match_quality`. Pages
+/// keep the order they arrived in, which is their own frecency; a bookmark
+/// goes ahead of the first page it matches at least as well, so at equal
+/// quality the page the user chose to keep wins.
+pub fn interleave_bookmarks<T>(mut bookmarks: Vec<(u16, T)>, pages: Vec<(u16, T)>) -> Vec<T> {
+    bookmarks.sort_by_key(|(quality, _)| std::cmp::Reverse(*quality));
+    let mut bookmarks = bookmarks.into_iter().peekable();
+    let mut merged = Vec::with_capacity(bookmarks.len() + pages.len());
+    for (quality, page) in pages {
+        while let Some((_, bookmark)) = bookmarks.next_if(|(rank, _)| *rank >= quality) {
+            merged.push(bookmark);
+        }
+        merged.push(page);
+    }
+    merged.extend(bookmarks.map(|(_, bookmark)| bookmark));
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +376,37 @@ mod tests {
         );
         assert!(match_quality("rust guide", "Guide to Rust", "") > 0);
         assert_eq!(match_quality("rust guide", "Rust", ""), 0);
+    }
+
+    #[test]
+    fn a_bookmark_leads_a_page_it_matches_equally_well() {
+        let merged = interleave_bookmarks(
+            vec![(80, "bookmark"), (40, "bookmark weak")],
+            vec![(80, "page"), (100, "page exact"), (40, "page weak")],
+        );
+        assert_eq!(
+            merged,
+            [
+                "bookmark",
+                "page",
+                "page exact",
+                "bookmark weak",
+                "page weak"
+            ]
+        );
+        assert_eq!(interleave_bookmarks(vec![(1, 'b')], vec![]), ['b']);
+        assert_eq!(interleave_bookmarks(vec![], vec![(1, 'p')]), ['p']);
+    }
+
+    #[test]
+    fn bookmarks_share_the_history_allowance_and_section() {
+        assert_eq!(capacity_group("bookmark"), "history");
+        assert_eq!(capacity_group("tab"), "tab");
+        assert_eq!(result_section("bookmark"), ResultSection::History);
+        assert_eq!(
+            kind_capacity(capacity_group("bookmark")),
+            kind_capacity("history")
+        );
     }
 
     #[test]

@@ -197,6 +197,69 @@ fn service(origin: &str, vault: Arc<MemoryVault>, settings: Arc<MemorySettings>)
     Service::new(settings, vault, "Zephium 1.0 · macOS", "1.0.0").unwrap()
 }
 
+/// A vault that holds a bearer for the origin but will not hand it over, as a
+/// Keychain does when the app's signature no longer matches the item.
+struct LockedVault {
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl AccountVault for LockedVault {
+    fn load(&self, _: &str) -> Result<AccountToken, VaultFault> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(VaultFault::Inaccessible)
+    }
+    fn store(&self, _: &str, _: &AccountToken) -> Result<(), VaultFault> {
+        Err(VaultFault::Inaccessible)
+    }
+    fn clear(&self, _: &str) -> Result<(), VaultFault> {
+        Ok(())
+    }
+    fn present(&self, _: &str) -> Result<bool, VaultFault> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn a_vault_that_will_not_give_up_the_bearer_is_shown_once_and_not_asked_again() {
+    let (origin, _seen) = server(Box::new(account_routes)).await;
+    let settings = Arc::new(MemorySettings::default());
+    settings.set("account.server".into(), origin);
+    let vault = Arc::new(LockedVault {
+        reads: Default::default(),
+    });
+    let account = Service::new(settings, vault.clone(), "x", "1.0.0").unwrap();
+    let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = changes.clone();
+    account.set_observer(Box::new(move || {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let reads = || vault.reads.load(std::sync::atomic::Ordering::SeqCst);
+
+    assert!(account.view().signed_in);
+    assert!(!account.view().vault_fault);
+
+    assert_eq!(account.refresh(true).await, Err(AccountError::Vault));
+    assert!(account.view().signed_in && account.view().vault_fault);
+    assert_eq!(
+        (reads(), changes.load(std::sync::atomic::Ordering::SeqCst)),
+        (1, 1)
+    );
+
+    // Neither another refresh nor a hosted call goes back to the Keychain.
+    assert_eq!(account.refresh(true).await, Err(AccountError::Vault));
+    assert!(matches!(account.bearer(), Err(AccountError::Vault)));
+    assert_eq!(
+        (reads(), changes.load(std::sync::atomic::Ordering::SeqCst)),
+        (1, 1)
+    );
+
+    // Signing in again starts clean, without asking the vault for the old one.
+    account.sign_out().await.unwrap();
+    let view = account.view();
+    assert!(!view.signed_in && !view.vault_fault);
+    assert_eq!(reads(), 1);
+}
+
 async fn signed_in() -> (Service, Arc<MemoryVault>, Log, String) {
     let (origin, seen) = server(Box::new(account_routes)).await;
     let vault = MemoryVault::with(&origin, "token-1");

@@ -88,6 +88,16 @@ fn navigation_observation_events(
     events
 }
 
+/// How a main-frame navigation that did not commit ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FailedNavigationEnd {
+    Failed,
+    /// Stopped or turned into a download: not a failure.
+    Cancelled,
+    /// WebView2's error document took the place of the shown page.
+    PageReplaced,
+}
+
 fn restored_navigation_can_present(
     already_presentable: bool,
     nonpresentable_bootstrap: Option<NavigationEpoch>,
@@ -282,11 +292,14 @@ impl EngineHost {
             ) {
                 return false;
             }
-            if view.navigation.current_committed() != Some(epoch) {
+            if view.navigation.current_committed() != Some(epoch)
+                || view.navigation.document_replaced(epoch)
+            {
                 // Source/KVO notifications can precede the identity-bearing
                 // main-frame commit. They may query useful provisional state,
                 // but can never authorize either chrome attribution or first
-                // presentation.
+                // presentation. Nor can an error document standing in for
+                // the committed page.
                 return false;
             }
             let url = crate::platform::imp::current_url(view);
@@ -637,7 +650,7 @@ impl EngineHost {
         source_navigation: &NavigationEpochTracker,
         failed: NavigationEpoch,
         restored: Option<NavigationEpoch>,
-        cancelled: bool,
+        ending: FailedNavigationEnd,
     ) {
         let Some((same_generation, current, current_committed, presentable, bootstrap, token)) =
             self.views.get(&id).map(|view| {
@@ -678,6 +691,10 @@ impl EngineHost {
         if current != restored {
             return;
         }
+        if let Some(restored) = restored.filter(|_| ending == FailedNavigationEnd::PageReplaced) {
+            self.keep_replaced_document_hidden(id, source_navigation, restored);
+            return;
+        }
         if let Some(restored) = restored
             .filter(|restored| restored_navigation_can_present(presentable, bootstrap, *restored))
         {
@@ -692,7 +709,7 @@ impl EngineHost {
             return;
         }
 
-        if cancelled {
+        if ending == FailedNavigationEnd::Cancelled {
             // A policy cancellation (including conversion to WKDownload) did
             // not fail controller construction. Keep its uncommitted view
             // hidden and reusable. Closing here would revoke a pending native
@@ -704,6 +721,31 @@ impl EngineHost {
         if let Some(token) = token {
             self.sink
                 .emit_for(token, EngineEvent::ViewCreationFailed { id });
+        }
+    }
+
+    /// WebView2's error document took the place of the restored page. The
+    /// view keeps its history but nothing it shows is that page any more:
+    /// it stays hidden, chrome covers it, and the next commit names its
+    /// address even when it is the same one. Back is offered from here.
+    fn keep_replaced_document_hidden(
+        &mut self,
+        id: ItemId,
+        source_navigation: &NavigationEpochTracker,
+        restored: NavigationEpoch,
+    ) {
+        if !source_navigation.mark_document_replaced(restored) {
+            return;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let history = crate::platform::imp::history_state(view);
+        let permit = view.event_permit.clone();
+        let previous = self.navigation_snapshots.entry(id).or_default();
+        previous.url = None;
+        for event in navigation_observation_events(id, previous, None, history) {
+            permit.emit(&self.sink, event);
         }
     }
 
@@ -770,6 +812,10 @@ impl EngineHost {
         self.invoke_navigation_action(id, NativeAction::Reload);
     }
 
+    pub(crate) fn hard_reload(&mut self, id: ItemId) {
+        self.invoke_navigation_action(id, NativeAction::HardReload);
+    }
+
     pub(crate) fn stop(&self, id: ItemId) {
         #[cfg(target_os = "macos")]
         if self.webext.navigate_page(id, 3) {
@@ -802,16 +848,13 @@ impl EngineHost {
             // The user has taken control of this tab even if the native
             // reload/history call fails. Auth cleanup cannot take it back.
             view.navigation.release_auth_cleanup();
-            let result = match action {
-                NativeAction::Reload => view.reload(),
-                NativeAction::GoBack => view.go_back(),
-                NativeAction::GoForward => view.go_forward(),
+            let failed = match action {
+                NativeAction::Reload => view.reload().is_err(),
+                NativeAction::HardReload => !crate::platform::imp::reload_ignoring_cache(view),
+                NativeAction::GoBack => view.go_back().is_err(),
+                NativeAction::GoForward => view.go_forward().is_err(),
             };
-            (
-                view.event_permit.clone(),
-                view.navigation.clone(),
-                result.is_err(),
-            )
+            (view.event_permit.clone(), view.navigation.clone(), failed)
         }) else {
             return;
         };

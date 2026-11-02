@@ -337,13 +337,7 @@ export function hostOf(url: string): string {
   }
 }
 
-/** Where a query lands in a title, so the row can show why it matched. */
-export function matchRange(title: string, query: string): [number, number] | null {
-  const needle = query.trim().toLocaleLowerCase();
-  if (!needle) return null;
-  const at = title.toLocaleLowerCase().indexOf(needle);
-  return at < 0 ? null : [at, at + needle.length];
-}
+export { matchRange } from "$shared/lib/match-range";
 
 /** Whether a task falls inside a scope's span of days.
  *

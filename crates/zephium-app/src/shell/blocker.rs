@@ -1473,6 +1473,7 @@ impl Shell {
     pub(super) fn start_blocker_profile(&mut self, profile: ProfileId) -> bool {
         self.ensure_blocker_statistics(profile, false);
         self.ensure_blocker_site_preferences(profile);
+        self.ensure_popup_sites(profile);
         let accepted = self.blocker.start_uninitialized(profile);
         self.finish_terminalized_blocker_native_operations();
         self.project_blocker_status();

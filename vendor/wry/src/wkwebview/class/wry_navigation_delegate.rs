@@ -36,8 +36,8 @@ use crate::{
       AppleNavigationEventState,
     },
   },
-  AppleNavigationAction, NavigationEvent, NavigationFailure, NavigationId, PageLoadEvent,
-  WryWebView,
+  AppleNavigationAction, FailedDocument, NavigationEvent, NavigationFailure, NavigationId,
+  PageLoadEvent, WryWebView,
 };
 
 use super::wry_download_delegate::WryDownloadDelegate;
@@ -82,10 +82,17 @@ pub struct WryNavigationDelegateIvars {
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
   #[cfg(target_os = "macos")]
   pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub http_auth_handler: Option<Box<crate::http_auth::HttpAuthHandler>>,
+  #[cfg(target_os = "macos")]
+  pub certificate_failure_handler: Option<Box<dyn Fn(crate::CertificateFailure)>>,
+  #[cfg(target_os = "macos")]
+  pub server_trust_exceptions: Option<crate::ServerTrustExceptions>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
-  pub navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+  pub navigation_failure_handler:
+    Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
   pub navigation_presentation_guard: Option<Box<dyn Fn()>>,
   // `AppleNavigationEventState` intentionally uses a non-wrapping `u128`
   // record token, which gives it 16-byte alignment on Apple 64-bit targets.
@@ -272,7 +279,7 @@ define_class!(
     #[unsafe(method(webView:didReceiveAuthenticationChallenge:completionHandler:))]
     unsafe fn deny_authentication_challenge(
       &self,
-      _webview: &WKWebView,
+      webview: &WKWebView,
       challenge: &NSURLAuthenticationChallenge,
       completion_handler: &block2::DynBlock<
         dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
@@ -280,11 +287,36 @@ define_class!(
     ) {
       // HTTP authentication, client certificates, and server-trust decisions
       // have different safe defaults. Preserve WebKit/Foundation's ordinary
-      // system trust evaluation for TLS certificates; cancel every challenge
-      // that could otherwise select credentials or expose native auth UI.
+      // system trust evaluation for TLS certificates; an opted-in embedder
+      // answers HTTP sign-in challenges; cancel every other challenge that
+      // could select credentials or expose native auth UI.
       let protection_space = challenge.protectionSpace();
       let method = protection_space.authenticationMethod();
+      if let Some(handler) = &self.ivars().http_auth_handler {
+        if let Some(request) = crate::wkwebview::http_auth::challenge(webview, challenge, &method) {
+          let responder = crate::wkwebview::http_auth::responder(completion_handler);
+          // A panicking embedder drops the responder while unwinding, which
+          // cancels the native request.
+          let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(request, responder)));
+          return;
+        }
+      }
       let disposition = if method.isEqualToString(NSURLAuthenticationMethodServerTrust) {
+        // Only a chain the embedder excepted, for its exact origin and leaf,
+        // and that still fails system evaluation, is accepted here.
+        if let Some(credential) = self
+          .ivars()
+          .server_trust_exceptions
+          .as_ref()
+          .and_then(|exceptions| crate::wkwebview::server_trust::excepted(exceptions, challenge))
+        {
+          completion_handler.call((
+            NSURLSessionAuthChallengeDisposition::UseCredential,
+            Retained::as_ptr(&credential).cast_mut(),
+          ));
+          return;
+        }
         NSURLSessionAuthChallengeDisposition::PerformDefaultHandling
       } else {
         if let Some(notify) = &self.ivars().credential_challenge_denied_handler {
@@ -328,10 +360,17 @@ impl WryNavigationDelegate {
     apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
     #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
+    #[cfg(target_os = "macos")] http_auth_handler: Option<Box<crate::http_auth::HttpAuthHandler>>,
+    #[cfg(target_os = "macos")] certificate_failure_handler: Option<
+      Box<dyn Fn(crate::CertificateFailure)>,
+    >,
+    #[cfg(target_os = "macos")] server_trust_exceptions: Option<crate::ServerTrustExceptions>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
     navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
-    navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+    navigation_failure_handler: Option<
+      Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>,
+    >,
     navigation_presentation_guard: Option<Box<dyn Fn()>>,
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
     mtm: MainThreadMarker,
@@ -376,6 +415,12 @@ impl WryNavigationDelegate {
         main_frame_navigation_attempt_handler,
         #[cfg(target_os = "macos")]
         credential_challenge_denied_handler,
+        #[cfg(target_os = "macos")]
+        http_auth_handler,
+        #[cfg(target_os = "macos")]
+        certificate_failure_handler,
+        #[cfg(target_os = "macos")]
+        server_trust_exceptions,
         has_download_handler,
         #[cfg(target_os = "macos")]
         new_window_req_handler,

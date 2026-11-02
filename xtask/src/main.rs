@@ -12,6 +12,7 @@ mod macos_process_family;
 mod page_assist_boundary;
 mod page_reader_boundary;
 mod password_manager_qa;
+mod updater_sign;
 mod webext_suite;
 mod work_composition_boundary;
 mod work_persistence_boundary;
@@ -46,6 +47,12 @@ fn main() {
         Some("ci") => {
             CI_RESOURCE_PROFILE.store(true, Ordering::Release);
             ci();
+        }
+        Some("sign-windows-updater") => {
+            if let Err(error) = updater_sign::run(&arguments[1..]) {
+                eprintln!("Windows updater signing failed: {error}");
+                exit(1);
+            }
         }
         Some("check-frame-styles") => run("node", &["frame/scripts/check-styles.mjs"]),
         Some("check-engine-floors") => {
@@ -123,7 +130,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
@@ -212,6 +219,7 @@ fn check_security_fork_locks() {
     ];
     const ROOT_FORKS: &[(&str, &str)] = &[
         ("adblock", "0.13.2"),
+        ("tao", "0.35.3"),
         ("tauri", "2.11.3"),
         ("tauri-runtime-wry", "2.11.3"),
         ("wry", "0.55.1"),

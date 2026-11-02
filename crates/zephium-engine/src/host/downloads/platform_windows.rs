@@ -63,6 +63,7 @@ pub(super) struct Source {
     parent: HWND,
     root: HWND,
     initial_open: bool,
+    ask_destination: bool,
 }
 impl Source {
     pub(super) fn live(&self) -> bool {
@@ -369,10 +370,11 @@ impl Downloads {
         request: (
             &ICoreWebView2Controller,
             &ICoreWebView2DownloadStartingEventArgs,
+            bool,
         ),
         mut initial: Option<InitialDownload>,
     ) {
-        let (controller, args) = request;
+        let (controller, args, ask_destination) = request;
         let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
@@ -404,6 +406,7 @@ impl Downloads {
             parent,
             root: unsafe { GetAncestor(parent, GA_ROOT) },
             initial_open,
+            ask_destination,
         };
         if !source.key() {
             return;
@@ -469,6 +472,13 @@ impl Downloads {
             } else if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
                 let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
                 unsafe { operation.InterruptReason(&mut reason) }?;
+                if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED {
+                    // The pause the person asked for. One nobody asked for
+                    // falls through and ends the transfer as any other stop.
+                    if manager.user_paused(id) {
+                        return Ok(());
+                    }
+                }
                 if automatically_restarting(reason) {
                     if manager
                         .active
@@ -557,10 +567,12 @@ impl Downloads {
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,
+                kept: false,
+                user_pausing: false,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         self.ensure_recovery(partition);
         let cached = self.preferences.borrow().get(&partition.profile()).cloned();
         if let Some(preferences) = cached {
@@ -597,10 +609,11 @@ impl Downloads {
                     source.root,
                     transfer.record.filename.clone(),
                     transfer.record.source.clone(),
+                    source.ask_destination,
                 )
             })
         });
-        let Some((true, window, filename, source)) = context else {
+        let Some((true, window, filename, source, ask_destination)) = context else {
             self.cancel(id, None);
             return;
         };
@@ -611,7 +624,8 @@ impl Downloads {
             .or_else(dirs::download_dir);
         // Admission pins the foreground document; WebView2's automatic-download
         // permission remains denied, so a page cannot authorize a download flood.
-        if !preferences.ask_destination
+        if !ask_destination
+            && !preferences.ask_destination
             && (preferences.directory.is_none() || preferences.directory_identity.is_some())
         {
             let Some(directory) = directory else {
@@ -667,11 +681,17 @@ impl Downloads {
             {
                 return;
             }
+            // A held file is complete: no native operation is left to cancel.
+            if transfer.record.state == DownloadState::Held {
+                drop(active);
+                self.terminal(id, DownloadState::Cancelled, error);
+                return;
+            }
             transfer.cancelling = true;
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
-            (self.notify)(transfer.partition.profile());
+            self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
                 transfer.destination_reply.take(),
@@ -712,6 +732,67 @@ impl Downloads {
         }
     }
 
+    /// The person paused a download. WebView2 stops the transfer and reports
+    /// it as interrupted by the user; `user_paused` settles it from there.
+    pub(super) fn user_pause(
+        self: &Rc<Self>,
+        partition: Partition,
+        id: DownloadId,
+    ) -> Result<(), DownloadError> {
+        let operation = {
+            let mut active = self.active.borrow_mut();
+            let transfer = active
+                .get_mut(&id)
+                .filter(|transfer| {
+                    transfer.partition == partition
+                        && may_pause(
+                            transfer.record.state,
+                            transfer.cancelling,
+                            transfer.user_pausing,
+                            transfer.persisting_terminal,
+                            transfer.destination.is_some(),
+                        )
+                        && retry_source_alive(&transfer.native.permit)
+                })
+                .ok_or(DownloadError::Invalid)?;
+            transfer.user_pausing = true;
+            transfer.native.operation.clone()
+        };
+        // No RefCell borrow crosses a COM call.
+        if unsafe { operation.Pause() }.is_err() {
+            if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
+                transfer.user_pausing = false;
+            }
+            return Err(DownloadError::Unavailable);
+        }
+        Ok(())
+    }
+
+    /// WebView2 reported the pause the person asked for. False when nobody
+    /// asked, so the caller treats the stop as the failure it is.
+    fn user_paused(&self, id: DownloadId) -> bool {
+        let profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active.get_mut(&id).filter(|transfer| {
+                transfer.user_pausing
+                    && transfer.record.state == DownloadState::Receiving
+                    && !transfer.cancelling
+                    && !transfer.persisting_terminal
+            }) else {
+                return false;
+            };
+            transfer.user_pausing = false;
+            transfer.record.state = DownloadState::Paused;
+            transfer.record.error = None;
+            transfer.deadline = DecisionDeadline::new(DecisionPhase::UserPaused, Instant::now());
+            transfer.record.revision += 1;
+            transfer.partition.profile()
+        };
+        self.persist(id);
+        self.changed(profile);
+        true
+    }
+
     pub(super) fn resume(
         self: &Rc<Self>,
         partition: Partition,
@@ -745,7 +826,8 @@ impl Downloads {
         }
         .map_err(|_| DownloadError::Unavailable)?;
         if state != COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
-            || !resumable_reason(reason)
+            || !(resumable_reason(reason)
+                || reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED)
             || !can_resume.as_bool()
         {
             return Err(DownloadError::Unavailable);
@@ -769,7 +851,7 @@ impl Downloads {
             return Err(DownloadError::Unavailable);
         }
         self.ensure_timer();
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         Ok(())
     }
 

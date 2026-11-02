@@ -1,5 +1,7 @@
 <script lang="ts" module>
   export type LauncherAction = { id: string; label: string; keys: string[]; run: () => void };
+  /** The sheet's id, which the field names while the sheet is open. */
+  export const ACTIONS_ID = "launcher-actions";
 </script>
 
 <script lang="ts">
@@ -9,17 +11,26 @@
   let {
     actions,
     height = $bindable(0),
+    onhighlight,
     onrun,
     onclose,
   }: {
     actions: LauncherAction[];
     height?: number;
+    /** The highlighted item's id, for the field's `aria-activedescendant`. */
+    onhighlight: (id: string | undefined) => void;
     onrun: (action: LauncherAction) => void;
     onclose: () => void;
   } = $props();
 
   let index = $state(0);
   let sheet = $state<HTMLElement>();
+  const itemId = (action: LauncherAction) => `${ACTIONS_ID}-${action.id}`;
+
+  $effect(() => {
+    const action = actions[Math.min(index, actions.length - 1)];
+    onhighlight(action ? itemId(action) : undefined);
+  });
 
   // The field keeps focus throughout, so the sheet reads keys from the window
   // rather than taking focus and handing it back.
@@ -38,13 +49,14 @@
 
   function pointerdown(event: PointerEvent) {
     const target = event.target as Element | null;
-    if (!sheet?.contains(target) && !target?.closest('[aria-haspopup="menu"]')) onclose();
+    if (!sheet?.contains(target) && !target?.closest('button[aria-haspopup="menu"]')) onclose();
   }
 </script>
 
 <svelte:window onkeydown={keydown} onpointerdown={pointerdown} />
 
 <div
+  id={ACTIONS_ID}
   class="sheet"
   role="menu"
   aria-label={m.launcher_actions()}
@@ -54,6 +66,7 @@
   {#each actions as action, i (action.id)}
     <button
       type="button"
+      id={itemId(action)}
       role="menuitem"
       tabindex="-1"
       class:active={i === index}

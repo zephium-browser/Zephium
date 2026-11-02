@@ -42,6 +42,10 @@ name = "WebKit callback and prompt hardening"
 paths = ["src/wkwebview"]
 
 [[patch_sets]]
+name = "bounded NSString dialog inputs before Rust allocation"
+paths = ["src/wkwebview/script_dialog.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
+
+[[patch_sets]]
 name = "WebKit frame-scoped extension resource admission"
 paths = ["src/wkwebview/navigation.rs"]
 
@@ -94,3 +98,11 @@ paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkweb
 [[patch_sets]]
 name = "optional aggregate content-rule load counts"
 paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
+
+[[patch_sets]]
+name = "extension-independent retained-controller initialization"
+paths = ["src/lib.rs", "src/native_controller_init.rs", "src/webview2/mod.rs"]
+
+[[patch_sets]]
+name = "MSRV-compatible native class bundle identity"
+paths = ["src/wkwebview/class/wry_web_view.rs"]

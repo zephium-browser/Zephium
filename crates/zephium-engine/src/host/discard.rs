@@ -816,6 +816,42 @@ impl EngineHost {
         }
     }
 
+    /// Asks each profile's environment once which renderer hosts which page,
+    /// and reports every asked-for page's share.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn sample_page_memory(&self, ids: Vec<ItemId>) {
+        let mut asked: std::collections::HashMap<ProfileId, Vec<(ItemId, u32, EventPermit)>> =
+            std::collections::HashMap::new();
+        for id in ids {
+            let (Some(view), Some(partition)) = (self.views.get(&id), self.partitions.get(&id))
+            else {
+                continue;
+            };
+            if let Some(frame) = crate::platform::imp::main_frame_id(&view.view) {
+                asked.entry(partition.profile()).or_default().push((
+                    id,
+                    frame,
+                    view.event_permit.clone(),
+                ));
+            }
+        }
+        for (profile, pages) in asked {
+            let Some(environment) = self.environments.get(&profile) else {
+                continue;
+            };
+            let sink = self.sink.clone();
+            crate::platform::imp::sample_renderers(environment, move |renderers| {
+                let frames: Vec<(ItemId, u32)> =
+                    pages.iter().map(|(id, frame, _)| (*id, *frame)).collect();
+                for (id, bytes) in page_memory_shares(&renderers, &frames) {
+                    if let Some((_, _, permit)) = pages.iter().find(|(page, ..)| *page == id) {
+                        permit.emit(&sink, EngineEvent::PageMemory { id, profile, bytes });
+                    }
+                }
+            });
+        }
+    }
+
     pub(crate) fn set_memory_pressure(
         &mut self,
         pressure: zephium_core::ports::engine::MemoryPressure,
@@ -1545,6 +1581,34 @@ impl EngineHost {
     }
 }
 
+/// A page's memory: each renderer's private bytes shared evenly among the
+/// pages whose frames it hosts, summed over the renderers the page uses.
+/// `renderers` holds each process's bytes and the main frames of its frames;
+/// a page none of them names gets no sample.
+#[cfg(any(test, target_os = "windows"))]
+fn page_memory_shares(
+    renderers: &[(u64, Vec<u32>)],
+    pages: &[(ItemId, u32)],
+) -> Vec<(ItemId, u64)> {
+    let mut bytes = std::collections::HashMap::<u32, u64>::new();
+    for (private, hosted) in renderers {
+        let mut hosted = hosted.clone();
+        hosted.sort_unstable();
+        hosted.dedup();
+        let Some(share) = private.checked_div(hosted.len() as u64) else {
+            continue;
+        };
+        for page in hosted {
+            let total = bytes.entry(page).or_default();
+            *total = total.saturating_add(share);
+        }
+    }
+    pages
+        .iter()
+        .filter_map(|(id, frame)| bytes.get(frame).map(|bytes| (*id, *bytes)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicBool;
@@ -1554,6 +1618,28 @@ mod tests {
 
     use super::super::scripts::DISCARD_SAFETY_BOOTSTRAP_JS;
     use super::*;
+
+    #[test]
+    fn a_page_owns_its_share_of_every_renderer_it_uses() {
+        const MB: u64 = 1 << 20;
+        let (a, b, c) = (ItemId::from(1), ItemId::from(2), ItemId::from(3));
+        let renderers = [
+            // A's own renderer, its two frames named once.
+            (300 * MB, vec![10, 10]),
+            // A same-site renderer A and B share, and an iframe of B's.
+            (200 * MB, vec![10, 20, 20]),
+            // A renderer for a page nobody asked about still takes its share.
+            (90 * MB, vec![20, 99, 99, 30]),
+            // A renderer with no frames left is nobody's.
+            (50 * MB, vec![]),
+        ];
+        let shares = page_memory_shares(&renderers, &[(a, 10), (b, 20), (c, 40)]);
+        assert_eq!(shares, vec![(a, 400 * MB), (b, 130 * MB)]);
+        assert!(
+            page_memory_shares(&[(u64::MAX, vec![1]), (u64::MAX, vec![1])], &[(a, 1)])
+                .contains(&(a, u64::MAX))
+        );
+    }
 
     #[cfg(target_os = "macos")]
     fn action(get: bool, main: Option<bool>) -> wry::AppleNavigationAction {

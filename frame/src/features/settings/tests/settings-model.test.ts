@@ -72,6 +72,16 @@ it("finds every real tab option", async () => {
   }
 });
 
+it("finds the page zoom options", async () => {
+  const { searchSettings } = await import("../lib/settings-model");
+  for (const [query, target] of [
+    ["default zoom", "appearance.zoom"],
+    ["zoom levels", "appearance.zoom-levels"],
+  ]) {
+    expect(searchSettings(query!).some((result) => result.target === target)).toBe(true);
+  }
+});
+
 it("takes each feature's pages out of navigation and search while its switch is off", async () => {
   const off = new Set<string>();
   vi.resetModules();
@@ -101,4 +111,19 @@ it("takes each feature's pages out of navigation and search while its switch is 
   expect(shown()).not.toContain("focus");
   expect(searchSettings("AI").map((result) => result.target)).toContain("ai.enabled");
   vi.doUnmock("$domain/preferences");
+});
+
+it("offers SmartScreen search results only on Windows", async () => {
+  for (const windows of [false, true]) {
+    vi.resetModules();
+    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows }));
+    const model = await import("../lib/settings-model");
+    expect(
+      model.searchSettings("SmartScreen").some((field) => field.target === "privacy.smartscreen"),
+    ).toBe(windows);
+    expect(model.searchSections("SmartScreen").some((section) => section.id === "privacy")).toBe(
+      windows,
+    );
+  }
+  vi.doUnmock("$shared/platform");
 });

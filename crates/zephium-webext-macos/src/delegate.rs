@@ -14,7 +14,7 @@ use objc2_web_kit::{
 };
 
 use crate::runtime::Shared;
-use crate::{access, bridge, error, native, socket, TabRequest};
+use crate::{access, bridge, error, events, native, socket, TabRequest};
 
 pub(crate) struct Ivars {
     shared: RcWeak<Shared>,
@@ -28,6 +28,78 @@ define_class!(
     pub(crate) struct Delegate;
 
     unsafe impl NSObjectProtocol for Delegate {}
+
+    // WebKit's private delegate method for tabs.move; without it the call
+    // reports that it is not implemented.
+    impl Delegate {
+        #[unsafe(method(_webExtensionController:moveTabs:toIndex:inWindow:forExtensionContext:completionHandler:))]
+        fn move_tabs(
+            &self,
+            _controller: &WKWebExtensionController,
+            tabs: &NSArray<AnyObject>,
+            index: usize,
+            window: *mut AnyObject,
+            _context: &WKWebExtensionContext,
+            completion: &DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            let completion = completion.copy();
+            let fail = |message: &str| {
+                let error = error(message);
+                completion.call((Retained::as_ptr(&error).cast_mut(),));
+            };
+            let Some(shared) = self.shared() else {
+                return fail("The browser is closing.");
+            };
+            let request = {
+                let graph = shared.graph.borrow();
+                let moved: Option<Vec<_>> = tabs
+                    .iter()
+                    .take(MAX_MOVED_TABS + 1)
+                    .map(|tab| {
+                        graph.windows.iter().flat_map(|w| w.tabs()).find(|candidate| {
+                            std::ptr::eq(Retained::as_ptr(candidate).cast::<AnyObject>(), &*tab)
+                        })
+                    })
+                    .collect();
+                let target = unsafe { window.as_ref() }
+                    .and_then(|window| window_id(&shared, window))
+                    .or_else(|| moved.as_ref()?.first()?.window().map(|window| window.id()));
+                match (moved, target.and_then(|id| graph.window(id))) {
+                    (Some(moved), Some(target)) if !moved.is_empty() && moved.len() <= MAX_MOVED_TABS => {
+                        if moved
+                            .iter()
+                            .any(|tab| tab.window().is_none_or(|w| w.id() != target.id()))
+                        {
+                            Err("Tabs cannot be moved to another window.")
+                        } else {
+                            let ids: Vec<u64> = moved.iter().map(|tab| tab.id()).collect();
+                            let before = target
+                                .tabs()
+                                .iter()
+                                .map(|tab| tab.id())
+                                .filter(|id| !ids.contains(id))
+                                .nth(index);
+                            Ok(TabRequest::Move { tabs: ids, before })
+                        }
+                    }
+                    _ => Err("No tab or window with that id."),
+                }
+            };
+            match request {
+                Ok(request) => shared.host().tab_request(
+                    request,
+                    Box::new(move |result| match result {
+                        Ok(_) => completion.call((std::ptr::null_mut(),)),
+                        Err(message) => {
+                            let error = error(&message);
+                            completion.call((Retained::as_ptr(&error).cast_mut(),));
+                        }
+                    }),
+                ),
+                Err(message) => fail(message),
+            }
+        }
+    }
 
     unsafe impl WKWebExtensionControllerDelegate for Delegate {
         #[unsafe(method_id(webExtensionController:openWindowsForExtensionContext:))]
@@ -132,7 +204,10 @@ define_class!(
                 .iter()
                 .filter_map(|url| url.absoluteString().map(|url| url.to_string()))
                 .collect();
+            let extension = unsafe { _context.uniqueIdentifier() }.to_string();
             for url in &urls {
+                let weak = Rc::downgrade(&shared);
+                let extension = extension.clone();
                 shared.host().tab_request(
                     TabRequest::Create {
                         window: None,
@@ -141,7 +216,15 @@ define_class!(
                         pinned: false,
                         index: None,
                     },
-                    Box::new(|_| {}),
+                    Box::new(move |created| {
+                        if let (Ok(Some(tab)), Some(shared)) = (created, weak.upgrade()) {
+                            let mut popouts = shared.popouts.borrow_mut();
+                            let owned = popouts.entry(extension).or_default();
+                            owned.push(tab);
+                            let excess = owned.len().saturating_sub(32);
+                            owned.drain(..excess);
+                        }
+                    }),
                 );
             }
             let window = shared.graph.borrow().focused_window();
@@ -255,6 +338,32 @@ define_class!(
             );
         }
 
+        // A change to a background tab's own action shows nowhere until that
+        // tab is activated, which refreshes the toolbar anyway.
+        #[unsafe(method(webExtensionController:didUpdateAction:forExtensionContext:))]
+        fn did_update_action(
+            &self,
+            _controller: &WKWebExtensionController,
+            action: &WKWebExtensionAction,
+            context: &WKWebExtensionContext,
+        ) {
+            let Some(shared) = self.shared() else {
+                return;
+            };
+            let shown = unsafe { action.associatedTab() }.is_none_or(|tab| {
+                let tab: &AnyObject = tab.as_ref();
+                shared.graph.borrow().windows.iter().any(|window| {
+                    window.active_tab().is_some_and(|active| {
+                        std::ptr::eq(Retained::as_ptr(&active).cast::<AnyObject>(), tab)
+                    })
+                })
+            });
+            if shown {
+                let id = unsafe { context.uniqueIdentifier() }.to_string();
+                shared.host().action_changed(&id);
+            }
+        }
+
         #[unsafe(method(webExtensionController:presentPopupForAction:forExtensionContext:completionHandler:))]
         fn present_popup(
             &self,
@@ -320,6 +429,10 @@ define_class!(
                     socket::connect(&shared, context, port);
                     completion.call((std::ptr::null_mut(),));
                 }
+                Some(shared) if application == events::APPLICATION => {
+                    events::connect(&shared, context, port);
+                    completion.call((std::ptr::null_mut(),));
+                }
                 Some(shared) => match native::connect(&shared, context, port, &application) {
                     Ok(()) => completion.call((std::ptr::null_mut(),)),
                     Err(message) => {
@@ -346,6 +459,9 @@ impl Delegate {
         self.ivars().shared.upgrade()
     }
 }
+
+/// Bounds the work one tabs.move asks of the browser.
+const MAX_MOVED_TABS: usize = 64;
 
 fn window_id(shared: &Shared, window: &AnyObject) -> Option<u64> {
     let graph = shared.graph.borrow();

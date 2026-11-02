@@ -693,6 +693,22 @@ fn validate_storage_postcondition(
     Ok(())
 }
 
+pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
+    view.webview().reload_bypass_cache();
+    true
+}
+
+pub fn history_session(
+    _view: &wry::WebView,
+    _done: impl FnOnce(Option<(Vec<(String, String)>, usize)>),
+) -> bool {
+    false
+}
+
+pub fn go_to_history_entry(_view: &wry::WebView, _offset: i32, _url: &str) -> bool {
+    false
+}
+
 pub fn stop_loading(view: &wry::WebView) {
     view.webview().stop_loading();
 }

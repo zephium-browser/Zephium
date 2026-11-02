@@ -297,6 +297,9 @@ pub struct PagePermissionRequest {
     pub id: PagePermissionRequestId,
     pub origin: PageOrigin,
     pub kind: PagePermissionRequestKind,
+    /// The operating system refuses the browser this capability, so an
+    /// Allow reaches nothing until the person changes it there.
+    pub blocked_by_system: bool,
 }
 
 /// Explicit settlement for one exact retained native completion.

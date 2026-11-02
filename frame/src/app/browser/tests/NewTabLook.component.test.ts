@@ -7,6 +7,8 @@ import { resourceTestServer } from "$shared/testing/resources/server";
 import type { SearchResult } from "$shared/ipc/bindings";
 import { preferences } from "$domain/preferences";
 import { taskSession } from "$domain/resources";
+import { loadNewTab } from "$features/newtab";
+import { loadNewTabSearch } from "$features/search";
 import NewTabLook from "./NewTabLook.svelte";
 import { themed } from "./look-bench";
 
@@ -45,6 +47,10 @@ vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: native.profile, name: "Alex Rivera", kind: "default" }) },
 }));
 const ontasks = vi.fn();
+
+// Resolve the public lazy modules with fixture preparation, so sky readiness
+// measures image decoding and rendering after cold dev-server transforms.
+await Promise.all([loadNewTab(), loadNewTabSearch()]);
 
 // Mid-afternoon on a Monday.
 const NOW = new Date(2026, 8, 28, 14, 32);
@@ -90,8 +96,12 @@ const settled = () =>
 
 /** The sky this theme asks for is decoded and showing. */
 async function skied(screen: Screen) {
+  const scene = document.documentElement.dataset.theme === "light" ? "day" : "night";
   await expect
-    .poll(() => screen.container.querySelector('.newtab[data-ready="true"]'), { timeout: 8000 })
+    .poll(
+      () => screen.container.querySelector(`.newtab[data-scene="${scene}"][data-ready="true"]`),
+      { timeout: 8000 },
+    )
     .toBeTruthy();
   await settled();
 }

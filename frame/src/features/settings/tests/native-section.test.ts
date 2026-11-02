@@ -11,10 +11,11 @@ test("every settings page a menu or command names is the one that opens", () => 
     "ai",
     "sites",
     "focus",
+    "privacy",
   ]) {
     handleNativeSection(`settings.section.${id}`);
     expect(section()).toBe(id);
   }
   handleNativeSection("settings.section.unknown");
-  expect(section()).toBe("focus");
+  expect(section()).toBe("privacy");
 });

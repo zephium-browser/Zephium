@@ -89,7 +89,11 @@ Three independent causes, all fixed:
   fills.
 
 Stored favicon retention is 1024 origins per profile, 4 MiB at the fixed 4 KiB
-raster size.
+raster size. A page whose icon differs from its origin's also keeps its own, by
+address without query or fragment: 512 per profile, 2 MiB. They are history, so
+clearing or forgetting history removes them, and a private page never stores
+one. The origin's icon stays the fallback for a page that declares none and for
+a listed address not yet opened.
 
 ## Opening a row
 

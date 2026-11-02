@@ -22,13 +22,22 @@ mod agentic_input_probe;
 mod agentic_probe_resources;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;
+pub(crate) mod browsing_data;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
 #[allow(dead_code)]
 mod cdp;
+mod certificates;
 mod content_filter;
 mod find;
+mod http_auth;
+pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
+pub(crate) use http_auth::BasicAuthResponder;
+mod audio;
+pub use audio::{install_audio_observer, AudioObserver};
 mod automatic_pip;
+mod favicon;
+pub use favicon::{install_favicon_observer, FaviconObserver};
 mod fullscreen;
 pub(crate) use automatic_pip::automatic_pip;
 mod fullscreen_transition;
@@ -47,6 +56,7 @@ mod cookie_transfer;
 pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
+mod page_layer;
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -54,12 +64,15 @@ mod semantic_action;
 // physical Windows isolated-world qualifier promotes the support claim.
 #[allow(dead_code)]
 mod semantic_runtime;
+mod sidebar_card;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
 mod apps;
 mod native_paths;
 pub(crate) use apps::{external_app_name, open_external_app};
+mod page_memory;
 mod paint;
+pub(crate) use page_memory::{main_frame_id, sample_renderers};
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
 mod semantic_screenshot;
@@ -127,28 +140,33 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment10,
-    ICoreWebView2Environment5, ICoreWebView2Environment7, ICoreWebView2Environment8,
-    ICoreWebView2Profile2, ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10,
-    ICoreWebView2_13, ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
+    ICoreWebView2, ICoreWebView2AcceleratorKeyPressedEventArgs, ICoreWebView2Controller,
+    ICoreWebView2Environment, ICoreWebView2Environment10, ICoreWebView2Environment5,
+    ICoreWebView2Environment7, ICoreWebView2Environment8, ICoreWebView2Profile2,
+    ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10, ICoreWebView2_13,
+    ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
     COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
-    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS,
+    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS, COREWEBVIEW2_PROCESS_FAILED_KIND,
     COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
-    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
     BrowserProcessExitedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
     ClearBrowsingDataCompletedHandler, ClientCertificateRequestedEventHandler,
-    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
-    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
-    ProcessFailedEventHandler, ServerCertificateErrorDetectedEventHandler,
-    SourceChangedEventHandler,
+    ExecuteScriptCompletedHandler, HistoryChangedEventHandler,
+    LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
+    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
+    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
+    ZoomFactorChangedEventHandler,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
@@ -368,6 +386,7 @@ fn configure_with_credential_denied(
     // Raw content views never use host objects or web messages. Disable the
     // mechanisms in the runtime too, so a future accidental handler cannot
     // silently turn into a bridge.
+    crate::reputation::configure(&core)?;
     let settings = unsafe { core.Settings()? };
     // The PDF viewer has its own Save, Save As and Print surfaces. They do not
     // reliably pass through DownloadStarting, so Settings7 is mandatory for
@@ -394,8 +413,8 @@ fn configure_with_credential_denied(
         }
         // Generic and agent views retain download/menu denial. The human-view
         // constructor may enable a bounded native menu only after installing
-        // its download broker and a separate SaveAsUIShowing denial hook;
-        // document SaveAs is not part of the DownloadStarting protocol.
+        // its download broker and a separate SaveAsUIShowing gate; document
+        // SaveAs is not part of the DownloadStarting protocol.
         settings.SetAreDefaultContextMenusEnabled(false)?;
         // Native modal dialogs are likewise disabled until browser chrome has
         // an origin-labelled, rate-limited dialog broker.
@@ -684,8 +703,29 @@ pub fn install_crash_handler(
     webview: &wry::WebView,
     on_failure: impl Fn(ProcessFailure) + 'static,
 ) -> windows_core::Result<CrashObserver> {
+    install_process_failure_handler(webview, on_failure, None)
+}
+
+/// A person's tab: also says when its page stops responding (`false`) and
+/// when it answers again (`true`). WebView2 repeats the unresponsive report
+/// every few seconds while the renderer is hung; one queued script per hang
+/// completes once the renderer runs again.
+pub fn install_crash_handler_with_responsiveness(
+    webview: &wry::WebView,
+    on_failure: impl Fn(ProcessFailure) + 'static,
+    on_responsive: impl Fn(bool) + 'static,
+) -> windows_core::Result<CrashObserver> {
+    install_process_failure_handler(webview, on_failure, Some(Rc::new(on_responsive)))
+}
+
+fn install_process_failure_handler(
+    webview: &wry::WebView,
+    on_failure: impl Fn(ProcessFailure) + 'static,
+    on_responsive: Option<Rc<dyn Fn(bool)>>,
+) -> windows_core::Result<CrashObserver> {
     let core = webview.webview();
-    let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+    let probing = Rc::new(Cell::new(false));
+    let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
         let Some(args) = args else {
             return Ok(());
         };
@@ -698,17 +738,62 @@ pub fn install_crash_handler(
             COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
                 on_failure(ProcessFailure::Renderer)
             }
-            // A subframe failure is not a top-level page death. Likewise an
-            // unresponsive page must not be destroyed without user consent.
-            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
-            | COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {}
-            _ => {}
+            // An unresponsive page is never ended without the person's say.
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {
+                if let (Some(report), Some(core)) = (on_responsive.as_ref(), sender.as_ref()) {
+                    report(false);
+                    probe_responsiveness(core, &probing, report);
+                }
+            }
+            // A subframe, GPU or utility process WebView2 brings back itself.
+            other => log_ignored_process_failure(other),
         }
         Ok(())
     }));
     let mut token = Default::default();
     unsafe { core.add_ProcessFailed(&handler, &mut token)? };
     Ok(CrashObserver { core, token })
+}
+
+/// Queues a no-op script behind the hung page's work, once per hang. It
+/// completes only when the renderer runs again.
+fn probe_responsiveness(core: &ICoreWebView2, probing: &Rc<Cell<bool>>, report: &Rc<dyn Fn(bool)>) {
+    if probing.replace(true) {
+        return;
+    }
+    let settled = probing.clone();
+    let answered = report.clone();
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(move |result, _| {
+        settled.set(false);
+        if result.is_ok() {
+            answered(true);
+        }
+        Ok(())
+    }));
+    // SAFETY: the sender's live core on its UI thread; constant script.
+    if unsafe { core.ExecuteScript(windows_core::w!("0"), &handler) }.is_err() {
+        probing.set(false);
+    }
+}
+
+static LOGGED_PROCESS_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn log_ignored_process_failure(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) {
+    let bit = 1_u32.checked_shl(kind.0.clamp(0, 31) as u32).unwrap_or(0);
+    let logged = LOGGED_PROCESS_FAILURES.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+    if logged & bit == 0 {
+        let name = match kind {
+            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED => "subframe renderer",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => "GPU",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED => "utility",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED => "sandbox helper",
+            _ => "other",
+        };
+        eprintln!(
+            "engine: a WebView2 {name} process ended ({}); left to WebView2",
+            kind.0
+        );
+    }
 }
 
 /// Registrations that make the native WebView2 source and back/forward list
@@ -1851,6 +1936,83 @@ impl Drop for AcceleratorRegistration {
     }
 }
 
+/// F10 and Alt+Space belong to the window's caption, yet WebView2 takes them
+/// before the window sees them. They reach the parent as the messages Windows
+/// itself would have produced.
+fn forward_caption_key(
+    controller: Option<&ICoreWebView2Controller>,
+    args: &ICoreWebView2AcceleratorKeyPressedEventArgs,
+    key: u32,
+    modifiers: (bool, bool, bool),
+) -> windows_core::Result<()> {
+    use crate::caption_keys::{classify, CaptionKey};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_F10;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, SC_KEYMENU, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    };
+
+    let (ctrl, shift, alt) = modifiers;
+    let (Some(controller), Some(caption_key)) = (controller, classify(key, ctrl, shift, alt))
+    else {
+        return Ok(());
+    };
+    // SAFETY: the arguments and controller are live for this callback.
+    unsafe {
+        args.SetHandled(true)?;
+        let mut lparam = 0i32;
+        args.KeyEventLParam(&mut lparam)?;
+        // Holding the key must not repeat what its first press did.
+        if lparam & (1 << 30) != 0 {
+            return Ok(());
+        }
+        let mut parent = HWND::default();
+        controller.ParentWindow(&mut parent)?;
+        match caption_key {
+            CaptionKey::Buttons => PostMessageW(
+                Some(parent),
+                WM_SYSKEYDOWN,
+                WPARAM(usize::from(VK_F10.0)),
+                LPARAM(lparam as u32 as isize),
+            ),
+            CaptionKey::SystemMenu => PostMessageW(
+                Some(parent),
+                WM_SYSCOMMAND,
+                WPARAM(SC_KEYMENU as usize),
+                LPARAM(' ' as isize),
+            ),
+        }
+    }
+}
+
+/// Lets the caption hear its keys from a WebView that is not one of the
+/// engine's own, such as the browser chrome. Lives as long as the controller.
+pub fn bridge_caption_keys(controller: &ICoreWebView2Controller) -> windows_core::Result<()> {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |controller, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+        unsafe { args.KeyEventKind(&mut kind)? };
+        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+        {
+            return Ok(());
+        }
+        let mut key = 0u32;
+        unsafe { args.VirtualKey(&mut key)? };
+        let down = |vk: i32| unsafe { (GetKeyState(vk) as u16 & 0x8000) != 0 };
+        let modifiers = (
+            down(VK_CONTROL.0 as i32),
+            down(VK_SHIFT.0 as i32),
+            down(VK_MENU.0 as i32),
+        );
+        forward_caption_key(controller.as_ref(), &args, key, modifiers)
+    }));
+    let mut token = Default::default();
+    unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
+}
+
 pub fn install_accelerators(
     view: &wry::WebView,
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
@@ -1900,12 +2062,60 @@ pub fn install_accelerators(
                 item: item(),
                 command,
             });
+            return Ok(());
         }
-        Ok(())
+        forward_caption_key(controller.as_ref(), &args, key, (ctrl, shift, alt))
     }));
     let mut token = Default::default();
     unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token)? };
     Ok(Some(AcceleratorRegistration { controller, token }))
+}
+
+/// Tells the engine when the person zooms the page itself, with Ctrl and the
+/// mouse wheel. `applied` holds what this view was last asked for, so a change
+/// the engine made on request is not taken for the person's.
+pub struct ZoomRegistration {
+    controller: ICoreWebView2Controller,
+    token: i64,
+}
+
+impl Drop for ZoomRegistration {
+    fn drop(&mut self) {
+        let _ = unsafe { self.controller.remove_ZoomFactorChanged(self.token) };
+    }
+}
+
+pub fn install_zoom_listener(
+    view: &wry::WebView,
+    applied: std::rc::Rc<std::cell::Cell<f64>>,
+    sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
+    item: impl Fn() -> zephium_core::ids::ItemId + 'static,
+) -> windows_core::Result<ZoomRegistration> {
+    let controller = view.controller();
+    let handler = ZoomFactorChangedEventHandler::create(Box::new(move |controller, _| {
+        let Some(controller) = controller else {
+            return Ok(());
+        };
+        let mut factor = 0.0;
+        unsafe { controller.ZoomFactor(&mut factor)? };
+        if !factor.is_finite() || (factor - applied.get()).abs() < 0.001 {
+            return Ok(());
+        }
+        let adopted = factor.clamp(crate::MIN_PAGE_ZOOM, crate::MAX_PAGE_ZOOM);
+        applied.set(adopted);
+        // WebView2 keeps a zoom made in the page for that page alone and drops
+        // it on the next navigation. Making it the view's own zoom lets it
+        // last, as one asked for does.
+        let _ = unsafe { controller.SetZoomFactor(adopted) };
+        sink(EngineEvent::ZoomGesture {
+            id: item(),
+            scale: adopted,
+        });
+        Ok(())
+    }));
+    let mut token = Default::default();
+    unsafe { controller.add_ZoomFactorChanged(&handler, &mut token)? };
+    Ok(ZoomRegistration { controller, token })
 }
 
 // Edge's sleeping-tabs primitive: a suspended view frees most of its
@@ -1943,6 +2153,92 @@ pub fn resume(view: &wry::WebView) {
         return;
     };
     let _ = unsafe { v3.Resume() };
+}
+
+/// The DevTools protocol's reload with the cache ignored is what Edge's own
+/// hard reload does, and it leaves cookies and site data alone.
+pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
+    let controller = view.controller();
+    let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+        return false;
+    };
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+    unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.reload"),
+            &HSTRING::from(r#"{"ignoreCache":true}"#),
+            &handler,
+        )
+    }
+    .is_ok()
+}
+
+/// The browser's own list around the current entry, as (title, address) in
+/// order with the index of the current one. The answer is asynchronous; a
+/// refused call is reported by the return value and never calls `done`.
+pub fn history_session(
+    view: &wry::WebView,
+    done: impl FnOnce(Option<(Vec<(String, String)>, usize)>) + 'static,
+) -> bool {
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            done(
+                result
+                    .is_ok()
+                    .then(|| crate::history_list::parse(&response))
+                    .flatten()
+                    .map(|history| history.window()),
+            );
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    unsafe {
+        view.webview().CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &handler,
+        )
+    }
+    .is_ok()
+}
+
+/// Goes to the entry `offset` steps from the current one when it is still at
+/// `url`. The list is read again first, so the entry id comes from the
+/// browser's list as it is now and not from one shown earlier.
+pub fn go_to_history_entry(view: &wry::WebView, offset: i32, url: &str) -> bool {
+    let core = view.webview();
+    let url = url.to_owned();
+    let navigate = core.clone();
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            let entry = result
+                .is_ok()
+                .then(|| crate::history_list::parse(&response))
+                .flatten()
+                .and_then(|history| history.entry_at(offset, &url));
+            if let Some(id) = entry {
+                let settled =
+                    CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+                // SAFETY: exact STA-owned core and immutable argument buffers.
+                let _ = unsafe {
+                    navigate.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.navigateToHistoryEntry"),
+                        &HSTRING::from(format!(r#"{{"entryId":{id}}}"#)),
+                        &settled,
+                    )
+                };
+            }
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &handler,
+        )
+    }
+    .is_ok()
 }
 
 pub fn stop_loading(view: &wry::WebView) {

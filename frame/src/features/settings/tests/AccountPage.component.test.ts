@@ -310,6 +310,31 @@ test("signing out returns to the sign-in screen", async () => {
   await expect.element(screen.getByLabelText("Email address")).toBeVisible();
 });
 
+test("a sign-in the Keychain will not give up is said plainly, with a way to sign in again", async () => {
+  await page.viewport(1100, 1200);
+  native.get.mockResolvedValue(reply({ ...signedIn, vault_fault: true }));
+  native.signOut.mockClear();
+  native.signOut.mockResolvedValue(reply(account()));
+  const screen = await render(AccountPage);
+  await expect
+    .element(screen.getByText("can’t read your sign-in from the Keychain", { exact: false }))
+    .toBeVisible();
+  expect(native.signOut).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Sign in again" }).click();
+  expect(native.signOut).toHaveBeenCalledTimes(1);
+  await expect.element(screen.getByLabelText("Email address")).toBeVisible();
+});
+
+test("a readable sign-in shows no Keychain warning", async () => {
+  await page.viewport(1100, 1200);
+  native.get.mockResolvedValue(reply(signedIn));
+  const screen = await render(AccountPage);
+  await expect
+    .element(screen.getByRole("button", { name: "Sign out", exact: true }).first())
+    .toBeVisible();
+  expect(screen.getByText("can’t read your sign-in", { exact: false }).elements()).toHaveLength(0);
+});
+
 test("with Work and AI off the plan stays and Zephium AI's usage and credits go", async () => {
   await page.viewport(1100, 1200);
   native.settings = { "ai.enabled": "false" };

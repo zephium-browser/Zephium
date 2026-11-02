@@ -72,6 +72,10 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            privilegedPermissionsPolicy:
+              /const PRIVILEGED_PERMISSIONS_POLICY: &str = "([^"]+)";/u.exec(
+                readFileSync(new URL("../desktop/src/lib.rs", import.meta.url), "utf8"),
+              )?.[1] ?? "",
             formSubmitRuntime: readFileSync(
               new URL(
                 "../crates/zephium-engine/src/platform/form_submit_observer.js",
@@ -131,6 +135,7 @@ export default defineConfig({
               ),
             },
           },
+          setupFiles: ["./vitest.component.setup.ts"],
           include: ["src/**/*.component.test.ts"],
           // Playwright retires the oldest of 10,000 live requests. Parallel
           // files flood that window while a slow manual mock is still being

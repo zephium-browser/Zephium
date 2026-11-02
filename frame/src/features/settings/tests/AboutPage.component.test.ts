@@ -6,8 +6,11 @@ import { IS_MAC } from "$shared/platform";
 import { preferences } from "$domain/preferences";
 import { runtime } from "$domain/runtime";
 import { updates } from "$domain/updates";
+import * as notices from "$session/notice.svelte";
 import { searchSettings } from "../lib/settings-model";
 import AboutPage from "../components/sections/AboutPage.svelte";
+
+const REPORT = vi.hoisted(() => "Zephium diagnostics\nApp: Zephium 1.0.1\nLog: 2 lines");
 
 const native = vi.hoisted(() => ({
   status: { state: "upToDate" } as UpdateStatus,
@@ -15,6 +18,8 @@ const native = vi.hoisted(() => ({
   relaunch: vi.fn(async () => true),
   openUrl: vi.fn(async () => ({ accepted: true, operation_id: null })),
   softwareUpdate: vi.fn(async () => true),
+  report: vi.fn(async (): Promise<string | null> => REPORT),
+  logs: vi.fn(async () => true),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -26,6 +31,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     updateRelaunch: native.relaunch,
     browserOpenUrl: native.openUrl,
     openSoftwareUpdate: native.softwareUpdate,
+    diagnosticsReport: native.report,
+    diagnosticsShowLogs: native.logs,
   });
 });
 
@@ -68,10 +75,7 @@ test("updates are checked, downloaded and relaunched from About", async () => {
   expect(preferences.set).toHaveBeenCalledWith("updates.auto-check", "false");
 
   await screen.getByRole("button", { name: "Release Notes" }).click();
-  expect(native.openUrl).toHaveBeenCalledWith(
-    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.1",
-    true,
-  );
+  expect(native.openUrl).toHaveBeenCalledWith("https://zephium.app/changelog#v1-0-1", true);
 });
 
 test("a failed check says so and can be tried again", async () => {
@@ -129,10 +133,7 @@ test("manual installation opens the exact release instead of retrying an impossi
   native.status = { state: "manualInstall", version: "1.0.2" };
   const screen = await render(AboutPage);
   await screen.getByRole("button", { name: "Download and install manually" }).click();
-  expect(native.openUrl).toHaveBeenCalledWith(
-    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.2",
-    true,
-  );
+  expect(native.openUrl).toHaveBeenCalledWith("https://zephium.app/changelog#v1-0-2", true);
   expect(screen.getByRole("button", { name: "Relaunch to update" }).query()).toBeNull();
 });
 
@@ -162,4 +163,90 @@ test("the links open Zephium's own pages in a tab", async () => {
     await links.getByRole("link", { name }).click();
     expect(native.openUrl).toHaveBeenLastCalledWith(url, true);
   }
+});
+
+/** What the clipboard does: the item's text is awaited, and a failure there rejects the write. */
+async function acceptingWrite(items: ClipboardItems) {
+  await items[0]?.getType("text/plain");
+}
+
+test("one click copies the diagnostics, and the preview shows the same text", async () => {
+  native.status = { state: "upToDate" };
+  notices.dismiss(notices.notice()?.id ?? 0);
+  const write = vi.spyOn(navigator.clipboard, "write").mockImplementation(acceptingWrite);
+  const screen = await render(AboutPage);
+
+  await screen.getByRole("button", { name: "Show What Is Copied" }).click();
+  await expect
+    .element(screen.getByRole("textbox", { name: "Diagnostic information" }))
+    .toHaveValue(REPORT);
+
+  await screen.getByRole("button", { name: "Copy Diagnostics" }).click();
+  await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
+  const item = write.mock.calls[0]?.[0][0];
+  expect(await (await item?.getType("text/plain"))?.text()).toBe(REPORT);
+  await vi.waitFor(() =>
+    expect(notices.notice()?.text).toBe("Copied. Paste it into your GitHub issue."),
+  );
+  expect(native.report).toHaveBeenCalledTimes(2);
+
+  await screen.getByRole("button", { name: "Hide" }).click();
+  expect(screen.getByRole("textbox", { name: "Diagnostic information" }).query()).toBeNull();
+});
+
+test("a clipboard that refuses the rich write is tried again as text", async () => {
+  native.status = { state: "upToDate" };
+  notices.dismiss(notices.notice()?.id ?? 0);
+  vi.spyOn(navigator.clipboard, "write").mockRejectedValue(
+    new DOMException("no", "NotAllowedError"),
+  );
+  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+  const screen = await render(AboutPage);
+  await screen.getByRole("button", { name: "Copy Diagnostics" }).click();
+  await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(REPORT));
+  await vi.waitFor(() => expect(notices.notice()?.text).toContain("Copied."));
+});
+
+test("a clipboard that refuses everything leaves the text to copy by hand", async () => {
+  native.status = { state: "upToDate" };
+  notices.dismiss(notices.notice()?.id ?? 0);
+  vi.spyOn(navigator.clipboard, "write").mockRejectedValue(
+    new DOMException("no", "NotAllowedError"),
+  );
+  vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(
+    new DOMException("no", "NotAllowedError"),
+  );
+  const screen = await render(AboutPage);
+  await screen.getByRole("button", { name: "Copy Diagnostics" }).click();
+  await expect
+    .element(screen.getByText("Couldn’t copy. Select the text below and copy it yourself."))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("textbox", { name: "Diagnostic information" }))
+    .toHaveValue(REPORT);
+  expect(notices.notice()).toBeNull();
+});
+
+test("diagnostics that cannot be read say so and can be tried again", async () => {
+  native.status = { state: "upToDate" };
+  notices.dismiss(notices.notice()?.id ?? 0);
+  native.report.mockResolvedValueOnce(null);
+  vi.spyOn(navigator.clipboard, "write").mockImplementation(acceptingWrite);
+  const screen = await render(AboutPage);
+  await screen.getByRole("button", { name: "Copy Diagnostics" }).click();
+  await expect.element(screen.getByText("Couldn’t read the diagnostics. Try again.")).toBeVisible();
+  expect(notices.notice()).toBeNull();
+  await screen.getByRole("button", { name: "Copy Diagnostics" }).click();
+  await vi.waitFor(() => expect(notices.notice()?.text).toContain("Copied."));
+  expect(screen.getByText("Couldn’t read the diagnostics. Try again.").query()).toBeNull();
+});
+
+test("the log folder opens from About, and settings search finds both actions", async () => {
+  native.status = { state: "upToDate" };
+  const screen = await render(AboutPage);
+  await screen.getByRole("button", { name: "Show Log Folder" }).click();
+  expect(native.logs).toHaveBeenCalledOnce();
+  expect(searchSettings("bug report").map((result) => result.target)).toContain(
+    "about.diagnostics",
+  );
 });

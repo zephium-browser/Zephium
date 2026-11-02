@@ -98,9 +98,8 @@
       case "failed":
         return problemText(entry.problem, jobName);
       case "done":
-        return entry.done > 0
-          ? m.import_kind_added({ count: number.format(entry.done) })
-          : m.import_kind_current();
+        if (entry.done > 0) return m.import_kind_added({ count: number.format(entry.done) });
+        return entry.total === 0 ? m.import_kind_none() : m.import_kind_current();
     }
   }
 
@@ -142,6 +141,13 @@
           : m.import_importing({ browser: jobName })}</strong
       >
       {#if job.finished}
+        {#if job.kinds.some((entry) => entry.problem === "permission")}
+          <Button
+            size="compact"
+            onclick={() => void browserImport.openPermissionSettings(job.source)}
+            >{m.onb_import_allow()}</Button
+          >
+        {/if}
         <Button size="compact" onclick={browserImport.dismiss}>{m.import_dismiss()}</Button>
       {:else}
         <Button size="compact" variant="ghost" onclick={() => void browserImport.cancel()}

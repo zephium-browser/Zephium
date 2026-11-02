@@ -4,7 +4,8 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
+  import { tabFallbackIcon } from "../lib/tab-icon";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -12,6 +13,8 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import AudioControl from "$shared/ui/AudioControl";
+  import CaptureControl from "$shared/ui/CaptureControl";
   import SpacePeek from "./SpacePeek.svelte";
   import RailSpaces from "./RailSpaces.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -148,6 +151,7 @@
             data-zephium-tab-id={tab.id}
             data-zephium-tab-url={tab.url ?? ""}
             data-zephium-projection-revision={tab.projection_revision}
+            data-audio-host
           >
             <button
               type="button"
@@ -170,12 +174,24 @@
                 loading={tab.loading}
                 lit={active}
                 size={16}
-                fallback={tab.content === "extensions" || tab.content === "extension_owned"
-                  ? PuzzleIcon
-                  : Globe02Icon}
+                fallback={tabFallbackIcon(tab.content)}
+                notched={!!tab.audio}
               />
               <span data-zephium-tab-label class="sr-only">{tab.title}</span>
             </button>
+            {#if tab.capture}<span class="rail-capture"
+                ><CaptureControl
+                  badge
+                  site={tab.url ?? tab.title}
+                  capture={tab.capture}
+                  onOpen={(x, y) => tabs.openMediaMenu(tab.id, x, y)}
+                /></span
+              >{/if}
+            {#if tab.audio}<AudioControl
+                audio={tab.audio}
+                size={16}
+                onToggle={(muted) => void tabs.setMuted(tab.id, muted)}
+              />{/if}
             <!-- A rail has no row to put a close control in, so it rides the
              mark's corner, the way a notification's does. -->
             {#if !tabs.loneNewTab(tab.id)}<button
@@ -298,6 +314,12 @@
 
   .rail-list > li {
     position: relative;
+  }
+
+  .rail-capture {
+    position: absolute;
+    inset-block-end: -3px;
+    inset-inline-start: -3px;
   }
 
   /* A small raised disc on the mark's corner: it waits a beat before it

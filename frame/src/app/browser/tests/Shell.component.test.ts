@@ -12,7 +12,11 @@ vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ tabsBootstrap: async () => {} });
+  return mockBindings({
+    pagePermissionCardHost: async () => {},
+    tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+  });
 });
 afterEach(() => {
   surface.dispose();
@@ -119,7 +123,7 @@ test("leaving Work or Settings gives back the column the window had", async () =
   const shown = () => ({
     width: column.style.width,
     resize: !!screen.container.querySelector('[aria-label="Resize sidebar"]'),
-    toggle: !!screen.container.querySelector('[aria-label="Compact Mode"]'),
+    toggle: !!screen.container.querySelector('[aria-label="Toggle sidebar"]'),
     modes: !!screen.container.querySelector('[aria-label="Switch between Browse and Work"]'),
   });
   const browse = { width: expanded, resize: true, toggle: true, modes: true };

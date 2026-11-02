@@ -1,4 +1,5 @@
 //! Small, apartment-bound WebView2 extension operations. No extension API emulation.
+use std::cell::Cell;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -17,10 +18,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
+const TIMED_OUT: &str = "Native extension operation timed out.";
+
+// A DevTools call that timed out means the browser process is not answering
+// (an extension's prompt, for one). Every further call would hold this UI
+// thread for the whole deadline again, so they are refused for a while.
+const CDP_PAUSE: Duration = Duration::from_secs(30);
+
+thread_local! {
+    static CDP_PAUSED_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
 // WebView2 completion callbacks run on this STA. The engine's dispatch owner
 // defers reentrant host work; the deadline never authorizes a late operation.
 fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_within(rx, Duration::from_secs(5))
+}
+
+fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration) -> Result<T> {
+    let deadline = Instant::now() + budget;
     loop {
         match rx.try_recv() {
             Ok(result) => return result.map_err(|e| e.to_string()),
@@ -30,7 +46,7 @@ fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
             Err(mpsc::TryRecvError::Empty) => {}
         }
         if Instant::now() >= deadline {
-            return Err("Native extension operation timed out.".into());
+            return Err(TIMED_OUT.into());
         }
         // SAFETY: local message storage and the controller's owning UI thread.
         unsafe {
@@ -145,6 +161,12 @@ pub(crate) fn add(
 }
 
 pub(crate) fn cdp(core: &ICoreWebView2, method: &str, parameters: Value) -> Result<Value> {
+    if CDP_PAUSED_UNTIL
+        .get()
+        .is_some_and(|until| Instant::now() < until)
+    {
+        return Err("The browser process is not answering.".into());
+    }
     let (tx, rx) = mpsc::channel();
     let handler =
         CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |status, result| {
@@ -160,7 +182,13 @@ pub(crate) fn cdp(core: &ICoreWebView2, method: &str, parameters: Value) -> Resu
         )
     }
     .map_err(|e| e.to_string())?;
-    serde_json::from_str(&wait(rx)?).map_err(|e| e.to_string())
+    let reply = wait_within(rx, Duration::from_secs(2)).inspect_err(|error| {
+        if error == TIMED_OUT {
+            CDP_PAUSED_UNTIL.set(Some(Instant::now() + CDP_PAUSE));
+        }
+    })?;
+    CDP_PAUSED_UNTIL.set(None);
+    serde_json::from_str(&reply).map_err(|e| e.to_string())
 }
 
 pub(crate) fn window_id(core: &ICoreWebView2) -> Result<i64> {

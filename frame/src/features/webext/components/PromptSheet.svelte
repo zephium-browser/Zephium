@@ -27,13 +27,12 @@
   let left = $derived(beside ? COMPACT_WIDTH + INSET : INSET);
 </script>
 
-<div class="scrim" style:width={`${effectiveWidth()}px`} aria-hidden="true"></div>
 <div
   role="alertdialog"
   aria-modal="true"
   aria-labelledby={labelledby}
   aria-describedby={describedby}
-  class="sheet"
+  class="sheet prompt-sheet"
   style:left={`${left}px`}
   style:width={`${Math.max(effectiveWidth() - left - INSET, 220)}px`}
 >
@@ -41,13 +40,13 @@
 </div>
 
 <style>
-  .scrim {
-    position: fixed;
-    inset-block: 0;
-    inset-inline-start: 0;
-    z-index: 50;
-    background: color-mix(in srgb, var(--color-canvas) 72%, transparent);
-    animation: interface-fade var(--motion-fast) var(--ease-out) both;
+  /* As under the column's own menus, what the prompt lies over steps back
+     and holds still; a veil would stop at the column's edge, short of the
+     page and the window's frame. */
+  :global(body:has(.prompt-sheet) .sidebar-browser-column > *) {
+    opacity: 0.18;
+    pointer-events: none;
+    transition: opacity var(--motion-base) var(--ease-out);
   }
 
   .sheet {

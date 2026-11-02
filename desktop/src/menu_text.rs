@@ -85,6 +85,12 @@ fn text(key: &str, english: &str) -> String {
         .unwrap_or_else(|| english.to_owned())
 }
 
+/// A longer native text under its own key, or `english` while the interface
+/// is English or the key has no translation.
+pub(crate) fn message(key: &str, english: &str) -> String {
+    text(key, english)
+}
+
 /// A menu label in the interface language, looked up by its English text:
 /// "Split View…" is `native_split_view_more` in `frame/messages`.
 pub(crate) fn label(english: &str) -> String {
@@ -134,6 +140,25 @@ mod tests {
     }
 
     #[test]
+    fn the_unsaved_changes_dialog_is_translated_into_every_language() {
+        for (locale, text) in DICTIONARIES {
+            let strings: HashMap<String, String> = serde_json::from_str(text).unwrap();
+            for key in [
+                "native_unsaved_changes",
+                "native_unsaved_changes_message",
+                "native_quit_anyway",
+                "native_cancel",
+                "native_recently_closed",
+            ] {
+                assert!(
+                    strings.get(key).is_some_and(|text| !text.is_empty()),
+                    "{locale} lacks {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_native_label_has_an_english_message_to_translate() {
         let english: HashMap<String, String> =
             serde_json::from_str(include_str!("../../frame/messages/en.json")).unwrap();
@@ -141,6 +166,8 @@ mod tests {
             include_str!("lib.rs"),
             include_str!("spaces.rs"),
             include_str!("help.rs"),
+            include_str!("recently_closed.rs"),
+            include_str!("resource_close.rs"),
         ];
         let labels = sources.iter().flat_map(|source| {
             source

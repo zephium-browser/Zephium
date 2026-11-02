@@ -39,15 +39,9 @@ pub(crate) async fn media_import(
         return refused(ResourceError::Invalid);
     };
     let picker = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        picker
-            .dialog()
-            .file()
-            .set_title("Add to Work")
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|_| ())?;
+    let picked = tokio::task::spawn_blocking(move || picker.dialog().file().blocking_pick_file())
+        .await
+        .map_err(|_| ())?;
     let Some(picked) = picked else {
         return Ok(MediaImportV1::Cancelled);
     };

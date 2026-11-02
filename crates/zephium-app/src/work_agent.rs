@@ -697,21 +697,13 @@ impl Driver {
         }
         let mut usage = self.used;
         usage.operations = usage.operations.max(self.steps);
-        if !usage.within(self.limits) {
-            usage = WorkUsage {
-                model_tokens: self.limits.model_tokens,
-                cost_micro_usd: self.limits.cost_micro_usd,
-                operations: self.limits.operations,
-                accounting: WorkUsageAccounting::ConservativeReservation,
-            };
-        }
-        Some(usage)
+        Some(usage.bounded_by(self.limits))
     }
     fn budget_left(&self) -> bool {
         self.turn < self.grant.max_turns
             && self.steps + 2 <= u32::from(self.grant.max_steps)
             && self.remaining().model_tokens >= TURN_TOKEN_FLOOR
-            && self.remaining().cost_micro_usd > 1
+            && (self.grant.no_usage_charge || self.remaining().cost_micro_usd > 1)
     }
     fn step(&self, kind: WorkStepKindV1, status: WorkStepStatus) -> WorkStepFact {
         WorkStepFact {

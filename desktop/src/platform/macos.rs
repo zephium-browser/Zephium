@@ -1,9 +1,12 @@
 mod log;
+mod popover_close;
+mod sidebar_edge;
 mod sidebar_resize;
 mod swipe;
 pub use log::redirect_stderr;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -161,6 +164,20 @@ pub fn enforce_runtime_security_floor(
         format!(
             "Zephium needs macOS Sonoma 14 or later with Safari 26 or later. This Mac has macOS {operating_system} with Safari {safari_version}.\n\nOpen System Settings > General > Software Update, install the available updates, then open Zephium again.\n\nDetails: {error}"
         )
+    })
+}
+
+/// The WebKit that draws pages, and the Safari it ships with.
+pub fn webkit_version() -> Option<String> {
+    // SAFETY: `WKWebView::class()` is a live Objective-C class from the linked
+    // WebKit framework, exactly as required by `bundleForClass:`.
+    let webkit = unsafe { NSBundle::bundleForClass(WKWebView::class()) };
+    let build = bundle_string(&webkit, ns_string!("CFBundleVersion")).ok()?;
+    let safari = NSBundle::bundleWithPath(ns_string!("/Applications/Safari.app"))
+        .and_then(|bundle| bundle_string(&bundle, ns_string!("CFBundleShortVersionString")).ok());
+    Some(match safari {
+        Some(version) => format!("WebKit {build} (Safari {version})"),
+        None => format!("WebKit {build}"),
     })
 }
 
@@ -595,6 +612,52 @@ pub fn publish_sidebar_resize_revision(revision: u64) -> bool {
     sidebar_resize::publish_revision(revision)
 }
 
+/// How much lower than configured the window controls are put on this
+/// macOS, so they line up with the sidebar's head on every release.
+pub fn window_controls_lift() -> f64 {
+    super::window_controls::inset_lift()
+}
+
+thread_local! {
+    /// The windows whose sidebar is hidden. Their controls show only with
+    /// the sidebar's card.
+    static HIDDEN_SIDEBARS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// The sidebar is hidden or back: its left edge is watched while it is away,
+/// and the window controls go with it.
+pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        HIDDEN_SIDEBARS.with(|windows| {
+            let mut windows = windows.borrow_mut();
+            if hidden {
+                windows.insert(owner.label().to_owned());
+            } else {
+                windows.remove(owner.label());
+            }
+        });
+        sidebar_edge::watch(&owner, hidden);
+        popover_close::watch(&owner, hidden);
+        super::window_controls::set_in_card(&owner, false);
+        super::window_controls::set_tucked(&owner, hidden);
+    });
+}
+
+/// The hidden sidebar's card shows its window controls, or has begun to
+/// leave and takes them at once. A sidebar in view keeps its own.
+pub fn sidebar_card_lights(window: &WebviewWindow, shown: bool) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        if HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(owner.label())) {
+            super::window_controls::set_tucked(&owner, !shown);
+            if shown {
+                super::window_controls::set_in_card(&owner, true);
+            }
+        }
+    });
+}
+
 /// Native has a new column width; a guide left at another edge goes off.
 pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
     let _ = window.run_on_main_thread(move || sidebar_resize::column_width(width));
@@ -882,8 +945,8 @@ thread_local! {
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
 /// key equivalent, so a local monitor matches them before the focused web
-/// view sees the keystroke. Only the main window's keys are considered; the
-/// launcher panel keeps its own.
+/// view sees the keystroke, and extensions' commands after them. Only the main
+/// window's keys are considered; the launcher panel keeps its own.
 pub fn install_key_monitor(
     window: &WebviewWindow,
     table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,
@@ -933,6 +996,9 @@ pub fn install_key_monitor(
                 }
                 std::ptr::null_mut()
             }
+            // Extension commands come after the browser's keys (these and
+            // the menus') and before the page's, as in Chrome.
+            None if zephium_engine::perform_extension_command(event_ref) => std::ptr::null_mut(),
             None => event.as_ptr(),
         }
     });

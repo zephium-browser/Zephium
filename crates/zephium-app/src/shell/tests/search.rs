@@ -74,6 +74,167 @@ fn search_ranks_tabs_primary_action_commands_and_history() {
     assert!(last.results.iter().all(|r| r.kind == "tab"));
 }
 
+fn kinds_and_urls(results: &SearchResults) -> Vec<(String, String)> {
+    results
+        .results
+        .iter()
+        .filter(|result| matches!(result.kind.as_str(), "bookmark" | "history"))
+        .map(|result| (result.kind.clone(), result.detail.clone()))
+        .collect()
+}
+
+fn hit(url: &str, title: &str) -> zephium_core::ports::store::HistoryHit {
+    zephium_core::ports::store::HistoryHit {
+        url: url.into(),
+        title: title.into(),
+        last_visit: 1,
+    }
+}
+
+fn shell_with_pages(
+    history: Vec<zephium_core::ports::store::HistoryHit>,
+    saved_pages: Vec<(&'static str, &'static str)>,
+    emit: EmitFn,
+) -> Shell {
+    let store = Arc::new(FakeStore {
+        history,
+        saved_pages,
+        ..Default::default()
+    });
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        store,
+        Arc::new(FakeChrome),
+        emit,
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    shell
+}
+
+#[test]
+fn a_bookmark_leads_the_visited_page_it_matches_as_well_as() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![
+            hit("https://rust-lang.org/", "Rust Programming"),
+            hit("https://blog.example/rust", "Rust Blog"),
+        ],
+        vec![
+            ("Rust Book", "https://doc.rust-lang.org/book/"),
+            ("Learn Rust", "https://learn.example/"),
+        ],
+        emit,
+    );
+    shell.handle(Command::Search("rust".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    let kinds: Vec<&str> = last.results.iter().map(|r| r.kind.as_str()).collect();
+    // The bookmark whose title starts with the query goes ahead of the visits
+    // that match it equally; the one that only contains it falls behind them.
+    assert_eq!(
+        kinds,
+        ["search", "bookmark", "history", "history", "bookmark"]
+    );
+    assert_eq!(
+        kinds_and_urls(&last)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect::<Vec<_>>(),
+        [
+            "https://doc.rust-lang.org/book/",
+            "https://rust-lang.org/",
+            "https://blog.example/rust",
+            "https://learn.example/",
+        ]
+    );
+}
+
+#[test]
+fn an_address_both_saved_and_visited_is_listed_once_as_the_bookmark() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![hit("https://docs.example/", "Docs")],
+        vec![("Docs", "https://docs.example/")],
+        emit,
+    );
+    shell.handle(Command::Search("docs".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("bookmark".to_owned(), "https://docs.example/".to_owned())]
+    );
+}
+
+#[test]
+fn bookmarks_share_the_visit_allowance_and_do_not_lengthen_the_list() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        (0..6)
+            .map(|at| hit(&format!("https://visit{at}.example/"), "Topic visit"))
+            .collect(),
+        vec![
+            ("Topic one", "https://one.example/"),
+            ("Topic two", "https://two.example/"),
+            ("Topic three", "https://three.example/"),
+            ("Topic four", "https://four.example/"),
+            ("Topic five", "https://five.example/"),
+        ],
+        emit,
+    );
+    shell.handle(Command::Search("topic".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    let kinds = kinds_and_urls(&last);
+    assert_eq!(kinds.len(), 4);
+    assert!(kinds.iter().all(|(kind, _)| kind == "bookmark"));
+    assert!(last.results.len() <= zephium_core::search::MAX_RESULTS);
+}
+
+#[test]
+fn bookmarks_are_offered_with_history_suggestions_off_and_not_to_a_history_search() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![hit("https://visited.example/", "Notes visited")],
+        vec![("Notes saved", "https://saved.example/")],
+        emit,
+    );
+    shell.search.include_history = false;
+    shell.handle(Command::Search("notes".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("bookmark".to_owned(), "https://saved.example/".to_owned())]
+    );
+
+    shell.handle(Command::Search("@history notes".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("history".to_owned(), "https://visited.example/".to_owned())]
+    );
+}
+
+#[test]
+fn a_bookmark_that_does_not_match_the_typing_is_dropped() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(Vec::new(), Vec::new(), emit);
+    shell.store_reads = Some(StoreReadQueue::new());
+    let profile = shell.windows.focused().unwrap().profile;
+    shell.handle(Command::Search("zzz".into()));
+    let generation = shell.search.pending.as_ref().unwrap().generation;
+    shell.handle(Command::StoreRead(StoreReadResult::History {
+        generation,
+        profile,
+        query: "zzz".into(),
+        hits: Vec::new(),
+        bookmarks: vec![crate::store_reads::BookmarkHit {
+            title: "Unrelated".into(),
+            url: "https://other.example/".into(),
+        }],
+    }));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert!(kinds_and_urls(&last).is_empty());
+}
+
 #[test]
 fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
     let (seen, emit) = search_sink();
@@ -101,6 +262,7 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
             title: "Old".into(),
             last_visit: 1,
         }],
+        bookmarks: Vec::new(),
     }));
     assert_eq!(
         shell
@@ -121,6 +283,7 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
             title: "New".into(),
             last_visit: 2,
         }],
+        bookmarks: Vec::new(),
     }));
     let last = seen.lock().unwrap().last().unwrap().clone();
     assert_eq!(last.query, "new");

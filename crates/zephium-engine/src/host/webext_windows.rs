@@ -721,6 +721,7 @@ impl super::EngineHost {
         let navigation_url = url.clone();
         let builder = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(|_, core| crate::reputation::configure(core))
             .with_browser_extension_startup_gate(move |environment, core| {
                 startup.authenticate(environment, core)
             })
@@ -884,7 +885,7 @@ impl super::EngineHost {
                 .views
                 .get(&tab)
                 .ok_or(ExtensionActionRejection::TabDiscarded)?;
-            let window = native::window_id(&view.webview())
+            let window = extension_window(view)
                 .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?;
             let mut states = Vec::new();
             for ((owner, _), install) in &self.windows_extensions.installs {
@@ -1017,6 +1018,11 @@ impl super::EngineHost {
         &mut self,
         request: ExtensionActionRequest,
     ) -> ExtensionActionSettlement {
+        if request.is_menu() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::UnsupportedPlatform,
+            );
+        }
         let result = self.present_windows_extension_popup(request);
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }
@@ -1270,7 +1276,7 @@ impl super::EngineHost {
             .views
             .get(&request.tab())
             .ok_or(ExtensionActionRejection::TabDiscarded)?;
-        if native::window_id(&view.webview()).ok() != Some(window_id) {
+        if extension_window(view).ok() != Some(window_id) {
             return Err(ExtensionActionRejection::TabUnavailable);
         }
         let resource = self
@@ -1305,6 +1311,7 @@ impl super::EngineHost {
         let message_base = base.clone();
         let built = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(|_, core| crate::reputation::configure(core))
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
             .with_initialization_script(&initialization)
             .with_initialization_script(zephium_webext::windows::POPUP_SIZE_SCRIPT)
@@ -1473,3 +1480,12 @@ mod tests {
 #[cfg(test)]
 #[path = "webext_windows_qualification.rs"]
 mod qualification;
+
+fn extension_window(view: &super::ObservedView) -> Result<i64, String> {
+    if let Some(window) = view.extension_window.get() {
+        return Ok(window);
+    }
+    let window = native::window_id(&view.webview())?;
+    view.extension_window.set(Some(window));
+    Ok(window)
+}

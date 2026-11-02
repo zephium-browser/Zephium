@@ -796,6 +796,8 @@ impl EngineHost {
         completion: Arc<crate::erasure::Completion>,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.forget_certificate_exceptions(profile);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(downloads) = self
             .downloads
             .as_ref()

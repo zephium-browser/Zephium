@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sign in</title>
+<h1>Sign in</h1>
+<form id="login" action="/submit" method="post">
+  <label>Email <input type="text" id="user" name="username" autocomplete="username"></label><br>
+  <label>Password <input type="password" id="pass" name="password" autocomplete="current-password"></label><br>
+  <button type="submit">Sign in</button>
+</form>
+<iframe id="inner" src="/login-frame.html" width="400" height="200"></iframe>
+<script>
+  window.focusFields = async () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const inner = document.getElementById('inner').contentDocument;
+    for (const doc of [document, inner]) {
+      for (const id of ['user', 'pass']) {
+        const field = doc.getElementById(id);
+        field.focus();
+        field.click();
+        await wait(300);
+      }
+    }
+  };
+</script>

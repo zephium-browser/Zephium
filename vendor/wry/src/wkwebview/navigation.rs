@@ -29,7 +29,9 @@ use super::class::wry_navigation_delegate::WryNavigationDelegate;
 
 const ACTIVE_APPLE_NAVIGATION_LIMIT: usize = 64;
 const APPLE_REDIRECT_EVENT_LIMIT: usize = 32;
-const WEB_EXTENSION_URL_PREFIX: &str = "webkit-extension://";
+// WebKit's default extension scheme, and the `chrome-extension` base URL the
+// embedder assigns each context so Chrome extensions see their usual origin.
+const WEB_EXTENSION_URL_PREFIXES: [&str; 2] = ["webkit-extension://", "chrome-extension://"];
 
 #[cfg(target_os = "macos")]
 fn extension_tab_trace_enabled() -> bool {
@@ -59,11 +61,36 @@ fn navigation_origin_category(value: &str) -> &'static str {
   }
 }
 
+// Only a view served by a WebKit extension controller has a handler that can
+// authorize an extension child frame; every other view keeps the host policy,
+// which refuses these schemes.
 fn native_web_extension_subframe_owns_policy(
   url: &str,
   target_is_main_frame: Option<bool>,
+  has_extension_controller: impl FnOnce() -> bool,
 ) -> bool {
-  target_is_main_frame == Some(false) && url.starts_with(WEB_EXTENSION_URL_PREFIX)
+  target_is_main_frame == Some(false)
+    && WEB_EXTENSION_URL_PREFIXES
+      .iter()
+      .any(|prefix| url.starts_with(prefix))
+    && has_extension_controller()
+}
+
+// `webExtensionController` exists from macOS 15.4 and iOS 18.4; earlier
+// systems have no extension controller.
+fn has_web_extension_controller(webview: &WKWebView) -> bool {
+  // SAFETY: `webview` is the live view WebKit is asking about, so its
+  // configuration is valid; the message is sent only after the selector is
+  // confirmed, and it returns a nullable retained object.
+  unsafe {
+    let configuration = webview.configuration();
+    if !configuration.respondsToSelector(objc2::sel!(webExtensionController)) {
+      return false;
+    }
+    let controller: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+      objc2::msg_send![&*configuration, webExtensionController];
+    controller.is_some()
+  }
 }
 
 /// URL attribution for WKNavigation's public delegate contract.
@@ -700,9 +727,23 @@ pub(crate) fn did_fail_navigation(
   // Failed event is emitted now or from a deferred flush.
   if phase == NavigationEventPhase::Failed {
     if let Some(handler) = &this.ivars().navigation_failure_handler {
+      #[allow(unused_mut)]
+      let mut failure = navigation_failure(domain.as_deref(), error.code());
+      #[cfg(target_os = "macos")]
+      if failure == NavigationFailure::Insecure {
+        if let Some(refused) =
+          crate::wkwebview::server_trust::certificate_failure(error, error.code())
+        {
+          failure = NavigationFailure::Certificate(refused.problem);
+          if let Some(report) = &this.ivars().certificate_failure_handler {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report(refused)));
+          }
+        }
+      }
       handler(
         NavigationId::from_raw(navigation_key(navigation) as u64),
-        navigation_failure(domain.as_deref(), error.code()),
+        failure,
+        crate::FailedDocument::Kept,
       );
     }
   }
@@ -860,7 +901,9 @@ pub(crate) fn navigation_policy(
       // verifies both the exact loaded context and `web_accessible_resources`.
       // Keep main-frame and target-less actions on the host policy path.
       let target_is_main_frame = action.targetFrame().map(|frame| frame.isMainFrame());
-      if native_web_extension_subframe_owns_policy(&url, target_is_main_frame) {
+      if native_web_extension_subframe_owns_policy(&url, target_is_main_frame, || {
+        has_web_extension_controller(webview)
+      }) {
         (*handler).call((WKNavigationActionPolicy::Allow,));
         return;
       }
@@ -988,24 +1031,44 @@ mod navigation_event_state_tests {
 
   #[test]
   fn web_extension_child_resources_delegate_only_to_native_webkit_policy() {
-    let extension = "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html";
-    assert!(native_web_extension_subframe_owns_policy(
-      extension,
-      Some(false)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(
-      extension,
-      Some(true)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(extension, None));
-    assert!(!native_web_extension_subframe_owns_policy(
-      "https://example.com/frame",
-      Some(false)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(
+    let owns = |url, frame| native_web_extension_subframe_owns_policy(url, frame, || true);
+    for extension in [
+      "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html",
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu-button.html",
+    ] {
+      assert!(owns(extension, Some(false)));
+      assert!(!owns(extension, Some(true)));
+      assert!(!owns(extension, None));
+    }
+    assert!(!owns("https://example.com/frame", Some(false)));
+    assert!(!owns(
       "webkit-extensionx://abcdefghijklmnopabcdefghijklmnop/frame",
       Some(false)
     ));
+    assert!(!owns(
+      "chrome-extensionx://nngceckbapebfimnlniiiahkandclblb/frame",
+      Some(false)
+    ));
+  }
+
+  #[test]
+  fn views_without_an_extension_controller_keep_extension_frames_on_host_policy() {
+    // A raw tab, the browser chrome or a private tab: a page framing an
+    // extension resource there stays with the host callback, which refuses it.
+    for extension in [
+      "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html",
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu-button.html",
+    ] {
+      assert!(!native_web_extension_subframe_owns_policy(
+        extension,
+        Some(false),
+        || false
+      ));
+    }
+    // The controller is only consulted for an extension child frame.
+    native_web_extension_subframe_owns_policy("https://example.com/", Some(false), || {
+      panic!("consulted for a web frame")
+    });
   }
 
   #[test]

@@ -1,4 +1,5 @@
 import { listenAll } from "$shared/lib/lifecycle";
+import { forgetDrafts } from "$shared/lib/drafts";
 import { flushSync } from "svelte";
 import type { ItemsState, SpaceLookInputV1, TabMenuContext, TabView } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
@@ -119,7 +120,7 @@ export const close = (id: string) => void commands.tabsClose(id);
 export const loneNewTab = (id: string) => {
   const all = state.tabs;
   const tab = all.length === 1 ? all[0] : undefined;
-  return tab?.id === id && !tab.url && (tab.content ?? "web") === "web";
+  return tab?.id === id && !tab.url && !tab.failure && (tab.content ?? "web") === "web";
 };
 export const navigate = (id: string, input: string) => void commands.tabsNavigate(id, input);
 
@@ -128,6 +129,8 @@ const onActive = (fn: (id: string) => void) => () => {
   if (id !== null) fn(id);
 };
 
+/** Mutes or unmutes a tab; the projected tab says what native applied. */
+export const setMuted = (id: string, muted: boolean) => settle(commands.tabSetMuted(id, muted));
 export const reloadActive = onActive((id) => void commands.tabsReload(id));
 export const backActive = onActive((id) => void commands.tabsBack(id));
 export const forwardActive = onActive((id) => void commands.tabsForward(id));
@@ -156,7 +159,7 @@ export const canSplitActive = () => state.tabs.length > 1 && (activeTab()?.url ?
 let menuTarget: string | null = null;
 
 /** What the tab menu can offer for one tab; native checks each action again. */
-function tabMenuContext(id: string): TabMenuContext {
+function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
   const tab = state.tabs.find((candidate) => candidate.id === id);
   const tabOf = (node: ItemsState["nodes"][number]) =>
     node.kind.type === "tab" ? node.kind.tab_id : null;
@@ -171,12 +174,22 @@ function tabMenuContext(id: string): TabMenuContext {
     essential: state.nodes.some((node) => tabOf(node) === id && node.section === "favorites"),
     others: open.some((candidate) => candidate !== id),
     below: at >= 0 && at < open.length - 1,
+    muted: tab?.audio?.muted ?? false,
+    capture: tab?.capture?.navigation_id ?? null,
+    media_only: mediaOnly,
   };
 }
 
 export function openTabMenu(id: string, x: number, y: number) {
   menuTarget = id;
   void commands.tabMenuPopup(id, x, y, tabMenuContext(id));
+}
+
+/** What can be done about a tab's camera, microphone and sound, opened from
+ *  its in-use indicator. */
+export function openMediaMenu(id: string, x: number, y: number) {
+  menuTarget = id;
+  void commands.tabMenuPopup(id, x, y, tabMenuContext(id, true));
 }
 
 /** The browser interface's own menu; `page` says a web page is in front. */
@@ -189,6 +202,13 @@ export function copyMenuTargetLink(): Promise<boolean> {
   menuTarget = null;
   if (id === null) return Promise.resolve(false);
   return copyLink(state.tabs.find((tab) => tab.id === id)?.url);
+}
+
+/** The address of the tab the menu was opened on, taken once. */
+export function takeMenuTargetUrl(): string | null {
+  const id = menuTarget;
+  menuTarget = null;
+  return id === null ? null : (state.tabs.find((tab) => tab.id === id)?.url ?? null);
 }
 
 /** Copies the address of the page in front, for the Copy Link command. */
@@ -213,7 +233,13 @@ export const createSpace = (name: string, look: SpaceLookInputV1) =>
   settle(commands.spacesCreate(name, look));
 export const updateSpace = (id: string, name: string, look: SpaceLookInputV1) =>
   settle(commands.spacesUpdate(id, name, look));
-export const deleteSpace = (id: string) => settle(commands.spacesDelete(id));
+export async function deleteSpace(id: string) {
+  const owner = state.profile?.id;
+  const result = await settle(commands.spacesDelete(id));
+  if (owner && (result.outcome === "applied" || result.outcome === "deferred"))
+    forgetDrafts(owner, id);
+  return result;
+}
 export const reorderSpace = (id: string, before: string | null) =>
   settle(commands.spacesReorder(id, before));
 export const moveTabToSpace = (tab: string, space: string) =>

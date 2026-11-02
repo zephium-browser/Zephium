@@ -21,6 +21,10 @@ test("a missing or refused key leads to Settings → AI", () => {
   expect(faultView({ reason: "no_model" }).fix?.command).toBe("settings.ai");
 });
 
+test("a request over the provider plan's per-minute limit is not retried", () => {
+  expect(model("plan_limit")).toMatchObject({ retry: "no", fix: { command: "settings.ai" } });
+});
+
 test("a plan a model needs and the daily limit point at the account", () => {
   expect(model("plan_required").fix?.command).toBe("settings.account");
   expect(model("daily_limit").message).toContain("resets");

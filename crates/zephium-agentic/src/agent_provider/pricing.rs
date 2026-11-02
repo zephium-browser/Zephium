@@ -128,6 +128,17 @@ pub struct AgentProviderTokenRates {
 }
 
 impl AgentProviderTokenRates {
+    /// Explicit zero-cost schedule for a resolved self-hosted model.
+    #[cfg(feature = "provider-transport")]
+    pub(crate) const fn free() -> Self {
+        Self {
+            uncached_input: 0,
+            cached_input: 0,
+            cache_write_input: 0,
+            output: 0,
+        }
+    }
+
     /// Validates nonzero rates under the hard product arithmetic ceiling.
     pub const fn try_new(
         uncached_input: u64,

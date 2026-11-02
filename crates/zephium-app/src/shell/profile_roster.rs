@@ -74,6 +74,7 @@ impl Shell {
         Some(ProfilesView {
             current: current.map(|profile| profile.to_string()),
             private,
+            private_tabs: self.private_tab_count(),
             profiles: self
                 .profiles
                 .iter()

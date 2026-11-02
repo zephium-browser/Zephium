@@ -1,4 +1,5 @@
-//! OS-driven residency input. No process sampling or periodic memory polling.
+//! OS-driven residency input. No process sampling; only a critically low
+//! state on Windows is read again periodically, to notice it easing.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
@@ -107,20 +108,88 @@ mod native {
     }
 }
 
+/// Windows signals two documented states: available memory is low, or it
+/// is high (three times the low threshold). Between the two, memory is
+/// tight: macOS's warning.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_tier(low: bool, high: bool) -> zephium_core::ports::engine::MemoryPressure {
+    use zephium_core::ports::engine::MemoryPressure;
+    if low {
+        MemoryPressure::Critical
+    } else if high {
+        MemoryPressure::Normal
+    } else {
+        MemoryPressure::Warning
+    }
+}
+
+/// The notifications that can end `tier`, as (low, high, recheck). Only an
+/// unsignaled notification can be waited for, so a signaled one is never in
+/// the set. Leaving the low state cannot be waited for at all: while
+/// critical, the state is read again after a pause.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_watch(tier: zephium_core::ports::engine::MemoryPressure) -> (bool, bool, bool) {
+    use zephium_core::ports::engine::MemoryPressure;
+    match tier {
+        MemoryPressure::Normal => (true, false, false),
+        MemoryPressure::Warning => (true, true, false),
+        MemoryPressure::Critical => (false, true, true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zephium_core::ports::engine::MemoryPressure;
+
+    #[test]
+    fn windows_tiers_follow_the_two_memory_notifications() {
+        assert_eq!(windows_tier(true, false), MemoryPressure::Critical);
+        assert_eq!(windows_tier(false, false), MemoryPressure::Warning);
+        assert_eq!(windows_tier(false, true), MemoryPressure::Normal);
+    }
+
+    #[test]
+    fn each_windows_tier_waits_only_for_what_can_end_it() {
+        for (low, high) in [(true, false), (false, false), (false, true)] {
+            let (watch_low, watch_high, _) = windows_watch(windows_tier(low, high));
+            assert!(
+                !(watch_low && low),
+                "a signaled notification never returns a wait"
+            );
+            assert!(!(watch_high && high));
+            assert!(watch_low || watch_high);
+        }
+        assert_eq!(windows_watch(MemoryPressure::Critical), (false, true, true));
+        assert!(!windows_watch(MemoryPressure::Normal).2);
+        assert!(!windows_watch(MemoryPressure::Warning).2);
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod native {
     use std::sync::{Arc, Mutex};
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::System::Memory::{
         CreateMemoryResourceNotification, HighMemoryResourceNotification,
-        LowMemoryResourceNotification,
+        LowMemoryResourceNotification, QueryMemoryResourceNotification,
     };
     use windows::Win32::System::Threading::{
         CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE,
     };
     use zephium_app::{Command, Handle};
     use zephium_core::ports::engine::MemoryPressure;
+
+    /// How often a critical state is read again to notice it easing.
+    const CRITICAL_RECHECK_MS: u32 = 10_000;
+
+    fn signaled(event: &Event) -> Option<bool> {
+        let mut state = windows::core::BOOL::default();
+        // SAFETY: a live memory resource notification handle.
+        unsafe { QueryMemoryResourceNotification(event.handle(), &mut state) }.ok()?;
+        Some(state.as_bool())
+    }
 
     struct Event(HANDLE);
     impl Event {
@@ -160,30 +229,46 @@ mod native {
             let worker = std::thread::Builder::new()
                 .name("memory-pressure".into())
                 .spawn(move || {
-                    let mut pressured = false;
+                    let read = || Some(super::windows_tier(signaled(&low)?, signaled(&high)?));
+                    let Some(mut tier) = read() else {
+                        return;
+                    };
+                    // Launching under pressure is not a normal machine.
+                    if tier != MemoryPressure::Normal {
+                        let _ = shell.dispatch(Command::SetMemoryPressure(tier));
+                    }
                     loop {
-                        // Alternate low/high thresholds: a signaled low-memory
-                        // event must not produce a busy loop while pressure lasts.
-                        let handles = [
-                            stopped.handle(),
-                            if pressured {
-                                high.handle()
-                            } else {
-                                low.handle()
-                            },
-                        ];
-                        // SAFETY: both handles remain owned across this wait;
+                        // Waiting on a signaled notification would return at
+                        // once, so each tier waits only for what can end it.
+                        let (watch_low, watch_high, recheck) = super::windows_watch(tier);
+                        let mut handles = vec![stopped.handle()];
+                        if watch_low {
+                            handles.push(low.handle());
+                        }
+                        if watch_high {
+                            handles.push(high.handle());
+                        }
+                        let timeout = if recheck {
+                            CRITICAL_RECHECK_MS
+                        } else {
+                            INFINITE
+                        };
+                        // SAFETY: every handle remains owned across this wait;
                         // shutdown signals index zero before joining this thread.
-                        let result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-                        if result.0 != WAIT_OBJECT_0.0 + 1 {
+                        let result = unsafe { WaitForMultipleObjects(&handles, false, timeout) };
+                        let notified = (WAIT_OBJECT_0.0 + 1
+                            ..WAIT_OBJECT_0.0 + handles.len() as u32)
+                            .contains(&result.0);
+                        if !notified && result != WAIT_TIMEOUT {
                             break;
                         }
-                        pressured = !pressured;
-                        let _ = shell.dispatch(Command::SetMemoryPressure(if pressured {
-                            MemoryPressure::Critical
-                        } else {
-                            MemoryPressure::Normal
-                        }));
+                        let Some(next) = read() else {
+                            break;
+                        };
+                        if next != tier {
+                            tier = next;
+                            let _ = shell.dispatch(Command::SetMemoryPressure(tier));
+                        }
                     }
                 })
                 .ok()?;

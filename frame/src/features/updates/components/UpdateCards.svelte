@@ -46,6 +46,6 @@
     flex: none;
     flex-direction: column;
     gap: 6px;
-    margin: 6px 8px 0;
+    margin: 6px var(--sidebar-inset) 0;
   }
 </style>

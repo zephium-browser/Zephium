@@ -1,7 +1,7 @@
 /** One brief confirmation, such as a copied link. A newer notice replaces the
  *  one showing; nothing queues. The kind picks the glyph that stands for it,
  *  which is all a collapsed sidebar shows. */
-export type NoticeKind = "link" | "download" | "focus";
+export type NoticeKind = "link" | "download" | "focus" | "data";
 type Notice = { id: number; text: string; kind: NoticeKind };
 
 let current = $state.raw<Notice | null>(null);

@@ -7,6 +7,9 @@ mod automatic_pip;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
+mod browsing_data;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod certificates;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -23,13 +26,17 @@ mod element_picker;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
+mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod generic_styles;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod http_auth;
 mod lifecycle;
+mod media;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod page_open;
@@ -42,13 +49,19 @@ mod page_permissions;
 ))]
 pub(crate) mod page_reader;
 mod permits;
+mod popup_sites;
 mod profiles;
 mod resources;
 mod scripts;
+mod site_permissions;
 mod stages;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod store_button;
 mod style_worker;
 #[cfg(target_os = "macos")]
 mod webext;
+#[cfg(target_os = "macos")]
+mod webext_downloads;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(
@@ -75,6 +88,8 @@ pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::try_perform_extension_command;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
@@ -159,10 +174,21 @@ struct ObservedView {
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
+    _audio_observer: Option<objc2::rc::Retained<crate::platform::macos::audio::AudioObserver>>,
+    #[cfg(target_os = "windows")]
+    audio_observer: Option<crate::platform::imp::AudioObserver>,
+    #[cfg(target_os = "macos")]
     _fullscreen_observer:
         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
     #[cfg(target_os = "windows")]
     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
+    #[cfg(target_os = "windows")]
+    _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
+    // Which icon watch of this view's document is current; an older watch's
+    // reports are ignored.
+    favicon_watch: Cell<u64>,
+    // The media watch's generation, and whether it is running.
+    media_watch: Cell<(u64, bool)>,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
     #[cfg(target_os = "macos")]
@@ -171,6 +197,10 @@ struct ObservedView {
     discard_settle_timer: std::cell::RefCell<Option<crate::platform::imp::ContentPolicyTimeout>>,
     #[cfg(target_os = "windows")]
     request_witness: Option<crate::platform::imp::RequestWitness>,
+    // The DevTools window id of this exact controller, which never changes:
+    // asked once instead of on every extension toolbar refresh.
+    #[cfg(target_os = "windows")]
+    extension_window: Cell<Option<i64>>,
     #[cfg(target_os = "windows")]
     windows_final_discard: Option<Arc<discard::WindowsFinalDiscard>>,
     #[cfg(target_os = "windows")]
@@ -182,9 +212,15 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
+    #[cfg(target_os = "macos")]
+    popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    http_auth: Rc<http_auth::HttpAuthBroker>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
@@ -201,7 +237,10 @@ struct ObservedView {
     // platform call succeeds and is returned with every settlement, making a
     // newest-per-item result authoritative even if intermediate results are
     // coalesced before the shell processes them.
-    applied_zoom: f64,
+    //
+    // Shared with the Windows zoom listener, which tells a zoom made in the
+    // page from one this engine applied by comparing against it.
+    applied_zoom: Rc<Cell<f64>>,
     // False until privileged chrome has applied and verified this exact
     // committed main-frame URL/revision and the shell returns the same opaque
     // epoch. It is reset
@@ -225,6 +264,8 @@ struct ObservedView {
     #[cfg(target_os = "windows")]
     _accelerator_registration: Option<crate::platform::imp::AcceleratorRegistration>,
     #[cfg(target_os = "windows")]
+    _zoom_registration: crate::platform::imp::ZoomRegistration,
+    #[cfg(target_os = "windows")]
     _security_policy: crate::platform::imp::SecurityPolicy,
     // `AllowAll` also has an explicit no-op registration. An absent field is
     // never used to authorize browsing. `Option` exists solely so teardown
@@ -239,6 +280,8 @@ struct ObservedView {
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // Before `view`, so a running search is stopped while its view lives.
     find: Option<crate::platform::imp::FindSession>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    store_button: store_button::StoreButtonSlot,
     // Before `view`: the Ask panel's reader removes its scripts and
     // handlers from the view's controller while the view lives.
     #[cfg(all(
@@ -326,6 +369,8 @@ impl Drop for ObservedView {
         self.navigation.revoke();
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.http_auth.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -533,6 +578,10 @@ pub(crate) struct EngineHost {
     /// views already open without touching them.
     focus_gate: focus::SharedFocusGate,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    popup_sites: HashMap<ProfileId, Rc<popup_sites::PopupSites>>,
+    /// Certificates people chose to continue past, per profile, until quit.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    certificate_exceptions: HashMap<ProfileId, certificates::SharedExceptions>,
     /// Ask panel page styles: validated CSS per registrable site.
     page_styles: HashMap<ProfileId, HashMap<String, Arc<str>>>,
     picker: Option<Arc<element_picker::PickerSession>>,
