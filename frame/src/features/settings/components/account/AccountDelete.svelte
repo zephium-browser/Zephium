@@ -11,6 +11,9 @@
   const sent = $derived(session.awaitingDeletionCode());
   let code = $state("");
   let opener: HTMLElement | null = null;
+  $effect(() => {
+    if (!sent) code = "";
+  });
   const busy = $derived(session.pending());
   const fault = $derived(session.fault());
   const faultText = $derived(

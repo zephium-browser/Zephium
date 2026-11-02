@@ -76,6 +76,7 @@ export const awaitingDeletionCode = () => deletionCodeSent;
 function adopt(reply: AccountReplyV1 | undefined) {
   if (reply?.account?.version !== 1) {
     unreachable = true;
+    deletionCodeSent = false;
     return;
   }
   unreachable = false;
@@ -146,6 +147,8 @@ async function act(
   lastFault = null;
   reads += 1;
   const started = generation;
+  const requestedIdentity =
+    action === "deletion_code" && current ? { server: current.server, email: current.email } : null;
   const response = await observe(Promise.resolve().then(request), timeout);
   if (started !== generation) return false;
   busy = null;
@@ -157,7 +160,12 @@ async function act(
   const failed = response.value.fault;
   if (failed) lastFault = { action, fault: failed, retryAfter: response.value.retry_after };
   else if (action === "deletion_code")
-    deletionCodeSent = response.value.account.version === 1 && response.value.account.signed_in;
+    deletionCodeSent =
+      response.value.account.version === 1 &&
+      response.value.account.signed_in &&
+      requestedIdentity !== null &&
+      requestedIdentity.server === response.value.account.server &&
+      requestedIdentity.email === response.value.account.email;
   else if (action === "delete") deletionCodeSent = false;
   return !failed;
 }

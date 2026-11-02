@@ -90,14 +90,33 @@ test("a failed send does not advance the deletion form", async () => {
 });
 
 test("an unrecognized account response does not retain a pending deletion step", async () => {
-  native.send.mockResolvedValue({
-    account: { ...native.account, version: 2 },
-    fault: null,
-    retry_after: null,
-  });
   await session.sendDeletionCode();
+  expect(session.awaitingDeletionCode()).toBe(true);
+  native.account = { ...native.account!, version: 2 };
+  await session.refresh();
   expect(session.awaitingDeletionCode()).toBe(false);
 });
+
+test.each(["server", "email"] as const)(
+  "a deletion-code reply for a different %s does not advance that account's form",
+  async (change) => {
+    let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+    native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const sending = session.sendDeletionCode();
+    await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+    native.account = {
+      ...native.account!,
+      ...(change === "email"
+        ? { email: "grace@example.com" }
+        : { server: "https://accounts.example.com" }),
+    };
+    finish({ account: native.account, fault: null, retry_after: null });
+    await sending;
+    expect(session.awaitingDeletionCode()).toBe(false);
+    await session.sendDeletionCode();
+    expect(session.awaitingDeletionCode()).toBe(true);
+  },
+);
 
 test("requesting a replacement code is explicit and clears the typed digits", async () => {
   await session.sendDeletionCode();
@@ -107,4 +126,16 @@ test("requesting a replacement code is explicit and clears the typed digits", as
   await page.getByRole("button", { name: "Send a new code", exact: true }).click();
   await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
   expect(native.send).toHaveBeenCalledTimes(2);
+});
+
+test("typed deletion digits do not follow an account change", async () => {
+  await session.sendDeletionCode();
+  const screen = await render(AccountDelete);
+  await screen.getByRole("button", { name: "Delete…", exact: true }).click();
+  await page.getByLabelText("Code from the email").fill("123456");
+  native.account = { ...native.account!, email: "grace@example.com" };
+  await session.refresh();
+  await expect.element(page.getByLabelText("Code from the email")).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Email me a code" }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
 });
