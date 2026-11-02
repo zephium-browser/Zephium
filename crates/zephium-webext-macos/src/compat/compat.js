@@ -1226,6 +1226,9 @@
       const relays = new WeakMap();
       pin(event, "addListener", function (listener, filter, ...rest) {
         if (typeof listener !== "function") return add.call(this, listener, filter, ...rest);
+        // A listener is registered once; a second add, whatever its filter,
+        // changes nothing, as in Chrome.
+        if (relays.has(listener)) return undefined;
         const types = filter && Array.isArray(filter.types) ? filter.types : null;
         const wantsSub = !types || types.includes("sub_frame");
         const wantsMain = !types || types.includes("main_frame");
