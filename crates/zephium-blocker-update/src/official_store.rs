@@ -5,10 +5,10 @@ use crate::storage_io::{
 };
 use crate::types::{ActivatedCatalog, CatalogIdentity};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zephium_blocker::Sha256;
 use zephium_blocker::{PolicyCatalog, PolicySource, SourceFormat, SourceId, StaticPolicyCatalog};
 use zephium_update_transport::official_filters::FilterValidators;
 
@@ -185,7 +185,7 @@ impl OfficialStore {
                     Err(_) => return false,
                 }
             }
-            total == source.bytes && <[u8; 32]>::from(digest.finalize()) == source.sha256
+            total == source.bytes && digest.finalize() == source.sha256
         })
     }
 
@@ -209,7 +209,7 @@ impl OfficialStore {
         {
             return Err(StoreError::InvalidPackage);
         }
-        let sha256 = Sha256::digest(bytes).into();
+        let sha256 = Sha256::digest(bytes);
         let path = self.root.join(object_name(&sha256));
         let identical = read_bounded_regular(&path, MAX_SOURCE).is_ok_and(|stored| stored == bytes);
         if !identical {
@@ -244,7 +244,7 @@ impl OfficialStore {
         Ok(Package {
             identity: CatalogIdentity {
                 revision,
-                manifest_sha256: Sha256::digest(manifest).into(),
+                manifest_sha256: Sha256::digest(manifest),
                 created_unix: now,
                 expires_unix: now.saturating_add(7 * DAY),
                 source_count: 2,
@@ -352,9 +352,7 @@ fn object_name(hash: &[u8; 32]) -> String {
 }
 fn read_source(root: &Path, source: &Source) -> Result<Vec<u8>, StoreError> {
     let bytes = read_bounded_regular(&root.join(object_name(&source.sha256)), source.bytes)?;
-    if bytes.len() as u64 != source.bytes
-        || <[u8; 32]>::from(Sha256::digest(&bytes)) != source.sha256
-    {
+    if bytes.len() as u64 != source.bytes || Sha256::digest(&bytes) != source.sha256 {
         return Err(StoreError::ObjectCorrupt);
     }
     Ok(bytes)
@@ -405,7 +403,7 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
                 .collect::<Vec<_>>(),
         ))
         .map_err(|_| StoreError::StateCorrupt)?;
-        if package.identity.manifest_sha256 != <[u8; 32]>::from(Sha256::digest(manifest)) {
+        if package.identity.manifest_sha256 != Sha256::digest(manifest) {
             return Err(StoreError::StateCorrupt);
         }
         for source in &package.sources {

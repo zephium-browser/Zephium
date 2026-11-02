@@ -950,7 +950,6 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "async-trait",
             "serde",
             "serde_json",
-            "sha2",
             "thiserror",
             "tokio",
             "tough",
@@ -967,7 +966,6 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     )?;
     require_string(async_trait, "version", "=0.1.89")?;
     require_bool(async_trait, "optional", true)?;
-    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
     for name in ["serde", "serde_json", "thiserror", "url"] {
         require_workspace_dependency(dependencies, name, &[])?;
     }

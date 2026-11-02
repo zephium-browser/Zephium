@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
+use zephium_blocker::Sha256;
 use zephium_blocker::{PolicySource, SourceFormat, SourceId, StaticPolicyCatalog};
 
 use crate::types::{CatalogIdentity, LicensePolicy, UpdateLimits};
