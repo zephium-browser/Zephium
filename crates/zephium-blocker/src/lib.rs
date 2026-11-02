@@ -11,6 +11,7 @@ mod cache;
 mod compiler;
 mod cosmetics;
 mod limits;
+mod priority;
 mod report;
 mod rules;
 mod sha256;

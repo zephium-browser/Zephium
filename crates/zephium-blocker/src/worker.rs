@@ -1006,7 +1006,7 @@ fn run_worker(
                 prepared = None;
                 let mut candidate = ArtifactCache::new(preparation.catalog);
                 let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    candidate.resolve(compiler, &mut persistent)
+                    crate::priority::in_background(|| candidate.resolve(compiler, &mut persistent))
                 })) {
                     Ok(BlockerCompileOutcome::Compiled(rules)) => {
                         prepared = Some((preparation.identity, candidate));
