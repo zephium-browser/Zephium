@@ -1197,9 +1197,9 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
         dependencies,
         &[
             "flate2",
+            "ring",
             "serde",
             "serde_json",
-            "sha2",
             "thiserror",
             "zephium-blocker",
             "zephium-blocker-update",
@@ -1208,8 +1208,8 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
         "zephium-blocker-service dependency table",
     )?;
     require_dependency_version(dependencies, "flate2", "=1.1.9")?;
-    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
     for name in [
+        "ring",
         "serde",
         "serde_json",
         "thiserror",
@@ -1389,6 +1389,7 @@ fn validate_blocker_fuzz_deny_source(source: &str) -> Result<(), String> {
         &[
             "Apache-2.0",
             "BSD-2-Clause",
+            "ISC",
             "MIT",
             "MPL-2.0",
             "NCSA",

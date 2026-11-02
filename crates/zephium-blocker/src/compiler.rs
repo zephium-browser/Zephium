@@ -5,6 +5,7 @@ use std::fmt;
 #[cfg(feature = "webkit")]
 use std::sync::Arc;
 
+use crate::Sha256;
 #[cfg(feature = "webkit")]
 use adblock::content_blocking::{
     CbLoadType, CbRule, CbRuleCreationFailure, CbRuleEquivalent, CbType,
@@ -20,7 +21,6 @@ use adblock::{
 };
 #[cfg(feature = "webkit")]
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::limits::CompileLimits;
@@ -308,7 +308,7 @@ impl Compiler {
             combined.update(b"zephium-network-and-cosmetic-policy-v1");
             combined.update(digest.as_bytes());
             combined.update(cosmetics.policy.fingerprint().as_bytes());
-            digest = PolicyDigest(combined.finalize().into());
+            digest = PolicyDigest(combined.finalize());
         }
         let (runtime, runtime_coverage, webkit, webkit_coverage, native_blocking_rule_entries) =
             match target {
@@ -1125,7 +1125,7 @@ fn compile_webkit(
         WebKitRules {
             json: Arc::from(json),
             rule_count: rules.len(),
-            digest: ArtifactDigest(artifact_digest.finalize().into()),
+            digest: ArtifactDigest(artifact_digest.finalize()),
         },
         coverage,
     ))
@@ -1144,7 +1144,7 @@ fn digest_policy(prepared: &[PreparedSource]) -> PolicyDigest {
         digest.update((source.rules.len() as u64).to_be_bytes());
         digest.update(source.rules.as_bytes());
     }
-    PolicyDigest(digest.finalize().into())
+    PolicyDigest(digest.finalize())
 }
 
 #[cfg(feature = "webkit")]

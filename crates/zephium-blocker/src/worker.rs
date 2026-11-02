@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use crate::Sha256;
 use thiserror::Error;
 use zephium_core::blocker::{
     BlockerConfig, ContentPolicyGeneration, ContentRuleCoverage, ContentRuleDigest, ContentRules,
@@ -1644,7 +1644,7 @@ fn map_method(method: &str) -> RequestMethod {
 }
 
 fn allow_all_digest() -> ContentRuleDigest {
-    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN).into())
+    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN))
 }
 
 fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {

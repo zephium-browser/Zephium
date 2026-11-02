@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "webkit")]
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest, Sha256};
+use crate::Sha256;
 use thiserror::Error;
 use zephium_core::blocker::{
     ContentRuleCoverage, ContentRuleDigest, ContentRules, ContentRulesPayload,
@@ -104,7 +104,7 @@ impl CacheKey {
         let mut digest = cache_key_prefix(target, limits);
         digest.update(b"authenticated-manifest");
         digest.update(manifest_sha256);
-        Self(digest.finalize().into())
+        Self(digest.finalize())
     }
 
     pub(crate) fn for_catalog<'a>(
@@ -124,7 +124,7 @@ impl CacheKey {
             digest.update((contents.len() as u64).to_be_bytes());
             digest.update(contents.as_bytes());
         }
-        Self(digest.finalize().into())
+        Self(digest.finalize())
     }
 }
 
@@ -428,7 +428,7 @@ fn encode_record_with_cosmetics(
     {
         return None;
     }
-    let payload_digest: [u8; 32] = Sha256::digest(payload).into();
+    let payload_digest: [u8; 32] = Sha256::digest(payload);
     let mut bytes = Vec::with_capacity(
         RECORD_HEADER_BYTES
             .checked_add(payload.len())?
@@ -457,7 +457,7 @@ fn encode_record_with_cosmetics(
     }
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(cosmetics);
-    let checksum: [u8; 32] = Sha256::digest(&bytes).into();
+    let checksum: [u8; 32] = Sha256::digest(&bytes);
     bytes.extend_from_slice(&checksum);
     Some(bytes)
 }
@@ -499,7 +499,7 @@ fn decode_header(
     if target != expected_target || reader.take::<3>()? != [0; 3] {
         return None;
     }
-    let adblock_digest: [u8; 32] = Sha256::digest(ADBLOCK_ENGINE_VERSION.as_bytes()).into();
+    let adblock_digest: [u8; 32] = Sha256::digest(ADBLOCK_ENGINE_VERSION.as_bytes());
     if reader.take::<32>()? != adblock_digest || reader.take::<32>()? != expected_key.0 {
         return None;
     }
@@ -1866,7 +1866,6 @@ mod tests {
     }
 
     #[cfg(feature = "webkit")]
-    #[cfg(feature = "webkit")]
     fn load_webkit_bytes(
         record: &[u8],
         cache_key: CacheKey,
@@ -1890,7 +1889,7 @@ mod tests {
             key(5),
             CompileTarget::WebKit,
             [5; 32],
-            artifact.finalize().into(),
+            artifact.finalize(),
             coverage(),
             1,
             payload,
@@ -1933,6 +1932,7 @@ mod tests {
         assert!(loaded.is_none());
     }
 
+    #[cfg(feature = "webkit")]
     fn webkit_record(cache_key: CacheKey, policy: u8) -> Vec<u8> {
         let payload = br#"[{"action":{"type":"block"},"trigger":{"url-filter":"ads\\.invalid"}}]"#;
         let mut artifact = Sha256::new();
@@ -1943,7 +1943,7 @@ mod tests {
             cache_key,
             CompileTarget::WebKit,
             [policy; 32],
-            artifact.finalize().into(),
+            artifact.finalize(),
             coverage(),
             1,
             payload,
@@ -2127,7 +2127,7 @@ mod tests {
         assert!(decode_record(&corrupt, key(1), CompileTarget::WebKit).is_none());
         let mut wrong_version = record;
         wrong_version[8..12].copy_from_slice(&(CACHE_FORMAT_VERSION + 1).to_be_bytes());
-        let checksum: [u8; 32] = Sha256::digest(&wrong_version[..wrong_version.len() - 32]).into();
+        let checksum: [u8; 32] = Sha256::digest(&wrong_version[..wrong_version.len() - 32]);
         let length = wrong_version.len();
         wrong_version[length - 32..].copy_from_slice(&checksum);
         assert!(decode_record(&wrong_version, key(1), CompileTarget::WebKit).is_none());

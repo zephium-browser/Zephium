@@ -7,14 +7,13 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use sha2::{Digest, Sha256};
-
 mod cache;
 mod compiler;
 mod cosmetics;
 mod limits;
 mod report;
 mod rules;
+mod sha256;
 #[cfg(feature = "webkit")]
 mod webkit;
 mod worker;
@@ -36,6 +35,8 @@ pub use rules::{
     ArtifactDigest, CompiledRules, MatchError, NetworkAction, NetworkDecision, NetworkRequest,
     PolicyDigest, RequestMethod, ResourceType, WebKitRules,
 };
+#[doc(hidden)]
+pub use sha256::Sha256;
 pub use worker::{
     CatalogError, CatalogPreparationOutcome, CatalogReplacementDispatch, PolicyCatalog,
     PolicySource, StaticPolicyCatalog, WorkerBlocker,
@@ -86,7 +87,7 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     ] {
         digest.update((value as u64).to_be_bytes());
     }
-    digest.finalize().into()
+    digest.finalize()
 }
 
 #[cfg(test)]
