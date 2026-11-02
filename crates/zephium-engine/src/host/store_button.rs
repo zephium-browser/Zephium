@@ -18,6 +18,10 @@ use super::EngineHost;
 const CLICK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "windows")]
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+// Behind another app the listing can only be clicked by first bringing its
+// window back, so it is asked far less often.
+#[cfg(target_os = "windows")]
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(super) struct StoreButtonSlot {
@@ -42,6 +46,19 @@ impl StoreButtonSlot {
             native,
             ..Self::default()
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn in_front(view: &wry::WebView) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
+    use wry::WebViewExtWindows;
+    let mut parent = HWND::default();
+    // SAFETY: plain reads of the live controller's parent and the window in front.
+    unsafe {
+        view.controller().ParentWindow(&mut parent).is_ok()
+            && GetAncestor(parent, GA_ROOT) == GetForegroundWindow()
     }
 }
 
@@ -182,8 +199,13 @@ impl EngineHost {
             view.store_button.poll = None;
             return;
         }
+        let interval = if in_front(&view.view) {
+            POLL_INTERVAL
+        } else {
+            BACKGROUND_POLL_INTERVAL
+        };
         view.store_button.poll =
-            crate::platform::imp::schedule_browser_timeout(POLL_INTERVAL, move || {
+            crate::platform::imp::schedule_browser_timeout(interval, move || {
                 let _ = super::try_with(move |host| host.poll_store_button(id));
             });
     }
