@@ -1615,7 +1615,7 @@ fn enabled_source_terminal_does_not_seal_the_allow_all_disable_path() {
 }
 
 #[test]
-fn restored_enabled_profile_browses_under_explicit_provisional_policy_while_preparing() {
+fn restored_enabled_profile_holds_views_for_its_enabled_policy() {
     let saved = opted_out_store();
     let (mut original, _, _) = setup_with(saved.clone());
     original.handle(Command::Bootstrap);
@@ -1664,13 +1664,15 @@ fn restored_enabled_profile_browses_under_explicit_provisional_policy_while_prep
         id: active_id(&screen),
         input: "instant.example".into(),
     });
-    assert!(
+    let created = |engine: &FakeEngine| {
         engine
             .calls()
             .iter()
-            .any(|call| call.starts_with("create ") && call.contains("instant.example")),
-        "{:?}",
-        engine.calls()
+            .any(|call| call.starts_with("create ") && call.contains("instant.example"))
+    };
+    assert!(
+        !created(&engine),
+        "the first page must wait for the enabled policy, not the provisional allow-all"
     );
 
     // Compilation is not installation. Starting remains visible until the
@@ -1703,11 +1705,73 @@ fn restored_enabled_profile_browses_under_explicit_provisional_policy_while_prep
         shell.focused_blocker_status_view().protection,
         BlockerProtection::Active
     );
+    assert!(created(&engine), "{:?}", engine.calls());
+    assert_eq!(shell.blocker.startup_unprotected_views, 0);
     assert!(shell.blocker.profiles[&profile].config.config.enabled);
 }
 
 #[test]
-fn fresh_profile_defaults_on_and_browses_before_background_compile_finishes() {
+fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
+    let (mut shell, engine, compiler, store, screen) = controlled_shell();
+    store.saved.lock().unwrap().take();
+    store.blocker_configs.lock().unwrap().take();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let provisional = initial_installation(&shell, profile);
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: provisional,
+        settlement: ContentRuleSettlement::Applied {
+            generation: provisional,
+        },
+    }));
+    shell.handle(Command::Navigate {
+        id: active_id(&screen),
+        input: "late-protection.example".into(),
+    });
+    let created = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("create ") && call.contains("late-protection.example"))
+            .count()
+    };
+    assert_eq!(created(&engine), 0);
+
+    shell.handle(Command::BlockerStartupDeadline {
+        profile,
+        token: provisional.get() + 1,
+    });
+    assert_eq!(
+        created(&engine),
+        0,
+        "a stale deadline must not release views"
+    );
+
+    shell.handle(Command::BlockerStartupDeadline {
+        profile,
+        token: provisional.get(),
+    });
+    assert_eq!(created(&engine), 1, "{:?}", engine.calls());
+    assert_eq!(shell.blocker.startup_unprotected_views, 1);
+
+    let generation = compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: generation,
+        settlement: ContentRuleSettlement::Applied { generation },
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+    assert_eq!(created(&engine), 1);
+    assert_eq!(shell.blocker.startup_unprotected_views, 1);
+}
+
+#[test]
+fn fresh_profile_defaults_on_and_its_first_page_waits_for_protection() {
     let (mut shell, engine, compiler, store, screen) = controlled_shell();
     store.saved.lock().unwrap().take();
     store.blocker_configs.lock().unwrap().take();
@@ -1728,11 +1792,14 @@ fn fresh_profile_defaults_on_and_browses_before_background_compile_finishes() {
             generation: provisional,
         },
     }));
-    assert!(engine
-        .calls()
-        .iter()
-        .any(|call| call.contains("https://default-protection.example/")));
-    assert!(shell.blocker.profiles[&profile].held_effects.is_empty());
+    let opened = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .iter()
+            .any(|call| call.contains("https://default-protection.example/"))
+    };
+    assert!(!opened(&engine));
+    assert!(!shell.blocker.profiles[&profile].held_effects.is_empty());
     assert_eq!(compiler.requests.lock().unwrap().len(), 1);
     assert!(compiler.request(0).2.enabled);
     let generation = compiler.complete_next(enabled_rules());
@@ -1746,6 +1813,8 @@ fn fresh_profile_defaults_on_and_browses_before_background_compile_finishes() {
         shell.focused_blocker_status_view().protection,
         BlockerProtection::Active
     );
+    assert!(opened(&engine));
+    assert!(shell.blocker.profiles[&profile].held_effects.is_empty());
 }
 
 #[test]

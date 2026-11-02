@@ -1371,6 +1371,9 @@ impl Shell {
                 self.consume_blocker_store_result(profile);
                 self.consume_blocker_site_result(profile);
             }
+            Command::BlockerStartupDeadline { profile, token } => {
+                self.on_blocker_startup_deadline(profile, token)
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }
