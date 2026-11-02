@@ -466,6 +466,32 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     Ok(pids)
 }
 
+/// The processes of `listed[..count]` in the `root` resource coalition. A
+/// full buffer may have cut the list short, so it is refused rather than
+/// measured as a smaller family.
+#[cfg(any(target_os = "macos", test))]
+fn coalition_members(
+    listed: &[i32],
+    count: usize,
+    root: u64,
+    mut coalition_of: impl FnMut(i32) -> Result<Option<u64>, String>,
+) -> Result<Vec<i32>, String> {
+    if count >= listed.len() {
+        return Err("the process list filled its buffer and may be incomplete".into());
+    }
+    let mut pids = Vec::new();
+    for &pid in &listed[..count] {
+        if pid > 1 && coalition_of(pid)? == Some(root) {
+            pids.push(pid);
+            if pids.len() > MAX_COALITION_PROCESSES {
+                return Err("application coalition exceeds the measurement process bound".into());
+            }
+        }
+    }
+    pids.sort_unstable();
+    Ok(pids)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
     if pid == root {
@@ -482,10 +508,10 @@ fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{
-        parse_coalition_pids, parse_integer_value, parse_single_asn, parse_string_value,
-        role_for_process, KernelCounters, MeasurementArguments, MeasurementReport, MemorySample,
-        ProcessIdentity, ProcessRole, ProcessSample, RoleAccumulator, RoleReport, TrackedProcess,
-        UsageCounters, MAX_APPLICATION_NAME_BYTES, MAX_COALITION_PROCESSES,
+        coalition_members, parse_coalition_pids, parse_integer_value, parse_single_asn,
+        parse_string_value, role_for_process, KernelCounters, MeasurementArguments,
+        MeasurementReport, MemorySample, ProcessIdentity, ProcessRole, ProcessSample,
+        RoleAccumulator, RoleReport, TrackedProcess, UsageCounters, MAX_APPLICATION_NAME_BYTES,
     };
     use std::collections::{BTreeMap, HashMap};
     use std::ffi::c_void;
@@ -710,22 +736,8 @@ mod platform {
         // SAFETY: proc_listallpids fills at most `capacity` bytes of the
         // writable buffer and returns how many PIDs it wrote.
         let count = unsafe { libc::proc_listallpids(all.as_mut_ptr().cast::<c_void>(), capacity) };
-        let count = usize::try_from(count)
-            .map_err(|_| "cannot list processes".to_owned())?
-            .min(all.len());
-        let mut pids = Vec::new();
-        for &pid in &all[..count] {
-            if pid > 1 && resource_coalition(pid)? == Some(root) {
-                pids.push(pid);
-                if pids.len() > MAX_COALITION_PROCESSES {
-                    return Err(
-                        "application coalition exceeds the measurement process bound".into(),
-                    );
-                }
-            }
-        }
-        pids.sort_unstable();
-        Ok(pids)
+        let count = usize::try_from(count).map_err(|_| "cannot list processes".to_owned())?;
+        coalition_members(&all, count, root, resource_coalition)
     }
 
     #[repr(C)]
@@ -942,8 +954,9 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_arguments, parse_coalition_pids, parse_integer_value, parse_single_asn,
-        parse_string_value, role_for_process, KernelCounters, ProcessRole, UsageCounters,
+        coalition_members, parse_arguments, parse_coalition_pids, parse_integer_value,
+        parse_single_asn, parse_string_value, role_for_process, KernelCounters, ProcessRole,
+        UsageCounters, MAX_COALITION_PROCESSES,
     };
 
     #[test]
@@ -1007,6 +1020,23 @@ mod tests {
             vec![45010, 45011, 45012]
         );
         assert!(parse_coalition_pids("\"LSApplicationCoalitionPIDsKey\"=( 2, 2)\n").is_err());
+    }
+
+    #[test]
+    fn coalition_members_refuse_a_full_list_and_an_oversized_family() {
+        let coalition = |pid: i32| Ok(Some(if pid % 2 == 0 { 7 } else { 9 }));
+        assert_eq!(
+            coalition_members(&[1, 4, 3, 2, 0, 0], 4, 7, coalition).unwrap(),
+            vec![2, 4]
+        );
+        assert!(coalition_members(&[2, 4, 6], 3, 7, coalition).is_err());
+        assert!(coalition_members(&[2, 4, 6], 4, 7, coalition).is_err());
+        let family: Vec<i32> = (2..=2 * (MAX_COALITION_PROCESSES as i32 + 2))
+            .step_by(2)
+            .collect();
+        let mut buffer = family.clone();
+        buffer.push(0);
+        assert!(coalition_members(&buffer, family.len(), 7, coalition).is_err());
     }
 
     #[test]
