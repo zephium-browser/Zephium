@@ -108,6 +108,22 @@
   }
 
   // ---- Language gaps -------------------------------------------------------
+  if (!isWorker && typeof g.requestIdleCallback !== "function") {
+    // A timer yields to the event loop, but cannot observe WebKit's real idle
+    // periods. Give extensions a bounded, decreasing compatibility budget.
+    g.requestIdleCallback = (callback, options) => {
+      if (typeof callback !== "function") throw new TypeError("requestIdleCallback requires a callback");
+      const posted = performance.now();
+      const timeout = Number(options?.timeout);
+      return setTimeout(() => {
+        const started = performance.now();
+        const didTimeout = Number.isFinite(timeout) && timeout > 0 && started - posted >= timeout;
+        const deadline = started + (didTimeout ? 0 : 50);
+        callback({ didTimeout, timeRemaining: () => Math.max(0, deadline - performance.now()) });
+      }, 1);
+    };
+    g.cancelIdleCallback = (handle) => clearTimeout(handle);
+  }
   if (typeof g.scheduler !== "object" || g.scheduler === null) {
     try {
       Object.defineProperty(g, "scheduler", { value: {}, configurable: true, writable: true });

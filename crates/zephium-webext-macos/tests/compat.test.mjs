@@ -8,7 +8,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../src/compat/compat.js", import.meta.url), "utf8");
 const event = () => ({ addListener() {}, removeListener() {}, hasListener: () => false });
 
-function context(kind, declared = []) {
+function context(kind, declared = [], globals = {}) {
   const invalid = (name) => new Error(`Invalid call. The 'permissions' value is invalid, because '${name}' is not a valid permission.`);
   const chrome = {
     runtime: {
@@ -213,10 +213,80 @@ function context(kind, declared = []) {
     g.location = { protocol: "https:", pathname: "/", href: "https://example.com/" };
   }
   g.globalThis = g;
+  Object.assign(g, globals);
   vm.createContext(g);
   vm.runInContext(source, g);
   return g;
 }
+
+for (const kind of ["page", "content"]) {
+  test(`${kind}: idle callbacks yield, have a bounded deadline and can be cancelled`, () => {
+    let now = 100;
+    let next = 0;
+    const timers = new Map();
+    const g = context(kind, [], {
+      performance: { now: () => now },
+      setTimeout(callback) {
+        timers.set(++next, callback);
+        return next;
+      },
+      clearTimeout: (handle) => timers.delete(handle),
+    });
+    let deadline;
+    const handle = g.requestIdleCallback((value) => { deadline = value; });
+    assert.equal(deadline, undefined, "does not call synchronously");
+    assert.equal(typeof handle, "number");
+    now += 100;
+    timers.get(handle)();
+    assert.equal(deadline.didTimeout, false);
+    assert.equal(deadline.timeRemaining(), 50, "budget starts at callback delivery");
+    now += 20;
+    assert.equal(deadline.timeRemaining(), 30);
+    now += 100;
+    assert.equal(deadline.timeRemaining(), 0);
+    const cancelled = g.requestIdleCallback(() => assert.fail("cancelled callback ran"));
+    g.cancelIdleCallback(cancelled);
+    assert.equal(timers.has(cancelled), false);
+    g.cancelIdleCallback(cancelled);
+    assert.throws(() => g.requestIdleCallback(null), { name: "TypeError" });
+  });
+
+  test(`${kind}: an expired idle timeout has no remaining budget`, () => {
+    let now = 0;
+    let run;
+    const g = context(kind, [], {
+      performance: { now: () => now },
+      setTimeout: (callback) => { run = callback; return 1; },
+      clearTimeout() {},
+    });
+    let deadline;
+    g.requestIdleCallback((value) => { deadline = value; }, { timeout: 10 });
+    now = 20;
+    run();
+    assert.equal(deadline.didTimeout, true);
+    assert.equal(deadline.timeRemaining(), 0);
+    g.requestIdleCallback((value) => { deadline = value; }, { timeout: 100 });
+    now = 30;
+    run();
+    assert.equal(deadline.didTimeout, false);
+    assert.equal(deadline.timeRemaining(), 50);
+  });
+}
+
+test("native idle callbacks are retained and workers do not gain a Window API", () => {
+  const request = () => 7;
+  const cancel = () => {};
+  const g = context("page", [], { requestIdleCallback: request, cancelIdleCallback: cancel });
+  assert.equal(g.requestIdleCallback, request);
+  assert.equal(g.cancelIdleCallback, cancel);
+  const worker = context("worker");
+  assert.equal(worker.requestIdleCallback, undefined);
+  assert.equal(worker.cancelIdleCallback, undefined);
+  const ordinaryPage = {};
+  vm.runInNewContext(source, ordinaryPage);
+  assert.equal(ordinaryPage.requestIdleCallback, undefined);
+  assert.equal(ordinaryPage.cancelIdleCallback, undefined);
+});
 
 test("pages and workers get every API fix", async () => {
   for (const kind of ["page", "worker"]) {
