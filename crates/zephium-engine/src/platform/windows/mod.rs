@@ -746,6 +746,12 @@ fn install_process_failure_handler(
                 }
             }
             // A subframe, GPU or utility process WebView2 brings back itself.
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => {
+                if let Some(core) = sender.as_ref() {
+                    page_memory::gpu_process_exited(core);
+                }
+                log_ignored_process_failure(kind)
+            }
             other => log_ignored_process_failure(other),
         }
         Ok(())
