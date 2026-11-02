@@ -401,6 +401,12 @@ test("a frame's document reaches webRequest listeners as sub_frame, once per lis
   event.removeListener(listener);
   assert.equal(event.hasListener(listener), false);
   assert.equal(event.listeners.length, 0);
+
+  const retried = () => {};
+  assert.throws(() => event.addListener(retried, undefined));
+  event.addListener(retried, { urls: ["<all_urls>"] });
+  assert.equal(event.hasListener(retried), true);
+  assert.equal(event.listeners.length, 1);
 });
 
 test("API methods work apart from their namespace", async () => {

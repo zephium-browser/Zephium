@@ -1240,9 +1240,10 @@
           if (!wantsMain && details && details.type === "main_frame") return undefined;
           return listener.call(this, details, ...more);
         };
-        relays.set(listener, relay);
         const widened = wantsSub && !wantsMain ? Object.assign({}, filter, { types: [...types, "main_frame"] }) : filter;
-        return add.call(this, relay, widened, ...rest);
+        const registered = add.call(this, relay, widened, ...rest);
+        relays.set(listener, relay);
+        return registered;
       });
       pin(event, "removeListener", function (listener) {
         const relay = relays.get(listener);
