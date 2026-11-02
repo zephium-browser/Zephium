@@ -73,6 +73,9 @@ const QA_IDENTIFIER: &str = "app.zephium.protection-qa";
 const SPEEDOMETER_URL: &str = "https://browserbench.org/Speedometer3.1/?startAutomatically=true";
 const SPEEDOMETER_POLL: Duration = Duration::from_secs(5);
 const SPEEDOMETER_CAP: Duration = Duration::from_secs(10 * 60);
+// A fresh Zephium profile compiles its lists again when the list update it
+// fetches at launch lands; every browser idles this long so no run overlaps that.
+const SPEEDOMETER_SETTLE: Duration = Duration::from_secs(20);
 /// The score is in the page once `#result-number` has text; a failed run
 /// writes "Error" there.
 const SPEEDOMETER_STATE: &str = "const text = (id) => document.getElementById(id)?.textContent.trim() ?? '';\n\
@@ -1643,6 +1646,7 @@ fn speedometer_run(session: &mut Session, config: Config, run: usize, url: &str)
     };
     let (root, driver) = (session.pid, &mut session.driver);
     let outcome = (|| -> Result<(), Failure> {
+        std::thread::sleep(SPEEDOMETER_SETTLE);
         let before = measure::sample(root).ok();
         record.footprint_before_mb = before.as_ref().map(|b| megabytes(b.footprint_bytes));
         let blocked_before = if config.zephium() {
