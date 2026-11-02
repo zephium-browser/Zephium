@@ -569,9 +569,10 @@ fn decode_record(
 }
 
 /// Checks a WebKit record without bringing its rule text into memory: one
-/// streaming pass verifies the record checksum and both payload digests, and
-/// only the cosmetic section is kept. The text itself is read again, and
-/// validated, only if the native store has lost the compiled list.
+/// streaming pass verifies the record checksum, which also covers the payload
+/// and artifact digests stored in the header, and only the cosmetic section is
+/// kept. The text itself is read again, re-hashed against the artifact digest
+/// and validated only if the native store has lost the compiled list.
 #[cfg(feature = "webkit")]
 fn load_webkit_record(
     path: &Path,
@@ -613,16 +614,12 @@ fn load_webkit_record(
 
     let mut record_digest = Sha256::new();
     record_digest.update(header_bytes);
-    let mut payload_digest = Sha256::new();
-    let mut native_digest = webkit_artifact_digest_prefix();
     let mut chunk = vec![0; CHUNK_BYTES];
     let mut remaining = header.payload_len;
     while remaining != 0 {
         let part = &mut chunk[..remaining.min(CHUNK_BYTES)];
         file.read_exact(part).map_err(|_| CacheError::Io)?;
         record_digest.update(&*part);
-        payload_digest.update(&*part);
-        native_digest.update(&*part);
         remaining -= part.len();
     }
     let mut cosmetics = vec![0; header.cosmetics_len];
@@ -631,13 +628,10 @@ fn load_webkit_record(
     record_digest.update(&cosmetics);
     let mut checksum = [0; RECORD_CHECKSUM_BYTES];
     file.read_exact(&mut checksum).map_err(|_| CacheError::Io)?;
-    let artifact_digest: [u8; 32] = native_digest.finalize().into();
-    if record_digest.finalize().as_slice() != checksum
-        || payload_digest.finalize().as_slice() != header.payload_digest
-        || artifact_digest != header.native_digest
-    {
+    if record_digest.finalize().as_slice() != checksum {
         return Ok(None);
     }
+    let artifact_digest = header.native_digest;
     let cosmetics = if cosmetics.is_empty() {
         None
     } else {
