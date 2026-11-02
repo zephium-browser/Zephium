@@ -92,3 +92,8 @@ strip = "symbols"
 # Bounds checks remain enabled independently; retain integer overflow checks
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
+
+# Stripped proc-macro libraries fail to load with the macOS 27 toolchain
+# ("mis-aligned LINKEDIT string pool"); build-time code never ships.
+[profile.release.build-override]
+strip = false
