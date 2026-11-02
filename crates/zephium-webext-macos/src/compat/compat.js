@@ -1136,6 +1136,50 @@
     }
   }
   if (webRequest) {
+    // WebKit reports a frame's own document as a main_frame request, with the
+    // frame's id; Chrome calls it sub_frame, and filters see it that way.
+    const framed = (details) => !!details && details.type === "main_frame" && details.frameId !== 0;
+    for (const name of [
+      "onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
+      "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred",
+    ]) {
+      let event;
+      try {
+        event = webRequest[name];
+      } catch {}
+      if (!event || typeof event.addListener !== "function") continue;
+      kept.push(event);
+      pin(webRequest, name, event);
+      const add = event.addListener;
+      const remove = event.removeListener;
+      const has = event.hasListener;
+      const relays = new WeakMap();
+      pin(event, "addListener", function (listener, filter, ...rest) {
+        if (typeof listener !== "function") return add.call(this, listener, filter, ...rest);
+        const types = filter && Array.isArray(filter.types) ? filter.types : null;
+        const wantsSub = !types || types.includes("sub_frame");
+        const wantsMain = !types || types.includes("main_frame");
+        const relay = function (details, ...more) {
+          if (framed(details)) {
+            if (!wantsSub) return undefined;
+            return listener.call(this, Object.assign({}, details, { type: "sub_frame" }), ...more);
+          }
+          if (!wantsMain && details && details.type === "main_frame") return undefined;
+          return listener.call(this, details, ...more);
+        };
+        relays.set(listener, relay);
+        const widened = wantsSub && !wantsMain ? Object.assign({}, filter, { types: [...types, "main_frame"] }) : filter;
+        return add.call(this, relay, widened, ...rest);
+      });
+      pin(event, "removeListener", function (listener) {
+        const relay = relays.get(listener);
+        relays.delete(listener);
+        return remove.call(this, relay || listener);
+      });
+      pin(event, "hasListener", function (listener) {
+        return has.call(this, relays.get(listener) || listener);
+      });
+    }
     const headers = { REQUEST_HEADERS: "requestHeaders", RESPONSE_HEADERS: "responseHeaders" };
     const BLOCKING = "blocking";
     const EXTRA_HEADERS = "extraHeaders";
@@ -1374,6 +1418,17 @@
       const type = info && info.windowType;
       if (type !== undefined && type !== "normal" && type !== "popup") return withCallback(Promise.resolve([]), callback);
       return query.apply(this, arguments);
+    });
+  }
+  if (tabsApi && typeof tabsApi.sendMessage === "function") {
+    // Chrome takes a frame and the document in it together; WebKit wants one.
+    const sendMessage = tabsApi.sendMessage;
+    pin(tabsApi, "sendMessage", function (tabId, message, options, ...rest) {
+      if (options && typeof options === "object" && options.documentId !== undefined && options.frameId !== undefined) {
+        const { frameId: _frameId, ...document } = options;
+        return sendMessage.call(this, tabId, message, document, ...rest);
+      }
+      return sendMessage.call(this, tabId, message, options, ...rest);
     });
   }
 
