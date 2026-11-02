@@ -2,6 +2,8 @@
 mod caption;
 #[path = "windows_menus.rs"]
 mod menus;
+#[path = "windows_pointer.rs"]
+mod pointer;
 #[path = "windows_renderer.rs"]
 pub(crate) mod renderer;
 #[path = "windows_sidebar_edge.rs"]

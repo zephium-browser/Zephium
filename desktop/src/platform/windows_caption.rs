@@ -22,12 +22,6 @@ const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
 const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
-const WATCH: usize = ID + 5;
-// How often the pointer is read for the top of the window. A page's WebView2
-// belongs to another process, so no move over it reaches this thread. With
-// another window in front, or this one minimized, there is nothing to read:
-// the watch stops and activation starts it again.
-const WATCH_MS: u32 = 50;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
 const TOP_REACH: f64 = 20.0;
@@ -83,8 +77,6 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
-    // The pointer watch is running.
-    watching: bool,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -190,7 +182,6 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
-            watching: true,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -208,7 +199,9 @@ pub fn install(window: &WebviewWindow) -> bool {
             return false;
         }
         layout(pointer);
-        SetTimer(Some(strip), WATCH, WATCH_MS, None);
+        // A page's WebView2 belongs to another process, so no move over it
+        // reaches this thread; the shared pointer watch reports them.
+        super::pointer::listen(owner, pointer_moved);
         true
     }
 }
@@ -728,6 +721,33 @@ unsafe fn near_top(p: *mut State) -> bool {
     let reach = (TOP_REACH * scale).round() as i32;
     at.y >= 0 && at.y < reach && at.x >= (page_left * scale).round() as i32 && at.x < client.right
 }
+/// The pointer moved, or the window came to the front or left it: a page's
+/// top asks for the caption after a dwell, and leaving it lets the caption go.
+fn pointer_moved(owner: HWND) {
+    // SAFETY: UI-thread lookup and use of this module's own live state.
+    unsafe {
+        let Some(p) = installed_state(owner) else {
+            return;
+        };
+        let strip = (*p).strip;
+        let near = near_top(p);
+        if near && !(*p).expanded {
+            if !(*p).suppressed
+                && !(*p).changing_state
+                && !(*p).sizing
+                && !(*p).reveal_armed
+                && pointer_moved_on(p)
+            {
+                (*p).reveal_armed = true;
+                SetTimer(Some(strip), REVEAL, TOP_DWELL_MS, None);
+            }
+        } else if !near && (*p).near_top {
+            cancel_reveal(p);
+            SetTimer(Some(strip), HIDE, 450, None);
+        }
+        (*p).near_top = near;
+    }
+}
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
     let mut edge = RECT::default();
@@ -1140,6 +1160,7 @@ unsafe extern "system" fn owner_proc(
     let p = data as *mut State;
     if msg == WM_NCDESTROY {
         let _ = RemoveWindowSubclass(hwnd, Some(owner_proc), ID);
+        super::pointer::forget(hwnd, pointer_moved);
         zephium_engine::forget_window_caption_offset(hwnd.0 as isize);
         // Owned popups are explicitly torn down before freeing subclass state.
         if IsWindow(Some((*p).strip)).as_bool() {
@@ -1242,17 +1263,6 @@ unsafe extern "system" fn owner_proc(
     if matches!(msg, WM_THEMECHANGED | WM_SETTINGCHANGE) {
         let _ = render(p);
     }
-    // The foreground may not have settled yet, so the first tick decides
-    // whether the watch keeps running.
-    if matches!(
-        msg,
-        WM_ACTIVATE | WM_ACTIVATEAPP | WM_NCACTIVATE | WM_SIZE | WM_SHOWWINDOW
-    ) && !(*p).watching
-        && !IsIconic(hwnd).as_bool()
-    {
-        (*p).watching = true;
-        SetTimer(Some((*p).strip), WATCH, WATCH_MS, None);
-    }
     result
 }
 unsafe extern "system" fn strip_proc(
@@ -1328,29 +1338,6 @@ unsafe extern "system" fn strip_proc(
                 && pointer_moved_on(p)
             {
                 reveal(p);
-            }
-            return LRESULT(0);
-        }
-        WM_TIMER if w.0 == WATCH => {
-            let near = near_top(p);
-            if near && !(*p).expanded {
-                if !(*p).suppressed
-                    && !(*p).changing_state
-                    && !(*p).sizing
-                    && !(*p).reveal_armed
-                    && pointer_moved_on(p)
-                {
-                    (*p).reveal_armed = true;
-                    SetTimer(Some(hwnd), REVEAL, TOP_DWELL_MS, None);
-                }
-            } else if !near && (*p).near_top {
-                cancel_reveal(p);
-                SetTimer(Some(hwnd), HIDE, 450, None);
-            }
-            (*p).near_top = near;
-            if IsIconic((*p).owner).as_bool() || !in_front((*p).owner) {
-                let _ = KillTimer(Some(hwnd), WATCH);
-                (*p).watching = false;
             }
             return LRESULT(0);
         }
