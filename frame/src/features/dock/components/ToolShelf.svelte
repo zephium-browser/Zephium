@@ -497,9 +497,17 @@
     .shelf {
       --shelf-stagger: 0ms;
     }
+
+    .shelf :global(.shelf-stack) {
+      transition-delay: 0s;
+    }
   }
 
   :global(:root[data-reduce-motion="true"]) .shelf {
     --shelf-stagger: 0ms;
+  }
+
+  :global(:root[data-reduce-motion="true"]) .shelf :global(.shelf-stack) {
+    transition-delay: 0s;
   }
 </style>
