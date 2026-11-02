@@ -303,6 +303,9 @@ enum PersistFault {
     AfterCurrentInstall,
 }
 
+// Only runtime records are decoded whole; WebKit ones stream through
+// `load_webkit_record`.
+#[cfg_attr(not(feature = "runtime"), allow(dead_code))]
 struct DecodedRecord<'a> {
     target: CompileTarget,
     policy_digest: [u8; 32],
