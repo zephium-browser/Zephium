@@ -74,7 +74,8 @@ const SPEEDOMETER_URL: &str = "https://browserbench.org/Speedometer3.1/?startAut
 const SPEEDOMETER_POLL: Duration = Duration::from_secs(5);
 const SPEEDOMETER_CAP: Duration = Duration::from_secs(10 * 60);
 // A fresh Zephium profile compiles its lists again when the list update it
-// fetches at launch lands; every browser idles this long so no run overlaps that.
+// fetches at launch lands; by default every browser idles this long so no run
+// overlaps that.
 const SPEEDOMETER_SETTLE: Duration = Duration::from_secs(20);
 /// The score is in the page once `#result-number` has text; a failed run
 /// writes "Error" there.
@@ -207,6 +208,7 @@ struct Options {
     startup: Option<usize>,
     speedometer: Option<usize>,
     speedometer_url: Option<String>,
+    speedometer_settle: Duration,
     label: Option<String>,
     compare: Option<PathBuf>,
     zephium: Option<PathBuf>,
@@ -227,6 +229,7 @@ impl Options {
             browsers: Config::DEFAULT.to_vec(),
             runs: 3,
             settle: Duration::from_millis(6000),
+            speedometer_settle: SPEEDOMETER_SETTLE,
             ..Options::default()
         };
         let mut arguments = arguments.iter();
@@ -268,6 +271,9 @@ impl Options {
                     options.speedometer = Some(number(&value()?, flag)?.max(1) as usize);
                 }
                 "--speedometer-url" => options.speedometer_url = Some(value()?),
+                "--speedometer-settle-ms" => {
+                    options.speedometer_settle = Duration::from_millis(number(&value()?, flag)?);
+                }
                 "--label" => options.label = Some(value()?),
                 "--compare" => options.compare = path(value()?),
                 "--zephium" => options.zephium = path(value()?),
@@ -1614,7 +1620,13 @@ fn run_speedometer(
                 };
             record_session(&mut launch, &session);
             results.launches.push(launch);
-            let record = speedometer_run(&mut session, config, run, url);
+            let record = speedometer_run(
+                &mut session,
+                config,
+                run,
+                url,
+                context.options.speedometer_settle,
+            );
             eprintln!(
                 "  score {}  range {}  {} s{}",
                 record.score_text.as_deref().unwrap_or("-"),
@@ -1637,7 +1649,13 @@ fn run_speedometer(
     Ok(())
 }
 
-fn speedometer_run(session: &mut Session, config: Config, run: usize, url: &str) -> SpeedometerRun {
+fn speedometer_run(
+    session: &mut Session,
+    config: Config,
+    run: usize,
+    url: &str,
+    settle: Duration,
+) -> SpeedometerRun {
     let mut record = SpeedometerRun {
         config: config.name().to_string(),
         run,
@@ -1646,7 +1664,7 @@ fn speedometer_run(session: &mut Session, config: Config, run: usize, url: &str)
     };
     let (root, driver) = (session.pid, &mut session.driver);
     let outcome = (|| -> Result<(), Failure> {
-        std::thread::sleep(SPEEDOMETER_SETTLE);
+        std::thread::sleep(settle);
         let before = measure::sample(root).ok();
         record.footprint_before_mb = before.as_ref().map(|b| megabytes(b.footprint_bytes));
         let blocked_before = if config.zephium() {
