@@ -469,7 +469,7 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
 /// A process's resource coalition. Only a process that has exited has none;
 /// any other failure could hide one of the app's own helpers, so it fails the
 /// measurement.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn coalition_lookup(
     pid: i32,
     coalition: u64,
@@ -972,9 +972,9 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        coalition_lookup, coalition_members, parse_arguments, parse_coalition_pids,
-        parse_integer_value, parse_single_asn, parse_string_value, role_for_process,
-        KernelCounters, ProcessRole, UsageCounters, MAX_COALITION_PROCESSES,
+        coalition_members, parse_arguments, parse_coalition_pids, parse_integer_value,
+        parse_single_asn, parse_string_value, role_for_process, KernelCounters, ProcessRole,
+        UsageCounters, MAX_COALITION_PROCESSES,
     };
 
     #[test]
@@ -1040,8 +1040,10 @@ mod tests {
         assert!(parse_coalition_pids("\"LSApplicationCoalitionPIDsKey\"=( 2, 2)\n").is_err());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn only_an_exited_process_has_no_coalition() {
+        use super::coalition_lookup;
         assert_eq!(coalition_lookup(7, 42, None), Ok(Some(42)));
         let exited = std::io::Error::from_raw_os_error(libc::ESRCH);
         assert_eq!(coalition_lookup(7, 0, Some(exited)), Ok(None));
