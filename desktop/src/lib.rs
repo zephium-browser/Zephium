@@ -572,6 +572,15 @@ impl UiStartupGate {
         if !platform::imp::set_chrome_hidden(window, true) {
             diagnostic!("onboarding: chrome could not be hidden for the handover");
         }
+        // Onboarding leaves tens of MB in its content process for as long as
+        // it lives; the browser starts in a new one.
+        #[cfg(target_os = "macos")]
+        {
+            renderer_recovery::expect_restart(window.app_handle());
+            if !platform::imp::restart_content_process(window) {
+                renderer_recovery::restart_settled(window.app_handle());
+            }
+        }
         if let Err(error) = window.navigate(handover.browser.clone()) {
             request_startup_failure(
                 window.app_handle(),
@@ -612,6 +621,8 @@ impl UiStartupGate {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
+        renderer_recovery::restart_settled(window.app_handle());
         let _ = window.set_resizable(true);
         let _ = window.set_maximizable(true);
         if !platform::imp::set_chrome_hidden(window, false) {
@@ -8633,6 +8644,10 @@ mod tests {
             .find("window.navigate(handover.browser.clone())")
             .expect("browser navigation");
         assert!(hidden < navigated);
+        let restarted = hand_over
+            .find("restart_content_process(window)")
+            .expect("browser in a new content process");
+        assert!(hidden < restarted && restarted < navigated);
         assert!(hand_over.contains("self.serves_onboarding(window)"));
         assert!(hand_over.contains("zephium-handover-watchdog"));
 

@@ -339,6 +339,28 @@ pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
         .is_ok()
 }
 
+/// Moves the chrome WebView to a new content process with an empty history.
+/// What a document left in its process (decoded images, graphics buffers,
+/// collected-but-unreturned heap) goes with the old one.
+pub fn restart_content_process(window: &WebviewWindow) -> bool {
+    window
+        .with_webview(|webview| {
+            // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+            // of this main-thread callback.
+            let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+            let restarts: bool = unsafe {
+                msg_send![
+                    webkit,
+                    respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)
+                ]
+            };
+            if restarts {
+                let _: () = unsafe { msg_send![webkit, _killWebContentProcessAndResetState] };
+            }
+        })
+        .is_ok()
+}
+
 pub fn harden_privileged(window: &WebviewWindow) -> bool {
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();
