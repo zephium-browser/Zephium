@@ -762,6 +762,73 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
 }
 
 #[test]
+fn hidden_pages_with_sound_capture_or_picture_in_picture_stay_awake() {
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    let asleep = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|c| c.starts_with("dormant"))
+            .is_some_and(|c| c == &format!("dormant {first}"))
+    };
+
+    shell.handle(Command::Engine(EngineEvent::AudioChanged {
+        id: first,
+        audible: true,
+    }));
+    shell.handle(Command::Tick);
+    assert!(!asleep(&engine), "audible");
+    shell.silence_tab_audio(first);
+    shell.handle(Command::Tick);
+    assert!(asleep(&engine));
+
+    let navigation = shell.presentation.presented_navigations[&first].0;
+    let capturing = MediaCaptureState {
+        camera: CaptureDeviceState::Active,
+        microphone: CaptureDeviceState::None,
+    };
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: first,
+        navigation,
+        state: capturing,
+    }));
+    assert!(!asleep(&engine), "capture wakes the page at once");
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: first,
+        navigation,
+        state: MediaCaptureState::default(),
+    }));
+    assert!(asleep(&engine), "it sleeps once capture stops");
+
+    shell.handle(Command::Engine(EngineEvent::MediaChanged {
+        id: first,
+        media: Some(Box::new(zephium_core::media::MediaSnapshot {
+            title: String::new(),
+            artist: String::new(),
+            duration: Some(60.0),
+            position: 0.0,
+            rate: 1.0,
+            playing: true,
+            waiting: false,
+            ended: false,
+            can_pip: true,
+            in_pip: true,
+            item: "1".into(),
+        })),
+    }));
+    assert!(!asleep(&engine), "picture in picture");
+}
+
+#[test]
 fn idle_hidden_pages_beyond_the_warm_set_sleep_only_after_acknowledgement() {
     let (mut shell, _engine, screen) = setup();
     shell.residency.warm_view_limit = 2;

@@ -244,6 +244,26 @@ impl Shell {
             })
     }
 
+    /// Suspending would cut off what the person hears, watches in picture in
+    /// picture, or sends from a camera or microphone.
+    pub(super) fn keeps_running(&self, id: ItemId) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.audio.shown()
+                || tab
+                    .capture
+                    .as_ref()
+                    .is_some_and(|(_, state)| state.is_capturing())
+        }) || self.media.get(id).is_some_and(|media| media.in_pip)
+    }
+
+    /// A page that starts sound, capture or picture in picture wakes now, and
+    /// one that stops sleeps on this pass instead of the next.
+    pub(super) fn follow_running(&mut self, id: ItemId, was_running: bool) {
+        if self.keeps_running(id) != was_running {
+            self.maintain_views();
+        }
+    }
+
     /// Only a foreground intent may wait for an acknowledged safe close. The
     /// queue is bounded by visible panes and never makes an unsafe page eligible.
     pub(super) fn wait_for_view_capacity(&mut self, id: ItemId, url: String) -> bool {
@@ -549,6 +569,7 @@ impl Shell {
             .filter(|id| {
                 self.residency.sleeping
                     && !self.site_kept_awake(*id)
+                    && !self.keeps_running(*id)
                     && !shown.contains(id)
                     && !self.residency.discard_probes.contains_key(id)
                     && self
@@ -576,6 +597,7 @@ impl Shell {
                         && !shown.contains(id)
                         && !self.residency.dormant_sent.contains(id)
                         && !self.site_kept_awake(*id)
+                        && !self.keeps_running(*id)
                 })
                 .filter_map(|id| {
                     self.last_view_activity(id)
