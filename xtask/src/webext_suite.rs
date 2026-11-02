@@ -403,9 +403,11 @@ fn baseline(lab: &Path, cache: &Path, origin: &str, soak: bool) -> Outcome {
     let budget = START_TIMEOUT + Duration::from_millis(FRAMES_WAIT);
     let (problems, resources, duration) = match launch(lab, cache, "baseline", &steps, budget) {
         // Figures from a run that never finished would replace good ones.
-        Ok(run) if run.output.lines().any(|line| line == "DONE") => {
-            (Vec::new(), timed(run.resources, &run.output), run.duration)
-        }
+        Ok(run) if run.output.lines().any(|line| line == "DONE") => (
+            frame_problem(&run.output).into_iter().collect(),
+            timed(run.resources, &run.output),
+            run.duration,
+        ),
         Ok(run) => (
             vec!["baseline did not finish in time".to_string()],
             timed(run.resources, &run.output),
@@ -439,11 +441,11 @@ fn check(lab: &Path, cache: &Path, origin: &str, entry: &Expectation, soak: bool
         + Duration::from_secs(if soak { 120 } else { 20 });
     let steps = steps(entry, &crx, origin, soak);
     let (problems, resources, duration) = match launch(lab, cache, &entry.id, &steps, budget) {
-        Ok(run) => (
-            evaluate(entry, &run.output),
-            timed(run.resources, &run.output),
-            run.duration,
-        ),
+        Ok(run) => {
+            let mut problems = evaluate(entry, &run.output);
+            problems.extend(frame_problem(&run.output));
+            (problems, timed(run.resources, &run.output), run.duration)
+        }
         Err(error) => (vec![error], Resources::default(), Duration::ZERO),
     };
     Outcome {
@@ -565,8 +567,26 @@ fn timed(mut resources: Resources, output: &str) -> Resources {
     resources.busy_ms = (0..LOADS)
         .filter_map(|index| result(output, &format!("load{index}"))?.parse::<f64>().ok())
         .min_by(f64::total_cmp);
-    resources.frames_ms = result(output, "frames").and_then(|value| value.parse().ok());
+    resources.frames_ms = frames(output);
     resources
+}
+
+/// The last batch of frame churn, when the run measured one that is usable.
+fn frames(output: &str) -> Option<f64> {
+    result(output, "frames")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Every run churns frames; one that reports no usable time would drop the
+/// comparison against the last run without saying so.
+fn frame_problem(output: &str) -> Option<String> {
+    frames(output)
+        .is_none()
+        .then(|| match result(output, "frames") {
+            Some(value) => format!("frame timing unusable: {}", excerpt(value, 80)),
+            None => "frame timing missing".to_string(),
+        })
 }
 
 /// The extension rests, with one idle page open, while its helpers are sampled.
@@ -855,6 +875,27 @@ fn excerpt(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_timing_must_be_a_finite_measurement() {
+        assert_eq!(frames("RESULT frames 412.5\n"), Some(412.5));
+        assert_eq!(frame_problem("RESULT frames 412.5\n"), None);
+        assert_eq!(
+            frame_problem("JS ERROR frames TypeError: churn\n").as_deref(),
+            Some("frame timing missing")
+        );
+        for broken in [
+            "RESULT frames null\n",
+            "RESULT frames NaN\n",
+            "RESULT frames -3\n",
+        ] {
+            assert!(frames(broken).is_none());
+            assert!(frame_problem(broken)
+                .is_some_and(|problem| problem.starts_with("frame timing unusable")));
+        }
+        let resources = timed(Resources::default(), "RESULT frames inf\n");
+        assert_eq!(resources.frames_ms, None);
+    }
 
     #[test]
     fn only_a_finished_baseline_with_a_footprint_is_saved() {
