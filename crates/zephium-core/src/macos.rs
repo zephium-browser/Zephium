@@ -65,9 +65,11 @@ pub const SEQUOIA_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/1
 // Reviewed 2026-10-27: Apple's October 26 releases fix WebKit memory-safety
 // and sandbox issues. Sonoma has no newer offered Safari and stays at 26.6.1.
 // macOS 27.2 evidence: https://support.apple.com/en-us/149521
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-03";
-/// 2026-11-04T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_793_750_400;
+// Reviewed again 2026-11-02: the only later release is Xcode 27.2 (October
+// 29); nothing newer for macOS or Safari, so the floors stand.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
+/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);

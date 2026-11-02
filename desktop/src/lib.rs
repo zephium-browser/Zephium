@@ -175,13 +175,15 @@ use zephium_core::extensions::{
     ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
+#[cfg(not(target_os = "macos"))]
 use zephium_core::ids::ScriptId;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
+#[cfg(not(target_os = "macos"))]
 use zephium_core::injection::MatchSet;
 use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome};
-use zephium_core::ports::engine::{
-    Engine as _, ScriptOwner, UserContent, UserContentGeneration, UserStyle,
-};
+use zephium_core::ports::engine::{Engine as _, UserContent, UserContentGeneration};
+#[cfg(not(target_os = "macos"))]
+use zephium_core::ports::engine::{ScriptOwner, UserStyle};
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
 use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
@@ -194,27 +196,14 @@ macro_rules! diagnostic {
     }};
 }
 
-// Only the thumb may paint. Every other part stays transparent so the page
-// background shows through the gutter; an unstyled scrollbar background is
-// what rendered as a detached band along the edge.
-macro_rules! scrollbar_base_css {
-    () => {
-        "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-button{display:none}"
-    };
-}
-
-// WebKit fills the main frame's styled scroll corner with the view's white
-// base color before painting it, so any corner style shows white beside a
-// dark page. Unstyled, the corner lets the page background through.
-#[cfg(target_os = "macos")]
-const SCROLLBAR_CSS: &str = scrollbar_base_css!();
-
-// Chromium paints an unstyled corner with its default theme square.
+// Pages on macOS keep WebKit's own scrollbars: styled ones cost every
+// scrollable element and frame about 2% on Speedometer. Only the thumb may
+// paint here; every other part stays transparent so the page background
+// shows through the gutter (an unstyled scrollbar background rendered as a
+// detached band along the edge), and Chromium paints an unstyled corner
+// with its default theme square.
 #[cfg(not(target_os = "macos"))]
-const SCROLLBAR_CSS: &str = concat!(
-    scrollbar_base_css!(),
-    "::-webkit-scrollbar-corner{background:transparent}"
-);
+const SCROLLBAR_CSS: &str = "::-webkit-scrollbar{width:10px;height:10px;background:transparent}::-webkit-scrollbar-thumb{background:rgba(140,140,150,.45);border-radius:8px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-button{display:none}::-webkit-scrollbar-corner{background:transparent}";
 
 static APP_STARTED: OnceLock<std::time::Instant> = OnceLock::new();
 static APP_STORE: OnceLock<Arc<SqliteStore>> = OnceLock::new();
@@ -6839,6 +6828,9 @@ pub fn run() {
                         .expect("initial user-content generation is nonzero"),
                     UserContent {
                         scripts: Vec::new(),
+                        #[cfg(target_os = "macos")]
+                        styles: Vec::new(),
+                        #[cfg(not(target_os = "macos"))]
                         styles: vec![UserStyle {
                             id: ScriptId::from(4),
                             owner: ScriptOwner::Builtin,

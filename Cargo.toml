@@ -93,6 +93,11 @@ strip = "symbols"
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
 
+# Stripped proc-macro libraries fail to load with the macOS 27 toolchain
+# ("mis-aligned LINKEDIT string pool"); build-time code never ships.
+[profile.release.build-override]
+strip = false
+
 # Release code generation for the protection QA app only, so its benchmark
 # numbers compare with shipped browsers. Symbols stay for sampling; the desktop
 # and engine build scripts refuse this profile for anything but that app.
