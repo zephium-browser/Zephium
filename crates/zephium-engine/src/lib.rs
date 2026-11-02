@@ -59,6 +59,9 @@ pub use platform::windows::{install_work_rendering_backing, remove_work_renderin
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
 
+#[cfg(all(feature = "blocker-bench", not(debug_assertions)))]
+compile_error!("the blocker benchmark driver is forbidden in optimized builds");
+
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
     run_interactive_government_probe, run_interactive_liveness_probe, run_liveness_probe,
@@ -2109,6 +2112,46 @@ impl WebviewEngine {
         self.run(move || {
             platform::macos::profile_seed_probe::finish();
             let _ = reply.send(());
+        });
+        answer
+    }
+
+    /// QA only: runs script in the page's main world and yields its string
+    /// result, or `None` when the page gave none within the engine's limits.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_evaluate(
+        &self,
+        id: ItemId,
+        script: String,
+    ) -> std::sync::mpsc::Receiver<Option<String>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.blocker_bench_evaluate(id, &script, reply));
+        });
+        answer
+    }
+
+    /// QA only: runs script at document start, in the main world of the main
+    /// frame of every page loaded from now on; yields whether every open page
+    /// took it.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            let sent = reply.clone();
+            if !host::try_with(move |engine| {
+                let _ = sent.send(engine.blocker_bench_preload(&script));
+            }) {
+                let _ = reply.send(false);
+            }
         });
         answer
     }

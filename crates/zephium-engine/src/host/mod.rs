@@ -4,6 +4,11 @@ mod agent_context;
 mod agent_cookie_source;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod automatic_pip;
+#[cfg(all(
+    feature = "blocker-bench",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;

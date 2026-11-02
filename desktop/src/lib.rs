@@ -67,6 +67,8 @@ pub use work::{
 
 mod about;
 mod account;
+#[cfg(feature = "adblock-qa")]
+mod blocker_bench;
 mod blocker_service;
 mod browser_credentials;
 mod browser_import;
@@ -126,7 +128,10 @@ mod system_time;
 mod updates;
 mod voice;
 mod webext;
-#[cfg(all(target_os = "windows", feature = "webext-qa"))]
+#[cfg(any(
+    all(target_os = "windows", feature = "webext-qa"),
+    feature = "adblock-qa"
+))]
 mod webext_qa;
 mod windows_privacy;
 #[cfg(feature = "work-product")]
@@ -5256,6 +5261,11 @@ const ONBOARDING_PAGE: &str = "onboarding.html";
 /// opens it on an existing profile without recording anything until it is
 /// finished.
 fn onboarding_first(store: &SqliteStore) -> bool {
+    // A fresh benchmark session has no one to finish onboarding.
+    #[cfg(feature = "adblock-qa")]
+    if blocker_bench::enabled() {
+        return false;
+    }
     #[cfg(debug_assertions)]
     if std::env::var("ZEPHIUM_ONBOARDING").as_deref() == Ok("1") {
         return true;
@@ -6392,6 +6402,8 @@ pub fn run() {
         );
         std::process::exit(1);
     }
+    #[cfg(feature = "adblock-qa")]
+    blocker_bench::refuse_bad_arguments();
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
     let context = tauri::generate_context!();
@@ -6508,9 +6520,11 @@ pub fn run() {
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
-                let qa_session = webext_qa::session_label()?;
+                let qa_session = webext_qa::session_label("--webext-qa-session=")?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
                 let data_dir = webext_qa::data_dir(data_dir, qa_session.as_deref())?;
+                #[cfg(feature = "adblock-qa")]
+                let data_dir = webext_qa::data_dir(data_dir, blocker_bench::session()?.as_deref())?;
                 #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
                 foreground_rendering_probe::validate_data_root(&data_dir)?;
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
@@ -6602,6 +6616,13 @@ pub fn run() {
                 menu_text::set_language(store.app_setting("ui.language").as_deref());
                 updates::schedule_native_checks(app.handle());
                 work_models::install(app.handle());
+                // The benchmark must not reach the person's keychain or the
+                // account server: the keychain asks for their password.
+                #[cfg(feature = "adblock-qa")]
+                if !blocker_bench::enabled() {
+                    account::install(app.handle());
+                }
+                #[cfg(not(feature = "adblock-qa"))]
                 account::install(app.handle());
 
                 #[cfg(target_os = "windows")]
@@ -6826,6 +6847,8 @@ pub fn run() {
                     },
                 ),
                 move |event| {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::engine_event(&event);
                     #[cfg(all(feature = "macos-work-retained-controller-probe", target_os = "macos"))]
                     if zephium_work_composition::retained_qualification::retained_controller_policy_event(&event) { return; }
                     #[cfg(all(feature = "macos-work-resource-probe", target_os = "macos"))]
@@ -6969,11 +6992,15 @@ pub fn run() {
                 ),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::items(&state);
                     spaces::follow(&emit_handle, &state);
                     page_assist::observe_items(&state);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
                 }
                 Projection::Tab(tab) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::tab(&tab);
                     page_assist::observe_tab(&tab);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
                 }
@@ -7094,6 +7121,8 @@ pub fn run() {
                     }
                 }
                 Projection::Profiles(view) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::profiles(&view);
                     private_window::follow(&emit_handle, &view);
                     emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:profiles", &view)
                 }
@@ -7290,6 +7319,9 @@ pub fn run() {
             if pending_runtime_update.swap(false, Ordering::AcqRel) {
                 engine.notify_runtime_restart_required();
             }
+
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::start(app.handle(), &engine)?;
 
             let initial =
                 platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));

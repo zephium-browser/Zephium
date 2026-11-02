@@ -1347,6 +1347,13 @@ impl EngineHost {
                 !script.all_frames,
             );
         }
+        #[cfg(all(
+            feature = "blocker-bench",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        for source in super::blocker_bench::preloads() {
+            builder = builder.with_initialization_script_for_main_only(source, true);
+        }
         #[cfg(target_os = "macos")]
         {
             builder = builder.with_user_agent(crate::platform::imp::safari_user_agent());
