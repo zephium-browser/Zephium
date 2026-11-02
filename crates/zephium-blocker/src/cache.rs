@@ -2112,7 +2112,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "webkit")]
+    #[cfg(all(feature = "runtime", feature = "webkit"))]
     #[test]
     fn cached_records_name_their_webkit_lists_for_the_native_store() {
         let root = private_root();

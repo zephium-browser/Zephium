@@ -1460,6 +1460,7 @@ impl ServiceState {
                 CatalogTransition::Repairing(repairing)
                     if activation.identity.revision > repairing.revision
             )
+    #[cfg_attr(not(feature = "official-https"), allow(dead_code))]
         });
         let newest = self
             .candidate
@@ -3503,6 +3504,7 @@ mod tests {
         current.expires_unix = now_unix() + 86400;
         let catalog = |hash| {
             PolicyCatalog::authenticated(
+    #[cfg(feature = "official-https")]
                 [hash; 32],
                 StaticPolicyCatalog::new(vec![PolicySource::new(
                     SourceId::new("test").unwrap(),
@@ -3583,6 +3585,7 @@ mod tests {
             last_refresh_attempt_unix: Some(10),
             status: UpdateStatus::Ready(CatalogAvailability::Stale(current.clone())),
         };
+    #[cfg(feature = "official-https")]
         state.observe_official_verification(&old, Some((1, true)));
         state.publish_with_supply(&old, Some(([0; 32], true)));
         assert_eq!(state.snapshot.package_stale, Some(true));
