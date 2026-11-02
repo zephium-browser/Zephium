@@ -5,6 +5,8 @@ use std::sync::{Mutex, OnceLock};
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
+use crate::menu_text;
+
 #[derive(Default)]
 struct Gate {
     touched: BTreeSet<String>,
@@ -47,6 +49,16 @@ impl Gate {
         self.participants()
             .iter()
             .any(|label| !participants.contains(label))
+    }
+
+    /// The person chose to leave what could not be saved. Admission is closed
+    /// exactly as after a successful flush.
+    fn leave_unsaved(&mut self, terminal: bool, requests: &[(&'static str, String)]) {
+        self.prepared = !terminal;
+        self.flushed = requests
+            .iter()
+            .map(|(label, token)| ((*label).to_owned(), token.clone()))
+            .collect();
     }
 
     fn complete(&mut self, label: &str, token: &str, success: bool) -> bool {
@@ -184,20 +196,51 @@ fn request_inner(app: tauri::AppHandle, terminal: bool, done: impl FnOnce(bool) 
             // It may now hold a draft, so request a fresh flush from both.
             request_inner(app, terminal, done);
         } else if !super::shutdown_started(&app) {
-            for (label, token) in requests {
-                super::emit_to_privileged(&app, label, "zephium:resource-close-cancelled", &token);
+            for (label, token) in &requests {
+                super::emit_to_privileged(&app, label, "zephium:resource-close-cancelled", token);
             }
             if let Some(panel) = app.try_state::<super::overlay::Overlay>() {
                 if !panel.snapshot().visible {
                     panel.hide();
                 }
             }
-            app.dialog().message("Some changes in Notes, Tasks or Work could not be saved. Return to them to retry or resolve a conflict. Drafts in another profile must be saved from that profile.").title("Unsaved changes").kind(tauri_plugin_dialog::MessageDialogKind::Warning).show(|_|{});
-            done(false);
+            // A failed save is the only thing that stops a close, and even
+            // then the person decides: nobody is left unable to quit.
+            ask_to_quit_anyway(&app, move |quit| {
+                let mut gate = crate::resource_close::gate()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if !quit {
+                    drop(gate);
+                    done(false);
+                    return;
+                }
+                gate.leave_unsaved(terminal, &requests);
+                if !terminal {
+                    drop(gate);
+                }
+                done(true);
+            });
         } else {
             done(false);
         }
     });
+}
+
+fn ask_to_quit_anyway(app: &tauri::AppHandle, answer: impl FnOnce(bool) + Send + 'static) {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    app.dialog()
+        .message(menu_text::message(
+            "native_unsaved_changes_message",
+            "Some changes in Notes, Tasks or Work could not be saved. Go back to retry or resolve a conflict, or quit anyway and lose them. Changes in another profile can only be saved from that profile.",
+        ))
+        .title(menu_text::label("Unsaved changes"))
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            menu_text::label("Quit Anyway"),
+            menu_text::label("Cancel"),
+        ))
+        .show(answer);
 }
 
 pub(super) fn is_closing() -> bool {
@@ -218,6 +261,17 @@ mod tests {
         assert!(gate.participants().is_empty());
         gate.prepared = false;
         assert!(gate.touch(super::super::overlay::PANEL_LABEL, || false));
+    }
+
+    #[test]
+    fn leaving_unsaved_work_closes_admission_like_a_successful_flush() {
+        let requests = [("main", "token".to_owned())];
+        for terminal in [true, false] {
+            let mut gate = Gate::default();
+            gate.leave_unsaved(terminal, &requests);
+            assert_eq!(gate.prepared, !terminal);
+            assert_eq!(gate.flushed, [("main".to_owned(), "token".to_owned())]);
+        }
     }
 
     #[test]

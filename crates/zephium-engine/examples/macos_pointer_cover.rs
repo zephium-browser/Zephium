@@ -7,6 +7,9 @@
 //! with `sync` where AppKit would have sent them.
 #[cfg(target_os = "macos")]
 #[path = "../src/platform/macos/pointer_cover.rs"]
+// The stage's own parking, for a chrome stacked over its pages, is not what
+// this check covers.
+#[allow(dead_code)]
 mod pointer_cover;
 
 #[cfg(target_os = "macos")]

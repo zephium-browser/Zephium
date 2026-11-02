@@ -51,6 +51,7 @@ struct CurrentNavigation {
     // A native popup's first load is performed by the engine, not requested
     // by us, so its first start may already describe a redirect target.
     adopts_first_start: bool,
+    document_replaced: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,7 @@ struct CommittedNavigation {
     epoch: NavigationEpoch,
     target: String,
     native_id: Option<NavigationId>,
+    document_replaced: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +160,7 @@ impl NavigationEpochTracker {
                     epoch: current.epoch,
                     target: current.target.clone(),
                     native_id: current.native_id,
+                    document_replaced: current.document_replaced,
                 })
             } else {
                 current.previous_committed.clone()
@@ -194,6 +197,7 @@ impl NavigationEpochTracker {
             request,
             previous_committed,
             adopts_first_start: false,
+            document_replaced: false,
         });
         Some(epoch)
     }
@@ -398,6 +402,7 @@ impl NavigationEpochTracker {
             request: None,
             previous_committed: None,
             adopts_first_start: false,
+            document_replaced: previous.document_replaced,
         });
         restored
     }
@@ -595,7 +600,10 @@ impl NavigationEpochTracker {
         let Some(current) = state.current.as_mut() else {
             return false;
         };
-        if current.epoch != epoch || current.phase != TrackedNavigationPhase::Committed {
+        if current.epoch != epoch
+            || current.phase != TrackedNavigationPhase::Committed
+            || current.document_replaced
+        {
             return false;
         }
         // This observer carries no native navigation identity. It is
@@ -608,6 +616,40 @@ impl NavigationEpochTracker {
         }
         current.target = source;
         true
+    }
+
+    /// WebView2 put its error document in place of this committed epoch's
+    /// page, so neither its address nor the view's source describes what the
+    /// view holds until another document commits.
+    pub(crate) fn mark_document_replaced(&self, epoch: NavigationEpoch) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return false;
+        }
+        match state.current.as_mut() {
+            Some(current)
+                if current.epoch == epoch && current.phase == TrackedNavigationPhase::Committed =>
+            {
+                current.document_replaced = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn document_replaced(&self, epoch: NavigationEpoch) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.revoked
+            && state
+                .current
+                .as_ref()
+                .is_some_and(|current| current.epoch == epoch && current.document_replaced)
     }
 
     pub(crate) fn revoke(&self) {
@@ -1078,6 +1120,64 @@ mod tests {
         assert_eq!(tracker.current_committed(), Some(visible));
         assert!(!tracker.matches_activity(visible_activity));
         assert!(tracker.matches_activity(provisional_activity));
+    }
+
+    #[test]
+    fn a_replaced_document_refuses_its_error_source_until_another_commit() {
+        let tracker = NavigationEpochTracker::new();
+        let visible = commit(
+            &tracker,
+            1,
+            "https://example.test/a",
+            "https://example.test/a",
+        );
+        assert_eq!(
+            tracker.observe_navigation(&event(
+                2,
+                NavigationEventPhase::Started,
+                "https://example.test/down",
+            )),
+            Some(NavigationTransition::Started(tracker.current().unwrap()))
+        );
+        assert!(matches!(
+            tracker.observe_navigation(&event(
+                2,
+                NavigationEventPhase::Failed,
+                "https://example.test/down",
+            )),
+            Some(NavigationTransition::Failed {
+                restored: Some(restored),
+                ..
+            }) if restored == visible
+        ));
+        assert!(tracker.mark_document_replaced(visible));
+        assert!(tracker.document_replaced(visible));
+        assert!(
+            !tracker.observe_source(visible, "https://example.test/down"),
+            "the error document's source is not a same-document change"
+        );
+
+        // A navigation that is stopped before it commits leaves the error
+        // document where it was.
+        assert_eq!(
+            tracker.observe_navigation(&event(
+                3,
+                NavigationEventPhase::Started,
+                "https://example.test/b",
+            )),
+            Some(NavigationTransition::Started(tracker.current().unwrap()))
+        );
+        tracker.observe_navigation(&event(3, NavigationEventPhase::Cancelled, ""));
+        assert!(tracker.document_replaced(visible));
+
+        let next = commit(
+            &tracker,
+            4,
+            "https://example.test/a",
+            "https://example.test/a",
+        );
+        assert!(!tracker.document_replaced(next));
+        assert!(tracker.observe_source(next, "https://example.test/a#top"));
     }
 
     #[test]

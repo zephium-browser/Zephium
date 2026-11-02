@@ -35,12 +35,25 @@ pub(super) fn load_matching(
 /// The version the retained update would install, read only to recognise an
 /// update that already finished; it is never authority to install.
 pub(super) fn retained_version(path: &Path) -> Option<String> {
-    let (metadata, _) = load(path).ok()??;
+    let (metadata, _) = open(path).ok()??;
     let version = metadata.get("version")?.as_str()?;
     Some(version.trim_start_matches('v').to_owned())
 }
 
 fn load(path: &Path) -> io::Result<Option<(serde_json::Value, Vec<u8>)>> {
+    let Some((metadata, file)) = open(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_ARTIFACT + 1).read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_ARTIFACT {
+        return Err(io::Error::other("invalid retained update payload size"));
+    }
+    Ok(Some((metadata, bytes)))
+}
+
+/// Opens a checked envelope, leaving its payload unread for version-only checks.
+fn open(path: &Path) -> io::Result<Option<(serde_json::Value, std::fs::File)>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -70,21 +83,27 @@ fn load(path: &Path) -> io::Result<Option<(serde_json::Value, Vec<u8>)>> {
             return Err(io::Error::other("retained update is a reparse point"));
         }
     }
+    let metadata = read_metadata(&mut file, opened.len())?;
+    Ok(Some((metadata, file)))
+}
+
+fn read_metadata(reader: &mut impl Read, file_len: u64) -> io::Result<serde_json::Value> {
     let mut length = [0; 4];
-    file.read_exact(&mut length)?;
+    reader.read_exact(&mut length)?;
     let length = u32::from_le_bytes(length) as usize;
     if length == 0 || length > MAX_METADATA {
         return Err(io::Error::other("invalid retained update metadata size"));
     }
-    let mut metadata = vec![0; length];
-    file.read_exact(&mut metadata)?;
-    let metadata = serde_json::from_slice(&metadata)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_ARTIFACT + 1).read_to_end(&mut bytes)?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_ARTIFACT {
+    if !file_len
+        .checked_sub(4 + length as u64)
+        .is_some_and(|payload| (1..=MAX_ARTIFACT).contains(&payload))
+    {
         return Err(io::Error::other("invalid retained update payload size"));
     }
-    Ok(Some((metadata, bytes)))
+    let mut metadata = vec![0; length];
+    reader.read_exact(&mut metadata)?;
+    let metadata = serde_json::from_slice(&metadata)?;
+    Ok(metadata)
 }
 
 #[cfg(test)]
@@ -111,6 +130,35 @@ mod tests {
         assert_eq!(retained_version(&path), None);
         save(&path, &serde_json::json!({"version":"v1.2.3"}), b"signed").unwrap();
         assert_eq!(retained_version(&path).as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn metadata_checks_stop_before_the_installer_payload() {
+        let metadata = serde_json::json!({"version":"v1.2.3"});
+        let json = serde_json::to_vec(&metadata).unwrap();
+        let mut header = (json.len() as u32).to_le_bytes().to_vec();
+        header.extend_from_slice(&json);
+        let mut reader = io::Cursor::new(&header);
+        // Only the header is readable: touching the payload would reach EOF.
+        assert_eq!(
+            read_metadata(&mut reader, header.len() as u64 + MAX_ARTIFACT).unwrap(),
+            metadata
+        );
+        assert_eq!(reader.position(), header.len() as u64);
+    }
+
+    #[test]
+    fn version_checks_reject_an_empty_or_oversized_installer_payload() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pending-update");
+        save(&path, &serde_json::json!({"version":"v1.2.3"}), b"x").unwrap();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        let header_len = file.metadata().unwrap().len() - 1;
+        for payload_len in [0, MAX_ARTIFACT + 1] {
+            file.set_len(header_len + payload_len).unwrap();
+            assert!(retained_version(&path).is_none());
+            assert!(load(&path).is_err());
+        }
     }
 
     #[test]
@@ -155,6 +203,7 @@ mod tests {
         ] {
             std::fs::write(&path, bytes).unwrap();
             assert!(load(&path).is_err());
+            assert!(retained_version(&path).is_none());
         }
     }
 }

@@ -50,6 +50,15 @@ autofill, idle detection and extension-managed downloads. An active extension
 can still have these feature limitations. Browser passkeys also depend on the
 platform and signed application's capabilities.
 
+## Native app access
+
+External native applications on macOS require a publisher-verified CRX and the
+original `nativeMessaging` permission accepted during install review. The browser's
+compatibility transport does not grant that access. Unsigned development packages,
+legacy records without reviewed provenance, and optional native-app permissions
+without a separate reviewed grant are denied; review a signed install to grant
+required access. Replacing or unloading its native context retires the authority.
+
 ## Compatibility and resource limits
 
 Dark Reader, Vimium, 1Password and JSON Formatter have real workflow evidence on macOS; other
@@ -57,3 +66,11 @@ extensions can use the same supported capabilities, but have not all been tested
 Windows qualification is separate. The browser currently admits up to twelve
 extension runtime owners across up to three active extension profiles. Pending
 activation and unfinished teardown retain their slots until safely settled.
+
+The native-app broker caps outstanding input at 32 frames and 64 MiB per host
+(128 MiB across the browser), and pending replies at eight events / 2 MiB per
+host. A full reply inbox pauses its pipe reader until delivery drains the inbox,
+so the host is backpressured without being disconnected. Exceeding the outbound
+input budget closes the port. Closing a port terminates and reaps its
+exact host independently of pipe I/O; physical host slots remain held until reap.
+The limit is eight physical hosts per profile/extension and 64 browser-wide.

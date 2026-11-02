@@ -3,6 +3,8 @@ import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
+import { acceleratorKeys } from "$shared/lib/accelerator";
+import { IS_MAC } from "$shared/platform";
 import type { AccountReplyV1, Material, WorkModelsV1 } from "$shared/ipc/bindings";
 import { browserImport, type ImportAdapter, type ImportJob } from "$domain/browser-import";
 import { fakeTabs } from "./onboarding-tabs.svelte";
@@ -53,6 +55,17 @@ vi.mock("$shared/ipc/bindings", async () => {
       native.intro++;
       return true;
     },
+    keymapEntries: async () => [
+      {
+        id: "url.focus",
+        title: "Open Location",
+        group: "view",
+        accelerator: "CmdOrCtrl+L",
+        default_accelerator: "CmdOrCtrl+L",
+        customizable: true,
+        customized: false,
+      },
+    ],
     launcherTrigger: async () => ({
       shortcut: "CmdOrCtrl+Shift+Space",
       default_shortcut: "CmdOrCtrl+Shift+Space",
@@ -241,6 +254,10 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   await next();
   await expect
     .element(page.getByRole("heading", { name: "Always a keystroke away." }))
+    .toBeVisible();
+  await expect.element(page.getByText("For a page’s address in Zephium.")).toBeVisible();
+  await expect
+    .element(page.getByLabelText(acceleratorKeys("CmdOrCtrl+L", IS_MAC).join(" "), { exact: true }))
     .toBeVisible();
   // It opens and types on its own, and steps aside for the real one.
   await pause(1800);

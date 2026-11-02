@@ -28,6 +28,23 @@ beforeEach(() => {
 });
 
 describe("bookmarks session", () => {
+  it("ignores a prior search reply as soon as the query changes", async () => {
+    vi.useFakeTimers();
+    const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
+    const session = new BookmarksSession("profile");
+    let resolve!: (value: BookmarkResponse) => void;
+    native.call.mockReturnValueOnce(new Promise((done) => (resolve = done)));
+    session.search("old");
+    await vi.advanceTimersByTimeAsync(200);
+    session.search("new");
+    resolve({ kind: "results", items: [view("1", "Old result")] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(session.items).toEqual([]);
+    native.call.mockResolvedValueOnce({ kind: "results", items: [view("2", "New result")] });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.items.map((item) => item.id)).toEqual(["2"]);
+  });
+
   it("opens folders and keeps only the newest read", async () => {
     const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
     const session = new BookmarksSession("profile");

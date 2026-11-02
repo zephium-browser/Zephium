@@ -300,6 +300,10 @@ pub enum WorkCapability {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkAgentGrantV1 {
+    /// Trusted resolved pricing fact: all models are free and browser search
+    /// has no paid fallback. This grants no capability or disclosure authority.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_usage_charge: bool,
     pub provider: super::search::WorkSearchProvider,
     pub model: String,
     pub max_turns: u8,
@@ -333,6 +337,18 @@ pub struct WorkAgentGrantV1 {
     pub search_fallback: Option<super::search::WorkSearchFallbackV1>,
 }
 impl WorkAgentGrantV1 {
+    pub fn reserved_usage(&self, limits: WorkExecutionLimits) -> WorkUsage {
+        WorkUsage {
+            model_tokens: limits.model_tokens,
+            cost_micro_usd: if self.no_usage_charge {
+                0
+            } else {
+                limits.cost_micro_usd
+            },
+            operations: limits.operations,
+            accounting: WorkUsageAccounting::ConservativeReservation,
+        }
+    }
     /// Whether search evidence from this provider and model belongs to the run.
     pub fn admits_search(&self, provider: super::search::WorkSearchProvider, model: &str) -> bool {
         (provider == self.provider && model == self.model)
@@ -342,6 +358,15 @@ impl WorkAgentGrantV1 {
                 .is_some_and(|fallback| fallback.provider == provider && fallback.model == model)
     }
     pub fn validate(&self) -> Result<(), WorkError> {
+        if self.no_usage_charge
+            && (self.provider != super::search::WorkSearchProvider::Browser
+                || self.search_fallback.is_some()
+                || self.lead.as_ref().is_none_or(|model| {
+                    model.provider != super::model::WorkModelProvider::Compatible
+                }))
+        {
+            return Err(WorkError::Invalid);
+        }
         let mut origins = BTreeSet::new();
         if self.accounts.len() > MAX_WORK_ACCOUNT_GRANTS
             || self
@@ -1242,6 +1267,19 @@ pub enum WorkPageFailureStageV1 {
 }
 
 impl WorkUsage {
+    /// Retain measured dimensions independently when a provider exceeds a bound.
+    /// Exceeding tokens or operations cannot invent a larger monetary charge.
+    pub fn bounded_by(self, limits: WorkExecutionLimits) -> Self {
+        if self.within(limits) {
+            return self;
+        }
+        Self {
+            model_tokens: self.model_tokens.min(limits.model_tokens),
+            cost_micro_usd: self.cost_micro_usd.min(limits.cost_micro_usd),
+            operations: self.operations.min(limits.operations),
+            accounting: WorkUsageAccounting::ConservativeReservation,
+        }
+    }
     pub fn within(self, limits: WorkExecutionLimits) -> bool {
         self.model_tokens <= limits.model_tokens
             && self.cost_micro_usd <= limits.cost_micro_usd
@@ -1258,6 +1296,8 @@ pub struct WorkAttemptFact {
     pub status: WorkAttemptStatus,
     /// Reservation is retained for unknown outcomes. Settled accounting names
     /// exact usage or a conservative ceiling; missing means unknown, never zero.
+    /// A trusted no-charge agent may retain a known-zero monetary reservation
+    /// while its token counts and native outcome remain uncertain.
     pub usage: Option<WorkUsage>,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -2480,10 +2520,17 @@ impl WorkExecutionFact {
     /// Settles what an owner the app lost left behind: running attempts have
     /// unknown outcomes, and every running step says the app closed during it.
     pub fn interrupt(&mut self) {
+        let no_charge = self
+            .agent_grant()
+            .is_some_and(|grant| grant.no_usage_charge);
+        let reserved = self.reserved_usage();
         self.status = WorkExecutionStatus::Interrupted;
         for attempt in &mut self.attempts {
             if attempt.status == WorkAttemptStatus::Running {
                 attempt.status = WorkAttemptStatus::OutcomeUnknown;
+                if no_charge {
+                    attempt.usage = Some(reserved);
+                }
             }
         }
         for step in &mut self.steps {
@@ -2573,6 +2620,20 @@ impl WorkExecutionFact {
     pub fn is_agent(&self) -> bool {
         matches!(self.spec.nodes.as_slice(), [node] if matches!(node.capability, WorkCapability::Agent { .. }))
     }
+    /// Monetary reservation is zero only under a persisted trusted pricing fact;
+    /// unknown token and operation counts keep the full admitted reservation.
+    pub fn reserved_usage(&self) -> WorkUsage {
+        self.agent_grant().map_or(
+            WorkUsage {
+                model_tokens: self.spec.limits.model_tokens,
+                cost_micro_usd: self.spec.limits.cost_micro_usd,
+                operations: self.spec.limits.operations,
+                accounting: WorkUsageAccounting::ConservativeReservation,
+            },
+            |grant| grant.reserved_usage(self.spec.limits),
+        )
+    }
+
     pub fn agent_grant(&self) -> Option<&WorkAgentGrantV1> {
         match self.spec.nodes.as_slice() {
             [WorkNodeExecutionSpec {
@@ -2651,10 +2712,14 @@ impl WorkExecutionFact {
         if let Some(fact) = attempt {
             if fact.node != node.node
                 || fact.usage.is_some_and(|u| !u.within(node.limits))
-                || matches!(
-                    fact.status,
-                    WorkAttemptStatus::Running | WorkAttemptStatus::OutcomeUnknown
-                ) != fact.usage.is_none()
+                || (fact.status == WorkAttemptStatus::Running
+                    || (fact.status == WorkAttemptStatus::OutcomeUnknown && !grant.no_usage_charge))
+                    != fact.usage.is_none()
+                || (grant.no_usage_charge
+                    && fact.usage.is_some_and(|usage| usage.cost_micro_usd != 0))
+                || (fact.status == WorkAttemptStatus::OutcomeUnknown
+                    && grant.no_usage_charge
+                    && fact.usage != Some(self.reserved_usage()))
             {
                 return Err(WorkError::Invalid);
             }

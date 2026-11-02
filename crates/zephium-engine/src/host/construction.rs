@@ -658,6 +658,10 @@ impl EngineHost {
             .or_default()
             .clone();
         let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
+            self.popup_sites_for(partition.profile()),
+        ));
         let replay_safety = Rc::new(super::discard::ReplaySafety::new(
             !report_failure && !native_popup,
             !native_popup,
@@ -703,6 +707,20 @@ impl EngineHost {
         );
         #[cfg(target_os = "macos")]
         let load_file_uploads = Rc::downgrade(&file_uploads);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let http_auth = super::http_auth::HttpAuthBroker::new(
+            id.clone(),
+            event_permit.clone(),
+            self.sink.clone(),
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let load_http_auth = Rc::downgrade(&http_auth);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let certificates = Rc::new(super::certificates::CertificateWatch::default());
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let load_certificates = Rc::downgrade(&certificates);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let certificate_exceptions = self.certificate_exceptions_for(partition.profile());
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
@@ -994,6 +1012,19 @@ impl EngineHost {
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     use wry::WebViewBuilderExtMacos;
                     let configuration = self.webext.configuration(profile, &self.sink);
+                    if crate::platform::imp::proxy::apply(
+                        &configuration,
+                        crate::network::current().as_ref(),
+                    )
+                    .is_err()
+                    {
+                        eprintln!("network: the proxy could not be applied; no view was made");
+                        if report_failure {
+                            event_permit
+                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                        }
+                        return None;
+                    }
                     (builder.with_webview_configuration(configuration), None)
                 }
             }
@@ -1087,7 +1118,7 @@ impl EngineHost {
                 admitted
             })
             // Raw content starts with no device or ambient capabilities. On
-            // Windows, camera and microphone requests go to WebView2's own
+            // Windows, a foreground tab's requests go to WebView2's own
             // origin-labelled prompt; macOS replaces this handler with the
             // browser-owned broker below.
             .with_permission_handler(move |kind| {
@@ -1237,7 +1268,15 @@ impl EngineHost {
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
             let popup_app_link = app_link.clone();
-            builder = builder.with_new_window_req_handler(move |url, features| {
+            let popup_policy = popup_policy.clone();
+            builder = builder.with_new_window_req_handler(move |url, mut features| {
+                features.user_initiated = popup_policy.admits(
+                    features.user_initiated,
+                    tracker
+                        .committed_snapshot()
+                        .as_ref()
+                        .map(|(_, committed)| committed.as_str()),
+                );
                 if features.user_initiated && popup_app_link(&url, true) {
                     return wry::NewWindowResponse::Deny;
                 }
@@ -1322,8 +1361,17 @@ impl EngineHost {
                 // Wry disables SmartScreen in its default argument set. Keep
                 // only the browser-UI suppressions so content protection stays
                 // enabled in the WebView2 runtime.
-                .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
+                .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
+                // Ctrl and the wheel zoom a person's page; the zoom listener
+                // brings what they do into the site's remembered level. Keys
+                // stay Zephium's own: browser accelerators are off above.
+                .with_hotkeys_zoom(true)
+                // A person's answer to WebView2's own permission prompt is
+                // kept in their profile, as in Edge; a private tab's lasts
+                // only for that request. Agent and extension views never
+                // reach this builder and keep denying every request.
+                .with_permission_decisions_saved(!matches!(partition, Partition::Ephemeral(_)))
                 // Runs after the exact environment exists and before Wry
                 // starts controller construction. This closes the opaque-build
                 // gap: even a later Wry error leaves a retained Environment5,
@@ -1342,21 +1390,39 @@ impl EngineHost {
                     }
                     *observed = Some(environment.clone());
                 });
+            let resource_save = Rc::new(super::page_open::ResourceSave::default());
             {
                 let menu_permit = event_permit.clone();
                 let menu_navigation = navigation.clone();
                 let menu_presentation = presentation_permit.clone();
+                let menu_save = resource_save.clone();
                 builder = builder.with_native_context_menu_handler(move |controller, args| {
-                    super::page_open::filter_windows_context_menu(
+                    let admitted = super::page_open::filter_windows_context_menu(
                         &menu_permit,
                         &menu_navigation,
                         &menu_presentation,
                         controller,
                         args,
-                    )
+                    );
+                    menu_save.menu(&menu_navigation, args, admitted);
+                    admitted
                 });
             }
             if let Some(downloads) = &self.downloads {
+                let save = resource_save.clone();
+                let save_permit = event_permit.clone();
+                let save_navigation = navigation.clone();
+                let save_presentation = presentation_permit.clone();
+                let save_intent = download_surface_intent.clone();
+                builder = builder.with_native_resource_save_handler(move |controller| {
+                    let foreground = save_intent.load(Ordering::Acquire)
+                        && super::page_open::windows_context_foreground(
+                            &save_permit,
+                            &save_presentation,
+                            controller,
+                        );
+                    save.authorize(&save_navigation, foreground)
+                });
                 let downloads = Rc::downgrade(downloads);
                 let download_permit = event_permit.clone();
                 let download_intent = download_surface_intent.clone();
@@ -1386,7 +1452,11 @@ impl EngineHost {
                                 download_permit.clone(),
                                 download_intent.clone(),
                                 download_navigation.clone(),
-                                (controller, event),
+                                (
+                                    controller,
+                                    event,
+                                    resource_save.take_download(&download_navigation),
+                                ),
                                 started.map(|on_started| super::downloads::InitialDownload {
                                     on_started: Some(on_started),
                                 }),
@@ -1397,6 +1467,8 @@ impl EngineHost {
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
             }
+            builder = builder
+                .with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
             if let Some(startup) = extension_startup {
                 builder = builder.with_browser_extension_startup_gate(move |environment, core| {
                     startup.authenticate(environment, core)
@@ -1409,12 +1481,17 @@ impl EngineHost {
             use wry::{WebViewBuilderExtDarwin, WebViewBuilderExtMacos};
             let permit = crash_permit.clone();
             let upload_broker = Rc::downgrade(&file_uploads);
+            let auth_broker = Rc::downgrade(&http_auth);
+            let refused_watch = Rc::downgrade(&certificates);
+            let covers_exceptions = certificate_exceptions.clone();
+            let allows_exceptions = certificate_exceptions.clone();
             let crash_upload_broker = Rc::downgrade(&file_uploads);
             let drop_permit = event_permit.clone();
             let drop_navigation = navigation.clone();
             let drop_presentation = presentation_permit.clone();
             let drop_epoch = std::cell::Cell::new(None);
             let page_permission_item = id.clone();
+            let autofill_item = id.clone();
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
             let page_permission_presence = page_permission_pending.clone();
@@ -1452,6 +1529,36 @@ impl EngineHost {
                     if let Some(broker) = upload_broker.upgrade() {
                         broker.present(view, request, responder);
                     }
+                })
+                .with_certificate_failure_handler(move |refused| {
+                    if let Some(watch) = refused_watch.upgrade() {
+                        watch.refused(&refused.url, refused.leaf_sha256);
+                    }
+                })
+                .with_server_trust_exceptions(
+                    move |scheme, host, port| {
+                        covers_exceptions
+                            .try_borrow()
+                            .is_ok_and(|exceptions| exceptions.covers(scheme, host, port))
+                    },
+                    move |scheme, host, port, leaf| {
+                        allows_exceptions
+                            .try_borrow()
+                            .is_ok_and(|exceptions| exceptions.allows(scheme, host, port, leaf))
+                    },
+                )
+                .with_http_auth_handler(move |request, responder| {
+                    if let (Some(broker), Some(challenge)) = (
+                        auth_broker.upgrade(),
+                        super::http_auth::native_challenge(&request),
+                    ) {
+                        broker.challenge(challenge, request.main_frame_url.as_deref(), responder);
+                    }
+                })
+                // Only views in `views` answer: agent pages never do.
+                .with_autofill_button_handler(move || {
+                    let id = autofill_item.get();
+                    let _ = super::try_with(move |host| host.autofill_password(id));
                 })
                 .with_permission_request_handler(move |request| {
                     super::page_permissions::admit_native_request(
@@ -1541,20 +1648,39 @@ impl EngineHost {
         // The engine says why a navigation failed just before its Failed
         // event; chrome uses it to explain a failed address the person asked
         // for, in place of WebKit's blank or WebView2's own error page.
+        // WebView2 can put its error document in place of the shown page;
+        // the failure handler names that navigation for its Failed event.
+        let replaced_navigation = Rc::new(Cell::new(None::<wry::NavigationId>));
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let failure_permit = load_permit.clone();
             let failure_sink = on_load.clone();
             let failure_id = load_id.clone();
-            builder = builder.with_navigation_failure_handler(move |_navigation, reason| {
-                failure_permit.emit(
-                    &failure_sink,
-                    EngineEvent::NavigationFailureReported {
-                        id: failure_id.get(),
-                        reason: failure_reason(reason),
-                    },
-                );
-            });
+            let failure_certificates = Rc::downgrade(&certificates);
+            let failure_replaced = replaced_navigation.clone();
+            builder =
+                builder.with_navigation_failure_handler(move |navigation, reason, document| {
+                    let reason = failure_reason(reason);
+                    let replaced = match document {
+                        wry::FailedDocument::Replaced { url } => Some(url),
+                        wry::FailedDocument::Kept => None,
+                    };
+                    failure_replaced.set(replaced.is_some().then_some(navigation));
+                    let replaced_page = replaced.is_some();
+                    let url = matches!(reason, NavigationFailureReason::Certificate(_))
+                        .then(|| failure_certificates.upgrade()?.refused_url())
+                        .flatten()
+                        .or(replaced);
+                    failure_permit.emit(
+                        &failure_sink,
+                        EngineEvent::NavigationFailureReported {
+                            id: failure_id.get(),
+                            reason,
+                            url,
+                            replaced_page,
+                        },
+                    );
+                });
         }
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1577,6 +1703,14 @@ impl EngineHost {
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(broker) = load_http_auth.upgrade() {
+                        broker.navigation_started(&event.url);
+                    }
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(watch) = load_certificates.upgrade() {
+                        watch.navigating(&event.url);
+                    }
                     #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
                     super::page_reader::begin_load(&load_reader);
                     #[cfg(target_os = "macos")]
@@ -1593,10 +1727,26 @@ impl EngineHost {
                 }
                 NavigationTransition::Redirected(_) => {
                     load_site_scope.navigating(&event.url);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(broker) = load_http_auth.upgrade() {
+                        broker.navigation_redirected(&event.url);
+                    }
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(watch) = load_certificates.upgrade() {
+                        watch.navigating(&event.url);
+                    }
                 }
                 NavigationTransition::Committed(epoch) => {
                     #[cfg(target_os = "macos")]
                     load_replay.commit();
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(broker) = load_http_auth.upgrade() {
+                        broker.navigation_committed(&event.url);
+                    }
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(watch) = load_certificates.upgrade() {
+                        watch.committed();
+                    }
                     load_site_scope.navigating(&event.url);
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
@@ -1631,6 +1781,10 @@ impl EngineHost {
                 } => {
                     #[cfg(target_os = "macos")]
                     load_replay.abandon();
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(broker) = load_http_auth.upgrade() {
+                        broker.navigation_failed();
+                    }
                     if let Some((_, url)) = load_navigation.committed_snapshot() {
                         load_site_scope.navigating(&url);
                     }
@@ -1641,13 +1795,21 @@ impl EngineHost {
                     if let Some(request) = request {
                         load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
                     }
+                    let replaced = replaced_navigation.take() == Some(event.id);
+                    let ending = if event.phase == wry::NavigationEventPhase::Cancelled {
+                        super::navigation::FailedNavigationEnd::Cancelled
+                    } else if replaced {
+                        super::navigation::FailedNavigationEnd::PageReplaced
+                    } else {
+                        super::navigation::FailedNavigationEnd::Failed
+                    };
                     queue_navigation_failure(
                         id,
                         &load_permit,
                         &load_navigation,
                         failed,
                         restored,
-                        event.phase == wry::NavigationEventPhase::Cancelled,
+                        ending,
                     );
                 }
             }
@@ -1755,6 +1917,8 @@ impl EngineHost {
                 return None;
             }
         };
+        #[cfg(target_os = "macos")]
+        popup_policy.bind(&view);
         // Lets Safari's Web Inspector reach tab pages and the content scripts
         // running in them while diagnosing extensions.
         #[cfg(target_os = "macos")]
@@ -1886,19 +2050,64 @@ impl EngineHost {
                 }
                 return None;
             }
+            let refused_watch = Rc::downgrade(&certificates);
+            let exceptions = certificate_exceptions.clone();
+            if let Err(error) = security_policy.route_certificate_errors(move |uri, leaf| {
+                let excepted = url::Url::parse(uri).ok().is_some_and(|url| {
+                    let (Some(host), Some(port), Some(leaf)) =
+                        (url.host_str(), url.port_or_known_default(), leaf)
+                    else {
+                        return false;
+                    };
+                    exceptions
+                        .try_borrow()
+                        .is_ok_and(|exceptions| exceptions.allows(url.scheme(), host, port, &leaf))
+                });
+                if !excepted {
+                    if let Some(watch) = refused_watch.upgrade() {
+                        watch.refused_request(uri, leaf);
+                    }
+                }
+                excepted
+            }) {
+                eprintln!("security: content WebView2 certificate routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
+            let auth_broker = Rc::downgrade(&http_auth);
+            if let Err(error) = security_policy.route_basic_authentication(move |uri, responder| {
+                if let (Some(broker), Some(challenge)) = (
+                    auth_broker.upgrade(),
+                    super::http_auth::native_challenge(uri),
+                ) {
+                    broker.challenge(challenge, None, responder);
+                }
+            }) {
+                eprintln!("security: content WebView2 sign-in routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
         }
         #[cfg(target_os = "windows")]
         {
             use wry::WebViewExtWindows;
             // configure() deliberately denies menus for generic/agent views.
             // Only this human-view constructor installed both the bounded
-            // ContextMenuRequested filter and the SaveAsUIShowing denial hook.
+            // ContextMenuRequested filter and the SaveAsUIShowing gate, which
+            // lets through only a Save As the browser asked for.
             // Tabs a person reads also get WebView2's own page dialogs, which
             // name the origin that asks; agent views keep them denied.
+            // A failed load shows Zephium's explanation, never Edge's page:
+            // with the built-in one off, WebView2 commits a blank document.
             if unsafe { view.webview().Settings() }
                 .and_then(|settings| unsafe {
                     settings.SetAreDefaultContextMenusEnabled(true)?;
-                    settings.SetAreDefaultScriptDialogsEnabled(true)
+                    settings.SetAreDefaultScriptDialogsEnabled(true)?;
+                    settings.SetIsBuiltInErrorPageEnabled(false)
                 })
                 .is_err()
             {
@@ -1906,6 +2115,24 @@ impl EngineHost {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }
                 return None;
+            }
+            // WebView2's own password and form autofill, saved in this
+            // profile's data folder, until Zephium has its own manager.
+            // Private tabs and agent views keep it off.
+            if !matches!(partition, Partition::Ephemeral(_))
+                && unsafe { view.webview().Settings() }
+                    .and_then(|settings| {
+                        windows_core::Interface::cast::<
+                            webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4,
+                        >(&settings)
+                    })
+                    .and_then(|settings| unsafe {
+                        settings.SetIsPasswordAutosaveEnabled(true)?;
+                        settings.SetIsGeneralAutofillEnabled(true)
+                    })
+                    .is_err()
+            {
+                eprintln!("engine: WebView2 autofill could not be enabled");
             }
             debug_assert!(!self.construction_unproven.contains(&partition.profile()));
         }
@@ -1922,6 +2149,28 @@ impl EngineHost {
             }
             return None;
         }
+        #[cfg(target_os = "macos")]
+        crate::platform::macos::autofill::show_key_in_sign_in_fields(
+            &crate::platform::imp::native_webview(&view),
+            partition.profile(),
+        );
+        // Private windows run no extensions, so their pages carry no button.
+        #[cfg(target_os = "macos")]
+        let store_button = if matches!(partition, Partition::Ephemeral(_)) {
+            super::store_button::StoreButtonSlot::default()
+        } else {
+            let tab = id.clone();
+            super::store_button::StoreButtonSlot::native(
+                crate::platform::macos::store_button::StoreButton::install(
+                    &crate::platform::imp::native_webview(&view),
+                    move |message| {
+                        let tab = tab.get();
+                        let _ =
+                            super::try_with(move |host| host.store_button_message(tab, message));
+                    },
+                ),
+            )
+        };
         #[cfg(target_os = "windows")]
         let request_witness = crate::platform::imp::RequestWitness::install(
             wry::WebViewExtWindows::webview(&view),
@@ -1985,8 +2234,12 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let process_failure_permit = crash_permit.clone();
         #[cfg(target_os = "windows")]
-        let crash_observer =
-            match crate::platform::imp::install_crash_handler(&view, move |failure| match failure {
+        let (responsiveness_permit, responsiveness_id, responsiveness_sink) =
+            (crash_permit.clone(), crash_id.clone(), self.sink.clone());
+        #[cfg(target_os = "windows")]
+        let crash_observer = match crate::platform::imp::install_crash_handler_with_responsiveness(
+            &view,
+            move |failure| match failure {
                 crate::platform::imp::ProcessFailure::Renderer => {
                     let id = crash_id.get();
                     let queued_permit = process_failure_permit.clone();
@@ -2004,17 +2257,26 @@ impl EngineHost {
                         );
                     });
                 }
-            }) {
-                Ok(observer) => observer,
-                Err(error) => {
-                    eprintln!("engine: required WebView2 process-failure handler failed: {error}");
-                    if report_failure {
-                        event_permit
-                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                    }
-                    return None;
+            },
+            move |responding| {
+                responsiveness_permit.emit(
+                    &responsiveness_sink,
+                    EngineEvent::PageResponsiveness {
+                        id: responsiveness_id.get(),
+                        responding,
+                    },
+                );
+            },
+        ) {
+            Ok(observer) => observer,
+            Err(error) => {
+                eprintln!("engine: required WebView2 process-failure handler failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }
-            };
+                return None;
+            }
+        };
         // A dead web process must surface as an event, never as a silently
         // blank pane; the shell decides whether to relaunch.
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -2052,6 +2314,29 @@ impl EngineHost {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }
                 return None;
+            }
+        };
+        let applied_zoom = Rc::new(Cell::new(1.0));
+        #[cfg(target_os = "windows")]
+        let zoom_registration = {
+            let zoom_item = id.clone();
+            let zoom_permit = event_permit.clone();
+            let zoom_sink = self.sink.clone();
+            match crate::platform::imp::install_zoom_listener(
+                &view,
+                applied_zoom.clone(),
+                Arc::new(move |event| zoom_permit.emit(&zoom_sink, event)),
+                move || zoom_item.get(),
+            ) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    eprintln!("engine: required zoom registration failed: {error}");
+                    if report_failure {
+                        event_permit
+                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    }
+                    return None;
+                }
             }
         };
         #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
@@ -2120,6 +2405,54 @@ impl EngineHost {
                     }
                     return None;
                 }
+            }
+        };
+        // The icon WebView2 chose for the page, when this runtime reports it;
+        // the declared icon addresses back it up otherwise.
+        #[cfg(target_os = "windows")]
+        let favicon_observer = {
+            let page_navigation = navigation.clone();
+            let page = move || page_navigation.committed_snapshot();
+            let favicon_id = id.clone();
+            let favicon_permit = event_permit.clone();
+            let favicon_sink = self.sink.clone();
+            crate::platform::imp::install_favicon_observer(&view, page, move |page_url, png| {
+                if favicon_permit.active_token().is_some() {
+                    favicon_permit.emit(
+                        &favicon_sink,
+                        EngineEvent::FaviconImage {
+                            id: favicon_id.get(),
+                            page_url,
+                            png,
+                        },
+                    );
+                }
+            })
+        };
+        // Whether the page makes sound, from the engine's own notification.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let audio_observer = {
+            let audio_id = id.clone();
+            let audio_permit = event_permit.clone();
+            let audio_sink = self.sink.clone();
+            let changed = move |audible| {
+                if audio_permit.active_token().is_some() {
+                    audio_permit.emit(
+                        &audio_sink,
+                        EngineEvent::AudioChanged {
+                            id: audio_id.get(),
+                            audible,
+                        },
+                    );
+                }
+            };
+            #[cfg(target_os = "macos")]
+            {
+                crate::platform::macos::audio::AudioObserver::install(&view, changed)
+            }
+            #[cfg(target_os = "windows")]
+            {
+                crate::platform::imp::install_audio_observer(&view, changed)
             }
         };
         let observation_permit = event_permit.clone();
@@ -2211,8 +2544,16 @@ impl EngineHost {
         Some(ObservedView {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             automatic_pip_sequence: Rc::new(Cell::new(0)),
+            favicon_watch: Cell::new(0),
+            media_watch: Cell::new((0, false)),
+            #[cfg(target_os = "windows")]
+            _favicon_observer: favicon_observer,
             #[cfg(target_os = "macos")]
             _capture_observer: capture_observer,
+            #[cfg(target_os = "macos")]
+            _audio_observer: audio_observer,
+            #[cfg(target_os = "windows")]
+            audio_observer,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             _fullscreen_observer: fullscreen_observer,
             replay_safety,
@@ -2234,15 +2575,21 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             suspend_attempt: None,
             site_scope,
+            #[cfg(target_os = "macos")]
+            popup_policy,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
             file_uploads,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            http_auth,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            certificates,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             download_surface_intent,
             event_permit,
             navigation,
             presentation_permit,
-            applied_zoom: 1.0,
+            applied_zoom,
             presentable: false,
             presentation_announced: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2254,6 +2601,8 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             _accelerator_registration: accelerator_registration,
             #[cfg(target_os = "windows")]
+            _zoom_registration: zoom_registration,
+            #[cfg(target_os = "windows")]
             _security_policy: security_policy,
             content_policy_registration: Some(content_policy_registration),
             _observer: observer,
@@ -2264,6 +2613,10 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             find: None,
+            #[cfg(target_os = "macos")]
+            store_button,
+            #[cfg(target_os = "windows")]
+            store_button: Default::default(),
             #[cfg(all(
                 feature = "agentic-browser",
                 any(target_os = "macos", target_os = "windows")
@@ -2474,7 +2827,7 @@ impl EngineHost {
                 .with_page_close_policy(wry::PageClosePolicy::Ignore);
             use wry::WebViewBuilderExtWindows;
             let builder = builder
-                .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
+                .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
                 .with_environment_created_handler(move |environment| {
                     let Ok(mut slot) = observed.try_borrow_mut() else {
@@ -2492,6 +2845,8 @@ impl EngineHost {
             } else {
                 builder
             };
+            let builder = builder
+                .with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
             if let Some(startup) = startup {
                 builder.with_browser_extension_startup_gate(move |environment, core| {
                     startup.authenticate(environment, core)
@@ -2631,8 +2986,28 @@ fn to_wry(r: Rect) -> wry::Rect {
 }
 
 pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::PermissionResponse {
+    raw_content_permission_on(kind, cfg!(windows))
+}
+
+/// What a human tab answers for each kind; `windows` asks WebView2 to show
+/// its own prompt for the kinds a browser asks about.
+pub(super) fn raw_content_permission_on(
+    kind: wry::PermissionKind,
+    windows: bool,
+) -> wry::PermissionResponse {
+    use wry::PermissionKind as Kind;
     match kind {
-        wry::PermissionKind::Camera | wry::PermissionKind::Microphone if cfg!(windows) => {
+        Kind::Camera
+        | Kind::Microphone
+        | Kind::Geolocation
+        | Kind::Notifications
+        | Kind::ClipboardRead
+        | Kind::Midi
+        | Kind::Sensors
+        | Kind::LocalFonts
+        | Kind::AutomaticDownloads
+            if windows =>
+        {
             wry::PermissionResponse::Prompt
         }
         _ => wry::PermissionResponse::Deny,
@@ -2650,6 +3025,16 @@ fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
         wry::NavigationFailure::Unreachable => NavigationFailureReason::Unreachable,
         wry::NavigationFailure::TimedOut => NavigationFailureReason::TimedOut,
         wry::NavigationFailure::Insecure => NavigationFailureReason::Insecure,
+        wry::NavigationFailure::Certificate(problem) => {
+            use zephium_core::certificates::CertificateProblem as Problem;
+            NavigationFailureReason::Certificate(match problem {
+                wry::CertificateProblem::Expired => Problem::Expired,
+                wry::CertificateProblem::Untrusted => Problem::Untrusted,
+                wry::CertificateProblem::NameMismatch => Problem::NameMismatch,
+                wry::CertificateProblem::Revoked => Problem::Revoked,
+                wry::CertificateProblem::Other => Problem::Other,
+            })
+        }
         wry::NavigationFailure::Other => NavigationFailureReason::Other,
     }
 }

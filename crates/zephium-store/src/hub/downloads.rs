@@ -193,6 +193,13 @@ impl Hub {
                 conn.execute("DELETE FROM downloads WHERE terminal=1", [])?;
                 Ok(DownloadStoreReply::Saved)
             }
+            DownloadStoreCall::ClearSince(since) => {
+                conn.execute(
+                    "DELETE FROM downloads WHERE terminal=1 AND json_extract(payload,'$.created_at')>=?1",
+                    [since],
+                )?;
+                Ok(DownloadStoreReply::Saved)
+            }
             DownloadStoreCall::ClearStaging { id, expected } => {
                 let tx = conn.transaction()?;
                 let receipt: Option<String> = tx

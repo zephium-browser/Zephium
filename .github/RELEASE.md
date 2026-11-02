@@ -68,6 +68,14 @@ existing install on its current version.
      assets/blocker-seed/v1/compile-report.json
    ```
 
+   Update the pinned revision, source bytes, manifest digest and rule counts in
+   `desktop/src/blocker_service.rs` from the refreshed catalog and compile report,
+   then verify the production loader and worker:
+
+   ```sh
+   cargo test -p zephium-desktop --lib --locked blocker_service::tests
+   ```
+
 2. **Bump the version** in `desktop/Cargo.toml` (`[package] version`, e.g.
    `1.0.0-beta.1`). It is the only version source: `tauri.conf.json` has none.
    Run `cargo check -p zephium-desktop` so `Cargo.lock` follows.
@@ -87,16 +95,61 @@ existing install on its current version.
    git push origin v1.0.0-beta.1
    ```
 
-6. **Review the draft** once the workflow finishes: install the DMG and the
-   Windows installer, check the notes, then **Publish**. Keep "Set as the
+6. **Review the draft** once the workflow finishes. For a stable version,
+   review the final assets below and use **Publish stable draft**. For a prerelease,
+   install the DMG and Windows installer and review the notes before publication. Keep "Set as the
    latest release" checked and leave "Set as a pre-release" unchecked, even for
    betas: `releases/latest` skips pre-releases, and both the website and the
    updater resolve through it.
 
-To rebuild a tag (for example after a flaky runner), run **Actions → Release →
-Run workflow** with the tag, or `gh workflow run release.yml -f tag=v1.0.0-beta.1`.
+To rebuild a tag (for example after a flaky runner), select the same tag in
+both **Actions → Release → Run workflow → Use workflow from** and the `tag`
+input. The gate binds that tag to the workflow commit; CI and both build jobs
+then check out the immutable `github.sha`, even if the tag moves later. With the
+CLI, pass the tag ref explicitly:
+
+```sh
+gh workflow run release.yml --ref v1.0.0-beta.1 -f tag=v1.0.0-beta.1
+```
+
+The [CLI defaults to the default branch](https://cli.github.com/manual/gh_workflow_run)
+without `--ref`. Release refuses a different workflow ref or checkout commit so
+its workflow `head_sha` and provenance describe the candidate's tag commit.
 An existing draft for that tag is replaced; a published release is never
 touched.
+
+## Draft review and stable publication
+
+Draft creation requires main CI for the exact release commit, both build/sign
+jobs, the release security gate and every WebKit component shard. Components use
+one retry (`--retry=1`) to tolerate an isolated runner failure.
+
+For an urgent release, dispatch **Release** from the candidate tag with the same
+`tag` input and set the boolean **`emergency`** input to `true`. This skips only
+components; main CI, security, build and signing checks still gate the draft.
+The generated release notes visibly state **EMERGENCY: Component tests were
+skipped for this release.** Review that disclosure before publishing.
+
+Install the draft's final DMG and Windows installer and review native behavior,
+platform signing, updater signatures and provenance on the shipping platforms.
+Hosted checks provide source/API coverage; retain useful device results with the
+candidate commit and artifact hashes so a rebuild cannot be mistaken for the
+bytes reviewed.
+
+For a stable `vMAJOR.MINOR.PATCH`, dispatch **Publish stable draft** with the
+existing annotated tag. It requires successful main-push CI and a successful
+Release run from that tag for the same commit. The Release run has already gated
+components, or recorded the explicit emergency bypass. The publisher downloads
+the existing draft's assets and verifies the DMG, macOS updater archive and
+Windows installer attestations against that commit and `release.yml` before
+publishing. It never builds or replaces assets. Release and publication share a
+same-tag workflow lock, and publication jobs serialize their latest-release check
+and edit across tags. A stable draft becomes latest only when its canonical
+semantic version is newer than the current latest stable release; equal or older
+versions explicitly use `--latest=false`. An absent latest release (HTTP 404)
+allows the first stable promotion; other lookup errors or malformed latest tags
+stop publication. Maintainers can also publish
+reviewed drafts through GitHub's release UI.
 
 ## Published assets
 
@@ -111,9 +164,9 @@ contract:
 | `latest.json` | Updater manifest (`darwin-aarch64[-app]`, `windows-x86_64[-nsis]`) |
 | `SHA256SUMS` | Digests of every other asset |
 
-Renaming does not invalidate an updater signature: minisign signs the bytes,
-and the build-time file name in its trusted comment is not checked by the
-updater.
+Renaming does not invalidate an updater signature. Windows signatures bind the
+release version and `windows-x86_64-nsis` target as well as the final bytes;
+the updater rejects an unbound or mismatched signature.
 
 ## What the workflow verifies
 
@@ -134,11 +187,66 @@ Download them for any release you need to symbolicate later.
 
 ## Windows signing
 
-The Windows installer is not Authenticode-signed yet, so SmartScreen warns on
-first run. When SignPath is added, signing goes in the marked spot in the
-Windows job and must come **before** the updater signature: Authenticode
-changes the installer's bytes, so sign it first, then replace Tauri's `.sig`
-by running `pnpm tauri signer sign` over the signed file.
+SignPath integration is **inactive** until the accepted project's certificate is
+issued and the owner completes the setup below. No signing request is sent while
+all three configuration values are absent. Partial configuration fails the release;
+drafts remain explicitly labelled unsigned
+while setup is pending. No secret belongs in an untrusted PR job.
+
+If the repository already holds a shared `SIGNPATH_API_TOKEN` for signing tests,
+an owner may explicitly set Actions variable `SIGNPATH_RELEASE_MODE` to `unsigned`
+while waiting for the production certificate. This keeps Windows drafts unsigned
+without removing the test token. It is allowed only while
+`SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_SIGNER_SUBJECT` and the forthcoming
+`SIGNPATH_RELEASE_CERT_THUMBPRINT` are absent. Remove the
+variable before configuring production signing; a stale unsigned mode alongside
+any production setting fails the release. macOS signing and updater signatures
+remain mandatory in this mode. With the variable unset, partial configuration
+still fails rather than silently producing unsigned Windows assets.
+
+The owner creates these exact SignPath resources:
+
+- Project slug **`zephium`**, linked to the public
+  `zephium-browser/Zephium` repository and GitHub.com Trusted Build System.
+- Signing policy **`release-signing`**, using the issued production certificate,
+  approved release submitters and human approval, restricted to this repository's
+  `.github/workflows/release.yml`, protected `v*` tags and GitHub-hosted runners.
+- Artifact configuration **`windows-nsis`**: a ZIP root (the upload-artifact
+  envelope) containing exactly one PE `Zephium_*_x64-setup.exe`, with
+  Authenticode signing and timestamping. NSIS is treated as a PE file; this signs
+  the downloaded setup, and does not claim signatures on its embedded payload.
+- Install the SignPath GitHub App and grant this repository access as required
+  by SignPath's origin verification policy.
+
+Then add repository Actions secrets **`SIGNPATH_API_TOKEN`** (a submitter token
+restricted to the project/policy) and **`SIGNPATH_ORGANIZATION_ID`** (the UUID
+from the dashboard), plus Actions variable **`SIGNPATH_SIGNER_SUBJECT`** with
+the issued certificate's complete, exact X.500 Subject. Do not guess the subject
+from the product name or activate using a test certificate. The existing updater
+key secrets are still required independently.
+
+The Windows job uploads `signpath-unsigned-windows-x64`, waits for approval,
+verifies `Get-AuthenticodeSignature` is `Valid`, checks the exact subject and a
+timestamp, then replaces the setup. Only afterwards does
+`cargo run --locked -p xtask -- sign-windows-updater <setup> <version>`
+regenerates the updater signature over the final bytes, binding the version and
+target. This step also runs when SignPath is inactive; the draft job verifies
+the signature against the configured public key. Signing failures never
+fall back to unsigned assets. The action is pinned to verified v3.0 commit
+`f6d04783b4569d051e0c80105fe66e82819d0092`.
+
+The Windows job has a bounded 180-minute budget: up to 75 minutes for the build,
+75 for the signing action, and 30 for setup and final verification/uploads. Within
+the signing action, human approval waits at most 60 minutes, service availability
+five minutes and download three minutes. Its explicit step cap bounds other
+request/processing overhead; a signing timeout fails rather than falling back.
+
+Before the first signed public release, qualify the exact downloaded setup on
+a clean Windows device: expected publisher, trust chain, timestamp, final hash,
+installation, updater signature and provenance. The accepted project and pending
+certificate alone do not establish those results. Follow the
+[SignPath GitHub integration](https://docs.signpath.io/trusted-build-systems/github)
+and [artifact reference](https://docs.signpath.io/artifact-configuration/reference).
 
 Until then, SmartScreen judges each installer by its own download reputation.
 After publishing, submit `Zephium-Windows-x64-setup.exe` at

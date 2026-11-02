@@ -763,10 +763,15 @@ fn command_observed(
             }
             // Stop revokes logical authority now. Native cleanup and original
             // usage journals may drain later; no late result can publish here.
+            let no_charge = row
+                .fact
+                .agent_grant()
+                .is_some_and(|grant| grant.no_usage_charge);
+            let reserved = row.fact.reserved_usage();
             for attempt in &mut row.fact.attempts {
                 if attempt.status == WorkAttemptStatus::Running {
                     attempt.status = WorkAttemptStatus::OutcomeUnknown;
-                    attempt.usage = None;
+                    attempt.usage = no_charge.then_some(reserved);
                 }
             }
             row.fact
@@ -822,15 +827,6 @@ fn command_observed(
         admitted(projection(tx, profile, id, session)?, receipt, false),
         true,
     ))
-}
-
-fn reserved_usage(limits: WorkExecutionLimits) -> WorkUsage {
-    WorkUsage {
-        model_tokens: limits.model_tokens,
-        cost_micro_usd: limits.cost_micro_usd,
-        operations: limits.operations,
-        accounting: WorkUsageAccounting::ConservativeReservation,
-    }
 }
 
 fn stop_parts(fact: &mut WorkExecutionFact) {
@@ -921,7 +917,7 @@ pub(super) fn abandon(
             } else {
                 WorkAttemptStatus::OutcomeUnknown
             },
-            usage: finished.then(|| reserved_usage(row.fact.spec.limits)),
+            usage: finished.then(|| row.fact.reserved_usage()),
             artifacts: vec![],
             intervention: None,
         },
@@ -1246,7 +1242,7 @@ pub(super) fn update(
                     .fact
                     .close_pending_steps("Work ended before this step's outcome was confirmed");
                 if pending && status != WorkAttemptStatus::OutcomeUnknown {
-                    usage = Some(reserved_usage(row.fact.spec.limits));
+                    usage = Some(row.fact.reserved_usage());
                     if status == WorkAttemptStatus::Succeeded {
                         if let Some(finish) = row
                             .fact
@@ -1262,6 +1258,19 @@ pub(super) fn update(
                     }
                 }
                 stop_parts(&mut row.fact);
+            }
+            if row
+                .fact
+                .agent_grant()
+                .is_some_and(|grant| grant.no_usage_charge)
+            {
+                usage = Some(match (status, usage) {
+                    (WorkAttemptStatus::OutcomeUnknown, _) | (_, None) => row.fact.reserved_usage(),
+                    (_, Some(usage)) => WorkUsage {
+                        cost_micro_usd: 0,
+                        ..usage
+                    },
+                });
             }
             row.fact.attempts[index].status = status;
             row.fact.attempts[index].usage = usage;

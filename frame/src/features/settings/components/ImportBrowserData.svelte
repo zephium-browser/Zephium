@@ -141,6 +141,13 @@
           : m.import_importing({ browser: jobName })}</strong
       >
       {#if job.finished}
+        {#if job.kinds.some((entry) => entry.problem === "permission")}
+          <Button
+            size="compact"
+            onclick={() => void browserImport.openPermissionSettings(job.source)}
+            >{m.onb_import_allow()}</Button
+          >
+        {/if}
         <Button size="compact" onclick={browserImport.dismiss}>{m.import_dismiss()}</Button>
       {:else}
         <Button size="compact" variant="ghost" onclick={() => void browserImport.cancel()}

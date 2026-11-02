@@ -7,14 +7,15 @@
 //! gets a host of its own that ends after the first reply.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::rc::{Rc, Weak as RcWeak};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+#[cfg(test)]
+use std::time::Duration;
 
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
@@ -32,20 +33,25 @@ const MAX_FROM_HOST: usize = 1024 * 1024;
 const MAX_TO_HOST: usize = 64 * 1024 * 1024;
 const MAX_MANIFEST: u64 = 64 * 1024;
 const MAX_HOSTS_PER_EXTENSION: usize = 8;
-/// How long a host may take to exit once its input closes before it is
-/// killed.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
+const MAX_PHYSICAL_HOSTS: usize = 64;
+const MAX_OUTBOUND_FRAMES: usize = 32;
+const MAX_QUEUED_BYTES: usize = 128 * 1024 * 1024;
+const MAX_INBOUND_EVENTS: usize = 8;
+const MAX_INBOUND_BYTES: usize = 2 * MAX_FROM_HOST;
+static PHYSICAL_HOSTS: AtomicUsize = AtomicUsize::new(0);
+static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 type Reply = RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>;
 
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<usize, Rc<Connection>>> = RefCell::new(HashMap::new());
+    static HOST_COUNTS: RefCell<HashMap<(usize, String), std::sync::Weak<AtomicUsize>>> = RefCell::new(HashMap::new());
 }
 
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
 
 enum Event {
-    Message(Value),
+    Message(Value, usize),
     Closed(Option<String>),
 }
 
@@ -55,7 +61,7 @@ struct Connection {
     host: String,
     port: Option<Retained<WKWebExtensionMessagePort>>,
     reply: RefCell<Option<Reply>>,
-    outbound: RefCell<Option<mpsc::Sender<Vec<u8>>>>,
+    outbound: RefCell<Option<Outbound>>,
     shared: RcWeak<Shared>,
 }
 
@@ -109,12 +115,19 @@ fn open(
 ) -> Result<Rc<Connection>, String> {
     // The browser's own bridges never reach this point; outside hosts are
     // only for extensions that declared them, as the install review showed.
-    let declared = unsafe { context.webExtension().requestedPermissions() }
-        .containsObject(&NSString::from_str("nativeMessaging"));
-    if !declared {
+    let extension = unsafe { context.uniqueIdentifier() }.to_string();
+    let allowed = shared
+        .loaded
+        .borrow()
+        .get(&extension)
+        .is_some_and(|loaded| {
+            loaded.external_native_messaging.get()
+                && std::ptr::eq(&*loaded.context, context)
+                && unsafe { context.hasPermission(&NSString::from_str("nativeMessaging")) }
+        });
+    if !allowed {
         return Err("Access to native messaging requires nativeMessaging permission.".into());
     }
-    let extension = unsafe { context.uniqueIdentifier() }.to_string();
     let running = CONNECTIONS.with(|connections| {
         connections
             .borrow()
@@ -127,7 +140,7 @@ fn open(
     }
     let path = find_host(&search_roots(), host, &extension)?;
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
-    let outbound = spawn(&path, &extension, key).map_err(|error| {
+    let outbound = spawn(&path, &extension, key, Rc::as_ptr(shared) as usize).map_err(|error| {
         shared.host().log(
             &extension,
             LogLevel::Warning,
@@ -151,6 +164,84 @@ fn open(
     });
     CONNECTIONS.with(|connections| connections.borrow_mut().insert(key, connection.clone()));
     Ok(connection)
+}
+
+/// Main-thread qualification used only by the standalone lab. The invalid
+/// hostname stops an admitted request before any host registration is read.
+#[cfg(feature = "lab")]
+pub(crate) fn verify_open_admission(shared: &Rc<Shared>, id: &str) -> Result<(), String> {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_web_kit::WKWebExtensionContextPermissionStatus;
+    let mtm = MainThreadMarker::new().ok_or("native admission probe needs the main thread")?;
+    let context = shared
+        .loaded
+        .borrow()
+        .get(id)
+        .map(|loaded| loaded.context.clone())
+        .ok_or("fixture extension was not loaded")?;
+    let check = |context: &WKWebExtensionContext, expected: &str| match open(
+        shared,
+        context,
+        "../no-host-lookup",
+        None,
+        None,
+    ) {
+        Err(error) if error == expected => Ok(()),
+        Err(error) => Err(format!(
+            "native admission returned {error}; expected {expected}"
+        )),
+        Ok(connection) => {
+            connection.close(None);
+            Err("native admission unexpectedly opened a host".into())
+        }
+    };
+    const DENIED: &str = "Access to native messaging requires nativeMessaging permission.";
+    check(&context, "Invalid native messaging host name specified.")?;
+    shared
+        .loaded
+        .borrow_mut()
+        .get_mut(id)
+        .unwrap()
+        .external_native_messaging
+        .set(false);
+    let unreviewed = check(&context, DENIED);
+    shared
+        .loaded
+        .borrow_mut()
+        .get_mut(id)
+        .unwrap()
+        .external_native_messaging
+        .set(true);
+    unreviewed?;
+    let mismatch = unsafe {
+        WKWebExtensionContext::initForExtension(
+            WKWebExtensionContext::alloc(mtm),
+            &context.webExtension(),
+        )
+    };
+    let permission = NSString::from_str("nativeMessaging");
+    unsafe {
+        mismatch.setUniqueIdentifier(&NSString::from_str(id));
+        mismatch.setPermissionStatus_forPermission(
+            WKWebExtensionContextPermissionStatus::GrantedExplicitly,
+            &permission,
+        );
+    }
+    check(&mismatch, DENIED)?;
+    let loaded = shared.loaded.borrow_mut().remove(id).unwrap();
+    let unloaded = check(&context, DENIED);
+    shared.loaded.borrow_mut().insert(id.to_owned(), loaded);
+    unloaded?;
+    let previous = unsafe { context.permissionStatusForPermission(&permission) };
+    unsafe {
+        context.setPermissionStatus_forPermission(
+            WKWebExtensionContextPermissionStatus::DeniedExplicitly,
+            &permission,
+        )
+    };
+    let no_permission = check(&context, DENIED);
+    unsafe { context.setPermissionStatus_forPermission(previous, &permission) };
+    no_permission
 }
 
 impl Connection {
@@ -184,7 +275,7 @@ impl Connection {
 
     fn receive(&self, event: Event) {
         match event {
-            Event::Message(message) => {
+            Event::Message(message, _) => {
                 if let Some(reply) = self.reply.borrow_mut().take() {
                     let object = json::to_object(&message);
                     reply.call((Retained::as_ptr(&object).cast_mut(), std::ptr::null_mut()));
@@ -201,7 +292,7 @@ impl Connection {
         if removed.is_none() {
             return;
         }
-        // Dropping the sender closes the host's input, which ends it.
+        // Independent child custody stops and reaps even a blocked pipe writer.
         self.outbound.borrow_mut().take();
         let message = error.unwrap_or_else(|| "Native host has exited.".into());
         if let Some(reply) = self.reply.borrow_mut().take() {
@@ -237,17 +328,220 @@ pub(crate) fn close_extension(shared: &Shared, extension: &str) {
     }
 }
 
-fn deliver(key: usize, event: Event) {
-    dispatch2::DispatchQueue::main().exec_async(move || {
-        let connection = CONNECTIONS.with(|connections| connections.borrow().get(&key).cloned());
-        if let Some(connection) = connection {
-            connection.receive(event);
+/// Only one bounded batch can be scheduled on the main queue per connection.
+#[derive(Default)]
+struct InboxState {
+    events: VecDeque<Event>,
+    bytes: usize,
+    scheduled: bool,
+    terminal: bool,
+}
+struct Inbox {
+    key: usize,
+    state: Mutex<InboxState>,
+    drained: Condvar,
+}
+impl Inbox {
+    fn push(self: &Arc<Self>, event: Event) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        let bytes = match &event {
+            Event::Message(_, bytes) => *bytes,
+            Event::Closed(_) => 0,
+        };
+        // Blocking only this pipe reader lets the OS pipe backpressure the host.
+        // Main-queue delivery and cancellation both wake it without polling.
+        while !state.terminal
+            && (state.events.len() >= MAX_INBOUND_EVENTS || state.bytes + bytes > MAX_INBOUND_BYTES)
+        {
+            let Ok(next) = self.drained.wait(state) else {
+                return false;
+            };
+            state = next;
         }
-    });
+        if state.terminal {
+            return false;
+        }
+        state.bytes += bytes;
+        state.events.push_back(event);
+        self.schedule(&mut state);
+        true
+    }
+    fn finish(self: &Arc<Self>, error: Option<String>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.terminal {
+            return;
+        }
+        state.terminal = true;
+        self.drained.notify_all();
+        // One terminal event has a reserved slot beyond the reply budget.
+        state.events.push_back(Event::Closed(error));
+        self.schedule(&mut state);
+    }
+    fn schedule(self: &Arc<Self>, state: &mut InboxState) {
+        if state.scheduled {
+            return;
+        }
+        state.scheduled = true;
+        let inbox = self.clone();
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let events = {
+                let Ok(mut state) = inbox.state.lock() else {
+                    return;
+                };
+                state.bytes = 0;
+                state.scheduled = false;
+                let events = std::mem::take(&mut state.events);
+                inbox.drained.notify_all();
+                events
+            };
+            for event in events {
+                let connection =
+                    CONNECTIONS.with(|connections| connections.borrow().get(&inbox.key).cloned());
+                if let Some(connection) = connection {
+                    connection.receive(event);
+                }
+            }
+        });
+    }
 }
 
-/// Starts the host and returns the channel its input is written through.
-fn spawn(path: &Path, extension: &str, key: usize) -> io::Result<mpsc::Sender<Vec<u8>>> {
+/// A physical slot is released only after the owned child has been reaped.
+struct PhysicalPermit(Arc<AtomicUsize>);
+impl PhysicalPermit {
+    fn acquire(owner: usize, extension: &str) -> io::Result<Self> {
+        let count = HOST_COUNTS.with(|counts| {
+            let mut counts = counts.borrow_mut();
+            counts.retain(|_, count| count.strong_count() > 0);
+            let key = (owner, extension.to_owned());
+            if let Some(count) = counts.get(&key).and_then(std::sync::Weak::upgrade) {
+                return count;
+            }
+            let count = Arc::new(AtomicUsize::new(0));
+            counts.insert(key, Arc::downgrade(&count));
+            count
+        });
+        PHYSICAL_HOSTS
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                (count < MAX_PHYSICAL_HOSTS).then_some(count + 1)
+            })
+            .map_err(|_| io::Error::other("too many physical native hosts"))?;
+        if count
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| {
+                (count < MAX_HOSTS_PER_EXTENSION).then_some(count + 1)
+            })
+            .is_err()
+        {
+            PHYSICAL_HOSTS.fetch_sub(1, Ordering::AcqRel);
+            return Err(io::Error::other(
+                "too many physical native hosts for this extension",
+            ));
+        }
+        Ok(Self(count))
+    }
+}
+impl Drop for PhysicalPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+        PHYSICAL_HOSTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct ChildCustody {
+    child: Child,
+    _permit: Option<PhysicalPermit>,
+}
+impl Drop for ChildCustody {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        if self.child.wait().is_err() {
+            // Unknown reap status keeps capacity reserved instead of allowing
+            // a replacement child to escape the physical process ceiling.
+            if let Some(permit) = self._permit.take() {
+                std::mem::forget(permit);
+            }
+        }
+    }
+}
+
+struct QueuedFrame {
+    body: Vec<u8>,
+    bytes: Arc<AtomicUsize>,
+}
+impl Drop for QueuedFrame {
+    fn drop(&mut self) {
+        self.bytes.fetch_sub(self.body.len(), Ordering::AcqRel);
+        QUEUED_BYTES.fetch_sub(self.body.len(), Ordering::AcqRel);
+    }
+}
+struct Outbound {
+    sender: mpsc::SyncSender<QueuedFrame>,
+    stop: mpsc::SyncSender<()>,
+    closed: Arc<AtomicBool>,
+    bytes: Arc<AtomicUsize>,
+    inbox: Arc<Inbox>,
+}
+impl Outbound {
+    fn send(&self, body: Vec<u8>) -> Result<(), ()> {
+        if self.closed.load(Ordering::Acquire) || body.len() > MAX_TO_HOST {
+            return Err(());
+        }
+        let length = body.len();
+        if self
+            .bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |bytes| {
+                bytes
+                    .checked_add(length)
+                    .filter(|bytes| *bytes <= MAX_TO_HOST)
+            })
+            .is_err()
+        {
+            self.close();
+            return Err(());
+        }
+        if QUEUED_BYTES
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |bytes| {
+                bytes
+                    .checked_add(length)
+                    .filter(|bytes| *bytes <= MAX_QUEUED_BYTES)
+            })
+            .is_err()
+        {
+            self.bytes.fetch_sub(length, Ordering::AcqRel);
+            self.close();
+            return Err(());
+        }
+        if self
+            .sender
+            .try_send(QueuedFrame {
+                body,
+                bytes: self.bytes.clone(),
+            })
+            .is_err()
+        {
+            self.close();
+            return Err(());
+        }
+        Ok(())
+    }
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.inbox.finish(None);
+        let _ = self.stop.try_send(());
+    }
+}
+impl Drop for Outbound {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The independent supervisor owns the child, not the blocking writer. Stop
+/// kills that exact host and reaps it without a main-loop timer or polling.
+fn spawn(path: &Path, extension: &str, key: usize, owner: usize) -> io::Result<Outbound> {
+    let permit = PhysicalPermit::acquire(owner, extension)?;
     let mut command = Command::new(path);
     command
         .arg(format!("{}://{extension}/", crate::runtime::SCHEME))
@@ -261,68 +555,79 @@ fn spawn(path: &Path, extension: &str, key: usize) -> io::Result<mpsc::Sender<Ve
     if let Some(directory) = path.parent() {
         command.current_dir(directory);
     }
-    let mut child = command.spawn()?;
-    let (Some(mut input), Some(mut output)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = child.kill();
+    let mut custody = ChildCustody {
+        child: command.spawn()?,
+        _permit: Some(permit),
+    };
+    let (Some(mut input), Some(mut output)) =
+        (custody.child.stdin.take(), custody.child.stdout.take())
+    else {
         return Err(io::Error::other(
             "the host's standard streams are unavailable",
         ));
     };
-    let child = Arc::new(Mutex::new(child));
-    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
-
-    let writer_child = child.clone();
+    let (stop, stopped) = mpsc::sync_channel(1);
+    let (sender, receiver) = mpsc::sync_channel::<QueuedFrame>(MAX_OUTBOUND_FRAMES);
+    let closed = Arc::new(AtomicBool::new(false));
+    let inbox = Arc::new(Inbox {
+        key,
+        state: Mutex::new(InboxState::default()),
+        drained: Condvar::new(),
+    });
+    let outbound = Outbound {
+        sender,
+        stop: stop.clone(),
+        closed: closed.clone(),
+        bytes: Arc::new(AtomicUsize::new(0)),
+        inbox: inbox.clone(),
+    };
+    let supervised_inbox = inbox.clone();
+    std::thread::Builder::new()
+        .name("zephium-native-host-custody".into())
+        .spawn(move || {
+            let _ = stopped.recv();
+            drop(custody);
+            closed.store(true, Ordering::Release);
+            supervised_inbox.finish(None);
+        })?;
+    let writer_stop = stop.clone();
     std::thread::Builder::new()
         .name("zephium-native-host-writer".into())
         .spawn(move || {
             for frame in receiver {
-                let length = (frame.len() as u32).to_ne_bytes();
                 let written = input
-                    .write_all(&length)
-                    .and_then(|()| input.write_all(&frame))
+                    .write_all(&(frame.body.len() as u32).to_ne_bytes())
+                    .and_then(|()| input.write_all(&frame.body))
                     .and_then(|()| input.flush());
                 if written.is_err() {
                     break;
                 }
             }
             drop(input);
-            reap(&writer_child);
+            let _ = writer_stop.try_send(());
         })?;
     std::thread::Builder::new()
         .name("zephium-native-host-reader".into())
-        .spawn(move || loop {
-            match read_frame(&mut output) {
-                Ok(Some(message)) => deliver(key, Event::Message(message)),
-                Ok(None) => return deliver(key, Event::Closed(None)),
-                Err(error) => {
-                    let _ = child.lock().map(|mut child| child.kill());
-                    return deliver(key, Event::Closed(Some(error)));
+        .spawn(move || {
+            let error = loop {
+                match read_frame_sized(&mut output) {
+                    Ok(Some((message, bytes))) => {
+                        if !inbox.push(Event::Message(message, bytes)) {
+                            break None;
+                        }
+                    }
+                    Ok(None) => break None,
+                    Err(error) => break Some(error),
                 }
-            }
+            };
+            let _ = stop.try_send(());
+            inbox.finish(error);
         })?;
-    Ok(sender)
-}
-
-fn reap(child: &Mutex<Child>) {
-    let deadline = Instant::now() + EXIT_GRACE;
-    loop {
-        let Ok(mut child) = child.lock() else { return };
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
-            }
-            Ok(None) => {}
-        }
-        drop(child);
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    Ok(outbound)
 }
 
 /// Reads one message; `None` at the end of the stream.
-fn read_frame(stream: &mut impl Read) -> Result<Option<Value>, String> {
+fn read_frame_sized(stream: &mut impl Read) -> Result<Option<(Value, usize)>, String> {
     let mut length = [0u8; 4];
     match stream.read_exact(&mut length) {
         Ok(()) => {}
@@ -342,8 +647,13 @@ fn read_frame(stream: &mut impl Read) -> Result<Option<Value>, String> {
         format!("Error when communicating with the native messaging host: {error}")
     })?;
     serde_json::from_slice(&body)
-        .map(Some)
+        .map(|message| Some((message, length)))
         .map_err(|_| "Native host sent a message that is not valid JSON.".into())
+}
+
+#[cfg(test)]
+fn read_frame(stream: &mut impl Read) -> Result<Option<Value>, String> {
+    read_frame_sized(stream).map(|frame| frame.map(|(message, _)| message))
 }
 
 /// Where Chromium browsers look for host manifests on macOS. Desktop
@@ -529,5 +839,194 @@ mod tests {
         assert!(read_frame(&mut invalid.as_slice())
             .unwrap_err()
             .contains("JSON"));
+    }
+}
+
+#[cfg(test)]
+mod custody_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Fixture {
+        directory: PathBuf,
+        pid: u32,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &self.pid.to_string()])
+                .stderr(Stdio::null())
+                .status();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+    fn stalled_host() -> (Fixture, Outbound) {
+        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("zephium-stalled-host-{}-{key}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let pid_file = directory.join("pid");
+        let path = directory.join("host");
+        std::fs::write(
+            &path,
+            b"#!/bin/sh\nprintf '%s' \"$$\" > \"${0%/*}/pid\"\nexec /bin/sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let outbound = spawn(&path, "fixture", key, 0).unwrap();
+        let pid = (0..200)
+            .find_map(|_| {
+                let pid = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|pid| pid.parse().ok());
+                if pid.is_none() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                pid
+            })
+            .expect("fixture started");
+        (Fixture { directory, pid }, outbound)
+    }
+
+    #[test]
+    fn stalled_native_host_cannot_accumulate_an_unbounded_outbound_backlog() {
+        let (_fixture, outbound) = stalled_host();
+        let admitted = (0..40)
+            .filter(|_| outbound.send(vec![b'x'; 2 * 1024 * 1024]).is_ok())
+            .count();
+        assert!(
+            admitted <= 32,
+            "accepted {admitted} queued frames for a stalled host"
+        );
+    }
+
+    #[test]
+    fn closing_a_stalled_writer_terminates_the_physical_child() {
+        let (fixture, outbound) = stalled_host();
+        outbound.send(vec![b'x'; MAX_TO_HOST]).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(outbound);
+        std::thread::sleep(Duration::from_millis(2300));
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &fixture.pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive,
+            "closing the logical port left its blocked child running"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backlog_tests {
+    use super::*;
+
+    #[test]
+    fn full_inbox_blocks_reader_until_cancelled_instead_of_killing_host() {
+        for (count, size) in [(MAX_INBOUND_EVENTS, 1), (2, MAX_FROM_HOST)] {
+            let inbox = Arc::new(Inbox {
+                key: 0,
+                drained: Condvar::new(),
+                state: Mutex::new(InboxState {
+                    scheduled: true,
+                    ..Default::default()
+                }),
+            });
+            for _ in 0..count {
+                assert!(inbox.push(Event::Message(Value::Null, size)));
+            }
+            let reader = inbox.clone();
+            let (sent, received) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                sent.send(reader.push(Event::Message(Value::Null, 1)))
+                    .unwrap();
+            });
+            let blocked = received.recv_timeout(Duration::from_millis(100)).is_err();
+            inbox.finish(None);
+            worker.join().unwrap();
+            assert!(
+                blocked,
+                "a full inbox terminated the reader instead of applying pipe backpressure"
+            );
+            let state = inbox.state.lock().unwrap();
+            assert_eq!(state.events.len(), count + 1);
+            assert!(matches!(state.events.back(), Some(Event::Closed(None))));
+        }
+    }
+
+    #[test]
+    fn draining_inbox_resumes_reader_and_preserves_order() {
+        let inbox = Arc::new(Inbox {
+            key: 0,
+            drained: Condvar::new(),
+            state: Mutex::new(InboxState {
+                scheduled: true,
+                ..Default::default()
+            }),
+        });
+        for index in 0..MAX_INBOUND_EVENTS {
+            assert!(inbox.push(Event::Message(serde_json::json!(index), 1)));
+        }
+        let reader = inbox.clone();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sent.send(reader.push(Event::Message(serde_json::json!(MAX_INBOUND_EVENTS), 1)))
+                .unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(100)).is_err());
+        {
+            let mut state = inbox.state.lock().unwrap();
+            state.events.clear();
+            state.bytes = 0;
+            inbox.drained.notify_all();
+        }
+        assert!(received.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+        let state = inbox.state.lock().unwrap();
+        assert_eq!(state.events.len(), 1);
+        assert!(
+            matches!(state.events.front(), Some(Event::Message(value, _)) if value == &serde_json::json!(MAX_INBOUND_EVENTS))
+        );
+        assert!(!state.terminal);
+    }
+
+    #[test]
+    fn normal_host_close_preserves_a_full_admitted_reply_batch() {
+        let inbox = Arc::new(Inbox {
+            key: 0,
+            drained: Condvar::new(),
+            state: Mutex::new(InboxState {
+                scheduled: true,
+                ..Default::default()
+            }),
+        });
+        for index in 0..MAX_INBOUND_EVENTS {
+            assert!(inbox.push(Event::Message(serde_json::json!(index), 1)));
+        }
+        inbox.finish(None);
+        inbox.finish(Some("late".into()));
+        assert!(!inbox.push(Event::Message(Value::Null, 1)));
+        let state = inbox.state.lock().unwrap();
+        assert_eq!(state.events.len(), MAX_INBOUND_EVENTS + 1);
+        assert_eq!(state.bytes, MAX_INBOUND_EVENTS);
+        for (index, event) in state.events.iter().take(MAX_INBOUND_EVENTS).enumerate() {
+            assert!(
+                matches!(event, Event::Message(value, _) if value == &serde_json::json!(index))
+            );
+        }
+        assert!(matches!(state.events.back(), Some(Event::Closed(None))));
+    }
+
+    #[test]
+    fn physical_extension_capacity_remains_held_until_permit_release() {
+        let permits: Vec<_> = (0..MAX_HOSTS_PER_EXTENSION)
+            .map(|_| PhysicalPermit::acquire(usize::MAX, "capacity-fixture").unwrap())
+            .collect();
+        assert!(PhysicalPermit::acquire(usize::MAX, "capacity-fixture").is_err());
+        drop(permits);
+        assert!(PhysicalPermit::acquire(usize::MAX, "capacity-fixture").is_ok());
     }
 }

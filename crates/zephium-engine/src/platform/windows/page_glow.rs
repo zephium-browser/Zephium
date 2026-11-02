@@ -16,19 +16,13 @@ use std::time::{Duration, Instant};
 
 use windows::core::{Interface as _, HSTRING};
 use windows::Foundation::TimeSpan;
-use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
-use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
-use windows::Win32::System::WinRT::{
-    CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT,
-};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetClientRect, IsWindowVisible, GA_ROOT,
 };
 use windows::UI::Color;
-use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     AnimationIterationBehavior, CompositionBrush, CompositionGradientExtendMode,
     CompositionLinearGradientBrush, CompositionMappingMode, CompositionPropertySet, Compositor,
@@ -56,23 +50,26 @@ const PEAK_DARK: f32 = 0.68;
 const PAUSED_SHARE: f32 = 0.45;
 const WHEEL_STOPS: usize = 12;
 
+/// Zephium's blues, sRGB: azure, sky, periwinkle and a cooler sky. The
+/// light travels through one family of colour, so it reads as the window's
+/// own light at work rather than a spectrum running round the page.
 const AURORA_LIGHT: [[f64; 3]; 4] = [
-    [86.0, 132.0, 240.0],
-    [142.0, 108.0, 236.0],
-    [226.0, 108.0, 152.0],
-    [232.0, 158.0, 68.0],
+    [58.0, 118.0, 238.0],
+    [86.0, 156.0, 250.0],
+    [112.0, 116.0, 238.0],
+    [64.0, 170.0, 244.0],
 ];
 const AURORA_DARK: [[f64; 3]; 4] = [
-    [124.0, 166.0, 255.0],
-    [176.0, 146.0, 255.0],
-    [255.0, 146.0, 186.0],
-    [255.0, 196.0, 120.0],
+    [104.0, 156.0, 255.0],
+    [138.0, 190.0, 255.0],
+    [150.0, 146.0, 255.0],
+    [110.0, 198.0, 255.0],
 ];
 
 struct Glow {
     tab: ItemId,
     window: HWND,
-    target: DesktopWindowTarget,
+    layer: Rc<super::page_layer::PageLayer>,
     root: ContainerVisual,
     clock: CompositionPropertySet,
     dark: bool,
@@ -89,26 +86,7 @@ struct Glow {
 }
 
 thread_local! {
-    static COMPOSITOR: RefCell<Option<(DispatcherQueueController, Compositor)>> = const { RefCell::new(None) };
     static GLOWS: RefCell<HashMap<ItemId, Glow>> = RefCell::new(HashMap::new());
-}
-
-fn compositor() -> Option<Compositor> {
-    COMPOSITOR.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            let options = DispatcherQueueOptions {
-                dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
-                threadType: DQTYPE_THREAD_CURRENT,
-                apartmentType: DQTAT_COM_NONE,
-            };
-            // SAFETY: creates this thread's dispatcher queue, which the
-            // compositor requires; it lives as long as the thread's glows.
-            let queue = unsafe { CreateDispatcherQueueController(options) }.ok()?;
-            *slot = Some((queue, Compositor::new().ok()?));
-        }
-        slot.as_ref().map(|(_, compositor)| compositor.clone())
-    })
 }
 
 /// Shows, holds or removes the glow on `tab`'s page view.
@@ -235,11 +213,8 @@ const PERIMETER: &str = "(2 * (host.Size.X + host.Size.Y) - 4 * r)";
 
 impl Glow {
     fn new(tab: ItemId, window: HWND, dark: bool, scale: f32) -> Option<Self> {
-        let compositor = compositor()?;
-        let interop: ICompositorDesktopInterop = compositor.cast().ok()?;
-        // SAFETY: a topmost target on this live container window: DWM draws
-        // it above the WebView2 child windows, and it takes no input.
-        let target = unsafe { interop.CreateDesktopWindowTarget(window, true) }.ok()?;
+        let compositor = super::page_layer::compositor()?;
+        let layer = super::page_layer::layer(window)?;
         let root = compositor.CreateContainerVisual().ok()?;
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
             .ok()?;
@@ -250,7 +225,7 @@ impl Glow {
         let glow = Self {
             tab,
             window,
-            target,
+            layer,
             root,
             clock,
             dark,
@@ -459,8 +434,8 @@ impl Glow {
         mask.SetEllipseRadius(v2(r, r)).ok()?;
         let stops = mask.ColorStops().ok()?;
         // Offset 1 is the corner's edge; inward is toward the centre.
-        for k in 0..=8 {
-            let at = k as f32 / 8.0;
+        for k in 0..=16 {
+            let at = k as f32 / 16.0;
             let alpha = band_alpha((1.0 - at) * RADIUS);
             stops
                 .Append(
@@ -479,8 +454,10 @@ impl Glow {
         stops: &windows::UI::Composition::CompositionColorGradientStopCollection,
         depth: f32,
     ) -> Option<()> {
+        // Enough stops that the falloff is a curve rather than a few
+        // straight ramps, which DWM shows as bands.
         let mut points = vec![0.0, LINE - 0.5, LINE + 0.5];
-        points.extend((1..=8).map(|k| LINE + 0.5 + (depth - LINE - 0.5) * k as f32 / 8.0));
+        points.extend((1..=20).map(|k| LINE + 0.5 + (depth - LINE - 0.5) * k as f32 / 20.0));
         for inside in points {
             stops
                 .Append(
@@ -504,7 +481,7 @@ impl Glow {
         }
         self.asked.set(Instant::now());
         if !self.attached.replace(true) {
-            let _ = self.target.SetRoot(&self.root);
+            let _ = self.layer.attach(&self.root);
             let mut client = RECT::default();
             // SAFETY: plain reads of the live container window.
             let (sized, visible) = unsafe {
@@ -542,7 +519,7 @@ impl Glow {
     /// The clock runs on from where it stopped; a whole trip later the
     /// colours are where they began, so each loop restarts unseen.
     fn travel(&self) -> Option<()> {
-        let compositor = compositor()?;
+        let compositor = super::page_layer::compositor()?;
         let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
         let linear = compositor.CreateLinearEasingFunction().ok()?;
         animation
@@ -567,7 +544,7 @@ impl Glow {
     }
 
     fn fade(&self, to: f32, duration: Duration) -> Option<()> {
-        let compositor = compositor()?;
+        let compositor = super::page_layer::compositor()?;
         let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
         animation.InsertKeyFrame(1.0, to).ok()?;
         animation.SetDuration(TimeSpan::from(duration)).ok()?;
@@ -600,13 +577,13 @@ impl Glow {
         let total = rise + hold + FADE_OUT;
         let _ = self.fade_out(peak, rise, hold, total);
         let current = self.generation.clone();
-        let (target, clock) = (self.target.clone(), self.clock.clone());
+        let (layer, root, clock) = (self.layer.clone(), self.root.clone(), self.clock.clone());
         let (tab, since) = (self.tab, self.since.get());
         let detached =
             super::schedule_browser_timeout(total + Duration::from_millis(50), move || {
                 if current.get() == generation {
                     let _ = clock.StopAnimation(&HSTRING::from("t"));
-                    let _ = target.SetRoot(None);
+                    layer.detach(&root);
                     crate::page_reader::note(format_args!(
                         "page_glow removed tab={tab} reason=off shown_ms={}",
                         since.elapsed().as_millis()
@@ -619,7 +596,7 @@ impl Glow {
     }
 
     fn fade_out(&self, peak: f32, rise: Duration, hold: Duration, total: Duration) -> Option<()> {
-        let compositor = compositor()?;
+        let compositor = super::page_layer::compositor()?;
         let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
         let at = |time: Duration| (time.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
         if !rise.is_zero() {
@@ -644,8 +621,7 @@ impl Drop for Glow {
             ));
         }
         let _ = self.clock.StopAnimation(&HSTRING::from("t"));
-        let _ = self.target.SetRoot(None);
-        let _ = self.target.Close();
+        self.layer.detach(&self.root);
     }
 }
 

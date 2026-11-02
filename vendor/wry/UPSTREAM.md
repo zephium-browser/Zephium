@@ -80,10 +80,15 @@ Its security-relevant deltas currently enforce these invariants:
   client-certificate event interfaces and registers deny handlers before the
   initial navigation. Basic authentication is cancelled; certificate
   selection is cancelled and marked handled, so neither can fall back to an
-  unowned native dialog. It also requires `ICoreWebView2_25` and cancels plus
-  suppresses `SaveAsUIShowing`, closing the independent native Save As surface
-  that context-menu, accelerator, PDF-toolbar, and download policy do not
-  comprehensively cover.
+  unowned native dialog. It also requires `ICoreWebView2_25` and registers a
+  `SaveAsUIShowing` gate. Browser-initiated document saves retain the default
+  dialog while their document gate is active. A resource save is admitted only
+  when download policy permits it, native context-menu and download handlers
+  are installed, and `native_resource_save_handler` accepts it; the default
+  dialog is suppressed and the native download broker owns its picker and path.
+  Every request is cancelled before configuring dialog suppression, and only
+  an admitted save clears cancellation afterward. A suppression failure or
+  resource handler panic therefore leaves the request denied.
 - WebView2 and WebKitGTK page-driven close requests default to a no-op.
   Destroying Wry's child container/widget is an explicit builder policy for
   embedders that can also reconcile native and logical-view ownership; a page
@@ -111,7 +116,9 @@ Its security-relevant deltas currently enforce these invariants:
   buffer before budget arithmetic or slicing. Its trusted print method calls
   `ICoreWebView2_16::ShowPrintUI` directly instead of evaluating the same
   page-controlled scripted-print primitives an embedder may deny at document
-  creation. Disabling browser accelerator keys is a construction postcondition:
+  creation. WKWebView printing works on a copy of the shared `NSPrintInfo` and
+  keeps the system margins unless the caller sets some, so printing never
+  rewrites the user's page setup. Disabling browser accelerator keys is a construction postcondition:
   the fork requires `ICoreWebView2Settings3`, applies the setting, and reads it
   back before an untrusted page can load.
 - Desktop navigation callbacks expose one opaque per-WebView identity across
@@ -229,7 +236,11 @@ titled by the initiating frame's security-origin host ("example.com says", or
 "An embedded page at … says"). A hidden view, or a window that already shows a
 sheet, gets the dismissed answer, as upstream's no-UI default did. From the
 second dialog within ten seconds the sheet offers to silence the page until its
-URL changes. Messages are bounded to 1,024 characters.
+URL changes. Messages are bounded to 1,024 characters. Message and prompt-default native
+strings are admitted at 2,048 UTF-16 units / 4,096 UTF-8 bytes before a Rust
+copy; oversized values dismiss once. Origin titles, document URLs and prompt
+answers also use native preallocation bounds. Native WebKit may already own
+its input NSString; this prevents duplicating an attacker-sized value in Rust.
 
 `navigation_failure_handler` reduces a failed main-frame navigation's
 `NSURLError` code to a category the host can explain (offline, host not found,
@@ -239,4 +250,43 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 `WebErrorStatus` (cancellation and download conversion stay silent). The
 `ContentLoading` of WebView2's built-in error page is hidden like a commit but
 not reported as one, so the failure lands on the document the person asked for
-and the host can show its own explanation.
+and the host can show its own explanation. The handler's `FailedDocument` says
+when that error document replaced the shown page, with the address from Wry's
+in-flight navigation record; macOS always reports `Kept`.
+
+### Independent Windows controller initialization (2026-10-27)
+
+`with_controller_initialization_hook` configures the retained controller before
+WebView initialization and navigation without changing browser-extension
+options. The separate extension startup gate retains its original admission
+role and runs first when present. Either failure follows owned controller cleanup.
+Zephium applies reputation settings through this hook for extension-disabled
+ordinary, private and agent controllers as well as admitted extension contexts.
+Portable callback tests execute OFF-preserving configuration and gate refusal;
+Windows builder tests cover the actual enablement field. The Windows-only native
+`native_controller_hook_applies_reputation_with_extensions_disabled` fixture
+constructs default/private/agent-shaped controllers with requested extensions OFF,
+verifies actual Settings8 reputation readback, and refuses an inert local extension
+install. An extension-enabled control must install that same fixture successfully.
+The resulting environment has no enablement getter, so this native control
+checks admission in addition to the builder option. It requires
+an unmanaged Windows desktop/WebView2 runtime; native execution remains pending here.
+Native Windows/WebView2 execution remains required; cross-target lint with an empty C-object shim is not
+native SDK or device evidence. The upstream revision and dependency graph are
+unchanged, so the application and standalone fork locks retain their versions.
+
+The required standalone formatter exposed pre-existing WebKit whitespace drift;
+only those formatter changes are normalized. The existing eight-argument
+`attach_handlers` registration boundary carries a scoped, Rust 1.77-compatible
+lint allowance with its retained-owner rationale in a comment. It does not use
+`#[expect]` or lint-reason syntax, which require Rust 1.81. Its signature/behavior
+is unchanged and workspace and standalone Clippy retain `-D warnings`.
+
+### Native class bundle identity compatibility (2026-10-27)
+
+The class-origin gate compares bundle pointers as numeric identities. It uses
+a pointer-to-`usize` cast, preserving that comparison under the inherited Rust
+1.77 manifest floor; `pointer.addr()` requires Rust 1.84. No pointer is recreated
+or dereferenced from the integer, and the admission policy is unchanged.
+The dependency graph and locked upstream versions remain unchanged. Strict
+standalone validation uses the manifest's default MSRV with no lint overrides.

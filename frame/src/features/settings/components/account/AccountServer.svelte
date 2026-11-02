@@ -91,10 +91,10 @@
     margin-block: 8px 34px;
   }
 
-  /* Under the welcome, it sits in the welcome's column. */
-  :global(.settings-view:has(.welcome)) .advanced {
-    max-inline-size: 460px;
-    margin-inline: auto;
+  /* At the foot of the sign-in scene, in the sheet's column. */
+  :global(.account-gate) .advanced {
+    inline-size: min(100%, 400px);
+    margin-block: 0;
     text-align: center;
   }
 
@@ -139,7 +139,7 @@
     box-shadow: var(--shadow-card);
   }
 
-  :global(.settings-view:has(.welcome)) .card {
+  :global(.account-gate) .card {
     text-align: start;
   }
 

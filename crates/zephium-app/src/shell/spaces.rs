@@ -1,6 +1,6 @@
 //! The focused profile's spaces: making, editing, ordering, deleting and
-//! switching them, and moving a tab from one to another. Favorites belong to
-//! the profile and stay put; pinned and open tabs belong to their space.
+//! switching them, and moving a tab from one to another. A space owns its
+//! Essentials, pinned tabs and open tabs alike.
 
 use super::*;
 use crate::SpaceCommand;
@@ -292,6 +292,16 @@ impl Shell {
         mutation_result(native)
     }
 
+    /// `show_space` arriving on `tab`, not on what the space last had in front.
+    pub(super) fn show_space_at(
+        &mut self,
+        space: SpaceId,
+        tab: ItemId,
+    ) -> (Vec<Effect>, Option<ItemId>) {
+        self.space_memory.left_at.insert(space, tab);
+        self.show_space(space)
+    }
+
     /// Also returns the untouched new tab left behind, for the caller to
     /// close once the window shows the new space.
     fn show_space(&mut self, space: SpaceId) -> (Vec<Effect>, Option<ItemId>) {
@@ -310,11 +320,7 @@ impl Shell {
         let blank = active.filter(|id| {
             self.items.get(*id).is_some_and(
                 |item| matches!(item.placement, Placement::Space { space, .. } if space == leaving),
-            ) && self.items.tab(*id).is_some_and(|tab| {
-                tab.url.is_none()
-                    && !tab.loading
-                    && tab.content == zephium_core::item::TabContent::Web
-            }) && self.items.pending_navigation_request(*id).is_none()
+            ) && self.is_untouched_new_tab(*id)
         });
         if let Some(window) = self.windows.focused_mut() {
             window.space = space;
@@ -395,10 +401,15 @@ impl Shell {
                 self.close_in_any_space(blank);
             }
         }
-        for root in self.space_roots(id) {
+        let essentials = self
+            .items
+            .roots(Placement::Favorites { space: id })
+            .to_vec();
+        for root in self.space_roots(id).into_iter().chain(essentials) {
             self.close_in_any_space(root);
         }
         self.recently_closed.retain(|entry| entry.space != id);
+        self.project_recently_closed_if_changed();
         self.spaces.remove(id);
         self.space_memory.left_at.remove(&id);
         self.space_memory.last.retain(|_, space| *space != id);
@@ -416,23 +427,28 @@ impl Shell {
         if !self.owned_space(profile, target) || !self.item_in_focused_scope(tab) {
             return rejected(OperationReason::InvalidScope);
         }
-        let Some(Placement::Space { space, section }) = self.items.get(tab).map(|i| i.placement)
-        else {
+        let Some(placement) = self.items.get(tab).map(|i| i.placement) else {
             return rejected(OperationReason::InvalidScope);
+        };
+        // An Essential stays an Essential, now of the other space.
+        let (space, destination) = match placement {
+            Placement::Space { space, section } => (
+                space,
+                Placement::Space {
+                    space: target,
+                    section,
+                },
+            ),
+            Placement::Favorites { space } => (space, Placement::Favorites { space: target }),
         };
         if space == target {
             return unchanged();
         }
-        let order = self.keyboard_tabs(profile, space);
-        let at = order.iter().position(|id| *id == tab);
-        if !self.items.move_tab_to_root(
-            tab,
-            Placement::Space {
-                space: target,
-                section,
-            },
-            None,
-        ) {
+        let at = self
+            .successor_pool(profile, space)
+            .iter()
+            .position(|id| *id == tab);
+        if !self.items.move_tab_to_root(tab, destination, None) {
             return rejected(OperationReason::InvalidInput);
         }
         let was_active = self.windows.focused().and_then(|w| w.active) == Some(tab);
@@ -451,9 +467,7 @@ impl Shell {
         if was_active {
             self.items.set_lifecycle(tab, Lifecycle::Inactive);
             self.space_memory.left_at.insert(target, tab);
-            if let Some(next) = self.successor(profile, space, at) {
-                effects.extend(self.focus_tab(next));
-            }
+            effects.extend(self.take_over(profile, space, at));
         }
         mutation_result(self.commit(effects))
     }

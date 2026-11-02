@@ -247,6 +247,7 @@ pub(super) fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlit
             PathBuf::from(path)
         })
         .chain(notes)
+        .chain(extension_profile_artifacts(dir, profile)?)
     {
         match std::fs::symlink_metadata(&path) {
             Ok(_) => return Ok(true),
@@ -384,6 +385,40 @@ pub(super) fn harden_registered_profile_files(
         }
     }
     Ok(degraded)
+}
+
+fn validate_directory(path: &Path) -> rusqlite::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_dir()
+                && std::fs::canonicalize(path).ok().as_deref() == Some(path) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(rusqlite::Error::InvalidPath(path.into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+    }
+}
+
+pub(super) fn extension_profile_artifacts(
+    dir: &Path,
+    profile: ProfileId,
+) -> rusqlite::Result<[PathBuf; 3]> {
+    let root = std::fs::canonicalize(dir)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let extensions = root.join("webext");
+    let profiles = extensions.join("profiles");
+    let staging = extensions.join("staging");
+    for path in [&extensions, &profiles, &staging] {
+        validate_directory(path)?;
+    }
+    let registry = profiles.join(format!("{profile}.json"));
+    Ok([
+        registry.clone(),
+        registry.with_extension("json.tmp"),
+        staging.join(profile.to_string()),
+    ])
 }
 
 #[cfg(test)]

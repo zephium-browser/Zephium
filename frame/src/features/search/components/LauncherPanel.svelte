@@ -9,7 +9,7 @@
   import { favicons } from "$domain/favicons";
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import ResultList from "./ResultList.svelte";
-  import LauncherActions, { type LauncherAction } from "./LauncherActions.svelte";
+  import LauncherActions, { ACTIONS_ID, type LauncherAction } from "./LauncherActions.svelte";
   import { launcherDestinations } from "../lib/destinations";
   import {
     createSearchSurface,
@@ -61,8 +61,10 @@
    *  their shadow, so the margin is whatever it left. */
   const WIDTH = 680;
   const FOOTER = 52;
-  /** Mirrors the native ceiling on the launcher window. */
+  /** Mirrors the native ceiling on the launcher window: this, or the work
+   *  area less a margin above and below on a display too short for it. */
   const WINDOW_MAX = 600;
+  const WINDOW_MARGIN = 24;
 
   let input = $state<HTMLInputElement>();
   let list = $state<HTMLElement>();
@@ -70,8 +72,12 @@
   let contentHeight = $state(0);
   let windowWidth = $state(0);
   let windowHeight = $state(0);
+  /** The display's usable height. The window is placed before it moves there,
+   *  so this is re-read whenever the window is resized or presented. */
+  let workHeight = $state(screen.availHeight);
   let menu = $state(false);
   let menuHeight = $state(0);
+  let menuItem = $state<string>();
   let commandHeld = $state(false);
   /** The launcher is arriving; its content settles in with the glass. */
   let entering = $state(false);
@@ -86,14 +92,22 @@
   let inset = $derived(detached ? Math.max(0, (windowWidth - WIDTH) / 2) : 0);
   let gap = $derived(detached ? GAP : 0);
   let nativeClip = $derived(IS_WINDOWS && !detached);
+  let ceiling = $derived(Math.max(1, Math.min(WINDOW_MAX, workHeight - 2 * WINDOW_MARGIN)));
   let sheetMax = $derived(
-    Math.max(0, (nativeClip ? windowHeight : WINDOW_MAX) - 2 * inset - FIELD - gap),
+    Math.max(0, (nativeClip ? windowHeight : ceiling) - 2 * inset - FIELD - gap),
   );
   let sheetHeight = $derived(
     Math.min(sheetMax, Math.max(contentHeight + FOOTER, menu ? menuHeight + FOOTER + 8 : 0)),
   );
 
   let home = $derived(!surface.query.trim());
+  let announcement = $derived(
+    surface.empty
+      ? m.panel_no_results()
+      : !home && !surface.pending && surface.rows.length
+        ? m.launcher_results_count({ count: surface.rows.length })
+        : "",
+  );
   let row = $derived(surface.selectedRow);
   let primary = $derived(primaryLabel(row));
   let lead = $derived.by(() => {
@@ -168,13 +182,13 @@
         if (bound === next.session_id) return;
         bound = next.session_id;
         menu = false;
+        workHeight = screen.availHeight;
         entering = !IS_WINDOWS;
         clearTimeout(arrival);
         if (entering) arrival = setTimeout(() => (entering = false), ARRIVAL_MS);
-        surface.begin(next);
         // Editing a page's address opens on that address, selected, so typing
         // replaces it and Return goes back to it.
-        if (next.seed) surface.seed(next.seed);
+        surface.begin(next);
         input?.focus();
         input?.select();
       } else if (bound !== null) {
@@ -249,7 +263,10 @@
 
   function keydown(event: KeyboardEvent) {
     commandHeld = IS_MAC ? event.metaKey : event.ctrlKey;
-    if (event.defaultPrevented || surface.composing || event.isComposing) return;
+    // WebKit ends a composition before the keydown that committed it, with
+    // isComposing already false; that key still reports the IME's 229.
+    if (event.defaultPrevented || surface.composing || event.isComposing || event.keyCode === 229)
+      return;
     const mod = IS_MAC ? event.metaKey : event.ctrlKey;
     const key = event.key.toLowerCase();
     if (mod && key === "k") {
@@ -257,6 +274,7 @@
       menu = !menu && actions.length > 0;
       return;
     }
+    const menuOpen = menu;
     if (menu) {
       // The sheet owns navigation while it is open; anything else puts it
       // away and falls through to the field.
@@ -268,6 +286,13 @@
       if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter") return;
       menu = false;
     }
+    // Like Spotlight, Tab does not take the keyboard out of the field.
+    if (event.key === "Tab" && !menuOpen && event.target === input) {
+      event.preventDefault();
+      return;
+    }
+    // A focused button activates itself instead of running the field's row.
+    if (event.key === "Enter" && event.target instanceof HTMLButtonElement) return;
     const numbered = mod && !event.shiftKey && !event.altKey ? Number(key) : NaN;
     if (numbered >= 1 && numbered <= destinations.length) {
       event.preventDefault();
@@ -319,6 +344,7 @@
 <svelte:window
   bind:innerWidth={windowWidth}
   bind:innerHeight={windowHeight}
+  onresize={() => (workHeight = screen.availHeight)}
   onkeydown={keydown}
   onkeyup={(event) => (commandHeld = IS_MAC ? event.metaKey : event.ctrlKey)}
 />
@@ -331,6 +357,9 @@
   class:entering
   onpointerdown={(event) => {
     if (event.target === event.currentTarget) onDismiss();
+    // A press anywhere but the field itself leaves the caret in it.
+    else if (event.pointerType !== "touch" && !(event.target as Element).closest("input"))
+      event.preventDefault();
   }}
   data-layout={detached ? "detached" : "fused"}
   data-native-clip={nativeClip}
@@ -351,18 +380,25 @@
       maxlength={2048}
       autocomplete="off"
       autocapitalize="off"
+      autocorrect="off"
       spellcheck={false}
       placeholder={m.panel_search_placeholder()}
       aria-label={m.panel_search_placeholder()}
       role="combobox"
-      aria-controls="launcher-results"
-      aria-expanded={surface.rows.length > 0}
+      aria-haspopup={menu ? "menu" : "listbox"}
+      aria-controls={menu ? ACTIONS_ID : "launcher-results"}
+      aria-expanded={menu || surface.rows.length > 0}
       aria-autocomplete="both"
-      aria-activedescendant={surface.selectedIndex >= 0
-        ? `launcher-results-option-${surface.selectedIndex}`
-        : undefined}
+      aria-activedescendant={menu
+        ? menuItem
+        : surface.selectedIndex >= 0
+          ? `launcher-results-option-${surface.selectedIndex}`
+          : undefined}
     />
   </div>
+  <!-- Rows arrive without the focus moving to them, so a screen reader hears
+       what came back from here. Quiet at home, where nothing was asked. -->
+  <div class="sr-only" role="status">{announcement}</div>
 
   <div class="sheet" style:height={`${sheetHeight}px`} style:margin-top={`${gap}px`}>
     <div class="scroll" style:max-height={`${Math.max(0, sheetMax - FOOTER)}px`}>
@@ -431,6 +467,7 @@
     {#if menu}<LauncherActions
         {actions}
         bind:height={menuHeight}
+        onhighlight={(id) => (menuItem = id)}
         onrun={runAction}
         onclose={() => (menu = false)}
       />{/if}

@@ -786,6 +786,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
@@ -1566,8 +1567,10 @@ struct AgentSettlementFixture {
 }
 impl AgentSettlementFixture {
     fn new() -> Self {
+        Self::with_pricing(Hub::in_memory().unwrap(), false)
+    }
+    fn with_pricing(mut hub: Hub, no_usage_charge: bool) -> Self {
         use zephium_core::work::search::*;
-        let mut hub = Hub::in_memory().unwrap();
         hub.save(&session()).unwrap();
         let work = create(&mut hub);
         let WorkReply::AgentAdmitted {
@@ -1583,10 +1586,26 @@ impl AgentSettlementFixture {
                     command: 100.into(),
                     intent: WorkRuntimeIntent::BeginAgent {
                         grant: WorkAgentGrantV1 {
+                            no_usage_charge,
                             draft: None,
-                            lead: None,
-                            provider: WorkSearchProvider::OpenAi,
-                            model: PUBLIC_SEARCH_MODEL.into(),
+                            lead: no_usage_charge.then(|| {
+                                zephium_core::work::model::WorkModelRef {
+                                    provider:
+                                        zephium_core::work::model::WorkModelProvider::Compatible,
+                                    wire: zephium_core::work::model::WorkModelWire::ChatCompletions,
+                                    model: "local-fixture".into(),
+                                }
+                            }),
+                            provider: if no_usage_charge {
+                                WorkSearchProvider::Browser
+                            } else {
+                                WorkSearchProvider::OpenAi
+                            },
+                            model: if no_usage_charge {
+                                "duckduckgo".into()
+                            } else {
+                                PUBLIC_SEARCH_MODEL.into()
+                            },
                             max_turns: 8,
                             max_steps: 24,
                             browse_hops: 4,
@@ -1975,6 +1994,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -2626,4 +2646,99 @@ fn image_disclosure_mark_refuses_wrong_attempt_execution_profile_and_non_read() 
         .steps
         .iter()
         .all(|step| step.measurements.is_none()));
+}
+
+#[test]
+fn local_pricing_fact_survives_stop_missing_usage_abandonment_and_restart() {
+    for local in [false, true] {
+        for finish in ["cancel", "missing", "abandon", "restart"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut f = AgentSettlementFixture::with_pricing(
+                Hub::open(directory.path().into()).unwrap(),
+                local,
+            );
+            f.step(
+                1,
+                WorkStepKindV1::Search {
+                    query: "fixture".into(),
+                },
+                WorkStepStatus::Running,
+                vec![],
+            )
+            .unwrap();
+            match finish {
+                "abandon" => f.abandon(),
+                "missing" => {
+                    f.update(WorkRuntimeUpdate::Settle {
+                        execution: f.execution,
+                        attempt: f.attempt,
+                        status: WorkAttemptStatus::Failed,
+                        usage: None,
+                        artifacts: vec![],
+                        intervention: None,
+                    })
+                    .unwrap();
+                }
+                operation => {
+                    if operation == "restart" {
+                        drop(std::mem::replace(&mut f.hub, Hub::in_memory().unwrap()));
+                        f.hub = Hub::open(directory.path().into()).unwrap();
+                    }
+                    let state = read_runtime(&mut f.hub, &f.work);
+                    f.hub
+                        .work_document(
+                            f.work.profile,
+                            WorkRequest::RuntimeCommand {
+                                id: f.work.id,
+                                expected: state.work.revision,
+                                command: WorkCommandId::generate(),
+                                intent: if operation == "restart" {
+                                    WorkRuntimeIntent::AcknowledgeInterruption {
+                                        execution: f.execution,
+                                    }
+                                } else {
+                                    WorkRuntimeIntent::Cancel {
+                                        execution: f.execution,
+                                        intervention: None,
+                                    }
+                                },
+                            },
+                        )
+                        .unwrap();
+                }
+            }
+            let fact = f.fact();
+            let decoded: WorkExecutionFact =
+                serde_json::from_str(&serde_json::to_string(&fact).unwrap()).unwrap();
+            assert_eq!(
+                decoded.agent_grant().unwrap().no_usage_charge,
+                local,
+                "{finish}"
+            );
+            assert!(fact.status.terminal(), "{finish}");
+            if local {
+                let usage = fact.attempts[0].usage.expect(finish);
+                assert_eq!(usage.cost_micro_usd, 0, "{finish}");
+                assert_eq!(
+                    usage.model_tokens, fact.spec.limits.model_tokens,
+                    "{finish}"
+                );
+                assert_eq!(usage.operations, fact.spec.limits.operations, "{finish}");
+                assert_eq!(
+                    usage.accounting,
+                    WorkUsageAccounting::ConservativeReservation
+                );
+            } else if finish == "missing" {
+                assert_eq!(
+                    fact.attempts[0].usage.unwrap().cost_micro_usd,
+                    fact.spec.limits.cost_micro_usd
+                );
+            } else {
+                assert!(
+                    fact.attempts[0].usage.is_none(),
+                    "paid unknown reservations remain unknown: {finish}"
+                );
+            }
+        }
+    }
 }

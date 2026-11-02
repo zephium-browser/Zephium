@@ -34,6 +34,7 @@ style.textContent = primitives + tokens.replace("@theme static", ":root") + brow
 document.head.append(style);
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
 });
@@ -63,6 +64,7 @@ function serve(all: HistoryVisitView[]) {
       removed = all.map((entry) => entry.url);
       return { kind: "removed", count: all.length } satisfies HistoryResponse;
     }
+    if (call.kind !== "page") return { kind: "error", error: "invalid" } satisfies HistoryResponse;
     const needle = call.query.toLowerCase();
     const window = { hour: 3600, day: 24 * 3600, week: 7 * 24 * 3600, everything: null }[
       call.range
@@ -82,8 +84,16 @@ function serve(all: HistoryVisitView[]) {
   });
 }
 
-test("groups visits under the day they happened", async () => {
-  serve([visit("Rust Book", 60), visit("Release Notes", 2 * 60), visit("Old Article", DAY + 3600)]);
+test.each([0, 12, 23])("groups visits under the day they happened at %i:30", async (hour) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 9, 28, hour, 30));
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  serve([
+    visit("Rust Book", 60),
+    visit("Release Notes", 2 * 60),
+    visit("Old Article", (Date.now() - yesterday.getTime()) / 1000),
+  ]);
   render(HistoryPage);
 
   await expect.element(page.getByText("Rust Book")).toBeVisible();

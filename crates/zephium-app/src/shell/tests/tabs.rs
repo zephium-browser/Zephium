@@ -66,15 +66,22 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
     let (mut shell, engine, screen) = setup_with(store.clone());
     shell.handle(Command::Bootstrap);
     let closed = active_id(&screen);
+    let closed_profile = shell.profile_of_item(closed).unwrap();
+    store.zoom_saved.lock().unwrap().insert(
+        closed_profile,
+        vec![zephium_core::zoom::SavedLevel {
+            site: "restore.example".into(),
+            percent: 125,
+            set_at: 1,
+        }],
+    );
     navigate_and_commit(&mut shell, closed, "restore.example/path");
     shell.items.set_title(closed, "Restorable title".into());
-    shell.items.set_zoom(closed, 1.25);
-
     shell.handle(Command::Close(closed));
     assert_eq!(shell.recently_closed.len(), 1);
     let profile = shell.windows.focused().unwrap().profile;
     let (restored, native) = shell
-        .restore_recently_closed_tab(profile)
+        .restore_recently_closed_tab(profile, None)
         .expect("recent tab must restore in its original focused space");
     assert_ne!(restored, closed);
     assert!(!native.rejected);
@@ -85,7 +92,9 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
         Some("https://restore.example/path")
     );
     assert_eq!(tab.title, "Restorable title");
-    assert_eq!(tab.zoom, 1.25);
+    // The page comes back at what its site shows, not what the tab held.
+    assert_eq!(engine.last_zoom_request().0, restored);
+    assert_eq!(engine.last_zoom_request().1, 1.25);
     assert!(engine.calls().iter().any(|call| {
         call == &format!("create {restored} https://restore.example/path [default]")
     }));
@@ -108,7 +117,7 @@ fn legacy_closed_tab_without_identity_still_reopens() {
     shell.recently_closed[0].session_id = None;
     shell.recently_closed[0].closed_at_ms = None;
 
-    assert!(shell.restore_recently_closed_tab(profile).is_some());
+    assert!(shell.restore_recently_closed_tab(profile, None).is_some());
 }
 
 #[test]
@@ -549,19 +558,21 @@ fn native_download_cleanup_survives_a_space_switch() {
 fn closing_an_essential_ends_its_page_and_keeps_it_in_place() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     let site = |url: &str| crate::ImportedSite {
         url: url.into(),
         title: url.into(),
     };
+    let destination = shell.import_destination().unwrap();
     shell.handle(Command::Import {
+        destination,
         work: Box::new(crate::ImportWork::Essentials(vec![
             site("https://mail.example/"),
             site("https://board.example/"),
         ])),
         done: crate::ImportCompletion::new(|_| {}),
     });
-    let kept = |shell: &Shell| shell.items.roots(Placement::Favorites { profile }).to_vec();
+    let kept = |shell: &Shell| shell.items.roots(Placement::Favorites { space }).to_vec();
     let mail = kept(&shell)[0];
     shell.handle(Command::Activate(mail));
     assert!(shell.items.tab(mail).unwrap().has_view());
@@ -853,4 +864,308 @@ fn a_tab_opened_in_front_is_shown_after_its_source() {
         .expect("a tab in front");
     assert_eq!(today_of(&shell, space), [first, opened, second]);
     assert_eq!(shell.windows.focused().unwrap().active, Some(opened));
+}
+
+fn focused_scope(shell: &Shell) -> (ProfileId, SpaceId) {
+    let window = shell.windows.focused().unwrap();
+    (window.profile, window.space)
+}
+
+/// Opens a loaded Today tab and leaves it in front.
+fn open_page(shell: &mut Shell, screen: &Screen, address: &str) -> ItemId {
+    shell.handle(Command::Open);
+    let id = active_id(screen);
+    navigate_and_commit(shell, id, address);
+    id
+}
+
+fn make_essential(shell: &mut Shell, id: ItemId) {
+    shell.handle(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+}
+
+fn pin(shell: &mut Shell, id: ItemId) {
+    let (_, space) = focused_scope(shell);
+    assert!(shell.items.move_tab_to_root(
+        id,
+        Placement::Space {
+            space,
+            section: SpaceSection::Pinned,
+        },
+        None,
+    ));
+}
+
+#[test]
+fn closing_the_last_open_tab_opens_a_new_tab_in_the_same_space() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let only = active_id(&screen);
+    navigate_and_commit(&mut shell, only, "only.example");
+
+    shell.handle(Command::Close(only));
+
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, only);
+    assert_eq!(today_of(&shell, space), vec![fresh]);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+    assert_eq!(shell.windows.focused().unwrap().space, space);
+}
+
+#[test]
+fn closing_never_hands_the_window_to_an_essential_or_a_pinned_tab() {
+    for preference in ["next", "previous", "recent"] {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        shell.operation_set_app_setting("tabs.after-close".into(), preference.into());
+        let (_, space) = focused_scope(&shell);
+        let first = active_id(&screen);
+        navigate_and_commit(&mut shell, first, "first.example");
+        let essential = open_page(&mut shell, &screen, "essential.example");
+        make_essential(&mut shell, essential);
+        let pinned = open_page(&mut shell, &screen, "pinned.example");
+        pin(&mut shell, pinned);
+        let last = open_page(&mut shell, &screen, "last.example");
+
+        shell.handle(Command::Close(last));
+        assert_eq!(active_id(&screen), first, "{preference}");
+        shell.handle(Command::Close(first));
+
+        let fresh = active_id(&screen);
+        assert_ne!(fresh, essential, "{preference}");
+        assert_ne!(fresh, pinned, "{preference}");
+        assert_eq!(today_of(&shell, space), vec![fresh], "{preference}");
+        assert!(
+            shell.items.tab(fresh).unwrap().url.is_none(),
+            "{preference}"
+        );
+        assert!(shell.items.tab(pinned).is_some());
+    }
+}
+
+#[test]
+fn previously_active_mode_does_not_loop_back_through_the_essentials() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.operation_set_app_setting("tabs.after-close".into(), "recent".into());
+    let (_, space) = focused_scope(&shell);
+    let home = active_id(&screen);
+    navigate_and_commit(&mut shell, home, "home.example");
+    let essential = open_page(&mut shell, &screen, "mail.example");
+    make_essential(&mut shell, essential);
+    let a = open_page(&mut shell, &screen, "a.example");
+    let b = open_page(&mut shell, &screen, "b.example");
+    shell.handle(Command::Activate(essential));
+    shell.handle(Command::Activate(b));
+    let essentials = shell.items.roots(Placement::Favorites { space }).to_vec();
+
+    for closing in [b, a, home] {
+        shell.handle(Command::Close(closing));
+        let front = active_id(&screen);
+        assert!(!essentials.contains(&front));
+        assert!(today_of(&shell, space).contains(&front));
+    }
+    let remaining = today_of(&shell, space);
+    assert_eq!(remaining.len(), 1);
+    assert!(shell.items.tab(remaining[0]).unwrap().url.is_none());
+    assert_eq!(shell.items.roots(Placement::Favorites { space }).len(), 1);
+}
+
+#[test]
+fn closing_the_front_essential_or_pinned_tab_follows_the_open_tabs() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    let second = open_page(&mut shell, &screen, "second.example");
+    let essential = open_page(&mut shell, &screen, "essential.example");
+    make_essential(&mut shell, essential);
+    let pinned = open_page(&mut shell, &screen, "pinned.example");
+    pin(&mut shell, pinned);
+
+    shell.handle(Command::Activate(essential));
+    shell.handle(Command::Close(essential));
+    assert_eq!(
+        active_id(&screen),
+        first,
+        "the first open tab, not the next essential"
+    );
+
+    shell.handle(Command::Activate(pinned));
+    shell.handle(Command::Close(pinned));
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(today_of(&shell, space), vec![first, second]);
+}
+
+#[test]
+fn closing_the_front_essential_with_no_open_tab_opens_a_new_tab_and_keeps_the_essential() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let blank = active_id(&screen);
+    navigate_and_commit(&mut shell, blank, "mail.example/inbox");
+    make_essential(&mut shell, blank);
+    assert!(today_of(&shell, space).is_empty());
+
+    shell.handle(Command::Close(blank));
+
+    let fresh = active_id(&screen);
+    assert_eq!(today_of(&shell, space), vec![fresh]);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+    let kept = shell.items.roots(Placement::Favorites { space }).to_vec();
+    assert_eq!(kept.len(), 1);
+    assert!(!shell.items.tab(kept[0]).unwrap().has_view());
+}
+
+#[test]
+fn closing_a_tab_behind_the_front_one_opens_nothing() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let essential = active_id(&screen);
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    make_essential(&mut shell, essential);
+    let behind = open_page(&mut shell, &screen, "behind.example");
+    shell.handle(Command::Activate(essential));
+
+    shell.handle(Command::Close(behind));
+
+    assert_eq!(active_id(&screen), essential);
+    assert!(today_of(&shell, space).is_empty());
+}
+
+#[test]
+fn closing_the_only_new_tab_changes_nothing() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let only = active_id(&screen);
+    engine.calls.lock().unwrap().clear();
+
+    shell.handle(Command::Close(only));
+    let disposition = shell.handle_operation(Command::Close(only));
+
+    assert_eq!(disposition.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), only);
+    assert_eq!(today_of(&shell, space), vec![only]);
+    assert!(engine.calls().iter().all(|call| !call.starts_with("close")));
+    let keyboard = shell.handle_operation(Command::Run("tab.close".into()));
+    assert_eq!(keyboard.outcome, OperationOutcome::NoOp);
+    assert_eq!(today_of(&shell, space), vec![only]);
+}
+
+#[test]
+fn the_only_tab_whose_first_page_failed_closes_into_a_new_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let failed = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: failed,
+        input: "localhost:9".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed {
+        id: failed,
+    }));
+    assert!(shell.items.tab(failed).unwrap().failure.is_some());
+
+    let disposition = shell.handle_operation(Command::Close(failed));
+
+    assert_ne!(disposition.outcome, OperationOutcome::NoOp);
+    let replacement = active_id(&screen);
+    assert_ne!(replacement, failed);
+    assert_eq!(today_of(&shell, space), vec![replacement]);
+}
+
+#[test]
+fn the_only_new_tab_is_kept_beside_essentials_but_a_typed_one_is_replaced() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, space) = focused_scope(&shell);
+    let essential = active_id(&screen);
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    make_essential(&mut shell, essential);
+    shell.handle(Command::Open);
+    let blank = active_id(&screen);
+
+    shell.handle(Command::Close(blank));
+    assert_eq!(today_of(&shell, space), vec![blank]);
+    assert_eq!(active_id(&screen), blank);
+
+    shell.handle(Command::Navigate {
+        id: blank,
+        input: "typed.example".into(),
+    });
+    shell.handle(Command::Close(blank));
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, blank);
+    assert_eq!(today_of(&shell, space), vec![fresh]);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+}
+
+#[test]
+fn moving_the_front_tab_out_of_its_space_leaves_a_new_tab_behind() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let (_, home) = focused_scope(&shell);
+    let only = active_id(&screen);
+    navigate_and_commit(&mut shell, only, "only.example");
+    shell.handle(Command::Space(Box::new(crate::SpaceCommand::Create {
+        name: "Other".into(),
+        look: Default::default(),
+    })));
+    let other = focused_scope(&shell).1;
+    shell.handle(Command::Space(Box::new(crate::SpaceCommand::Switch(home))));
+    assert_eq!(active_id(&screen), only);
+
+    shell.handle(Command::Space(Box::new(crate::SpaceCommand::MoveTab {
+        tab: only,
+        space: other,
+    })));
+
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, only);
+    assert_eq!(focused_scope(&shell).1, home);
+    assert_eq!(today_of(&shell, home), vec![fresh]);
+    assert!(shell.items.tab(fresh).unwrap().url.is_none());
+}
+
+#[test]
+fn closing_the_last_private_tab_still_ends_the_private_session() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let regular = active_id(&screen);
+    let regular_profile = focused_scope(&shell).0;
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let private_profile = focused_scope(&shell).0;
+    assert!(shell.incognito_profile(private_profile));
+    let lone = active_id(&screen);
+    assert!(shell.items.tab(lone).unwrap().url.is_none());
+
+    let closed = shell.handle_operation(Command::Close(lone));
+
+    assert_ne!(closed.outcome, OperationOutcome::NoOp);
+    assert_eq!(focused_scope(&shell).0, regular_profile);
+    assert_eq!(active_id(&screen), regular);
+    assert_eq!(engine.erasure_requests(), vec![private_profile]);
+}
+
+#[test]
+fn closing_one_private_tab_hands_over_to_another() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+
+    shell.handle(Command::Close(second));
+
+    assert_eq!(active_id(&screen), first);
+    assert!(shell.incognito_profile(focused_scope(&shell).0));
 }

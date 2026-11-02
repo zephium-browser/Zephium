@@ -70,35 +70,11 @@ impl Shell {
     fn archive_tab(&mut self, id: ItemId, now: u64) {
         // Closing in the focused space records the tab itself.
         let record = (!self.item_in_focused_scope(id))
-            .then(|| self.closed_record(id, now))
+            .then(|| self.closed_record(id, Some(now)))
             .flatten();
         self.close_in_any_space(id);
         if let Some(record) = record {
-            if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
-                self.recently_closed.remove(0);
-            }
-            self.recently_closed.push(record);
+            self.remember_closed(record);
         }
-    }
-
-    fn closed_record(
-        &self,
-        id: ItemId,
-        now: u64,
-    ) -> Option<zephium_core::session::PersistedClosedTab> {
-        let item = self.items.get(id)?;
-        let Placement::Space { space, .. } = item.placement else {
-            return None;
-        };
-        let tab = item.tab()?;
-        Some(zephium_core::session::PersistedClosedTab {
-            profile: self.spaces.get(space)?.profile,
-            space,
-            url: tab.url.as_ref()?.to_string(),
-            title: tab.title.clone(),
-            zoom: tab.zoom,
-            session_id: Some(zephium_core::ids::ClosedSessionId::generate()),
-            closed_at_ms: Some(now),
-        })
     }
 }

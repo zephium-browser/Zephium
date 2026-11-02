@@ -42,3 +42,14 @@ describe("layout", () => {
     expect(layout(1200, 300, FULL).mark.y).toBeGreaterThanOrEqual(82);
   });
 });
+
+it("removes the wordmark's height and clock gap and leaves the controls where they were", () => {
+  const normal = layout(1200, 800, FULL);
+  const hidden = layout(1200, 800, { ...FULL, wordmark: false });
+  expect(hidden.mark.h).toBe(0);
+  expect(hidden.when).toBe(hidden.mark.y);
+  expect(hidden.when).toBeLessThan(normal.when!);
+  expect(hidden.controls).toEqual(normal.controls);
+  expect(hidden.notch).toEqual(normal.notch);
+  expect(layout(1200, 800, { ...FULL, wordmark: false, clock: false }).when).toBeNull();
+});

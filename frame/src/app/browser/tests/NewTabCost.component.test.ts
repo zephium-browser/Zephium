@@ -86,6 +86,22 @@ test.skipIf(!mode)(
     await rest(2000);
     const after = await commands.webkitFootprint();
 
+    // Warm new-tab opens: committed DOM and the next paint opportunity.
+    await screen.unmount();
+    const opening: number[] = [];
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const started = performance.now();
+      const opened = await render(NewTab, {
+        search: createRawSnippet(() => ({ render: () => '<div class="dock"></div>' })),
+        oncustomize: () => {},
+      });
+      opened.container.style.cssText = "inline-size:1512px;block-size:945px";
+      await frame();
+      opening.push(performance.now() - started);
+      await opened.unmount();
+    }
+    opening.sort((a, b) => a - b);
+
     await commands.writeFile(
       `./node_modules/.cache/newtab-cost-${mode}.json`,
       JSON.stringify(
@@ -95,6 +111,7 @@ test.skipIf(!mode)(
           after: after.processes,
           resizeFrameMs: { median: frames[30], p90: frames[54], max: frames[59] },
           idle,
+          openingMs: { median: opening[15], p90: opening[27], max: opening[29] },
         },
         null,
         1,

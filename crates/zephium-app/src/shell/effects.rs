@@ -72,6 +72,8 @@ impl Shell {
         native.record(self.relayout());
         self.maintain_views();
         self.project_items();
+        self.project_private_if_changed();
+        self.project_recently_closed_if_changed();
         self.project_browser_page_if_changed();
         native
     }
@@ -143,12 +145,11 @@ impl Shell {
                 Effect::CreateView { id, url } => {
                     let profile = self.profile_of_item(id);
                     if profile.is_some_and(|profile| extension_surfaces.failed(profile)) {
-                        crate::diagnostic!("view-create: extension surface publication unsettled");
-                        self.zoom.pending.remove(&id);
-                        self.items.view_creation_failed(id);
-                        rejected_creates.insert(id);
-                        native.rejected = true;
-                        continue;
+                        // Extensions lose sight of this tab until the next
+                        // publication; the page itself must still open.
+                        crate::diagnostic!(
+                            "view-create: extension surface unsettled; opening without it"
+                        );
                     }
                     if logical_residents >= LIVE_VIEW_ABSOLUTE_LIMIT {
                         crate::diagnostic!(
@@ -182,21 +183,23 @@ impl Shell {
                         continue;
                     }
                     self.record_view_creation(id);
+                    self.restore_tab_mute(id);
                     logical_residents += 1;
                     native.scheduled = true;
-                    // restored or revived views keep their zoom
-                    let zoom = self.items.tab(id).map(|t| t.zoom).unwrap_or(1.0);
+                    // A newly constructed view starts at 1.0. Do not keep or
+                    // later persist the scale its tab last had, and bring the
+                    // view to what its site shows.
+                    let stale = self.items.tab(id).is_some_and(|tab| tab.zoom != 1.0);
+                    if stale {
+                        self.items.set_zoom(id, 1.0);
+                        self.schedule_persist();
+                    }
+                    let zoom = self.new_view_zoom(id, &url);
                     if zoom != 1.0 {
-                        let admission = self.request_zoom(id, zoom);
-                        native.record(admission);
-                        if admission != NativeDispatch::Scheduled {
-                            // A newly constructed view starts at 1.0. If its
-                            // restore request never reached the native queue,
-                            // do not retain or later persist the stale scale.
-                            self.items.set_zoom(id, 1.0);
-                            self.schedule_persist();
-                            self.project_tab(id);
-                        }
+                        native.record(self.request_zoom(id, zoom, ZoomOrigin::Site));
+                    }
+                    if stale {
+                        self.project_tab(id);
                     }
                 }
                 Effect::Navigate { id, url, request } => {

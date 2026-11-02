@@ -1,0 +1,116 @@
+name: Publish stable draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable stable draft tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify exact candidate and publish
+    concurrency:
+      group: stable-latest-publication
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require a stable annotated draft candidate
+        run: |
+          set -euo pipefail
+          [[ "${TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$(git cat-file -t "refs/tags/${TAG}")" == tag ]]
+          gh release view "${TAG}" --json isDraft --jq '.isDraft' | grep -qx true
+          echo "CANDIDATE=$(git rev-parse HEAD)" >> "${GITHUB_ENV}"
+          mkdir dist
+          gh release download "${TAG}" --dir dist
+
+      - name: Require the exact candidate's main CI and complete release workflow
+        run: |
+          set -euo pipefail
+          for workflow in ci.yml release.yml; do
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?head_sha=${CANDIDATE}&per_page=100" \
+              | jq -e --arg sha "${CANDIDATE}" --arg workflow "${workflow}" --arg tag "${TAG}" '
+                [.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success") |
+                  select(($workflow == "ci.yml" and .head_branch == "main" and .event == "push") or
+                    ($workflow == "release.yml" and .head_branch == $tag and
+                      (.event == "push" or .event == "workflow_dispatch")))] | length > 0'
+          done
+
+      - name: Verify final asset provenance
+        run: |
+          set -euo pipefail
+          for asset in Zephium-macOS-arm64.dmg Zephium-macOS-arm64.app.tar.gz Zephium-Windows-x64-setup.exe; do
+            gh attestation verify "dist/${asset}" --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-digest "${CANDIDATE}"
+          done
+
+      - name: Publish the verified draft
+        run: |
+          set -euo pipefail
+          response="${RUNNER_TEMP}/latest-stable-response"
+          api_status=0
+          gh api --include "repos/${GITHUB_REPOSITORY}/releases/latest" > "${response}" || api_status=$?
+          latest="$(python3 - "${TAG}" "${response}" "${api_status}" <<'PYTHON'
+          import json, re, sys
+          from pathlib import Path
+
+          def stable(value):
+              match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)
+              if match is None:
+                  raise SystemExit("A canonical stable tag is required; refusing to guess latest ordering.")
+              return tuple(map(int, match.groups()))
+
+          def published(value):
+              match = re.fullmatch(
+                  r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+                  r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+                  r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", value)
+              if match is None or (match[4] is not None and any(
+                  part.isdigit() and len(part) > 1 and part.startswith("0")
+                  for part in match[4].split(".")
+              )):
+                  raise SystemExit("Latest release tag is not valid semver; refusing to guess latest ordering.")
+              return tuple(map(int, match.groups()[:3])), match[4] is None
+
+          candidate = stable(sys.argv[1])
+          response = Path(sys.argv[2]).read_text().replace("\r\n", "\n")
+          headers, separator, body = response.partition("\n\n")
+          status = re.match(r"HTTP/[0-9.]+ ([0-9]{3})(?:[ \t].*)?(?:\n|$)", headers)
+          if not separator or status is None:
+              raise SystemExit("Latest release lookup did not return a valid HTTP response.")
+          if status[1] == "404":
+              promote = True
+          elif status[1] == "200" and sys.argv[3] == "0":
+              release = json.loads(body)
+              if release.get("draft") is not False or release.get("prerelease") is not False:
+                  raise SystemExit("Latest release is not a published stable candidate.")
+              promote = (candidate, True) > published(release["tag_name"])
+          else:
+              raise SystemExit("Latest release lookup failed; refusing publication.")
+          print(str(promote).lower())
+          PYTHON
+          )"
+          gh release edit "${TAG}" --draft=false --prerelease=false --latest="${latest}"

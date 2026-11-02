@@ -14,6 +14,17 @@ import {
 import { entry, models } from "$shared/testing/work-models";
 
 describe("the picker's list", () => {
+  test("a provider listing cannot promote a catalog model into another role", () => {
+    const known = entry("google", "gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite", true, [
+      "page",
+      "light",
+    ]);
+    const view = { ...models({ keys: { google: "valid" } }), entries: [known] };
+    const listed: WorkModelEntry[] = [{ ...known, roles: ["lead", "page", "light"] }];
+    expect(pickerGroups(view, "lead", listed).ready).toEqual([]);
+    expect(pickerGroups(view, "page", listed).ready[0]!.entries).toEqual([known]);
+    expect(pickerGroups(view, "light", listed).ready[0]!.entries).toEqual([known]);
+  });
   test("groups the curated models of usable providers, recommended first, hosted first", () => {
     const view = models({
       keys: { anthropic: "valid", open_ai: "set", google: "invalid" },

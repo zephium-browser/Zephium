@@ -331,6 +331,32 @@ fn blocks(need: &WorkPartNeedV1) -> bool {
     )
 }
 
+#[derive(Debug, PartialEq)]
+enum BrowseWords<'a> {
+    None,
+    Text(&'a str),
+    Draft(&'a str),
+}
+
+fn browse_words<'a>(name: &str, arguments: &'a Value) -> Result<BrowseWords<'a>, String> {
+    if name != "browse" {
+        return Ok(BrowseWords::None);
+    }
+    // Models fill every optional property of a non-strict schema, often with "".
+    let given = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|words| !words.trim().is_empty())
+    };
+    match (given("draft"), given("text")) {
+        (Some(_), Some(_)) => Err("give draft or text, not both".into()),
+        (Some(id), None) => Ok(BrowseWords::Draft(id)),
+        (None, Some(text)) => Ok(BrowseWords::Text(text)),
+        (None, None) => Ok(BrowseWords::None),
+    }
+}
+
 /// A goal about what anyone sees on a service's site (its pricing, plans,
 /// features or docs), not the person's own workspace there: it reads the
 /// public site, and the person's connection is no way in to it.
@@ -446,16 +472,9 @@ where
     /// A browse that names a canvas draft carries its words, as the person
     /// last left them, as the exact text the page types.
     async fn with_draft(&self, name: &str, arguments: &Value) -> Result<Value, String> {
-        let Some(id) = arguments
-            .get("draft")
-            .and_then(Value::as_str)
-            .filter(|_| name == "browse")
-        else {
-            if let Some(text) = arguments
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|_| name == "browse")
-            {
+        let id = match browse_words(name, arguments)? {
+            BrowseWords::None => return Ok(arguments.clone()),
+            BrowseWords::Text(text) => {
                 let projection = self.run.probe.runtime_projection().await.ok();
                 let earlier = projection.iter().flat_map(|projection| {
                     projection
@@ -469,12 +488,10 @@ where
                 ) {
                     return Err("text is only the person's own words, copied character for character from their request; these words are not in it. Copy them exactly, or use draft for a draft on the canvas.".into());
                 }
+                return Ok(arguments.clone());
             }
-            return Ok(arguments.clone());
+            BrowseWords::Draft(id) => id,
         };
-        if arguments.get("text").is_some() {
-            return Err("give draft or text, not both".into());
-        }
         let projection = self
             .run
             .probe
@@ -2800,6 +2817,39 @@ mod tests {
         ));
         assert!(!person_wrote("Hi Ana, the release is ready.", [request]));
         assert!(!person_wrote("  ", [request]));
+    }
+
+    #[test]
+    fn a_browse_takes_a_draft_or_text_and_blank_ones_are_not_given() {
+        let browse = |draft: &str, text: &str| {
+            serde_json::json!({
+                "start": "https://outlook.office.com/mail/",
+                "goal": "List unread messages",
+                "draft": draft,
+                "text": text,
+                "mine": true
+            })
+        };
+        assert_eq!(
+            browse_words("browse", &browse("", " \n")),
+            Ok(BrowseWords::None)
+        );
+        assert_eq!(
+            browse_words("browse", &browse("d1", "")),
+            Ok(BrowseWords::Draft("d1"))
+        );
+        assert_eq!(
+            browse_words("browse", &browse("  ", "Hi")),
+            Ok(BrowseWords::Text("Hi"))
+        );
+        assert_eq!(
+            browse_words("browse", &browse("d1", "Hi")),
+            Err("give draft or text, not both".to_owned())
+        );
+        assert_eq!(
+            browse_words("read", &browse("d1", "Hi")),
+            Ok(BrowseWords::None)
+        );
     }
 
     #[test]

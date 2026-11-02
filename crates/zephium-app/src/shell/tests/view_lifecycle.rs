@@ -334,7 +334,9 @@ fn rejected_view_creation_rolls_back_the_live_view_synchronously() {
     assert!(!tab.has_view());
     assert!(tab.url.is_none());
     assert!(!tab.loading);
-    assert_eq!(tab.title, "Page failed to open");
+    assert_eq!(tab.title, "example.com");
+    let failure = tab.failure.as_deref().unwrap();
+    assert_eq!(failure.url.as_str(), "https://example.com/");
 }
 
 #[test]
@@ -352,12 +354,14 @@ fn failed_native_view_can_be_retried() {
     let tab = shell.items.tab(id).unwrap();
     assert!(!tab.has_view());
     assert!(!tab.loading);
-    assert_eq!(tab.title, "Page failed to open");
+    assert_eq!(tab.title, "example.com");
+    assert!(tab.failure.is_some());
 
     shell.handle(Command::Navigate {
         id,
         input: "example.com".into(),
     });
+    assert!(shell.items.tab(id).unwrap().failure.is_none());
     assert_eq!(
         engine
             .calls()
@@ -433,7 +437,10 @@ fn crashed_page_recreates_once_then_reports() {
         .into_iter()
         .find(|t| t.id == id.to_string())
         .unwrap();
-    assert_eq!(tab.title, "Page crashed");
+    assert_eq!(
+        tab.failure.map(|failure| failure.reason),
+        Some(zephium_ipc::TabFailureReason::Crashed)
+    );
     assert!(!tab.loading);
 }
 
@@ -459,7 +466,11 @@ fn crash_presentation_never_overwrites_the_durable_document_title() {
         .into_iter()
         .find(|tab| tab.id == id.to_string())
         .unwrap();
-    assert_eq!(projected.title, "Page crashed");
+    assert_eq!(projected.title, "Last real title");
+    assert_eq!(
+        projected.failure.map(|failure| failure.reason),
+        Some(zephium_ipc::TabFailureReason::Crashed)
+    );
 
     let saved = store.saved.lock().unwrap().clone().unwrap();
     let durable_title = saved.items.into_iter().find_map(|item| {

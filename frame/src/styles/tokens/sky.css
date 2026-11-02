@@ -7,6 +7,39 @@
   --sky-day-disc-fill: rgb(255 255 255 / 18%);
   --sky-day-disc-rim: rgb(255 255 255 / 36%);
   --sky-night-paper: #1a1d25;
+
+  /* Beside a new tab the window's glass is first evened out, so whatever
+     the wallpaper puts through it is only a hint, then lit from the side by
+     the picture's own edge, this strongly where the light comes in. */
+  --sky-day-glass: rgb(242 244 248 / 72%);
+  --sky-night-glass: rgb(18 20 27 / 76%);
+  --sky-day-edge-strength: 0.5;
+  --sky-night-edge-strength: 0.62;
+
+  /* Light falls off with distance from where it comes in, eased, so there is
+     no line where it ends. */
+  --sky-edge-falloff: linear-gradient(
+    to left,
+    rgb(0 0 0 / 100%) 0,
+    rgb(0 0 0 / 66%) 16%,
+    rgb(0 0 0 / 34%) 38%,
+    rgb(0 0 0 / 13%) 64%,
+    rgb(0 0 0 / 3%) 86%,
+    transparent 100%
+  );
+
+  /* And it eases in below the page's top and out above its foot, round the
+     page's corners, so it ends where the picture does. */
+  --sky-edge-ends: linear-gradient(
+    transparent 0,
+    rgb(0 0 0 / 35%) 14px,
+    rgb(0 0 0 / 80%) 34px,
+    rgb(0 0 0 / 100%) 56px,
+    rgb(0 0 0 / 100%) calc(100% - 56px),
+    rgb(0 0 0 / 80%) calc(100% - 34px),
+    rgb(0 0 0 / 35%) calc(100% - 14px),
+    transparent 100%
+  );
   --sky-night-shadow: rgb(2 8 24 / 40%);
   --sky-night-disc-fill: rgb(255 255 255 / 10%);
   --sky-night-disc-rim: rgb(255 255 255 / 18%);
@@ -15,6 +48,25 @@
   --sky-glint: rgb(255 255 255);
   --sky-day-lip: rgb(236 244 255 / 34%);
   --sky-night-lip: rgb(176 196 238 / 30%);
+
+  /* Where the picture meets the page's sides: by day it softens into haze,
+     by night into the deep of the sky. */
+  --sky-day-edge: rgb(232 238 248 / 46%);
+  --sky-day-edge-half: rgb(232 238 248 / 22%);
+  --sky-day-edge-faint: rgb(232 238 248 / 7%);
+  --sky-night-edge: rgb(10 16 32 / 58%);
+  --sky-night-edge-half: rgb(10 16 32 / 28%);
+  --sky-night-edge-faint: rgb(10 16 32 / 9%);
+
+  /* A sheet of glass standing on the sky: dark over the night, white over
+     the day, so the theme's own ink reads on it. Its rim is the light caught
+     along the upper edge, its edge the hairline all round. */
+  --sky-day-card: rgb(255 255 255 / 64%);
+  --sky-day-card-rim: rgb(255 255 255 / 90%);
+  --sky-day-card-edge: rgb(255 255 255 / 70%);
+  --sky-night-card: rgb(12 18 36 / 64%);
+  --sky-night-card-rim: rgb(176 196 238 / 26%);
+  --sky-night-card-edge: rgb(176 196 238 / 14%);
 
   /* Ink on a white control set on the sky. */
   --sky-on-ink: rgb(16 24 42);
@@ -27,10 +79,22 @@
   --sky-paper: var(--sky-day-paper);
   --sky-shadow: var(--sky-day-shadow);
   --sky-lip: var(--sky-day-lip);
+  --sky-card: var(--sky-day-card);
+  --sky-card-rim: var(--sky-day-card-rim);
+  --sky-card-edge: var(--sky-day-card-edge);
 }
 
 [data-sky="night"] {
   --sky-paper: var(--sky-night-paper);
   --sky-shadow: var(--sky-night-shadow);
   --sky-lip: var(--sky-night-lip);
+  --sky-card: var(--sky-night-card);
+  --sky-card-rim: var(--sky-night-card-rim);
+  --sky-card-edge: var(--sky-night-card-edge);
+}
+
+/* The sheet's hairline is all that sets it off the sky; with more contrast
+   asked for, it is the strong one. */
+:root[data-contrast="true"] [data-sky] {
+  --sky-card-edge: var(--color-border-strong);
 }

@@ -84,21 +84,26 @@
     const faviconsReady = favicons.init();
     void (async () => {
       try {
-        stop = await listener;
-        stopMotion = await motionListener;
+        // Listening comes first, so a setting changed while the reads below
+        // are in flight is heard rather than lost between read and listener.
+        [stop, stopMotion] = await Promise.all([listener, motionListener]);
         // The launcher is loaded while the window is still hidden, and native
         // shows nothing before `panelReady`, so the first frame is never empty.
-        const [launcher] = await Promise.all([loadLauncherPanel(), theme.init(), faviconsReady]);
-        if (disposed) return;
-        Launcher = launcher.default;
-        const [motion, language, notesOn, tasksOn, ...look] = await Promise.all([
-          commands.settingGet("ui.reduce-motion").catch(() => null),
-          commands.settingGet("ui.language").catch(() => null),
-          commands.settingGet("notes.enabled").catch(() => null),
-          commands.settingGet("tasks.enabled").catch(() => null),
-          ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
+        // Nothing below waits on anything else, so the wait is the slowest one.
+        const [launcher, , , [motion, language, notesOn, tasksOn, ...look]] = await Promise.all([
+          loadLauncherPanel(),
+          theme.init(),
+          faviconsReady,
+          Promise.all([
+            commands.settingGet("ui.reduce-motion").catch(() => null),
+            commands.settingGet("ui.language").catch(() => null),
+            commands.settingGet("notes.enabled").catch(() => null),
+            commands.settingGet("tasks.enabled").catch(() => null),
+            ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
+          ]),
         ]);
         if (disposed) return;
+        Launcher = launcher.default;
         theme.customizationKeys.forEach((key, index) => {
           const value = look[index];
           if (!liveLook.includes(key) && value != null) theme.customize(key, value);

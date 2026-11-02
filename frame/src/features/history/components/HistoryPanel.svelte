@@ -6,6 +6,7 @@
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { historySession } from "../lib/history-session.svelte";
+  import ClosedTabs from "./ClosedTabs.svelte";
   import HistoryList from "./HistoryList.svelte";
 
   let {
@@ -42,6 +43,7 @@
   const open = (url: string) => commands.browserOpenUrl(url, false);
 </script>
 
+{#if !query.trim()}<ClosedTabs {profile} />{/if}
 {#if session.error}
   <EmptyState title={m.history_unavailable()} description={m.surface_retry()}>
     {#snippet icon()}<Icon icon={Clock01Icon} size={22} />{/snippet}

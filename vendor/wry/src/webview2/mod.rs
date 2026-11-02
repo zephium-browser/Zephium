@@ -327,11 +327,20 @@ fn web_error_failure(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<crate::Nav
     | COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT
     | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET => Failure::Unreachable,
     COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => Failure::TimedOut,
-    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => Failure::Insecure,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT => {
+      Failure::Certificate(crate::CertificateProblem::NameMismatch)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED => {
+      Failure::Certificate(crate::CertificateProblem::Expired)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED => {
+      Failure::Certificate(crate::CertificateProblem::Revoked)
+    }
+    // Self-signed and unknown issuers, among other chain faults.
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => {
+      Failure::Certificate(crate::CertificateProblem::Untrusted)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS => Failure::Insecure,
     _ => Failure::Other,
   })
 }
@@ -340,6 +349,7 @@ fn web_error_failure(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<crate::Nav
 struct InFlightNavigationUrls {
   urls: HashMap<u64, String>,
   committed: HashSet<u64>,
+  error_documents: HashSet<u64>,
 }
 
 impl InFlightNavigationUrls {
@@ -358,9 +368,20 @@ impl InFlightNavigationUrls {
     self.urls.get(&id).cloned()
   }
 
-  fn finish(&mut self, id: u64) -> Option<String> {
+  /// WebView2 committed its error document for this navigation, in place
+  /// of the one shown. False for a navigation that is not tracked.
+  fn error_document(&mut self, id: u64) -> bool {
+    self.urls.contains_key(&id) && {
+      self.error_documents.insert(id);
+      true
+    }
+  }
+
+  /// The address and whether an error document replaced the shown one.
+  fn finish(&mut self, id: u64) -> Option<(String, bool)> {
     self.committed.remove(&id);
-    self.urls.remove(&id)
+    let replaced = self.error_documents.remove(&id);
+    self.urls.remove(&id).map(|url| (url, replaced))
   }
 }
 
@@ -643,6 +664,10 @@ pub(crate) struct InnerWebView {
   pub env: ICoreWebView2Environment,
   custom_protocol_admission: InFlightAdmission,
   cleanup: RefCell<Option<NativeCleanupDebt>>,
+  /// Present only for a page a person reads. It is set while a Save As the
+  /// browser asked for is in flight, and is the only thing that lets
+  /// `SaveAsUIShowing` through; a view without it denies every Save As.
+  save_as: Option<Rc<Cell<bool>>>,
   // Store FileDropController in here to make sure it gets dropped when
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
@@ -999,6 +1024,25 @@ const fn extension_startup_refusal(
   }
 }
 
+/// The kinds whose request WebView2 may put to the person with its own
+/// origin-labelled prompt when the embedder answers [`PermissionResponse::Prompt`].
+/// File-system access, autoplay, window management and anything unknown stay
+/// denied.
+pub(crate) fn prompts_natively(kind: PermissionKind) -> bool {
+  matches!(
+    kind,
+    PermissionKind::Camera
+      | PermissionKind::Microphone
+      | PermissionKind::Geolocation
+      | PermissionKind::Notifications
+      | PermissionKind::ClipboardRead
+      | PermissionKind::Midi
+      | PermissionKind::Sensors
+      | PermissionKind::LocalFonts
+      | PermissionKind::AutomaticDownloads
+  )
+}
+
 impl InnerWebView {
   #[inline]
   pub fn new(
@@ -1088,7 +1132,9 @@ impl InnerWebView {
       Err(error) => return Err(construction.finish_failure(error)),
     };
     construction.retain_controller(&controller);
-    if let Some(startup_gate) = &pl_attrs.browser_extension_startup_gate {
+    if pl_attrs.browser_extension_startup_gate.is_some()
+      || pl_attrs.controller_initialization_hook.is_some()
+    {
       let core = unsafe { controller.CoreWebView2() }
         .map_err(webview2_com::Error::WindowsError)
         .map_err(Error::WebView2Error);
@@ -1096,13 +1142,22 @@ impl InnerWebView {
         Ok(core) => core,
         Err(error) => return Err(construction.finish_failure(error)),
       };
-      if let Err(error) = startup_gate(&env, &core) {
+      if let Err(error) = crate::native_controller_init::run(
+        &env,
+        &core,
+        pl_attrs.browser_extension_startup_gate.as_deref(),
+        pl_attrs.controller_initialization_hook.as_deref(),
+      ) {
         return Err(construction.finish_failure(Error::WebView2Error(
           webview2_com::Error::WindowsError(error),
         )));
       }
     }
     let custom_protocol_admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    let save_as = pl_attrs
+      .native_context_menu_handler
+      .is_some()
+      .then(|| Rc::new(Cell::new(false)));
     let webview = match Self::init_webview(
       parent,
       hwnd,
@@ -1114,6 +1169,7 @@ impl InnerWebView {
       is_child,
       &mut construction,
       &custom_protocol_admission,
+      save_as.clone(),
     ) {
       Ok(webview) => webview,
       Err(error) => {
@@ -1169,6 +1225,7 @@ impl InnerWebView {
       env,
       custom_protocol_admission,
       cleanup: RefCell::new(Some(cleanup)),
+      save_as,
       drag_drop_controller,
     })
   }
@@ -1436,6 +1493,7 @@ impl InnerWebView {
     is_child: bool,
     construction: &mut ControllerConstructionGuard,
     custom_protocol_admission: &InFlightAdmission,
+    save_as: Option<Rc<Cell<bool>>>,
   ) -> Result<ICoreWebView2> {
     let webview = unsafe { controller.CoreWebView2()? };
 
@@ -1520,17 +1578,23 @@ impl InnerWebView {
 
     // Install one construction-time broker for every permission. Missing
     // callbacks, malformed native state, and `Default` all remain denied;
-    // `Prompt` defers only camera and microphone to WebView2's own prompt.
+    // `Prompt` defers only the kinds in `prompts_natively` to WebView2's own
+    // prompt.
     let clipboard = attributes.clipboard;
     let permission_handler = attributes.permission_handler.take();
+    let saves_decisions = pl_attrs.permission_decisions_saved;
     unsafe {
       webview.add_PermissionRequested(
         &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
           let Some(args) = args else { return Ok(()) };
           args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
           // A persisted decision would outlive this broker's policy and
-          // suppress later requests, so nothing set here is saved.
-          if let Ok(args3) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>() {
+          // suppress later requests, so nothing set here is saved; only the
+          // person's own answer to the native prompt may be, below.
+          let args3 = args
+            .cast::<ICoreWebView2PermissionRequestedEventArgs3>()
+            .ok();
+          if let Some(args3) = &args3 {
             let _ = args3.SetSavesInProfile(false);
           }
 
@@ -1563,11 +1627,15 @@ impl InnerWebView {
               .map(|handler| handler(permission_kind))
               .unwrap_or(PermissionResponse::Deny)
           };
-          let media = kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-            || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE;
           match response {
             PermissionResponse::Allow => args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?,
-            PermissionResponse::Prompt if media => {
+            PermissionResponse::Prompt if prompts_natively(permission_kind) => {
+              // Without the interface WebView2 would save by default, so
+              // the prompt is shown only where the choice can be scoped.
+              let Some(args3) = &args3 else { return Ok(()) };
+              if saves_decisions {
+                args3.SetSavesInProfile(true)?;
+              }
               args.SetState(COREWEBVIEW2_PERMISSION_STATE_DEFAULT)?
             }
             _ => {}
@@ -1611,11 +1679,33 @@ impl InnerWebView {
       // suppression. Require the current interface and cancel before
       // suppressing the dialog so a later HRESULT failure stays fail-closed.
       let webview25 = webview.cast::<ICoreWebView2_25>()?;
+      let gate = save_as.clone();
+      let resource_save = attributes
+        .download_policy
+        .inspect_metadata(|| pl_attrs.native_resource_save_handler.clone())
+        .flatten()
+        .filter(|_| {
+          pl_attrs.native_context_menu_handler.is_some()
+            && pl_attrs.native_download_handler.is_some()
+        });
+      let save_owner = controller.clone();
       webview25.add_SaveAsUIShowing(
-        &SaveAsUIShowingEventHandler::create(Box::new(|_, args| {
+        &SaveAsUIShowingEventHandler::create(Box::new(move |_, args| {
           if let Some(args) = args {
             args.SetCancel(true)?;
-            args.SetSuppressDefaultDialog(true)?;
+            let document = gate.as_ref().is_some_and(|gate| gate.get());
+            let resource = !document
+              && resource_save.as_ref().is_some_and(|handler| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&save_owner)))
+                  .unwrap_or(false)
+              });
+            let allowed = document || resource;
+            // Resource Save As enters DownloadStarting next. The broker owns
+            // its picker and staging path; document Save As has a separate UI.
+            args.SetSuppressDefaultDialog(!document)?;
+            if allowed {
+              args.SetCancel(false)?;
+            }
           }
           Ok(())
         })),
@@ -1718,6 +1808,8 @@ impl InnerWebView {
   }
 
   #[inline]
+  // Native registration keeps distinct controller, navigation and cleanup owners.
+  #[allow(clippy::too_many_arguments)]
   unsafe fn attach_handlers(
     hwnd: HWND,
     controller: &ICoreWebView2Controller,
@@ -1800,8 +1892,7 @@ impl InnerWebView {
             let tracked = committed_urls
               .lock()
               .unwrap_or_else(|poisoned| poisoned.into_inner())
-              .urls
-              .contains_key(&navigation_id);
+              .error_document(navigation_id);
             if tracked {
               if let Some(guard) = navigation_presentation_guard.as_ref() {
                 guard();
@@ -1856,12 +1947,17 @@ impl InnerWebView {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finish(navigation_id);
-          if let Some(url) = url {
+          if let Some((url, replaced)) = url {
             if !succeeded.as_bool() {
               if let (Some(report), Some(failure)) =
                 (failure_handler.as_ref(), web_error_failure(status))
               {
-                report(NavigationId::from_raw(navigation_id), failure);
+                let document = if replaced {
+                  crate::FailedDocument::Replaced { url: url.clone() }
+                } else {
+                  crate::FailedDocument::Kept
+                };
+                report(NavigationId::from_raw(navigation_id), failure, document);
               }
             }
             completed_handler(NavigationEvent {
@@ -2118,19 +2214,6 @@ impl InnerWebView {
     Self::attach_main_thread_dispatcher(hwnd)?;
 
     if let Some(handler) = pl_attrs.native_context_menu_handler.clone() {
-      // Save-page/SaveAs is distinct from DownloadStarting. Keep that separate
-      // filesystem surface denied even when selected download/edit menu items
-      // are enabled. Registration is mandatory before any content can load.
-      let core25: ICoreWebView2_25 = webview.cast()?;
-      core25.add_SaveAsUIShowing(
-        &SaveAsUIShowingEventHandler::create(Box::new(|_, args| {
-          if let Some(args) = args {
-            args.SetCancel(true)?;
-          }
-          Ok(())
-        })),
-        token,
-      )?;
       let owner = controller.clone();
       let core11: ICoreWebView2_11 = webview.cast()?;
       core11.add_ContextMenuRequested(
@@ -3422,6 +3505,26 @@ impl InnerWebView {
     unsafe { set_background_color(&self.controller, background_color) }
   }
 
+  /// Shows WebView2's own Save As for the loaded document. Only a view a person
+  /// reads may; any other refuses, and a Save As the page starts is still
+  /// denied, because the gate is open only while this call is in flight.
+  pub fn show_save_as(&self) -> Result<()> {
+    let Some(gate) = self.save_as.clone() else {
+      return Err(windows::core::Error::from_hresult(E_ACCESSDENIED).into());
+    };
+    let webview = self.webview.cast::<ICoreWebView2_25>()?;
+    gate.set(true);
+    let closing = gate.clone();
+    let handler = ShowSaveAsUICompletedHandler::create(Box::new(move |_, _| {
+      closing.set(false);
+      Ok(())
+    }));
+    unsafe { webview.ShowSaveAsUI(&handler) }.map_err(|error| {
+      gate.set(false);
+      error.into()
+    })
+  }
+
   pub fn set_memory_usage_level(&self, level: MemoryUsageLevel) -> Result<()> {
     let webview = self.webview.cast::<ICoreWebView2_19>()?;
     // https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2memoryusagetargetlevel
@@ -3629,11 +3732,31 @@ mod tests {
       None,
       "one navigation gates presentation once"
     );
-    assert_eq!(urls.finish(0).as_deref(), Some("https://redirect.example/"));
+    assert_eq!(
+      urls.finish(0),
+      Some(("https://redirect.example/".into(), false))
+    );
     assert!(urls.admit(
       IN_FLIGHT_NAVIGATION_LIMIT as u64,
       "https://reused.example/".into()
     ));
+  }
+
+  #[test]
+  fn an_error_document_is_reported_only_for_its_own_tracked_navigation() {
+    let mut urls = InFlightNavigationUrls::default();
+    assert!(!urls.error_document(7), "an untracked navigation");
+    assert!(urls.admit(7, "https://down.example/".into()));
+    assert!(urls.admit(8, "https://up.example/".into()));
+    assert!(urls.error_document(7));
+    assert_eq!(urls.finish(7), Some(("https://down.example/".into(), true)));
+    assert_eq!(urls.finish(8), Some(("https://up.example/".into(), false)));
+    assert!(urls.admit(7, "https://down.example/".into()));
+    assert_eq!(
+      urls.finish(7),
+      Some(("https://down.example/".into(), false)),
+      "a reused identity starts clean"
+    );
   }
 
   #[test]

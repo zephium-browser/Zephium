@@ -95,12 +95,9 @@ button {
   background: var(--color-chrome);
 }
 
-/* Only the opaque tier on Windows draws its own window edge, where chrome is
-   the whole window. On macOS the window paints itself and AppKit rounds it;
-   chrome there is only the sidebar, which an edge would frame as a plate. */
+/* Windows rounds the window and draws its edge itself, in every tier; an edge
+   of our own inside it showed as a second, rounder corner in Solid. */
 :root[data-material="none"] .shell[data-caption] {
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-card);
   background: var(--color-chrome);
 }
 

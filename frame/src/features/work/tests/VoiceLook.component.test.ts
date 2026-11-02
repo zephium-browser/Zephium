@@ -1,5 +1,5 @@
 import "$styles/global.css";
-import { test, vi } from "vitest";
+import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import type { VoiceChanged, VoiceStartV1 } from "$shared/ipc/bindings";
@@ -46,46 +46,78 @@ const change = (take: number, rest: Partial<VoiceChanged>): VoiceChanged => ({
   ...rest,
 });
 
+function screenshotTarget(root: HTMLElement) {
+  // The clock and partial transcript change while a screenshot is resolving.
+  root.setAttribute("data-testid", "voice-look-bar");
+  return page.getByTestId("voice-look-bar");
+}
+
 async function shoot(root: HTMLElement, name: string) {
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     await settle();
-    await page.elementLocator(root).screenshot({ path: `${shots}/${name}-${theme}.png` });
+    await screenshotTarget(root).screenshot({ path: `${shots}/${name}-${theme}.png` });
   }
   document.documentElement.dataset.theme = "dark";
 }
 
+test("a screenshot target keeps the bar after the live recording clock changes", async () => {
+  await page.viewport(1000, 420);
+  const screen = await render(VoiceStage);
+  try {
+    native.start.mockResolvedValue({ take: 13, engine: "zephium", fault: null });
+    await page.getByRole("button", { name: "Dictate" }).click();
+    await expect.element(page.getByRole("button", { name: "Stop and insert" })).toBeVisible();
+    const bar = screen.container.querySelector<HTMLElement>(".work-bar")!;
+    const clock = bar.querySelector<HTMLElement>(".time")!;
+    const before = clock.textContent;
+    const target = screenshotTarget(bar);
+    // A one-second label can need the following 250 ms sample to advance.
+    await expect.poll(() => clock.textContent, { timeout: 2_000 }).not.toBe(before);
+    expect(target.query()).toBe(bar);
+  } finally {
+    await screen.unmount();
+  }
+});
+
 test("the bar at rest, listening, transcribing and when it cannot listen, in both themes", async () => {
   await page.viewport(1000, 420);
   const screen = await render(VoiceStage);
-  const bar = () => screen.container.querySelector<HTMLElement>(".work-bar")!;
-  await shoot(bar(), "rest");
+  let quiet = () => {};
+  try {
+    const bar = () => screen.container.querySelector<HTMLElement>(".work-bar")!;
+    await shoot(bar(), "rest");
 
-  native.start.mockResolvedValue({ take: 1, engine: "on_device", fault: null });
-  await page.getByRole("button", { name: "Dictate" }).click();
-  let quiet = speak(1);
-  await new Promise((done) => setTimeout(done, 2400));
-  await shoot(bar(), "listening");
-  emitNativeEvent(
-    "voiceChanged",
-    change(1, { partial: "Find me a quiet hotel in Lisbon for next weekend" }),
-  );
-  await shoot(bar(), "listening-words");
-  quiet();
-  emitNativeEvent("voiceChanged", change(1, { phase: "done", text: "Find me a quiet hotel." }));
-  await settle();
+    native.start.mockResolvedValue({ take: 1, engine: "on_device", fault: null });
+    await page.getByRole("button", { name: "Dictate" }).click();
+    quiet = speak(1);
+    await new Promise((done) => setTimeout(done, 2400));
+    await shoot(bar(), "listening");
+    emitNativeEvent(
+      "voiceChanged",
+      change(1, { partial: "Find me a quiet hotel in Lisbon for next weekend" }),
+    );
+    await shoot(bar(), "listening-words");
+    quiet();
+    emitNativeEvent("voiceChanged", change(1, { phase: "done", text: "Find me a quiet hotel." }));
+    await settle();
 
-  native.start.mockResolvedValue({ take: 2, engine: "zephium", fault: null });
-  // With words in the field the mic has given way to Send: a take starts from the shortcut.
-  await uiCommands.init();
-  emitNativeEvent("uiCommand", "work.dictate");
-  quiet = speak(2);
-  await new Promise((done) => setTimeout(done, 1600));
-  await shoot(bar(), "listening-cloud");
-  quiet();
-  emitNativeEvent("voiceChanged", change(2, { phase: "transcribing", engine: "zephium" }));
-  await shoot(bar(), "transcribing");
-  emitNativeEvent("voiceChanged", change(2, { phase: "failed", fault: "no_engine" }));
-  await shoot(bar(), "no-engine");
-  await screen.unmount();
+    native.start.mockResolvedValue({ take: 2, engine: "zephium", fault: null });
+    // With words in the field the mic has given way to Send: a take starts from the shortcut.
+    await uiCommands.init();
+    emitNativeEvent("uiCommand", "work.dictate");
+    quiet = speak(2);
+    await new Promise((done) => setTimeout(done, 1600));
+    await shoot(bar(), "listening-cloud");
+    quiet();
+    emitNativeEvent("voiceChanged", change(2, { phase: "transcribing", engine: "zephium" }));
+    await shoot(bar(), "transcribing");
+    emitNativeEvent("voiceChanged", change(2, { phase: "failed", fault: "no_engine" }));
+    await shoot(bar(), "no-engine");
+  } finally {
+    document.documentElement.dataset.theme = "dark";
+    quiet();
+    uiCommands.dispose();
+    await screen.unmount();
+  }
 });

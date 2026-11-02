@@ -6,8 +6,14 @@
   <string>Zephium uses the camera only when you allow a website to access it.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Zephium uses the microphone while you dictate in Work, and for a website only when you allow it.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>Zephium shares your location with a website only when you allow it.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Zephium shares your location with a website only when you allow it.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Zephium turns what you dictate in Work into text on this Mac.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Websites you open can reach devices on your network, such as your router, printer or a video call.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Zephium saves the files you download to your Downloads folder.</string>
   <key>NSDesktopFolderUsageDescription</key>

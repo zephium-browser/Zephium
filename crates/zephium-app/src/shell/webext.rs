@@ -14,6 +14,7 @@ pub(super) struct WebExtensionState {
     deferred: HashMap<ProfileId, Vec<WebExtensionLoad>>,
     loaded: HashMap<ProfileId, HashMap<ExtensionInstallId, WebExtensionLoad>>,
     status: HashMap<ExtensionInstallId, WebExtensionStatus>,
+    preparation_failures: HashMap<ProfileId, Vec<(ExtensionInstallId, String)>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,11 +33,57 @@ pub struct WebExtensionTarget {
 }
 
 impl Shell {
+    pub(super) fn web_extension_profile_admitted(&self, profile: ProfileId) -> bool {
+        !self.profile_deletion.states.contains_key(&profile)
+            && self
+                .profiles
+                .get(profile)
+                .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
+    }
+
+    pub(super) fn retire_web_extensions(&mut self, profile: ProfileId) {
+        self.web_extensions.deferred.remove(&profile);
+        self.web_extensions.preparation_failures.remove(&profile);
+        if let Some(installs) = self.web_extensions.loaded.remove(&profile) {
+            for install in installs.keys() {
+                self.web_extensions.status.remove(install);
+            }
+        }
+    }
+
+    pub(super) fn set_prepared_web_extensions(
+        &mut self,
+        profile: ProfileId,
+        wanted: Vec<WebExtensionLoad>,
+        failures: Vec<(ExtensionInstallId, String)>,
+        retry: Option<ExtensionInstallId>,
+    ) {
+        self.set_web_extensions_for(profile, wanted, retry);
+        if !self.bootstrapped || self.web_extension_profile_admitted(profile) {
+            self.web_extensions
+                .preparation_failures
+                .insert(profile, failures);
+        }
+    }
+
     pub(super) fn set_web_extensions(&mut self, profile: ProfileId, wanted: Vec<WebExtensionLoad>) {
+        self.set_web_extensions_for(profile, wanted, None);
+    }
+
+    fn set_web_extensions_for(
+        &mut self,
+        profile: ProfileId,
+        wanted: Vec<WebExtensionLoad>,
+        retry: Option<ExtensionInstallId>,
+    ) {
         if !self.bootstrapped {
             self.web_extensions.deferred.insert(profile, wanted);
             return;
         }
+        if !self.web_extension_profile_admitted(profile) {
+            return;
+        }
+        self.web_extensions.preparation_failures.remove(&profile);
         let current = self.web_extensions.loaded.entry(profile).or_default();
         let wanted: std::collections::BTreeMap<_, _> = wanted
             .into_iter()
@@ -56,6 +103,7 @@ impl Shell {
             if current
                 .get(&install)
                 .is_some_and(|loaded| unchanged(loaded, &load))
+                && retry != Some(install)
             {
                 continue;
             }
@@ -154,7 +202,7 @@ impl Shell {
                     )
                 })
                 .count();
-            if active >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            if active >= zephium_core::extensions::WINDOWS_RUNNING_EXTENSIONS {
                 break;
             }
             self.web_extensions
@@ -190,7 +238,15 @@ impl Shell {
                 .into_iter()
                 .collect();
         for (profile, wanted) in deferred {
+            let failures = self.web_extensions.preparation_failures.remove(&profile);
             self.set_web_extensions(profile, wanted);
+            if self.web_extension_profile_admitted(profile) {
+                if let Some(failures) = failures {
+                    self.web_extensions
+                        .preparation_failures
+                        .insert(profile, failures);
+                }
+            }
         }
     }
 
@@ -200,6 +256,9 @@ impl Shell {
         install: ExtensionInstallId,
         result: Result<WebExtensionLoaded, String>,
     ) {
+        if !self.web_extension_profile_admitted(profile) {
+            return;
+        }
         let still_wanted = self
             .web_extensions
             .loaded
@@ -258,7 +317,11 @@ impl Shell {
         &self,
         profile: ProfileId,
     ) -> Vec<(ExtensionInstallId, WebExtensionStatus)> {
-        self.web_extensions
+        if !self.web_extension_profile_admitted(profile) {
+            return Vec::new();
+        }
+        let mut result: Vec<_> = self
+            .web_extensions
             .loaded
             .get(&profile)
             .map(|installs| {
@@ -270,7 +333,15 @@ impl Shell {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(failures) = self.web_extensions.preparation_failures.get(&profile) {
+            result.extend(
+                failures
+                    .iter()
+                    .map(|(install, error)| (*install, WebExtensionStatus::Failed(error.clone()))),
+            );
+        }
+        result
     }
 
     pub(super) fn web_extension_target(&self, tab: Option<ItemId>) -> Option<WebExtensionTarget> {
@@ -278,7 +349,7 @@ impl Shell {
             return None;
         }
         let window = self.windows.focused()?;
-        if self.profiles.get(window.profile)?.kind == ProfileKind::Incognito {
+        if !self.web_extension_profile_admitted(window.profile) {
             return None;
         }
         let listing_url = tab
@@ -296,6 +367,38 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Only the active tab of the focused window, in a profile that can
+    /// install extensions, showing that exact listing.
+    fn store_listing_in_front(&self, tab: ItemId, extension: &str) -> bool {
+        self.web_extension_target(Some(tab))
+            .and_then(|target| target.listing_url)
+            .and_then(|url| url::Url::parse(&url).ok())
+            .is_some_and(|url| super::extension_store::store_listing_id(&url) == Some(extension))
+    }
+
+    pub(super) fn show_store_button(
+        &mut self,
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
+    ) {
+        if self.store_listing_in_front(tab, &button.extension) {
+            self.engine.show_store_button(tab, button);
+        }
+    }
+
+    pub(super) fn store_button_clicked(&mut self, tab: ItemId, extension: String) {
+        if self.store_listing_in_front(tab, &extension) {
+            (self.emit)(Projection::WebExtensionStoreClick(
+                zephium_ipc::WebExtensionStoreClickView {
+                    tab_id: tab.to_string(),
+                    extension_id: extension,
+                },
+            ));
+        }
+    }
+}
+
 /// `start_background` asks for one background run after a package changed; a
 /// later apply that clears it changes nothing that is loaded.
 fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
@@ -303,6 +406,8 @@ fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
         && loaded.extension_id == wanted.extension_id
         && loaded.root == wanted.root
         && loaded.permissions == wanted.permissions
+        && loaded.external_native_messaging == wanted.external_native_messaging
+        && loaded.native_messaging_grantable == wanted.native_messaging_grantable
         && loaded.match_patterns == wanted.match_patterns
 }
 
@@ -317,6 +422,8 @@ mod tests {
             extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
             root: "/packages/a/1.0-rev".into(),
             permissions: vec!["storage".into()],
+            external_native_messaging: false,
+            native_messaging_grantable: false,
             match_patterns: vec!["<all_urls>".into()],
             start_background: true,
         };
@@ -330,5 +437,10 @@ mod tests {
             ..settled.clone()
         };
         assert!(!unchanged(&loaded, &narrowed));
+        let authority_changed = WebExtensionLoad {
+            external_native_messaging: true,
+            ..settled
+        };
+        assert!(!unchanged(&loaded, &authority_changed));
     }
 }

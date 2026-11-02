@@ -292,6 +292,13 @@ fn looks_like_host(s: &str) -> bool {
     if authority.contains('@') {
         return false;
     }
+    if authority
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']'))
+        .is_some_and(|(host, _)| host.parse::<std::net::Ipv6Addr>().is_ok())
+    {
+        return true;
+    }
     let host = authority.split(':').next().unwrap_or(authority);
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
         return true;
@@ -302,6 +309,19 @@ fn looks_like_host(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn bracketed_ipv6_input_is_a_web_address_not_a_search() {
+        for (input, expected) in [
+            ("[::1]:7474/path", "https://[::1]:7474/path"),
+            ("[2001:db8::1]", "https://[2001:db8::1]/"),
+        ] {
+            assert!(!super::is_query(input));
+            assert_eq!(super::classify(input).unwrap().as_str(), expected);
+        }
+        assert!(super::classify("[::1]:99999").is_none());
+        assert!(super::classify("https://user:password@[::1]/").is_none());
+    }
 
     #[test]
     fn only_a_page_acting_alone_with_no_app_stays_silent() {

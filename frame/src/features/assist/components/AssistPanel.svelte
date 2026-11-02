@@ -138,18 +138,23 @@
 </script>
 
 <!-- Escape steps back from a sheet, then closes the panel; the composer takes it first to stop. -->
-<div
-  class="assist-host"
-  data-assist
-  role="presentation"
+<svelte:window
   onkeydown={(event) => {
-    if (event.key !== "Escape" || event.defaultPrevented) return;
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+    if (session?.picking) {
+      event.preventDefault();
+      session.cancelPick();
+      return;
+    }
     if (view !== "thread") view = "thread";
     else viewProps.onclose();
   }}
->
+/>
+
+<div class="assist-host" data-assist role="presentation">
   <Frame {...viewProps} caption={false} scrolls={false} closable={false}>
     {#snippet actions()}
+      <IconButton icon={Cancel01Icon} label={m.tool_close()} onclick={viewProps.onclose} />
       <IconButton
         icon={PencilEdit02Icon}
         label={m.assist_new()}

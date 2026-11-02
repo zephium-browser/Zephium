@@ -12,6 +12,8 @@ blocker-seed-webkit = ["dep:zephium-blocker", "zephium-blocker/webkit"]
 
 [dependencies]
 base64.workspace = true
+minisign = "=0.10.0"
+semver = "=1.0.28"
 zephium-core.workspace = true
 zephium-blocker = { workspace = true, optional = true }
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }

@@ -350,15 +350,27 @@ mod custom_protocol_workaround;
 mod error;
 #[cfg(target_os = "macos")]
 mod file_upload;
+#[cfg(target_os = "macos")]
+mod http_auth;
 #[cfg(any(target_os = "android", test))]
 mod inject_initialization_scripts;
 mod native_admission;
 mod native_bounds;
 #[cfg(any(target_os = "windows", test))]
 mod native_cleanup;
+#[cfg(any(target_os = "windows", test))]
+mod native_controller_init;
 mod permissions;
 #[cfg(target_os = "macos")]
 pub use file_upload::{FileUploadRequest, FileUploadResponder};
+#[cfg(target_os = "macos")]
+pub use http_auth::{HttpAuthChallenge, HttpAuthResponder};
+
+#[cfg(target_os = "macos")]
+pub(crate) struct ServerTrustExceptions {
+  pub(crate) covers: Box<dyn Fn(&str, &str, u16) -> bool>,
+  pub(crate) allows: Box<dyn Fn(&str, &str, u16, &[u8; 32]) -> bool>,
+}
 mod proxy;
 #[cfg(any(target_os = "macos", target_os = "android", target_os = "ios"))]
 mod util;
@@ -901,7 +913,8 @@ struct WebViewAttributes<'a> {
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
 
   /// Why a main-frame navigation failed, reported before its `Failed` event.
-  pub navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+  pub navigation_failure_handler:
+    Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
 
   /// Hide the native presentation surface synchronously at each main-frame
   /// commit, before delivering its identity event. Hardened embedders can
@@ -962,8 +975,9 @@ struct WebViewAttributes<'a> {
   ///
   /// - **Windows**: Fully supported via WebView2's PermissionRequested event.
   /// - **macOS / iOS**: Camera and microphone via WKUIDelegate's public media
-  ///   capture callback (macOS 12+ / iOS 15+). This is not a deny-all capability
-  ///   boundary: display capture, geolocation and WebAuthn are not routed here.
+  ///   capture callback (macOS 12+ / iOS 15+), and on macOS geolocation. This
+  ///   is not a deny-all capability boundary: display capture and WebAuthn are
+  ///   not routed here.
   /// - **Linux**: Fully supported via WebKitGTK's permission-request signal.
   /// - **Android**: Supported via JNI bridge for geolocation, microphone, camera,
   ///   protected media, and MIDI requests. Android runtime permissions may still
@@ -1566,8 +1580,9 @@ impl<'a> WebViewBuilder<'a> {
   ///
   /// - **Windows**: Fully supported via WebView2's PermissionRequested event.
   /// - **macOS / iOS**: Camera and microphone via WKUIDelegate's public media
-  ///   capture callback (macOS 12+ / iOS 15+). This is not a deny-all capability
-  ///   boundary: display capture, geolocation and WebAuthn are not routed here.
+  ///   capture callback (macOS 12+ / iOS 15+), and on macOS geolocation. This
+  ///   is not a deny-all capability boundary: display capture and WebAuthn are
+  ///   not routed here.
   /// - **Linux**: Fully supported via WebKitGTK's permission-request signal.
   /// - **Android**: Supported via JNI bridge for geolocation, microphone, camera,
   ///   protected media, and MIDI requests. Android runtime permissions may still
@@ -1756,10 +1771,11 @@ impl<'a> WebViewBuilder<'a> {
   /// native error text.
   ///
   /// Supported on macOS and Windows. On Windows, WebView2's own error page
-  /// is hidden and never reported as a commit. Other platforms ignore it.
+  /// is hidden and never reported as a commit; [`FailedDocument`] says when
+  /// it took the place of the shown document. Other platforms ignore it.
   pub fn with_navigation_failure_handler(
     mut self,
-    handler: impl Fn(NavigationId, NavigationFailure) + 'static,
+    handler: impl Fn(NavigationId, NavigationFailure, FailedDocument) + 'static,
   ) -> Self {
     self.attrs.navigation_failure_handler = Some(Box::new(handler));
     self
@@ -1928,7 +1944,15 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   #[cfg(target_os = "macos")]
   file_upload_handler: Option<Box<file_upload::FileUploadHandler>>,
   #[cfg(target_os = "macos")]
+  http_auth_handler: Option<Box<http_auth::HttpAuthHandler>>,
+  #[cfg(target_os = "macos")]
+  certificate_failure_handler: Option<Box<dyn Fn(CertificateFailure)>>,
+  #[cfg(target_os = "macos")]
+  server_trust_exceptions: Option<ServerTrustExceptions>,
+  #[cfg(target_os = "macos")]
   native_download_handler: Option<Box<dyn Fn(&objc2_web_kit::WKDownload)>>,
+  #[cfg(target_os = "macos")]
+  autofill_button_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
   context_menu_handler: Option<
     Box<
@@ -1960,7 +1984,15 @@ impl Default for PlatformSpecificWebViewAttributes {
       #[cfg(target_os = "macos")]
       file_upload_handler: None,
       #[cfg(target_os = "macos")]
+      http_auth_handler: None,
+      #[cfg(target_os = "macos")]
+      certificate_failure_handler: None,
+      #[cfg(target_os = "macos")]
+      server_trust_exceptions: None,
+      #[cfg(target_os = "macos")]
       native_download_handler: None,
+      #[cfg(target_os = "macos")]
+      autofill_button_handler: None,
       #[cfg(target_os = "macos")]
       context_menu_handler: None,
     }
@@ -2051,6 +2083,33 @@ pub trait WebViewBuilderExtMacos {
     self,
     handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
   ) -> Self;
+  /// Hands HTTP Basic, Digest, NTLM and Negotiate challenges to the embedder
+  /// instead of cancelling them. The responder cancels on drop; the embedder
+  /// must cancel retained responders on navigation and teardown. Without it
+  /// every such challenge is cancelled. Client certificates are always
+  /// cancelled and server trust is unaffected.
+  fn with_http_auth_handler(
+    self,
+    handler: impl Fn(HttpAuthChallenge, HttpAuthResponder) + 'static,
+  ) -> Self;
+  /// Reports a main-frame load refused for its server certificate, with the
+  /// presented leaf's digest, before its navigation failure is reported.
+  /// Classification evaluates a copy of the chain without network access.
+  fn with_certificate_failure_handler(self, handler: impl Fn(CertificateFailure) + 'static)
+    -> Self;
+  /// Lets a server-trust challenge that fails system evaluation proceed
+  /// when `allows` accepts its exact `(scheme, host, port, leaf SHA-256)`.
+  /// `covers` is asked first so ordinary connections never read their chain.
+  /// Without this every challenge keeps the system's default handling.
+  fn with_server_trust_exceptions(
+    self,
+    covers: impl Fn(&str, &str, u16) -> bool + 'static,
+    allows: impl Fn(&str, &str, u16, &[u8; 32]) -> bool + 'static,
+  ) -> Self;
+  /// Called when the person clicks the AutoFill button WebKit draws inside a
+  /// field. Only a script in a content world allowed to drive AutoFill can
+  /// show that button; page script cannot.
+  fn with_autofill_button_handler(self, handler: impl Fn() + 'static) -> Self;
   /// Merges browser-owned items into the native page context menu without
   /// serializing page metadata through Rust. The callback receives WebKit's
   /// already-created default menu and may replace or suppress it.
@@ -2099,6 +2158,39 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
     handler: impl Fn(&objc2_web_kit::WKWebView, FileUploadRequest, FileUploadResponder) + 'static,
   ) -> Self {
     self.platform_specific.file_upload_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_http_auth_handler(
+    mut self,
+    handler: impl Fn(HttpAuthChallenge, HttpAuthResponder) + 'static,
+  ) -> Self {
+    self.platform_specific.http_auth_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_certificate_failure_handler(
+    mut self,
+    handler: impl Fn(CertificateFailure) + 'static,
+  ) -> Self {
+    self.platform_specific.certificate_failure_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_server_trust_exceptions(
+    mut self,
+    covers: impl Fn(&str, &str, u16) -> bool + 'static,
+    allows: impl Fn(&str, &str, u16, &[u8; 32]) -> bool + 'static,
+  ) -> Self {
+    self.platform_specific.server_trust_exceptions = Some(ServerTrustExceptions {
+      covers: Box::new(covers),
+      allows: Box::new(allows),
+    });
+    self
+  }
+
+  fn with_autofill_button_handler(mut self, handler: impl Fn() + 'static) -> Self {
+    self.platform_specific.autofill_button_handler = Some(Box::new(handler));
     self
   }
 
@@ -2192,6 +2284,11 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
       dyn Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
     >,
   >,
+  controller_initialization_hook: Option<
+    std::sync::Arc<
+      dyn Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+    >,
+  >,
   extension_path: Option<PathBuf>,
   default_context_menus: bool,
   environment: Option<ICoreWebView2Environment>,
@@ -2200,9 +2297,11 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   native_context_menu_handler: Option<
     Rc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool>,
   >,
+  native_resource_save_handler: Option<Rc<dyn Fn(&ICoreWebView2Controller) -> bool>>,
   native_download_handler: Option<
     std::sync::Arc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs)>,
   >,
+  permission_decisions_saved: bool,
 }
 
 #[cfg(windows)]
@@ -2217,12 +2316,15 @@ impl Default for PlatformSpecificWebViewAttributes {
       scroll_bar_style: ScrollBarStyle::default(),
       browser_extensions_enabled: false,
       browser_extension_startup_gate: None,
+      controller_initialization_hook: None,
       extension_path: None,
       environment: None,
       environment_created_handler: None,
       profile_name: None,
       native_context_menu_handler: None,
+      native_resource_save_handler: None,
       native_download_handler: None,
+      permission_decisions_saved: false,
     }
   }
 }
@@ -2235,6 +2337,14 @@ pub trait WebViewBuilderExtWindows {
     self,
     handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
       + 'static,
+  ) -> Self;
+  /// Authorizes a context-menu resource save before it enters DownloadStarting.
+  /// The host must validate the menu's document and resource kind. A true return
+  /// suppresses the runtime's picker; the native download handler must choose
+  /// the destination. Requires a native menu, native downloads and UseHandlers.
+  fn with_native_resource_save_handler(
+    self,
+    handler: impl Fn(&ICoreWebView2Controller) -> bool + 'static,
   ) -> Self;
   /// Hands the original native download event to the host. Cancellation is
   /// set before invocation; the host must retain a deferral to resolve later.
@@ -2272,6 +2382,11 @@ pub trait WebViewBuilderExtWindows {
   ///
   /// <https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2settings#aredefaultcontextmenusenabled>
   fn with_default_context_menus(self, enabled: bool) -> Self;
+
+  /// Lets WebView2 save the person's answer to its own permission prompt in
+  /// the profile, as a browser does. Off by default: every request then asks
+  /// again, and nothing the permission handler itself answers is ever saved.
+  fn with_permission_decisions_saved(self, saved: bool) -> Self;
 
   /// Specifies the theme of webview2. This affects things like `prefers-color-scheme`.
   ///
@@ -2338,6 +2453,17 @@ pub trait WebViewBuilderExtWindows {
     gate: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
   ) -> Self;
 
+  /// Configures the retained controller before WebView initialization or navigation.
+  ///
+  /// This hook preserves the existing browser-extension enablement setting. It
+  /// does not admit extensions or replace their authenticated startup gate. When
+  /// both are present, the extension gate runs first. An error aborts construction
+  /// through the owned controller-cleanup path.
+  fn with_controller_initialization_hook(
+    self,
+    hook: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self;
+
   /// Retains an unpacked-extension path for source compatibility.
   ///
   /// On Windows, construction with a configured path fails with
@@ -2387,6 +2513,13 @@ pub trait WebViewBuilderExtWindows {
 
 #[cfg(windows)]
 impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
+  fn with_native_resource_save_handler(
+    mut self,
+    handler: impl Fn(&ICoreWebView2Controller) -> bool + 'static,
+  ) -> Self {
+    self.platform_specific.native_resource_save_handler = Some(Rc::new(handler));
+    self
+  }
   fn with_native_context_menu_handler(
     mut self,
     handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
@@ -2419,6 +2552,11 @@ impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
     self
   }
 
+  fn with_permission_decisions_saved(mut self, saved: bool) -> Self {
+    self.platform_specific.permission_decisions_saved = saved;
+    self
+  }
+
   fn with_theme(mut self, theme: Theme) -> Self {
     self.platform_specific.theme = Some(theme);
     self
@@ -2445,6 +2583,14 @@ impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
   ) -> Self {
     self.platform_specific.browser_extensions_enabled = true;
     self.platform_specific.browser_extension_startup_gate = Some(std::sync::Arc::new(gate));
+    self
+  }
+
+  fn with_controller_initialization_hook(
+    mut self,
+    hook: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self {
+    self.platform_specific.controller_initialization_hook = Some(std::sync::Arc::new(hook));
     self
   }
 
@@ -2910,6 +3056,11 @@ pub trait WebViewExtWindows {
   /// see <https://learn.microsoft.com/en-us/microsoft-edge/webview2/release-notes/archive?tabs=dotnetcsharp#10121039>
   fn set_theme(&self, theme: Theme) -> Result<()>;
 
+  /// Shows WebView2's own Save As dialog for the loaded document. Refused
+  /// unless the view was built with a native context menu handler, which only
+  /// a page a person reads has.
+  fn show_save_as(&self) -> Result<()>;
+
   /// Sets the [memory usage target level][1].
   ///
   /// When to best use this mode depends on the app in question. Most commonly it's called when
@@ -2952,6 +3103,10 @@ impl WebViewExtWindows for WebView {
 
   fn set_theme(&self, theme: Theme) -> Result<()> {
     self.webview.set_theme(theme)
+  }
+
+  fn show_save_as(&self) -> Result<()> {
+    self.webview.show_save_as()
   }
 
   fn set_memory_usage_level(&self, level: MemoryUsageLevel) -> Result<()> {
@@ -3317,8 +3472,46 @@ pub enum NavigationFailure {
   TimedOut,
   /// A secure connection could not be established or verified.
   Insecure,
+  /// The server's certificate was refused, and what the engine could tell
+  /// about why.
+  Certificate(CertificateProblem),
   /// Any other failure.
   Other,
+}
+
+/// What a failed main-frame navigation left in the view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailedDocument {
+  /// The document shown before the navigation is still there.
+  Kept,
+  /// Windows: WebView2 committed its error document in place of the shown
+  /// one (blank when its built-in error page is off). `url` is the address
+  /// the navigation was for, from Wry's own in-flight navigation record.
+  Replaced { url: String },
+}
+
+/// Why a server certificate was refused, as a category; never native text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertificateProblem {
+  /// Expired, or not valid yet.
+  Expired,
+  /// Self-signed, or from an issuer the system does not trust.
+  Untrusted,
+  /// Issued for a different name.
+  NameMismatch,
+  Revoked,
+  Other,
+}
+
+/// A main-frame load whose server certificate was refused.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CertificateFailure {
+  /// The address that failed, bounded.
+  pub url: String,
+  pub problem: CertificateProblem,
+  /// SHA-256 of the presented leaf certificate's DER encoding.
+  pub leaf_sha256: Option<[u8; 32]>,
 }
 
 /// Identity-bearing observation of a main-frame navigation.
@@ -3398,6 +3591,168 @@ pub struct InitializationScript {
 mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
+
+  #[cfg(windows)]
+  #[test]
+  fn controller_initialization_hook_preserves_extension_enablement() {
+    for private in [false, true] {
+      let builder = WebViewBuilder::new()
+        .with_incognito(private)
+        .with_browser_extensions_enabled(false)
+        .with_controller_initialization_hook(|_, _| Ok(()));
+      assert!(!builder.platform_specific.browser_extensions_enabled);
+      assert!(builder
+        .platform_specific
+        .browser_extension_startup_gate
+        .is_none());
+      assert!(builder
+        .platform_specific
+        .controller_initialization_hook
+        .is_some());
+    }
+    let enabled = WebViewBuilder::new()
+      .with_browser_extension_startup_gate(|_, _| Ok(()))
+      .with_controller_initialization_hook(|_, _| Ok(()));
+    assert!(enabled.platform_specific.browser_extensions_enabled);
+    assert!(enabled
+      .platform_specific
+      .browser_extension_startup_gate
+      .is_some());
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn native_controller_hook_applies_reputation_with_extensions_disabled() {
+    use tao::event_loop::EventLoopBuilder;
+    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tao::window::WindowBuilder;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings8, ICoreWebView2_13};
+    use windows_core::Interface;
+
+    // WebView2 exposes the environment option during creation, not a readback
+    // on the resulting environment. An inert local install distinguishes actual
+    // disabled profiles from an empty-but-enabled environment; an enabled
+    // control proves the package and runtime's extension API are operational.
+    fn install(core: &ICoreWebView2, package: &std::path::Path) -> bool {
+      use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile7;
+      let profile = unsafe { core.cast::<ICoreWebView2_13>().unwrap().Profile().unwrap() }
+        .cast::<ICoreWebView2Profile7>()
+        .unwrap();
+      let (send, receive) = std::sync::mpsc::channel();
+      let handler = webview2_com::ProfileAddBrowserExtensionCompletedHandler::create(Box::new(
+        move |status, extension| {
+          let _ = send.send(status.is_ok() && extension.is_some());
+          Ok(())
+        },
+      ));
+      let package = windows::core::HSTRING::from(package.to_string_lossy().as_ref());
+      if unsafe { profile.AddBrowserExtension(&package, &handler) }.is_err() {
+        return false;
+      }
+      let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+      loop {
+        if let Ok(allowed) = receive.try_recv() {
+          return allowed;
+        }
+        assert!(
+          std::time::Instant::now() < deadline,
+          "extension control did not settle"
+        );
+        unsafe {
+          use windows::Win32::UI::WindowsAndMessaging::*;
+          let mut message = MSG::default();
+          while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+          }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+    }
+
+    let event_loop = EventLoopBuilder::<()>::new().with_any_thread(true).build();
+    let window = WindowBuilder::new()
+      .with_visible(false)
+      .build(&event_loop)
+      .unwrap();
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+      "wry-controller-init-{}-{unique}",
+      std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    struct OwnedDirectory(PathBuf);
+    impl Drop for OwnedDirectory {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+      }
+    }
+    let owned = OwnedDirectory(directory);
+    let package = owned.0.join("inert-extension");
+    std::fs::create_dir(&package).unwrap();
+    std::fs::write(
+      package.join("manifest.json"),
+      r#"{"manifest_version":3,"name":"Controller init control","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    for (label, private, profile, extensions) in [
+      ("enabled-control", false, None, true),
+      ("default", false, None, false),
+      ("private", true, None, false),
+      ("agent-shaped", false, Some("automation"), false),
+    ] {
+      let mut context = WebContext::new(Some(owned.0.join(label)));
+      let configured = Rc::new(std::cell::Cell::new(false));
+      let observed = configured.clone();
+      let mut builder = WebViewBuilder::new_with_web_context(&mut context)
+        .with_incognito(private)
+        .with_visible(false)
+        .with_browser_extensions_enabled(false)
+        .with_controller_initialization_hook(move |_, core| {
+          let settings = unsafe { core.Settings()? }.cast::<ICoreWebView2Settings8>()?;
+          unsafe { settings.SetIsReputationCheckingRequired(false)? };
+          let mut actual = windows_core::BOOL::default();
+          unsafe { settings.IsReputationCheckingRequired(&mut actual)? };
+          if actual.as_bool() {
+            return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+          }
+          observed.set(true);
+          Ok(())
+        });
+      if extensions {
+        builder = builder.with_browser_extension_startup_gate(|_, _| Ok(()));
+      }
+      if let Some(profile) = profile {
+        builder = builder.with_profile_name(profile.to_owned());
+      }
+      assert_eq!(
+        builder.platform_specific.browser_extensions_enabled,
+        extensions
+      );
+      assert_eq!(
+        builder
+          .platform_specific
+          .browser_extension_startup_gate
+          .is_some(),
+        extensions
+      );
+      let view = builder.build(&window).unwrap();
+      assert!(
+        configured.get(),
+        "{label} did not apply reputation configuration"
+      );
+      assert_eq!(
+        install(&view.webview(), &package),
+        extensions,
+        "{label}: native extension admission did not match the requested mode"
+      );
+      eprintln!("{label}: extensions_enabled={extensions} controller_hook_applied=true reputation_required=false");
+      drop(view);
+    }
+  }
 
   #[cfg(target_os = "macos")]
   #[test]

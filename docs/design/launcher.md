@@ -28,8 +28,9 @@ the panel.
 `desktop/src/overlay.rs` owns presentation, focus, placement and operation
 settlement; `overlay/model.rs` separates publication revision from search
 session identity. Rust publishes `PanelState`; the frontend sends `PanelIntent`
-(`search`, `dismiss`, `open { tool }`) and reports its content height through
-`panel_fit`. It never positions the window itself.
+(`search`, `dismiss`, `open { tool }`) and reports what it shows, as a height and
+the rectangles of its field and sheet, through `panel_layout`. It never positions
+the window itself.
 
 The shortcut toggles the launcher. It goes away when focus moves to the browser
 or another application; an owned native surface such as a menu keeps Zephium
@@ -77,8 +78,14 @@ macOS detaches the hidden WKWebView from its parent and allows background
 suspension. Reopening resumes the renderer before publishing the new session. Each presentation binds a new search session; putting it away disposes
 the controller and native work. What was typed is kept for 30 seconds so a
 launcher reopened a moment later resumes, and the reset to the home list happens
-while hidden, so the window is never resized on the frame it appears. A
-fulfilled action or capture resets at once.
+while hidden, so the window is never resized on the frame it appears. The new
+session's controller starts from the rows already on screen, so the list is
+never emptied while its first answer is on the way. A fulfilled action or
+capture resets at once.
+
+The page keeps the icon rasters it was sent between presentations; native
+sends them again only after the page has loaded afresh, which the page reports
+when it is ready.
 
 ## Geometry and materials
 
@@ -114,12 +121,19 @@ This avoids repeated WebView surface resizing while keeping short lists compact.
 Long lists scroll within the maximum height without visible scrollbars.
 
 The window keeps a fixed width and a height that follows the content, between
-the field alone and 600 points, bounded by the display. With macOS shapes it grows at once and
-shrinks only after the shapes have settled, so nothing is cut off mid-motion;
-the shapes sit on a canvas pinned to the window's top edge, so a resize never
-moves them. It opens on the display under the pointer with its top edge at a
-fifth of the work area. It is not resizable or draggable, so no geometry is
-persisted. AppKit's utility-window animation fades it in and out, and the
+the field alone and 600 points, bounded by the display: the work area less 24
+points above and below, which the page reads from the display's usable height
+so its footer is never cut off on a short screen. With macOS shapes it grows at
+once and shrinks only after the shapes have settled, so nothing is cut off
+mid-motion; the shapes sit on a canvas pinned to the window's top edge, so a
+resize never moves them. The window is made its final width, shapes included,
+before the page first measures it, so the glass does not glide in from the
+corner on the first arrival. It opens on the display under the pointer with its
+top edge at a fifth of the work area. On macOS the pointer, the displays and
+the window's frame are all read and set in AppKit points, so displays of
+different scale are never converted between; on Windows the window moves to
+the display first and is then sized in that display's own units. It is not
+resizable or draggable, so no geometry is persisted. AppKit's utility-window animation fades it in and out, and the
 shapes are reinstalled when the appearance changes.
 
 ## Verification record — 2026-09-11
@@ -319,6 +333,20 @@ seam this hid behind: a real profile database, the real read queue and the real
 worker loop, driven by the scoped command the shipping surfaces send. Each piece
 had coverage; the path between them had none.
 
+### Bookmarks
+
+Saved pages are offered in the History section, marked with a star. The history
+read also asks the store for bookmarks whose title or address contains every
+word typed (`BookmarkRequest::Search`), so the launcher keeps no second copy of
+the tree to go stale; it runs on the same read worker, in the same request.
+Each bookmark and each visit is scored with `match_quality`, and
+`interleave_bookmarks` puts a bookmark ahead of the first visit it matches at
+least as well. Visits keep their frecency order. Bookmarks draw on the visited
+pages' allowance of four (`capacity_group`), so the list never gets longer, and
+an address that is both saved and visited shows once, as the bookmark. They are
+offered with visited pages turned off, and not in an `@history` search or a
+private profile.
+
 ### Completion and deletion
 
 Deletion is judged against what the field is showing, not against the typed
@@ -384,9 +412,11 @@ label:
 
 The launcher's material costs nothing while hidden: the window is ordered
 out, and the glass is composited by the window server only while visible.
-The hidden WebView receives no task, note or resource events, and only the
-UI commands it acts on — appearance and Reduce Motion. Open and repeated
-open/close cycles, and a release build, remain to be measured.
+The hidden WebView receives no task, note, resource or download events, and
+only the UI commands it acts on — appearance, language and Reduce Motion. Media
+and download changes were still sent to it when this was measured; they now go
+to the browser alone. Open and repeated open/close cycles, and a release build,
+remain to be measured.
 
 ## Glass redesign — 2026-09-28
 

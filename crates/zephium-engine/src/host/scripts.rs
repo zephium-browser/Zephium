@@ -530,143 +530,6 @@ pub(super) const DISCARD_BOOTSTRAP_TOP_QUERY_JS: &str =
 #[cfg(target_os = "windows")]
 pub(super) const SUSPEND_ACTIVITY_QUERY_JS: &str = "(()=>{try{const mask=globalThis.__zephium_discard_safety_v1__();return typeof mask==='number'?((mask&(16|32|64))?mask:1):256}catch(_){return 256}})()";
 
-// Fetch and decode entirely inside the untrusted site renderer. The callback
-// surface is a fixed 32x32 RGBA raster; privileged Rust/chrome never parse a
-// page-controlled image container. Calling this script again polls the
-// renderer-owned asynchronous Image decode without adding an IPC bridge.
-pub(super) const FAVICON_JS: &str = r#"(function(){
-  'use strict';
-  var pageUrl = String(document.location.href).slice(0, 8192);
-  var key = '__zephium_favicon_rgba32_v1__';
-  var readyState = document.readyState === 'complete' ? 'complete' :
-      (document.readyState === 'interactive' ? 'interactive' : 'loading');
-  var state = globalThis[key];
-  var rebuildAfterComplete = false;
-  function validRgba(value) {
-    // 32 * 32 * 4 bytes encode to exactly 5464 canonical base64
-    // characters, with two padding characters. Check length before the
-    // regular expression so a page-preseeded huge string is never copied
-    // into the renderer-to-host callback result.
-    return typeof value === 'string' && value.length === 5464 &&
-        /^[A-Za-z0-9+/]{5462}==$/.test(value);
-  }
-  if (state && state.pageUrl === pageUrl) {
-    // `state` is page-readable and may have been replaced with a Proxy or
-    // accessor-bearing object between polls. Snapshot every value used for
-    // the native return exactly once: validating one getter result and then
-    // reading it again would let a hostile getter substitute an arbitrarily
-    // large string for Wry to serialize before Rust can apply its bound.
-    var rgba = state.rgba;
-    var done = state.done;
-    var completeRebuildUsed = state.completeRebuildUsed;
-    var initialReadyState = state.initialReadyState;
-    if (validRgba(rgba)) return rgba;
-    if (rgba == null && typeof done === 'boolean') {
-      // UrlChanged can run while the parser has not inserted icon links yet.
-      // Once that bounded attempt has finished, permit exactly one fresh
-      // candidate scan after the same document transitions to complete.
-      if (done && completeRebuildUsed === false &&
-          (initialReadyState === 'loading' ||
-           initialReadyState === 'interactive') &&
-          readyState === 'complete') {
-        rebuildAfterComplete = true;
-      } else {
-        return null;
-      }
-    }
-    // Invalid page-mutable state is ignored and rebuilt below. In
-    // particular, never echo an attacker-sized string to native code.
-    state = null;
-  }
-
-  state = Object.create(null);
-  state.pageUrl = pageUrl;
-  state.rgba = null;
-  state.done = false;
-  state.initialReadyState = readyState;
-  state.completeRebuildUsed = rebuildAfterComplete;
-  state.index = 0;
-  state.candidates = [];
-  globalThis[key] = state;
-
-  var ranked = [];
-  var links = document.querySelectorAll('link[rel~="icon"]');
-  for (var i = 0; i < links.length && i < 32; i++) {
-    var href = links[i].getAttribute('href');
-    if (!href || href.length > 2048) continue;
-    try {
-      var candidate = new URL(href, document.location.href);
-      if ((candidate.protocol !== 'http:' && candidate.protocol !== 'https:') ||
-          candidate.origin !== document.location.origin ||
-          candidate.username || candidate.password ||
-          candidate.href.length > 2048) continue;
-      var declared = parseInt((links[i].getAttribute('sizes') || '').split('x')[0], 10);
-      var size = Number.isFinite(declared) && declared > 0 ? declared : 32;
-      ranked.push([Math.abs(size - 32), candidate.href]);
-    } catch (_) {}
-  }
-  ranked.sort(function(a, b) { return a[0] - b[0]; });
-  for (var j = 0; j < ranked.length && state.candidates.length < 4; j++) {
-    if (state.candidates.indexOf(ranked[j][1]) === -1) state.candidates.push(ranked[j][1]);
-  }
-  try {
-    var fallback = new URL('/favicon.ico', document.location.origin).href;
-    if (fallback.length <= 2048 && state.candidates.indexOf(fallback) === -1) {
-      state.candidates.push(fallback);
-    }
-  } catch (_) {}
-
-  function next() {
-    if (state.index >= state.candidates.length) {
-      state.done = true;
-      return;
-    }
-    var image = new Image();
-    image.decoding = 'async';
-    image.onload = function() {
-      try {
-        var width = image.naturalWidth;
-        var height = image.naturalHeight;
-        if (!Number.isFinite(width) || !Number.isFinite(height) ||
-            width < 1 || height < 1 || width > 16384 || height > 16384) {
-          next();
-          return;
-        }
-        var canvas = document.createElement('canvas');
-        canvas.width = 32;
-        canvas.height = 32;
-        var context = canvas.getContext('2d', {alpha: true, willReadFrequently: true});
-        if (!context) {
-          state.done = true;
-          return;
-        }
-        context.clearRect(0, 0, 32, 32);
-        var scale = Math.min(32 / width, 32 / height);
-        var drawWidth = Math.max(1, Math.round(width * scale));
-        var drawHeight = Math.max(1, Math.round(height * scale));
-        context.drawImage(
-          image,
-          Math.floor((32 - drawWidth) / 2),
-          Math.floor((32 - drawHeight) / 2),
-          drawWidth,
-          drawHeight
-        );
-        var bytes = context.getImageData(0, 0, 32, 32).data;
-        var binary = '';
-        for (var k = 0; k < bytes.length; k++) binary += String.fromCharCode(bytes[k]);
-        state.rgba = btoa(binary);
-        state.done = true;
-      } catch (_) {
-        next();
-      }
-    };
-    image.onerror = next;
-    image.src = state.candidates[state.index++];
-  }
-  next();
-  return null;
-})()"#;
-
 // Capture native string/DOM intrinsics before page script can replace them.
 // The locked function returns one primitive string: truncation flag + at most
 // the requested number of UTF-16 units. This gives native JSON conversion a
@@ -701,21 +564,6 @@ pub(super) const MAX_HTML_CHARS: usize = 2 * 1024 * 1024;
 // the platform creates the callback string.
 pub(super) const MAX_HTML_RESULT_BYTES: usize = (MAX_HTML_CHARS + 1) * 6 + 2;
 pub(super) const EXTRACT_HTML_JS: &str = "(function(){try{var f=globalThis.__zephium_extract_html_v1__;return typeof f==='function'?f(__MAX__):null}catch(_){return null}})()";
-
-pub(super) fn decode_favicon_eval_result(result: &str) -> Option<Vec<u8>> {
-    // Wry returns a JSON serialization of the primitive JavaScript string.
-    // Foundation is allowed to spell every base64 solidus as `\/`, while
-    // JavaScriptCore/Chromium commonly leave it unescaped. Bound the raw JSON
-    // before parsing, then require the exact canonical base64 payload and
-    // fixed decoded raster. This accepts both native spellings without
-    // widening the callback to objects or attacker-sized strings.
-    const MAX_RESULT_BYTES: usize = zephium_core::icon::RGBA32_BASE64_BYTES * 2 + 2;
-    if result.len() > MAX_RESULT_BYTES {
-        return None;
-    }
-    let encoded = serde_json::from_str::<String>(result).ok()?;
-    zephium_core::icon::decode_rgba32(&encoded)
-}
 
 fn style_script(style: &UserStyle) -> UserScript {
     // WebView2 runs document-start scripts before <html> exists; WebKit does
@@ -771,8 +619,7 @@ struct ProtectedScriptSpec {
 }
 
 const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
-    3 + cfg!(not(target_os = "macos")) as usize
-        + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
+    3 + cfg!(not(target_os = "macos")) as usize + cfg!(target_os = "windows") as usize] = [
     ProtectedScriptSpec {
         id: 6,
         source: CONTENT_STYLE_JS,
@@ -796,7 +643,8 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         source: crate::PAGE_PRINT_DENY_SCRIPT,
         all_frames: true,
     },
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // macOS runs the store script in a world of its own, from the view.
+    #[cfg(target_os = "windows")]
     ProtectedScriptSpec {
         // The desktop's global page style already owns builtin ID 4.
         id: 5,
@@ -1646,62 +1494,5 @@ mod tests {
         );
         assert!(crate::PAGE_PRINT_DENY_SCRIPT
             .contains("return apply(execCommand, this, [primitive, arguments[1]"));
-    }
-
-    #[test]
-    fn favicon_script_bounds_page_mutable_state_before_returning_it() {
-        assert!(FAVICON_JS.contains("value.length === 5464"));
-        assert!(FAVICON_JS.contains("[A-Za-z0-9+/]{5462}=="));
-        assert!(FAVICON_JS.contains("var rgba = state.rgba;"));
-        assert!(FAVICON_JS.contains("if (validRgba(rgba)) return rgba;"));
-        assert!(!FAVICON_JS.contains("return state.rgba"));
-        let length_check = FAVICON_JS.find("value.length === 5464").unwrap();
-        let host_return = FAVICON_JS.find("return rgba").unwrap();
-        assert!(length_check < host_return);
-        assert!(!FAVICON_JS.contains("return {"));
-        assert!(!FAVICON_JS.contains("rgba: state.rgba"));
-    }
-
-    #[test]
-    fn favicon_callback_accepts_bounded_native_json_spellings_of_the_canonical_string() {
-        let rgba: Vec<u8> = (0..zephium_core::icon::RGBA32_BYTES)
-            .map(|index| (index % 251) as u8)
-            .collect();
-        let encoded = zephium_core::icon::encode_rgba32(&rgba).unwrap();
-        assert!(encoded.contains('/'));
-        let serialized = serde_json::to_string(&encoded).unwrap();
-        let foundation_serialized = serialized.replace('/', "\\/");
-        assert_eq!(decode_favicon_eval_result(&serialized), Some(rgba.clone()));
-        assert_eq!(
-            decode_favicon_eval_result(&foundation_serialized),
-            Some(rgba)
-        );
-        assert!(decode_favicon_eval_result("null").is_none());
-        assert!(decode_favicon_eval_result(&encoded).is_none());
-        assert!(decode_favicon_eval_result(&format!("\"{encoded}x\"")).is_none());
-        assert!(decode_favicon_eval_result(&format!(
-            "\"{}\"",
-            "A".repeat(zephium_core::icon::RGBA32_BASE64_BYTES * 2 + 1)
-        ))
-        .is_none());
-    }
-
-    #[test]
-    fn favicon_script_rebuilds_candidates_once_after_document_completion() {
-        let ready_state = FAVICON_JS
-            .find("var readyState = document.readyState")
-            .unwrap();
-        let completed_retry = FAVICON_JS.find("completeRebuildUsed === false").unwrap();
-        let early_terminal_return = FAVICON_JS.find("return null").unwrap();
-        let retry_consumed = FAVICON_JS
-            .find("state.completeRebuildUsed = rebuildAfterComplete")
-            .unwrap();
-        let candidate_scan = FAVICON_JS
-            .find("document.querySelectorAll('link[rel~=\"icon\"]')")
-            .unwrap();
-        assert!(ready_state < completed_retry);
-        assert!(completed_retry < early_terminal_return);
-        assert!(early_terminal_return < retry_consumed);
-        assert!(retry_consumed < candidate_scan);
     }
 }

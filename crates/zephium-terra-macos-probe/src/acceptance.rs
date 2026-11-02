@@ -2344,6 +2344,7 @@ pub(super) async fn lead_workflow(
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::BeginAgent {
                     grant: WorkAgentGrantV1 {
+                        no_usage_charge: false,
                         provider: WorkSearchProvider::OpenAi,
                         model: PUBLIC_SEARCH_MODEL.into(),
                         max_turns: 10,

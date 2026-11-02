@@ -451,11 +451,30 @@ impl Index {
     }
 
     pub fn backlinks(&self, id: &str) -> rusqlite::Result<Vec<Row>> {
+        let keys = self
+            .conn
+            .prepare_cached(
+                "SELECT stem_key,title_key FROM notes WHERE id=?1 AND trashed_at IS NULL",
+            )?
+            .query_row([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let Some((stem, title)) = keys else {
+            return Ok(Vec::new());
+        };
+        // A matching name is only a backlink when opening it resolves here.
+        // Resolve each of the two keys once, rather than once per source note.
+        let named = self.resolve(&stem)?.is_some_and(|note| note.id == id);
+        let titled = title != stem && self.resolve(&title)?.is_some_and(|note| note.id == id);
+        if !named && !titled {
+            return Ok(Vec::new());
+        }
         let mut statement = self.conn.prepare_cached(&format!(
             "SELECT {} FROM notes n WHERE n.trashed_at IS NULL AND n.id<>?1 AND EXISTS(
-               SELECT 1 FROM note_links l, notes me WHERE me.id=?1 AND l.source=n.id
-                 AND (l.target=me.stem_key OR l.target=me.title_key))
-             ORDER BY n.modified DESC LIMIT ?2",
+               SELECT 1 FROM note_links l WHERE l.source=n.id
+                 AND (l.target=?2 OR l.target=?3))
+             ORDER BY n.modified DESC LIMIT ?4",
             COLUMNS
                 .split(',')
                 .map(|c| format!("n.{c}"))
@@ -463,7 +482,15 @@ impl Index {
                 .join(",")
         ))?;
         let rows = statement
-            .query_map(params![id, MAX_BACKLINKS], row)?
+            .query_map(
+                params![
+                    id,
+                    named.then_some(stem),
+                    titled.then_some(title),
+                    MAX_BACKLINKS
+                ],
+                row,
+            )?
             .collect();
         rows
     }
@@ -614,6 +641,53 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(backlinks, [C, B]);
+    }
+
+    #[test]
+    fn backlinks_follow_file_name_precedence_and_fall_back_after_trash() {
+        let mut index = Index::memory();
+        let mut file_match = note(A, "Plans.md", "Summer", 1);
+        index.put(&file_match, "", &[]).unwrap();
+        index
+            .put(&note(B, "Ideas.md", "Plans", 2), "", &[])
+            .unwrap();
+        index
+            .put(&note(C, "Source.md", "Source", 3), "", &["plans".into()])
+            .unwrap();
+
+        assert_eq!(index.resolve("plans").unwrap().unwrap().id, A);
+        assert_eq!(index.backlinks(A).unwrap()[0].id, C);
+        assert!(index.backlinks(B).unwrap().is_empty());
+
+        file_match.trashed_at = Some(4);
+        index.put(&file_match, "", &[]).unwrap();
+        assert_eq!(index.resolve("plans").unwrap().unwrap().id, B);
+        assert!(index.backlinks(A).unwrap().is_empty());
+        assert_eq!(index.backlinks(B).unwrap()[0].id, C);
+    }
+
+    #[test]
+    fn backlinks_follow_the_same_title_winner_as_link_resolution() {
+        let mut index = Index::memory();
+        index
+            .put(&note(A, "First.md", "Shared title", 1), "", &[])
+            .unwrap();
+        index
+            .put(&note(B, "Second.md", "Shared title", 2), "", &[])
+            .unwrap();
+        index
+            .put(
+                &note(C, "Source.md", "Source", 3),
+                "",
+                &["shared title".into(), "second".into()],
+            )
+            .unwrap();
+
+        assert_eq!(index.resolve("shared title").unwrap().unwrap().id, B);
+        assert!(index.backlinks(A).unwrap().is_empty());
+        let backlinks = index.backlinks(B).unwrap();
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].id, C);
     }
 
     #[test]

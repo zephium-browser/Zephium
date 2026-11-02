@@ -1,2 +1,2 @@
-export { default as ExtensionActions } from "./components/ExtensionActions.svelte";
-export { default as ManageExtensions } from "./components/ManageExtensions.svelte";
+export { default as ExtensionsSection } from "./components/ExtensionsSection.svelte";
+export { default as PinnedExtensions } from "./components/PinnedExtensions.svelte";

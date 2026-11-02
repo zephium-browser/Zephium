@@ -450,3 +450,27 @@ agentic still reports three pre-existing findings in unchanged code:
 (`too_many_arguments`), and `semantic_wire.rs` (`manual_contains`). No lint
 allowances were added to bypass them. The earlier optional execution-only
 application finding remains outside this planning feature's qualification.
+
+## Local pricing during cancellation and recovery
+
+The trusted lead service records `no_usage_charge` only after resolving all
+three chosen models as free Compatible models and selecting browser search
+without a provider fallback. Incoming commands cannot assert this fact. Fully
+local runs use their chosen light/page client for typed decisions and do not
+load fixed paid decision credentials or add a provider-search fallback.
+
+The fact survives Store serialization. Stop, missing terminal usage, lost-driver
+reconciliation and restart retain conservative token and operation reservations
+with a known zero monetary charge. A page with an in-flight model call uses the
+same original admitted pricing fact. This does not confirm native effects or
+change cancellation, recovery or cleanup authority. Mixed or paid runs retain paid accounting
+and conservative reservations for ambiguous calls; stopping a local call does
+not erase charges already measured for other models. Exceeding token or operation
+bounds clamps those dimensions without inventing a larger monetary charge.
+
+Older persisted runs default this fact to false. They do not retain enough
+trustworthy endpoint and per-role pricing evidence to establish that every
+possible call was free. Their recorded charges and unknown reservations remain
+unchanged; current endpoint settings or a Compatible label cannot repair them.
+A fresh run receives a new trusted pricing classification. Historical billing
+would require original authenticated usage evidence before any correction.

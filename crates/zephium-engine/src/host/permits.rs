@@ -210,6 +210,7 @@ pub(super) fn queue_navigation_commit(
     let admitted = with_navigation_commit(id, move |host| {
         if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch) {
             host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
+            host.apply_popup_policy(id);
         }
     });
     if !admitted {
@@ -256,7 +257,7 @@ pub(super) fn queue_navigation_failure(
     navigation: &NavigationEpochTracker,
     failed: NavigationEpoch,
     restored: Option<NavigationEpoch>,
-    cancelled: bool,
+    ending: super::navigation::FailedNavigationEnd,
 ) {
     if permit.active_token().is_none() {
         return;
@@ -270,7 +271,7 @@ pub(super) fn queue_navigation_failure(
             &queued_navigation,
             failed,
             restored,
-            cancelled,
+            ending,
         );
     });
 }

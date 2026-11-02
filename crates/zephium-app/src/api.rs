@@ -9,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
@@ -132,13 +132,15 @@ pub enum ShutdownOutcome {
 
 /// Browser-owned response vocabulary for one exact page capability request.
 /// `Always*` is authority to mutate the durable per-profile catalog; `*Once`
-/// never writes policy.
+/// never writes policy and holds for the asking document until its tab shows
+/// another one. `Dismiss` refuses this request only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PagePermissionPromptDecision {
     AllowOnce,
     AlwaysAllow,
     DenyOnce,
     AlwaysDeny,
+    Dismiss,
 }
 
 /// Ordered result of a trusted profile content-policy status query.
@@ -162,6 +164,9 @@ pub enum BrowserPage {
     Tasks,
     Notes,
     Time,
+    /// The source of the tab in front. Chrome never asks for it by name: a
+    /// source tab being in front is what shows it.
+    Source,
 }
 
 impl BrowserPage {
@@ -175,6 +180,7 @@ impl BrowserPage {
             Self::Tasks => "browser.tasks",
             Self::Notes => "browser.notes",
             Self::Time => "browser.time",
+            Self::Source => "browser.source",
         }
     }
 
@@ -285,15 +291,45 @@ pub enum Command {
         call: Box<zephium_ipc::HistoryCall>,
         done: HistoryCompletion,
     },
+    BrowsingDataCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::BrowsingDataCall>,
+        done: BrowsingDataCompletion,
+    },
     BookmarkCall {
         expected_profile: ProfileId,
         call: Box<zephium_ipc::BookmarkCall>,
         done: BookmarkCompletion,
     },
+    /// The document a source tab shows, for the page that renders it.
+    PageSource {
+        id: ItemId,
+        done: SourceCompletion,
+    },
+    /// What the Back and Forward buttons of a tab can reach, for their menu.
+    HistoryList {
+        id: ItemId,
+        done: HistoryListCompletion,
+    },
+    GoToHistoryEntry {
+        id: ItemId,
+        offset: i32,
+        url: String,
+    },
+    /// The focused profile's bookmarks or history as the text of a file.
+    Export {
+        kind: zephium_core::export::ExportKind,
+        done: ExportCompletion,
+    },
     TimeCall {
         expected_profile: ProfileId,
         call: Box<zephium_ipc::TimeCall>,
         done: TimeCompletion,
+    },
+    ZoomCall {
+        expected_profile: ProfileId,
+        call: Box<zephium_ipc::ZoomCall>,
+        done: ZoomCompletion,
     },
     /// A time report the store read, coming back for icons.
     TimeReportRead {
@@ -310,9 +346,16 @@ pub enum Command {
     Focus(zephium_ipc::FocusControl),
     /// The running focus session reached its next change.
     FocusWake,
-    /// Writes what was read from another browser into the focused profile,
-    /// restoring the session first when it has not been yet (onboarding).
+    /// A quiet tab's speaker is due to go.
+    AudioWake,
+    /// Captures one persistent destination before any source reads begin,
+    /// restoring the session first for onboarding.
+    ImportDestination {
+        done: ImportDestinationCompletion,
+    },
+    /// Writes one kind into the destination admitted for the whole job.
     Import {
+        destination: ImportDestination,
         work: Box<crate::store_reads::ImportWork>,
         done: ImportCompletion,
     },
@@ -389,6 +432,16 @@ pub enum Command {
         id: ItemId,
         decision: PageRequestDecision,
     },
+    /// The person's answer to the tab's sign-in prompt: credentials, or
+    /// None to cancel. Credentials are wiped when the command drops.
+    AnswerHttpAuth {
+        id: ItemId,
+        request: u32,
+        credentials: Option<zephium_core::http_auth::HttpCredentials>,
+    },
+    /// The person chose to continue past the certificate the tab refused,
+    /// on a host on their own network, and to load it again.
+    ContinuePastCertificate(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {
@@ -417,12 +470,33 @@ pub enum Command {
         item: ItemId,
         navigation: zephium_core::ports::engine::NavigationPresentationId,
     },
+    /// Mutes or unmutes one tab for as long as it is open.
+    SetTabMuted {
+        id: ItemId,
+        muted: bool,
+    },
+    /// Acts on the media of the tab the sidebar's player shows.
+    MediaPlayer {
+        id: ItemId,
+        action: zephium_ipc::MediaPlayerAction,
+    },
     /// The sidebar's width, and whether it changed by a deliberate change of
     /// shape — a toggle, a snap, a tool opening — that the content should
     /// travel with, rather than by a drag that it should simply follow.
     SetSidebarWidth(f64, bool),
+    /// The sidebar is put away, the page taking the window, or brought back.
+    SetSidebarHidden(bool),
+    /// A hidden sidebar comes over the page, or goes back beneath it, sliding
+    /// as the card does or at once.
+    PeekSidebar {
+        peek: bool,
+        slide: bool,
+    },
     /// Transient Windows resize feedback only; no width or layout mutation.
     SidebarResizeGuide(Option<f64>),
+    /// Whether the expanded sidebar is on screen to show a page-permission
+    /// prompt under its address field.
+    SetPagePermissionCardHost(bool),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
@@ -471,6 +545,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
+        /// Opens the action's context menu rather than clicking it.
+        menu: bool,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
@@ -504,6 +580,9 @@ pub enum Command {
     SetWebExtensions {
         profile: ProfileId,
         extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
+        /// Package preparation failures for this exact profile/install set.
+        failures: Vec<(zephium_core::ids::ExtensionInstallId, String)>,
+        retry: Option<zephium_core::ids::ExtensionInstallId>,
     },
     /// Opens an extension's options page in a tab.
     OpenWebExtensionOptions {
@@ -520,6 +599,11 @@ pub enum Command {
     RemoveWebExtension {
         profile: ProfileId,
         extension: Box<zephium_core::ports::engine::WebExtensionLoad>,
+    },
+    /// What the install button on the Web Store listing in `tab` shows.
+    ShowStoreButton {
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
     },
     /// The profile an installation from `tab` would go to.
     ResolveWebExtensionTarget {
@@ -552,6 +636,9 @@ pub enum Command {
     CancelSearch {
         session_id: String,
     },
+    /// The launcher's page has just loaded, so it holds none of the icon
+    /// rasters it was sent before.
+    PanelLoaded,
     RunSearchAction {
         context: Box<zephium_ipc::SearchContext>,
         action: zephium_ipc::SearchAction,
@@ -613,6 +700,30 @@ pub enum Command {
     /// Requests one authenticated source-package refresh. This is a global
     /// browser maintenance operation, not a profile or page capability.
     RefreshContentBlockerSources,
+    /// The focused profile's saved site decisions, of one origin when given.
+    SitePermissions {
+        origin: Option<zephium_core::permissions::PageOrigin>,
+        reply: SyncSender<Option<zephium_ipc::SitePermissionsView>>,
+    },
+    /// Changes or, with None, forgets one decision of the focused profile.
+    /// Accepted only as an operation.
+    SetSitePermission {
+        origin: zephium_core::permissions::PageOrigin,
+        kind: zephium_core::permissions::SitePermissionKind,
+        decision: Option<zephium_core::permissions::RememberedPagePermission>,
+    },
+    SitePermissionCatalogLoaded {
+        operation_id: String,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        kind: zephium_core::permissions::PagePermissionKind,
+        decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        outcome: Box<zephium_core::ports::store::PagePermissionCatalogLoadOutcome>,
+    },
+    SitePermissionSettled {
+        operation_id: String,
+        applied: bool,
+    },
     /// Trusted, bounded actor query. Raw page content has no command bridge
     /// and the desktop layer does not expose this variant over IPC.
     ContentPolicyStatus {
@@ -674,7 +785,17 @@ pub enum Command {
         origin: String,
         rgba: Option<Vec<u8>>,
     },
-    /// Bounded retry for the renderer-owned asynchronous favicon decode.
+    /// The prober's single answer for one page's icon: the raster, the
+    /// address it came from, and the addresses that gave nothing.
+    FaviconFetched {
+        ticket: u64,
+        rgba: Option<Vec<u8>>,
+        source: Option<String>,
+        failed: Vec<String>,
+    },
+    /// One-shot deadline for a tab's icon work: attempt 0 is a lost store
+    /// read, the maximum is a deferred page check, and the one below it ends
+    /// the wait that keeps the previous icon on show.
     FaviconPoll {
         id: ItemId,
         attempt: u8,
@@ -780,9 +901,35 @@ impl fmt::Debug for ResourceCompletion {
     }
 }
 
-/// Fetches one origin's icon anonymously and answers exactly once with
-/// [`Command::FaviconProbed`] for the same profile and origin.
-pub type FaviconProber = Arc<dyn Fn(ProfileId, String) + Send + Sync>;
+/// Where an icon comes from, for a request the prober answers with
+/// [`Command::FaviconFetched`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FaviconPageSource {
+    /// Icon addresses the page declared, best first. Each is fetched without
+    /// cookies, credentials or referrer; the first that decodes wins.
+    Addresses(Vec<String>),
+    /// A PNG the web engine already chose for the page.
+    Encoded(Vec<u8>),
+}
+
+/// One request to the prober.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FaviconProbe {
+    /// An origin's icon, answered exactly once with [`Command::FaviconProbed`]
+    /// for the same profile and origin.
+    Origin { profile: ProfileId, origin: String },
+    /// A page's icon, answered exactly once with [`Command::FaviconFetched`]
+    /// for the same ticket.
+    Page {
+        ticket: u64,
+        profile: ProfileId,
+        origin: String,
+        source: FaviconPageSource,
+    },
+}
+
+/// Fetches icons anonymously and decodes them into the fixed raster.
+pub type FaviconProber = Arc<dyn Fn(FaviconProbe) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct FaviconProberAttachment(pub FaviconProber);
@@ -864,6 +1011,23 @@ impl HistoryCompletion {
     }
 }
 #[derive(Clone)]
+pub struct BrowsingDataCompletion(Completion<zephium_ipc::BrowsingDataResponse>);
+impl BrowsingDataCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::BrowsingDataResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::BrowsingDataResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+#[derive(Clone)]
 pub struct TimeCompletion(Completion<zephium_ipc::TimeResponse>);
 impl TimeCompletion {
     pub fn new(done: impl FnOnce(zephium_ipc::TimeResponse) + Send + 'static) -> Self {
@@ -886,6 +1050,28 @@ impl fmt::Debug for TimeCompletion {
     }
 }
 #[derive(Clone)]
+pub struct ZoomCompletion(Completion<zephium_ipc::ZoomResponse>);
+impl ZoomCompletion {
+    pub fn new(done: impl FnOnce(zephium_ipc::ZoomResponse) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, response: zephium_ipc::ZoomResponse) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(response);
+        }
+    }
+}
+impl fmt::Debug for ZoomCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ZoomCompletion")
+    }
+}
+#[derive(Clone)]
 pub struct BookmarkCompletion(Completion<zephium_ipc::BookmarkResponse>);
 impl BookmarkCompletion {
     pub fn new(done: impl FnOnce(zephium_ipc::BookmarkResponse) + Send + 'static) -> Self {
@@ -900,6 +1086,113 @@ impl BookmarkCompletion {
         if let Some(done) = done {
             done(response);
         }
+    }
+}
+/// The serialized document of a page, kept for the tab that shows its source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageSource {
+    pub url: String,
+    pub text: String,
+    /// The page was longer than the engine reads.
+    pub truncated: bool,
+}
+
+#[derive(Clone)]
+pub struct SourceCompletion(Completion<Option<Arc<PageSource>>>);
+impl SourceCompletion {
+    pub fn new(done: impl FnOnce(Option<Arc<PageSource>>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, document: Option<Arc<PageSource>>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(document);
+        }
+    }
+}
+impl fmt::Debug for SourceCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SourceCompletion")
+    }
+}
+#[derive(Clone)]
+pub struct HistoryListCompletion(Completion<zephium_core::ports::engine::HistoryEntries>);
+impl HistoryListCompletion {
+    pub fn new(
+        done: impl FnOnce(zephium_core::ports::engine::HistoryEntries) + Send + 'static,
+    ) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, entries: zephium_core::ports::engine::HistoryEntries) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(entries);
+        }
+    }
+}
+impl fmt::Debug for HistoryListCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HistoryListCompletion")
+    }
+}
+#[derive(Clone)]
+pub struct ExportCompletion(Completion<Result<String, zephium_core::export::ExportRefusal>>);
+impl ExportCompletion {
+    pub fn new(
+        done: impl FnOnce(Result<String, zephium_core::export::ExportRefusal>) + Send + 'static,
+    ) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, reply: Result<String, zephium_core::export::ExportRefusal>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(reply);
+        }
+    }
+}
+impl fmt::Debug for ExportCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExportCompletion")
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImportDestination {
+    pub profile: ProfileId,
+    pub space: SpaceId,
+}
+
+#[derive(Clone)]
+pub struct ImportDestinationCompletion(Completion<Option<ImportDestination>>);
+impl ImportDestinationCompletion {
+    pub fn new(done: impl FnOnce(Option<ImportDestination>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, profile: Option<ImportDestination>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(profile);
+        }
+    }
+}
+impl fmt::Debug for ImportDestinationCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ImportDestinationCompletion")
     }
 }
 #[derive(Clone)]
@@ -927,6 +1220,11 @@ impl fmt::Debug for ImportCompletion {
 impl fmt::Debug for BookmarkCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("BookmarkCompletion")
+    }
+}
+impl fmt::Debug for BrowsingDataCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BrowsingDataCompletion")
     }
 }
 impl fmt::Debug for HistoryCompletion {

@@ -379,7 +379,7 @@ favorites and folders into one aggregate; there is no separate bookmarks system.
   spaces swaps the visible item set and the theme.
 - **Item** - sidebar node. `{ id: Ulid, container, parent: Option<ItemId>,
   order, kind: Folder { name } | Tab { url, title, favicon } }`.
-  Containers/sections: `Favorites(profile)` (profile-wide grid),
+  Containers/sections: `Favorites(space)` (the space's Essentials),
   `Pinned(space)`, `Today(space)` (ephemeral tabs, auto-archivable).
 - **View** (runtime only) - a live webview bound to an item:
   `{ view: u64, item: ItemId, profile }`. Many items, few views (§7).
@@ -442,7 +442,7 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   unsafe page is never force-discarded. A successful discard drops the view
   but keeps the item; activation recreates it, restores native back/forward
   state where it was safely captured (showing the tab's last frame until the
-  restored document paints), and reapplies zoom.
+  restored document paints), and brings the view to its site's page zoom.
 - The application admits at most 64 live views, a backstop for kept-awake and
   protected pages rather than a memory budget; a foreground create waits
   briefly for a verified close at that ceiling.
@@ -502,7 +502,7 @@ and denies malformed metadata, overflow, handler panic, unknown settlement,
 and delegate teardown. Engine admission is stricter: at most one request per
 physical view and eight process-wide, bound to the exact profile, item,
 physical-view permit, and committed navigation epoch. Shell settlement,
-navigation, close/profile retirement, and a 30-second watchdog use an
+navigation, close/profile retirement, and a 125-second watchdog use an
 independent fixed terminal channel; an `Allow` is downgraded to denial after
 any identity or epoch change.
 
@@ -514,18 +514,30 @@ notifications and screen capture are denied everywhere, and extension pages and
 offscreen documents deny media capture.
 The macOS coordinator loads the exact profile catalog only after a supported request from the
 focused resident tab, retains at most the two relevant rows, and serializes one
-browser-owned process-wide prompt. Navigation, tab/profile loss, window hide,
-shutdown, a 25-second Shell deadline, Store refusal, or identity mismatch all
-deny. One-time choices never write policy. A remembered denial dominates an
-atomic camera-and-microphone request; a remembered Allow reaches WebKit only
+browser-owned process-wide prompt. While chrome reports the expanded sidebar's
+address field on screen (never on a browser page such as Work), the prompt is a
+card under that field, where no page view overlaps, and the page stays on
+screen; otherwise it is a window-modal sheet and the content stage is removed
+while it shows. Opening a browser page over the asking tab dismisses it.
+Navigation to another document, tab/profile
+loss, window hide, shutdown, a two-minute Shell deadline, Store refusal, or
+identity mismatch all deny; the same document finishing its load or changing
+its address through the History API does not. One-time choices never write
+policy. Allow this time and Don't allow are held in memory for the exact tab,
+origin and committed document that asked, so its later requests settle without
+a prompt until the tab shows another document or closes, or the private session
+ends. A saved decision still wins, and changing the site in Site settings
+forgets them. Escape refuses that one request and remembers nothing. A
+remembered or one-time denial dominates an atomic camera-and-microphone request; a remembered Allow reaches WebKit only
 after an atomic CAS mutation and a second exact catalog read observe every
 requested capability as allowed. Conflict and outcome-unknown results are
-reconciled but never blindly retried. These remembered-choice paths exist but
-are unreachable in shipped builds: `PagePermissionPromptState::remember_enabled`
-is false, so every macOS decision is one-time until the browser can list and
-revoke grants. The frame receives opaque echo identities,
-a canonical origin, and a closed camera/microphone vocabulary; it cannot supply
-an origin or permission name. Incognito profiles bypass Store entirely, expose
+reconciled but never blindly retried. The prompt offers Allow while visiting
+the site, Allow this time and Never allow; only the first and last are written.
+Geolocation uses the same coordinator and catalog. Settings ▸ Privacy ▸ Site
+settings lists and changes the catalog's rows through the same CAS path. The
+frame receives opaque echo identities, a canonical origin, and a closed
+camera/microphone/location vocabulary; it cannot supply an origin or permission
+name. Incognito profiles bypass Store entirely, expose
 only one-time choices, and cannot be coerced into durable policy through IPC.
 Pre-bootstrap and quarantined-profile events still
 deny every request. Unit, actor, IPC-binding, and frontend projection tests
@@ -552,26 +564,42 @@ The macOS bundle carries human-readable `NSCameraUsageDescription` and
 signed packaged build must still be checked for camera, microphone, and atomic
 combined Allow/Deny, OS consent ordering, navigation and tab-close
 invalidation, and device-track cleanup (`desktop/Entitlements.plist` grants the
-two device entitlements). Remembered-policy reload and incognito
-non-persistence must be proved before `remember_enabled` is switched on.
+two device entitlements and location). Remembered-policy reload and incognito
+non-persistence are covered by Shell tests and still need a packaged check.
 
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 
-The built favicon path deliberately has no second Rust HTTP stack or native
-image decoder. The exact site renderer scans a bounded set of same-origin icon
-links plus `/favicon.ico`, decodes there, and returns only canonical 32x32 RGBA
-for the current view generation/navigation epoch. Seven timed polls are
-followed by at most one fresh pass at document completion when the initial
-budget expired during loading. Cross-origin/CDN icons are not fetched until a
-profile-scoped broker can share the engine's exact cookies, proxy, DNS, and
-shutdown policy; affected sites may show the fallback rather than their
-declared icon.
+The favicon path never polls. When a page commits, the shell asks the engine
+to watch that document's icon links: one host-initiated evaluation waits inside
+the page, answers with the addresses its `icon`, `apple-touch-icon` and
+`mask-icon` links name (cross-origin included) as soon as its head has any, and
+again if they change until a moment after load, then stops. The page names
+addresses only; it never supplies an image. The shell ranks them (kind first,
+then the side nearest 32 px without upscaling, the site's own `/favicon.ico`
+last) and asks the desktop prober for the best three. The prober is the one
+anonymous client the Work origin probe already used: HTTPS to public addresses
+only, resolved by a resolver that refuses private ones, no cookie store, no
+credentials, no referrer and nothing of the page, two redirects, five seconds,
+256 KiB. Its decoders are the bounded memory-safe ones; only a fixed 32x32
+RGBA raster leaves it, so a page-controlled image is still never parsed by the
+chrome. What the prober cannot use (vectors, plain-http or private hosts, icons
+that need the page's cookies) is decoded by the page itself from one address
+the host names, same-origin first. A private profile never asks the prober for a
+page's addresses: all of its icon fetching stays inside its own partition and is
+kept in memory only. Where WebView2 reports the icon it chose (`FaviconChanged`
+and `GetFavicon`), that PNG is the primary source and the declared addresses
+wait for the load and back it up. A tab shows its page's icon, then its
+origin's, then the other spelling of its host (`www` and apex only). While a
+page of the site it was just on loads it keeps the icon it had until the new one
+is known or thirty seconds pass; a tab that moved to another site shows its
+loading state. An address that gave nothing is not asked for again for an hour,
+and the oldest of those give way first, so a new site always gets its turn.
 
 Future application-owned downloads, such as maintained filter lists or signed
 updates, are not page-derived browsing traffic. Each must use a purpose-built,
 bounded component with its own source allowlist, redirect, proxy, integrity,
-retention, and shutdown policy. A generic native fetch seam must not be
-reintroduced for page-controlled URLs.
+retention, and shutdown policy. Apart from the icon prober above, a generic
+native fetch seam must not be reintroduced for page-controlled URLs.
 
 ---
 
@@ -2469,9 +2497,10 @@ is claimed.
 
 HTTP request authentication is resolved as an explicit degradation rather
 than an open workaround target. Public WebKit cannot enforce the blocking
-`onAuthRequired` response used by password managers, and the raw WKWebView
-delegate cancels every non-server-trust authentication challenge before native
-credential UI can bypass browser policy. The browser therefore discloses HTTP
+`onAuthRequired` response used by password managers. The raw WKWebView
+delegate hands a person's tab its main-frame HTTP sign-in challenges for
+Zephium's own prompt and cancels every other non-server-trust challenge before
+native credential UI can bypass browser policy. The browser therefore discloses HTTP
 Basic-auth autofill as unavailable; it does not add a generic credential
 bridge, expose a native dialog, or retain credentials outside the publisher.
 

@@ -12,6 +12,7 @@ use zephium_core::ids::ProfileId;
 use zephium_core::work::{agent::*, search::*, synthesis::*};
 
 const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
+    no_usage_charge: false,
     draft: None,
     lead: None,
     provider: WorkSearchProvider::OpenAi,
@@ -34,6 +35,7 @@ fn begin(work: WorkId, expected: WorkRevision, timeout_seconds: u32) -> WorkComm
         command: WorkCommandId::generate(),
         intent: WorkRuntimeIntent::BeginAgent {
             grant: WorkAgentGrantV1 {
+                no_usage_charge: false,
                 model: PUBLIC_SEARCH_MODEL.into(),
                 ..GRANT
             },

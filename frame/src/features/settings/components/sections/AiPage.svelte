@@ -112,15 +112,18 @@
   >
     {#each roles as row (row.role)}
       <SettingsRow title={row.title()} description={row.description()}
-        ><Select
-          label={row.title()}
-          labelHidden
-          options={options(row.role)}
-          value={models?.chosen[row.role] ?? AUTO}
-          disabled={!anyUsable || !!session?.busy}
-          onchange={(value) => void session?.choose(row.role, value === AUTO ? null : value)}
-        /></SettingsRow
+        >{#key session?.fault?.action === `choose:${row.role}` ? session.fault : null}<Select
+            label={row.title()}
+            labelHidden
+            options={options(row.role)}
+            value={models?.chosen[row.role] ?? AUTO}
+            disabled={!anyUsable || !!session?.busy}
+            onchange={(value) => void session?.choose(row.role, value === AUTO ? null : value)}
+          />{/key}</SettingsRow
       >
+      {#if session?.fault?.action === `choose:${row.role}`}<p class="ai-note" role="alert">
+          {m.work_model_failed()}
+        </p>{/if}
     {/each}
     <div class="more">
       <Button

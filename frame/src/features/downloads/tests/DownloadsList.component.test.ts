@@ -8,6 +8,50 @@ const native = vi.hoisted(() => ({
   call: vi.fn(),
   listener: null as null | ((event: { payload: { profile: string } }) => void),
 }));
+
+test("resuming after a pause starts a fresh time-left estimate", async () => {
+  const profile = "00000000000000000000000009";
+  let time = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => time);
+  let entry: DownloadView = {
+    id: "00000000000000000000000008",
+    revision: "00000001",
+    created_at: "1",
+    filename: "resume.zip",
+    source: "https://example.com/",
+    state: "receiving",
+    received: "0",
+    total: "10000",
+    error: null,
+  };
+  native.call.mockImplementation(async (_profile: string, call: DownloadCall) => ({
+    kind: call.kind === "list" ? "page" : "updates",
+    entries: [entry],
+    next: null,
+    removed: [],
+    supported: true,
+    cleanup: { running: false, error: null },
+  }));
+  const screen = await render(DownloadsList, { profile });
+  await expect.poll(() => screen.container.textContent).toContain("0 B of");
+  time = 1000;
+  entry = { ...entry, revision: "00000002", received: "1000" };
+  native.listener?.({ payload: { profile } });
+  await expect.poll(() => screen.container.textContent).toContain("9 sec left");
+  entry = { ...entry, revision: "00000003", state: "paused" };
+  native.listener?.({ payload: { profile } });
+  await expect.poll(() => screen.container.textContent).not.toContain("left");
+  time = 601_000;
+  entry = { ...entry, revision: "00000004", state: "receiving" };
+  native.listener?.({ payload: { profile } });
+  await expect.poll(() => screen.container.textContent).toContain("1,000 B of");
+  expect(screen.container.textContent).not.toContain("left");
+  time = 602_000;
+  entry = { ...entry, revision: "00000005", received: "2000" };
+  native.listener?.({ payload: { profile } });
+  await expect.poll(() => screen.container.textContent).toContain("8 sec left");
+  await screen.unmount();
+});
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ downloadCall: native.call });
@@ -271,5 +315,114 @@ test("a resumable short response explains retry without presenting a finished co
       "title",
       "Retry Download can resume this interrupted transfer for up to five minutes while its tab stays open.",
     );
+  await screen.unmount();
+});
+
+function serving(initial: DownloadView, onCall: (call: DownloadCall) => DownloadView | null) {
+  let entry = initial;
+  native.call.mockClear();
+  native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
+    if (call.kind === "list")
+      return {
+        kind: "page",
+        cleanup: { running: false, error: null },
+        entries: [entry],
+        next: null,
+        supported: true,
+      };
+    if (call.kind === "updates")
+      return {
+        kind: "updates",
+        cleanup: { running: false, error: null },
+        entries: [entry],
+        removed: [],
+      };
+    const next = onCall(call);
+    if (next) entry = next;
+    return { kind: "accepted" };
+  });
+}
+
+const base: DownloadView = {
+  id: "00000000000000000000000007",
+  revision: "00000001",
+  created_at: "1",
+  filename: "setup.exe",
+  source: "https://example.com",
+  source_is_context: false,
+  state: "receiving",
+  received: "10",
+  total: "100",
+  error: null,
+};
+
+test("a receiving download can be paused and then resumed, and a pause is not shown as a problem", async () => {
+  const profile = "00000000000000000000000001";
+  serving({ ...base, filename: "movie.mp4" }, (call) =>
+    call.kind === "pause"
+      ? { ...base, filename: "movie.mp4", revision: "00000002", state: "paused" }
+      : call.kind === "resume"
+        ? { ...base, filename: "movie.mp4", revision: "00000003" }
+        : null,
+  );
+  const screen = await render(DownloadsList, { profile });
+
+  await page.getByRole("button", { name: "Pause", exact: true }).click();
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "pause", id: base.id });
+  await expect.element(page.getByText("Paused", { exact: true })).toBeVisible();
+  // Nobody interrupted it, so it does not offer a retry or read as an error.
+  await expect
+    .element(page.getByRole("button", { name: "Retry Download", exact: true }))
+    .not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Resume", exact: true }).click();
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "resume", id: base.id });
+  await expect.element(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
+  await screen.unmount();
+});
+
+test("a download of a risky type asks before it is kept and can be deleted instead", async () => {
+  const profile = "00000000000000000000000001";
+  serving({ ...base, revision: "00000002", state: "held", received: "100" }, (call) =>
+    call.kind === "keep"
+      ? { ...base, revision: "00000003", state: "completed", received: "100" }
+      : call.kind === "discard"
+        ? { ...base, revision: "00000003", state: "cancelled" }
+        : null,
+  );
+  const screen = await render(DownloadsList, { profile });
+
+  await expect
+    .element(page.getByText("This type of file can harm your computer. Keep it?"))
+    .toBeVisible();
+  // Held is not finished: it cannot be opened or forgotten before a decision.
+  await expect
+    .element(page.getByRole("button", { name: "Open setup.exe", exact: true }))
+    .not.toBeInTheDocument();
+  await expect
+    .element(page.getByRole("button", { name: "Remove from list", exact: true }))
+    .not.toBeInTheDocument();
+
+  await page.getByRole("button", { name: "Keep", exact: true }).click();
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "keep", id: base.id });
+  await expect
+    .element(page.getByRole("button", { name: "Open setup.exe", exact: true }))
+    .toBeVisible();
+  await screen.unmount();
+});
+
+test("deleting a held download sends the discard and no keep", async () => {
+  const profile = "00000000000000000000000001";
+  serving({ ...base, revision: "00000002", state: "held", received: "100" }, (call) =>
+    call.kind === "discard" ? { ...base, revision: "00000003", state: "cancelled" } : null,
+  );
+  const screen = await render(DownloadsList, { profile });
+
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+
+  expect(native.call).toHaveBeenCalledWith(profile, { kind: "discard", id: base.id });
+  expect(native.call).not.toHaveBeenCalledWith(profile, { kind: "keep", id: base.id });
+  await expect.element(page.getByText("Cancelled · example.com")).toBeVisible();
   await screen.unmount();
 });

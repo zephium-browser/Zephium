@@ -163,6 +163,8 @@ fn a_failed_address_is_explained_until_the_next_attempt() {
     shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
         id,
         reason: NavigationFailureReason::Offline,
+        url: None,
+        replaced_page: false,
     }));
     assert_eq!(failure(&screen), None, "a page's own load names no address");
 
@@ -173,6 +175,8 @@ fn a_failed_address_is_explained_until_the_next_attempt() {
     shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
         id,
         reason: NavigationFailureReason::HostNotFound,
+        url: None,
+        replaced_page: false,
     }));
     let shown = failure(&screen).expect("the failed address is explained");
     assert_eq!(shown.url, "https://unreachable.example/");
@@ -187,6 +191,157 @@ fn a_failed_address_is_explained_until_the_next_attempt() {
         None,
         "a new attempt clears the explanation"
     );
+}
+
+#[test]
+fn a_page_replaced_by_an_error_document_is_covered_until_a_page_commits() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    commit_url(&mut shell, id, "https://example.com/");
+    present_committed(&mut shell, id, "https://example.com/");
+    assert_eq!(engine.last_layout(), [id.to_string()]);
+    let tab = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+    };
+
+    // A link the page followed failed, and the engine replaced the page.
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Unreachable,
+        url: Some("https://example.com/down".into()),
+        replaced_page: true,
+    }));
+    let failure = tab(&screen)
+        .failure
+        .expect("the failure stands in for the page");
+    assert!(failure.covers_page);
+    assert_eq!(failure.url, "https://example.com/down");
+    assert!(
+        engine.last_layout().is_empty(),
+        "the view keeps its history off the stage"
+    );
+
+    // Retrying keeps it covered while the address loads.
+    shell.handle(Command::Navigate {
+        id,
+        input: "https://example.com/down".into(),
+    });
+    assert!(tab(&screen)
+        .failure
+        .is_some_and(|failure| failure.covers_page));
+    assert!(engine.last_layout().is_empty());
+
+    // Back, or any other document, commits: the view returns.
+    commit_url(&mut shell, id, "https://example.com/");
+    assert_eq!(tab(&screen).failure, None);
+    assert_eq!(engine.last_layout(), [id.to_string()]);
+}
+
+#[test]
+fn a_page_kept_in_place_after_a_failure_is_never_covered() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    commit_url(&mut shell, id, "https://example.com/");
+    present_committed(&mut shell, id, "https://example.com/");
+    shell.handle(Command::Navigate {
+        id,
+        input: "unreachable.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::HostNotFound,
+        url: None,
+        replaced_page: false,
+    }));
+    let failure = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .and_then(|tab| tab.failure)
+        .unwrap();
+    assert!(!failure.covers_page);
+    assert_eq!(engine.last_layout(), [id.to_string()]);
+}
+
+#[test]
+fn a_page_that_stops_responding_in_front_asks_to_wait_or_reload() {
+    use zephium_ipc::PageRequestView;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let behind = active_id(&screen);
+    commit_url(&mut shell, behind, "https://behind.example/");
+    shell.handle(Command::Open);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    commit_url(&mut shell, id, "https://example.com/");
+    present_committed(&mut shell, id, "https://example.com/");
+    let request = |screen: &Screen, id: ItemId| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.page_request)
+    };
+    let hung = |shell: &mut Shell, id: ItemId, responding: bool| {
+        shell.handle(Command::Engine(EngineEvent::PageResponsiveness {
+            id,
+            responding,
+        }));
+    };
+
+    hung(&mut shell, behind, false);
+    assert_eq!(request(&screen, behind), None, "only the tab in front asks");
+
+    hung(&mut shell, id, false);
+    assert_eq!(request(&screen, id), Some(PageRequestView::Unresponsive));
+
+    // The page answers again: the question goes.
+    hung(&mut shell, id, true);
+    assert_eq!(request(&screen, id), None);
+
+    // Waiting holds the question back while the page stays hung.
+    hung(&mut shell, id, false);
+    shell.handle(Command::AnswerPageRequest {
+        id,
+        decision: crate::PageRequestDecision::Dismiss,
+    });
+    assert_eq!(request(&screen, id), None);
+    hung(&mut shell, id, false);
+    assert_eq!(request(&screen, id), None, "the person chose to wait");
+    shell.crash.unresponsive_waits.insert(
+        id,
+        std::time::Instant::now() - super::super::page_requests::UNRESPONSIVE_WAIT,
+    );
+    hung(&mut shell, id, false);
+    assert_eq!(request(&screen, id), Some(PageRequestView::Unresponsive));
+
+    // Reload ends the hung view; the crash path brings the page back.
+    shell.handle(Command::AnswerPageRequest {
+        id,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(request(&screen, id), None);
+    assert!(engine.calls().contains(&format!("end-unresponsive {id}")));
+    assert!(shell.crash.unresponsive_waits.is_empty());
 }
 
 #[test]
@@ -330,7 +485,8 @@ fn a_blocked_new_tab_can_be_opened_from_its_notice() {
     assert_eq!(
         shown,
         Some(PageRequestView::Popup {
-            host: Some("accounts.example.com".into())
+            host: Some("accounts.example.com".into()),
+            site: Some("example.com".into()),
         })
     );
 
@@ -373,5 +529,185 @@ fn an_unchanged_tab_keeps_its_revision_across_snapshots() {
     assert!(
         revision_of(&screen, first) > before,
         "a changed tab gets a newer revision"
+    );
+}
+
+#[test]
+fn a_sign_in_prompt_waits_on_its_tab_and_answers_once() {
+    use zephium_core::http_auth::{HttpAuthPrompt, HttpCredentials};
+    use zephium_ipc::PageRequestView;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let shown = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.page_request)
+    };
+    let answers = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("http-auth "))
+            .collect::<Vec<_>>()
+    };
+    let ask = |shell: &mut Shell, request: u32| {
+        shell.handle(Command::Engine(EngineEvent::HttpAuthRequested {
+            id,
+            prompt: HttpAuthPrompt {
+                request,
+                host: "router.lan".into(),
+                insecure: true,
+                proxy: false,
+                retry: false,
+            },
+        }));
+    };
+    let credentials = || HttpCredentials::new("admin".into(), "hunter2".into());
+
+    ask(&mut shell, 4);
+    assert_eq!(
+        shown(&screen),
+        Some(PageRequestView::HttpAuth {
+            request: 4,
+            host: "router.lan".into(),
+            insecure: true,
+            proxy: false,
+            retry: false,
+        })
+    );
+    shell.handle(Command::Engine(EngineEvent::PageOpenBlocked {
+        id,
+        url: None,
+    }));
+    assert!(
+        matches!(shown(&screen), Some(PageRequestView::HttpAuth { .. })),
+        "a refused pop-up never hides a waiting sign-in"
+    );
+
+    shell.handle(Command::AnswerHttpAuth {
+        id,
+        request: 3,
+        credentials: credentials(),
+    });
+    assert!(answers(&engine).is_empty(), "a stale answer goes nowhere");
+    shell.handle(Command::AnswerHttpAuth {
+        id,
+        request: 4,
+        credentials: credentials(),
+    });
+    assert_eq!(shown(&screen), None);
+    assert_eq!(
+        answers(&engine),
+        [format!("http-auth {id} 4 sign-in as admin")]
+    );
+    shell.handle(Command::AnswerHttpAuth {
+        id,
+        request: 4,
+        credentials: credentials(),
+    });
+    assert_eq!(answers(&engine).len(), 1, "a prompt is answered once");
+
+    ask(&mut shell, 5);
+    shell.handle(Command::Engine(EngineEvent::HttpAuthEnded {
+        id,
+        request: 4,
+    }));
+    assert!(
+        shown(&screen).is_some(),
+        "only the ended prompt is taken down"
+    );
+    shell.handle(Command::Engine(EngineEvent::HttpAuthEnded {
+        id,
+        request: 5,
+    }));
+    assert_eq!(shown(&screen), None);
+
+    ask(&mut shell, 6);
+    shell.handle(Command::AnswerPageRequest {
+        id,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(shown(&screen), None);
+    assert_eq!(
+        answers(&engine).last().map(String::as_str),
+        Some(format!("http-auth {id} 6 cancel").as_str()),
+        "the generic answer can only cancel a sign-in"
+    );
+
+    ask(&mut shell, 7);
+    shell.handle(Command::Engine(EngineEvent::Crashed { id }));
+    assert!(!matches!(
+        shown(&screen),
+        Some(PageRequestView::HttpAuth { .. })
+    ));
+}
+
+#[test]
+fn only_a_local_hosts_refused_certificate_has_a_way_past() {
+    use zephium_core::certificates::CertificateProblem;
+    use zephium_core::ports::engine::NavigationFailureReason;
+    use zephium_ipc::{TabCertificateProblem, TabFailureReason};
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let tab = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+    };
+    let allowed = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("allow-certificate "))
+            .collect::<Vec<_>>()
+    };
+    let refuse = |shell: &mut Shell, input: &str, refused: &str| {
+        shell.handle(Command::Navigate {
+            id,
+            input: input.into(),
+        });
+        shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+            id,
+            reason: NavigationFailureReason::Certificate(CertificateProblem::Untrusted),
+            url: Some(refused.into()),
+            replaced_page: false,
+        }));
+    };
+
+    refuse(&mut shell, "example.com", "https://example.com/");
+    let failure = tab(&screen).failure.expect("the refusal is explained");
+    assert_eq!(failure.reason, TabFailureReason::Insecure);
+    assert_eq!(failure.certificate, Some(TabCertificateProblem::Untrusted));
+    assert!(!failure.can_continue, "a public name never has a way past");
+    shell.handle(Command::ContinuePastCertificate(id));
+    assert!(allowed(&engine).is_empty());
+
+    // The refused address, after the redirect to https, is the one shown.
+    refuse(&mut shell, "http://nas.local", "https://nas.local:5001/");
+    let failure = tab(&screen).failure.unwrap();
+    assert_eq!(failure.url, "https://nas.local:5001/");
+    assert!(failure.can_continue);
+    shell.handle(Command::ContinuePastCertificate(id));
+    assert_eq!(
+        allowed(&engine),
+        [format!("allow-certificate {id} https://nas.local:5001/")]
+    );
+    commit_url(&mut shell, id, "https://nas.local:5001/");
+    present_committed(&mut shell, id, "https://nas.local:5001/");
+    let shown = tab(&screen);
+    assert_eq!(shown.failure, None);
+    assert!(shown.certificate_exception, "the page never looks secure");
+
+    commit_url(&mut shell, id, "https://nas.local/");
+    present_committed(&mut shell, id, "https://nas.local/");
+    assert!(
+        !tab(&screen).certificate_exception,
+        "another port is another origin"
     );
 }

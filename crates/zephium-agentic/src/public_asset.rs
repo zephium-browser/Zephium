@@ -187,6 +187,13 @@ impl reqwest::dns::Resolve for PublicResolver {
     }
 }
 
+/// A resolver that answers only public unicast addresses, checked once and
+/// handed to the connector as-is, so a name that points inward cannot reach a
+/// private host however it is spelled or redirected.
+pub fn public_resolver() -> Arc<dyn reqwest::dns::Resolve> {
+    Arc::new(PublicResolver)
+}
+
 /// The same picture at display size, when its CDN takes size parameters in
 /// the address: LEGO, Shopify, Cloudinary, imgix, Contentful, Sanity and
 /// Airbnb. None when the host is not one of them or the address already asks

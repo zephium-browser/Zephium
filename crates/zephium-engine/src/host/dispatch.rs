@@ -428,6 +428,9 @@ pub(crate) fn install(
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            popup_sites: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            certificate_exceptions: HashMap::new(),
             page_styles: HashMap::new(),
             picker: None,
             next_picker: 0,
@@ -584,6 +587,21 @@ pub(super) fn try_open_native_tab(
             return wry::NewWindowResponse::Deny;
         };
         host.open_native_tab(source, permit, activity, url, features)
+    })
+}
+
+/// Synchronous: a key monitor must answer whether it consumed the event.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        slot.as_ref()
+            .is_some_and(|host| host.webext.perform_command(event))
     })
 }
 

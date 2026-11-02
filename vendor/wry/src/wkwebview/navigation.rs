@@ -727,9 +727,23 @@ pub(crate) fn did_fail_navigation(
   // Failed event is emitted now or from a deferred flush.
   if phase == NavigationEventPhase::Failed {
     if let Some(handler) = &this.ivars().navigation_failure_handler {
+      #[allow(unused_mut)]
+      let mut failure = navigation_failure(domain.as_deref(), error.code());
+      #[cfg(target_os = "macos")]
+      if failure == NavigationFailure::Insecure {
+        if let Some(refused) =
+          crate::wkwebview::server_trust::certificate_failure(error, error.code())
+        {
+          failure = NavigationFailure::Certificate(refused.problem);
+          if let Some(report) = &this.ivars().certificate_failure_handler {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report(refused)));
+          }
+        }
+      }
       handler(
         NavigationId::from_raw(navigation_key(navigation) as u64),
-        navigation_failure(domain.as_deref(), error.code()),
+        failure,
+        crate::FailedDocument::Kept,
       );
     }
   }

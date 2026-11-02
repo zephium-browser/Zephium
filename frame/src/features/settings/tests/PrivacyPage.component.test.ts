@@ -3,13 +3,19 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import PrivacyPage from "../components/sections/PrivacyPage.svelte";
 
-const native = vi.hoisted(() => ({ history: vi.fn() }));
-
+vi.mock("$shared/platform", () => ({ IS_WINDOWS: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ historyCall: native.history as never });
+  return mockBindings();
 });
+vi.mock("../lib/settings-model", async (original) => ({
+  ...(await original<typeof import("../lib/settings-model")>()),
+  showPreviews: false,
+}));
 vi.mock("$domain/tabs", () => ({ tabs: { profile: () => ({ id: "profile" }) } }));
+vi.mock("$domain/permissions", () => ({
+  sitePermissions: { list: async () => null, set: vi.fn() },
+}));
 vi.mock("$domain/blocker", () => ({
   blocker: {
     status: () => ({
@@ -35,44 +41,21 @@ vi.mock("$domain/credentials", () => ({
 
 afterEach(() => vi.clearAllMocks());
 
-test("clearing browsing data offers history only and clears the chosen range", async () => {
-  native.history.mockResolvedValue({ kind: "removed", count: 3 });
+test("the release page offers browsing data that works and none of the previews", async () => {
   const screen = await render(PrivacyPage);
-  await screen.getByRole("button", { name: "Clear…" }).click();
 
-  const dialog = page.getByRole("dialog");
-  await expect.element(dialog.getByRole("checkbox")).toHaveLength(1);
-  await expect.element(dialog.getByRole("checkbox", { name: "Browsing history" })).toBeChecked();
-  const text = dialog.element().textContent;
-  expect(text).not.toContain("Cookies");
-  expect(text).not.toContain("do not change browser behavior");
+  await expect
+    .element(page.getByRole("heading", { name: "Browsing data", exact: true }))
+    .toBeVisible();
+  await expect.element(page.getByText("Clear browsing data")).toBeVisible();
+  await expect.element(page.getByText("Manage site data")).toBeVisible();
+  await expect.element(page.getByRole("button", { name: "Clear…" })).toBeVisible();
+  await expect.element(page.getByRole("button", { name: "Manage…" })).toBeVisible();
 
-  await dialog.getByLabelText("Time range").click();
-  await page.getByRole("option", { name: "Last 7 days" }).click();
-  await dialog.getByRole("button", { name: "Clear history" }).click();
-
-  expect(native.history).toHaveBeenCalledExactlyOnceWith("profile", {
-    kind: "clear",
-    range: "week",
-  });
-  await expect.element(page.getByRole("status")).toHaveTextContent("History cleared.");
-});
-
-test("a failed clear keeps the dialog open and says so", async () => {
-  native.history.mockRejectedValue(new Error("offline"));
-  const screen = await render(PrivacyPage);
-  await screen.getByRole("button", { name: "Clear…" }).click();
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't clear history");
-  await expect.element(page.getByRole("dialog")).toBeVisible();
-});
-
-test("a native storage rejection never reports that history was cleared", async () => {
-  native.history.mockResolvedValue({ kind: "error", error: "unavailable" });
-  const screen = await render(PrivacyPage);
-  await screen.getByRole("button", { name: "Clear…" }).click();
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't clear history");
-  await expect.element(page.getByRole("dialog")).toBeVisible();
-  expect(screen.container.textContent).not.toContain("History cleared.");
+  const text = screen.container.textContent;
+  expect(text).not.toContain("Microsoft Defender SmartScreen");
+  expect(text).not.toContain("Windows diagnostic settings");
+  expect(text).not.toContain("Interface preview");
+  expect(text).not.toContain("Site exceptions");
+  expect(text).not.toContain("Clear site data when Zephium closes");
 });

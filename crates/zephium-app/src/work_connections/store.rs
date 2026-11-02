@@ -3,7 +3,7 @@
 //! secret, bearer tokens and OAuth credentials live in the login Keychain.
 use std::path::{Path, PathBuf};
 
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
 use zephium_ipc::work::{WorkServerV1, MAX_WORK_SERVERS};
@@ -32,6 +32,48 @@ pub enum StoreError {
 #[derive(Clone, Debug)]
 pub struct ConnectionStore {
     folder: PathBuf,
+    authority: Arc<Mutex<AuthorityRegistry>>,
+}
+
+type AuthorityRegistry =
+    std::collections::HashMap<(String, String), std::sync::Weak<Mutex<AuthorityState>>>;
+
+#[derive(Debug, Default)]
+struct AuthorityState {
+    generation: u64,
+    changing: usize,
+}
+impl AuthorityState {
+    fn advance(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("connection generation exhausted");
+    }
+}
+
+/// A session retains only its own authority; registry entries disappear once
+/// sessions and in-flight writes release them. No per-server history accumulates.
+pub(crate) struct ConnectionGeneration {
+    authority: Arc<Mutex<AuthorityState>>,
+    generation: u64,
+}
+impl ConnectionGeneration {
+    pub(crate) fn is_current(&self) -> bool {
+        let state = self.authority.lock().unwrap_or_else(|p| p.into_inner());
+        state.changing == 0 && state.generation == self.generation
+    }
+}
+
+/// Holds the authority closed through successful or failed credential/configuration writes.
+/// Dropping the lease revokes sessions captured before either boundary, including failures.
+pub struct ConnectionChange(Arc<Mutex<AuthorityState>>);
+impl Drop for ConnectionChange {
+    fn drop(&mut self) {
+        let mut authority = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        authority.advance();
+        authority.changing -= 1;
+    }
 }
 
 fn valid_profile(profile: &str) -> bool {
@@ -42,7 +84,57 @@ impl ConnectionStore {
     pub fn new(data: &Path) -> Self {
         Self {
             folder: data.join("connections"),
+            authority: Default::default(),
         }
+    }
+
+    fn authority(&self, profile: &str, server: &str) -> Arc<Mutex<AuthorityState>> {
+        let mut registry = self.authority.lock().unwrap_or_else(|p| p.into_inner());
+        registry.retain(|_, state| state.strong_count() > 0);
+        let slot = registry
+            .entry((profile.to_owned(), server.to_owned()))
+            .or_default();
+        if let Some(state) = slot.upgrade() {
+            return state;
+        }
+        let state = Arc::new(Mutex::new(AuthorityState::default()));
+        *slot = Arc::downgrade(&state);
+        state
+    }
+
+    /// Only this profile/server is unavailable while its authority is written.
+    pub fn begin_change(&self, profile: &str, server: &str) -> ConnectionChange {
+        let state = self.authority(profile, server);
+        {
+            let mut authority = state.lock().unwrap_or_else(|p| p.into_inner());
+            authority.advance();
+            authority.changing += 1;
+        }
+        ConnectionChange(state)
+    }
+
+    pub(crate) fn generation(&self, profile: &str, server: &str) -> Option<ConnectionGeneration> {
+        let state = self.authority(profile, server);
+        let authority = state.lock().unwrap_or_else(|p| p.into_inner());
+        (authority.changing == 0).then(|| ConnectionGeneration {
+            authority: state.clone(),
+            generation: authority.generation,
+        })
+    }
+
+    /// Browser OAuth waits carry no write lease. Only save/clear revoke sessions.
+    pub fn track_tokens(
+        &self,
+        profile: &str,
+        server: &str,
+        tokens: Arc<dyn zephium_mcp::oauth::TokenStore>,
+    ) -> Arc<dyn zephium_mcp::oauth::TokenStore> {
+        Arc::new(TrackedTokens {
+            store: self.clone(),
+            profile: profile.into(),
+            server: server.into(),
+            tokens,
+        })
     }
 
     fn path(&self, profile: &str) -> Result<PathBuf, StoreError> {
@@ -107,11 +199,16 @@ impl ConnectionStore {
         if server.id != replaced && servers.iter().any(|s| s.id == server.id) {
             return Err(StoreError::Invalid);
         }
+        let id = server.id.clone();
         match servers.iter().position(|s| s.id == replaced) {
             Some(index) => servers[index] = server,
             None if servers.len() >= MAX_WORK_SERVERS => return Err(StoreError::Full),
             None => servers.push(server),
         }
+        let _change = self.begin_change(profile, &id);
+        let _previous_change = previous
+            .filter(|previous| *previous != id)
+            .map(|previous| self.begin_change(profile, previous));
         self.write(profile, servers.clone())?;
         Ok(servers)
     }
@@ -135,6 +232,10 @@ impl ConnectionStore {
             };
             before.push((account, value));
         }
+        let _change = self.begin_change(profile, &server.id);
+        let _previous_change = previous
+            .filter(|id| *id != server.id)
+            .map(|id| self.begin_change(profile, id));
         let result = (|| {
             for (account, value) in secrets {
                 vault
@@ -165,6 +266,7 @@ impl ConnectionStore {
         id: &str,
         vault: &dyn zephium_mcp::keychain::SecretVault,
     ) -> Result<(), StoreError> {
+        let _change = self.begin_change(profile, id);
         vault
             .delete_server(profile, id)
             .map_err(|_| StoreError::Io)?;
@@ -173,6 +275,7 @@ impl ConnectionStore {
     }
 
     pub fn remove(&self, profile: &str, id: &str) -> Result<Vec<WorkServerV1>, StoreError> {
+        let _change = self.begin_change(profile, id);
         let mut servers = self.servers(profile)?;
         servers.retain(|s| s.id != id);
         self.write(profile, servers.clone())?;
@@ -268,6 +371,26 @@ impl ConnectionStore {
     }
 }
 
+struct TrackedTokens {
+    store: ConnectionStore,
+    profile: String,
+    server: String,
+    tokens: Arc<dyn zephium_mcp::oauth::TokenStore>,
+}
+impl zephium_mcp::oauth::TokenStore for TrackedTokens {
+    fn load(&self) -> Option<String> {
+        self.tokens.load()
+    }
+    fn save(&self, value: &str) -> bool {
+        let _change = self.store.begin_change(&self.profile, &self.server);
+        self.tokens.save(value)
+    }
+    fn clear(&self) {
+        let _change = self.store.begin_change(&self.profile, &self.server);
+        self.tokens.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +458,48 @@ mod tests {
             self.0.borrow_mut().retain(|(s, _), _| s != server);
             Ok(())
         }
+    }
+
+    #[test]
+    fn rejected_duplicate_rename_preserves_existing_authority_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        store.put("profile", server("first"), None).unwrap();
+        store.put("profile", server("second"), None).unwrap();
+        let first = store.generation("profile", "first").unwrap();
+        let second = store.generation("profile", "second").unwrap();
+        let before = std::fs::read(store.path("profile").unwrap()).unwrap();
+        assert_eq!(
+            store.put("profile", server("second"), Some("first")),
+            Err(StoreError::Invalid)
+        );
+        assert_eq!(
+            std::fs::read(store.path("profile").unwrap()).unwrap(),
+            before
+        );
+        assert!(
+            first.is_current(),
+            "a rejected rename revoked the unchanged original server"
+        );
+        assert!(
+            second.is_current(),
+            "a rejected rename revoked the unchanged destination server"
+        );
+    }
+
+    #[test]
+    fn authority_registry_retains_only_live_session_and_write_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        let live = store.generation("profile", "live").unwrap();
+        for index in 0..1000 {
+            drop(store.begin_change("profile", &format!("server{index}")));
+        }
+        assert!(live.is_current());
+        assert!(store.authority.lock().unwrap().len() <= 2);
+        drop(live);
+        drop(store.begin_change("profile", "last"));
+        assert_eq!(store.authority.lock().unwrap().len(), 1);
     }
 
     #[test]
