@@ -7142,6 +7142,7 @@ pub fn run() {
                 let engine=engine.clone();
                 Arc::new(move |rules,done|zephium_core::ports::engine::Engine::validate_content_rules(engine.as_ref(),rules,done))
             };
+            engine.retain_content_rule_cache_digests(blocker_service::cached_webkit_digests(&data_dir));
             let blocker = blocker_service::start_with_updates(&data_dir,native_validation).map_err(|error| {
                 std::io::Error::other(format!(
                     "failed to start managed content-policy service: {error}"

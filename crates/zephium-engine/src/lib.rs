@@ -2140,6 +2140,17 @@ impl WebviewEngine {
         answer
     }
 
+    /// Keeps the compiled rule lists with these digests through the native
+    /// cache's collection, as the blocker's cache still names them.
+    pub fn retain_content_rule_cache_digests(&self, digests: Vec<[u8; 32]>) {
+        #[cfg(not(target_os = "windows"))]
+        self.run(move || {
+            let _ = host::try_with(move |engine| engine.retain_content_rule_cache_digests(digests));
+        });
+        #[cfg(target_os = "windows")]
+        let _ = digests;
+    }
+
     /// QA only: runs script at document start, in the main world of the main
     /// frame of every page loaded from now on; yields whether every open page
     /// took it.

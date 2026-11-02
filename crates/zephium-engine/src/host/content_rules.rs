@@ -954,8 +954,16 @@ impl EngineHost {
     }
 
     #[cfg(not(target_os = "windows"))]
+    pub(crate) fn retain_content_rule_cache_digests(&mut self, mut digests: Vec<[u8; 32]>) {
+        digests.truncate(4);
+        self.retained_cache_digests = digests;
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn is_content_rule_cache_digest_protected(&self, digest: &[u8; 32]) -> bool {
-        if self.preflight_cache_digests.contains(digest) {
+        if self.preflight_cache_digests.contains(digest)
+            || self.retained_cache_digests.contains(digest)
+        {
             return true;
         }
         if self.content_policies.values().any(|state| {

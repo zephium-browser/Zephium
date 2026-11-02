@@ -35,6 +35,15 @@ pub(crate) fn start_with_updates(
     )
 }
 
+/// The compiled WebKit lists the blocker's cache names, such as a list update
+/// checked before the last exit, so the engine keeps them instead of
+/// collecting and compiling them again.
+pub(crate) fn cached_webkit_digests(data_dir: &Path) -> Vec<[u8; 32]> {
+    CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map(|cache| cache.cached_webkit_artifact_digests())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 pub(crate) fn start_seed_only(data_dir: &Path) -> std::io::Result<Arc<ManagedBlocker>> {
     let artifact_cache = CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))

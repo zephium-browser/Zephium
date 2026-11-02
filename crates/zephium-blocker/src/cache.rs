@@ -82,6 +82,33 @@ impl CompiledArtifactCacheConfig {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
+
+    /// The WebKit rule-list digests named by the cached records, read from
+    /// their headers alone. They are only a hint for keeping compiled lists:
+    /// a damaged header can at worst keep one list too many or too few.
+    pub fn cached_webkit_artifact_digests(&self) -> Vec<[u8; 32]> {
+        const NATIVE_DIGEST_OFFSET: usize = 8 + 4 + 4 + 4 + 4 + 32 + 32 + 32;
+        let mut digests = Vec::new();
+        for name in [CURRENT_FILE, PREVIOUS_FILE] {
+            let Some(mut file) = file_identity::open_verified_regular(&self.root.join(name)) else {
+                continue;
+            };
+            let mut header = [0; RECORD_HEADER_BYTES];
+            if file.read_exact(&mut header).is_err()
+                || header[..8] != *CACHE_MAGIC
+                || header[8..12] != CACHE_FORMAT_VERSION.to_be_bytes()
+                || header[20] != target_tag(CompileTarget::WebKit)
+            {
+                continue;
+            }
+            let mut digest = [0; 32];
+            digest.copy_from_slice(&header[NATIVE_DIGEST_OFFSET..NATIVE_DIGEST_OFFSET + 32]);
+            if digest != [0; 32] && !digests.contains(&digest) {
+                digests.push(digest);
+            }
+        }
+        digests
+    }
 }
 
 /// A compiled-cache root cannot establish a stable security boundary.
@@ -2083,6 +2110,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "webkit")]
+    #[test]
+    fn cached_records_name_their_webkit_lists_for_the_native_store() {
+        let root = private_root();
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        assert!(config.cached_webkit_artifact_digests().is_empty());
+        let first = compiled_artifact(CompileTarget::WebKit, "cache-webkit-named-first");
+        let second = compiled_artifact(CompileTarget::WebKit, "cache-webkit-named-second");
+        let cache = PersistentArtifactCache::open(&config).unwrap();
+        cache.store(key(8), &first.0, &first.1).unwrap();
+        cache.store(key(9), &second.0, &second.1).unwrap();
+        let named = |rules: &ContentRules| match rules.payload() {
+            ContentRulesPayload::Declarative {
+                artifact_digest, ..
+            } => *artifact_digest.as_bytes(),
+            _ => panic!("WebKit artifact expected"),
+        };
+        // Both sources compile to the same WebKit rules: one list to keep.
+        assert_eq!(named(&first.1), named(&second.1));
+        assert_eq!(
+            config.cached_webkit_artifact_digests(),
+            vec![named(&second.1)]
+        );
     }
 
     #[cfg(all(feature = "runtime", feature = "webkit"))]

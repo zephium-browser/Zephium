@@ -578,6 +578,10 @@ pub(crate) struct EngineHost {
     )>,
     #[cfg(not(target_os = "windows"))]
     preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    /// Compiled lists the blocker's own cache still names, such as a list
+    /// update checked in an earlier run, kept through cache collection.
+    #[cfg(not(target_os = "windows"))]
+    retained_cache_digests: Vec<[u8; 32]>,
     blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
     /// Read by every view's navigation policy, so a focus change reaches
     /// views already open without touching them.
