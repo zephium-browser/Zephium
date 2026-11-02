@@ -84,6 +84,28 @@ impl Results {
         std::fs::write(path, json).map_err(|e| e.to_string())
     }
 
+    /// Keeps this run's records. Frame times are only comparable with the
+    /// page-only run they were measured beside, so without an accepted
+    /// baseline each extension keeps the frame time it was last saved with.
+    pub(super) fn record(
+        &mut self,
+        mut now: BTreeMap<String, Record>,
+        baseline: Option<&Resources>,
+    ) {
+        match baseline {
+            Some(baseline) => self.baseline = Some(baseline.clone()),
+            None => {
+                for (name, record) in &mut now {
+                    record.resources.frames_ms = self
+                        .extensions
+                        .get(name)
+                        .and_then(|before| before.resources.frames_ms);
+                }
+            }
+        }
+        self.extensions.extend(now);
+    }
+
     /// What got worse since `self`, for the extensions `now` ran. Frame times
     /// follow how busy the machine is, so they are compared after scaling by
     /// how much slower the page alone got (`baseline`, this run's page-only
@@ -205,6 +227,35 @@ mod tests {
             before.regressions(&now, None),
             ["A: frames 400 ms -> 900 ms"]
         );
+    }
+
+    #[test]
+    fn frame_times_are_saved_only_beside_an_accepted_baseline() {
+        let timed = |frames_ms| {
+            let mut record = record(Status::Ok, 100.0);
+            record.resources.frames_ms = Some(frames_ms);
+            record
+        };
+        let mut results = Results {
+            baseline: Some(timed(200.0).resources),
+            ..Results::default()
+        };
+        results.extensions.insert("A".into(), timed(400.0));
+
+        let mut now = BTreeMap::new();
+        now.insert("A".into(), timed(900.0));
+        now.insert("B".into(), timed(300.0));
+        results.record(now, None);
+        assert_eq!(results.extensions["A"].resources.frames_ms, Some(400.0));
+        assert_eq!(results.extensions["B"].resources.frames_ms, None);
+        assert_eq!(results.baseline.as_ref().unwrap().frames_ms, Some(200.0));
+
+        let mut now = BTreeMap::new();
+        now.insert("A".into(), timed(900.0));
+        let fresh = timed(450.0).resources;
+        results.record(now, Some(&fresh));
+        assert_eq!(results.extensions["A"].resources.frames_ms, Some(900.0));
+        assert_eq!(results.baseline.as_ref().unwrap().frames_ms, Some(450.0));
     }
 
     #[test]

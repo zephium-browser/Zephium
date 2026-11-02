@@ -310,10 +310,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     results.generated = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    if let Some(resources) = baseline.first().and_then(accepted_baseline) {
-        results.baseline = Some(resources.clone());
-    }
-    results.extensions.extend(records);
+    results.record(records, baseline.first().and_then(accepted_baseline));
     results.save(&results_path)?;
     if failed > 0 {
         return Err(format!("{failed} extensions regressed"));
