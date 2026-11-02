@@ -91,6 +91,23 @@ pub struct ManagedBlocker {
     /// panic, so a marker left at launch names a list that crashed the
     /// browser; it is refused instead of compiled again on every start.
     compile_marker: Option<std::path::PathBuf>,
+    /// A downloaded list still waiting at launch is compiled and checked only
+    /// after the first enabled profile policy, or this long after launch.
+    /// They share one compiler thread and WebKit's compile queue, and the
+    /// profile's policy is what holds the first pages.
+    startup_candidate_yield: Option<(Instant, Arc<AtomicBool>)>,
+}
+
+const STARTUP_CANDIDATE_YIELD: Duration = Duration::from_secs(10);
+
+fn startup_candidate_may_prepare(
+    startup_yield: Option<&(Instant, Arc<AtomicBool>)>,
+    now: Instant,
+) -> bool {
+    startup_yield.is_none_or(|(started, profile_compiled)| {
+        profile_compiled.load(Ordering::Acquire)
+            || now.saturating_duration_since(*started) >= STARTUP_CANDIDATE_YIELD
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +287,7 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
         }))
     }
 
@@ -320,6 +338,7 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
         }))
     }
 
@@ -382,6 +401,7 @@ impl ManagedBlocker {
             native_retry: None,
             official_verification: None,
         };
+        let mut startup_candidate_yield = None;
         if let Some(candidate) = candidate {
             if crashed_compile.as_deref().map(str::trim)
                 == Some(hex_digest(&candidate.identity.manifest_sha256).as_str())
@@ -397,6 +417,7 @@ impl ManagedBlocker {
                 ));
             } else {
                 state.admit_activation(candidate, now_unix());
+                startup_candidate_yield = Some((Instant::now(), Arc::new(AtomicBool::new(false))));
             }
         }
         state.recompute_schedule(&initial_status, now_unix());
@@ -420,6 +441,7 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: Some(compile_marker),
+            startup_candidate_yield,
         }))
     }
 
@@ -487,6 +509,7 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
         }))
     }
 
@@ -648,6 +671,10 @@ impl ManagedBlocker {
                             .native_retry
                             .as_ref()
                             .is_none_or(|(_, _, deadline)| Instant::now() >= *deadline)
+                            && startup_candidate_may_prepare(
+                                self.startup_candidate_yield.as_ref(),
+                                Instant::now(),
+                            )
                     })
                     .map(Action::Prepare)
             }
@@ -1858,11 +1885,19 @@ impl BlockerCompiler for ManagedBlocker {
                 None
             };
             let signal = Arc::clone(&self.source_material_signal);
+            let profile_compiled = self
+                .startup_candidate_yield
+                .as_ref()
+                .filter(|_| config.enabled)
+                .map(|(_, compiled)| Arc::clone(compiled));
             self.compiler.compile(
                 profile,
                 generation,
                 config,
                 Box::new(move |outcome| {
+                    if let Some(compiled) = profile_compiled {
+                        compiled.store(true, Ordering::Release);
+                    }
                     if matches!(
                         &outcome,
                         BlockerCompileOutcome::Failed(BlockerCompileFailure::SourceUnavailable)
@@ -2189,6 +2224,25 @@ fn refresh_jitter() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_startup_candidate_waits_for_the_first_profile_policy_or_the_yield() {
+        let started = Instant::now();
+        let compiled = Arc::new(AtomicBool::new(false));
+        let startup = (started, Arc::clone(&compiled));
+        assert!(startup_candidate_may_prepare(None, started));
+        assert!(!startup_candidate_may_prepare(Some(&startup), started));
+        assert!(!startup_candidate_may_prepare(
+            Some(&startup),
+            started + STARTUP_CANDIDATE_YIELD - Duration::from_millis(1)
+        ));
+        assert!(startup_candidate_may_prepare(
+            Some(&startup),
+            started + STARTUP_CANDIDATE_YIELD
+        ));
+        compiled.store(true, Ordering::Release);
+        assert!(startup_candidate_may_prepare(Some(&startup), started));
+    }
 
     fn cache() -> (tempfile::TempDir, CompiledArtifactCacheConfig) {
         let root = tempfile::tempdir().unwrap();
