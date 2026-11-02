@@ -511,11 +511,21 @@ for (const kind of ["page", "worker"]) {
     const logs = () => g.chrome.runtime.messages.filter((message) => message.api === "log");
     listeners.get("error")({ error: new Error("ordinary extension failure") });
     assert.equal(logs().length, 0);
+    for (const message of [
+      "Can't find variable 'alice@example.com'",
+      "Can't find variable: 'alice@example.com'",
+      "Can't find variable: alice@example.com",
+      "alice@example.com Can't find variable: requestIdleCallback",
+      "Can't find variable: requestIdleCallback trailing data",
+    ]) listeners.get("error")({ error: new ReferenceError(message) });
+    assert.equal(logs().length, 0, "only the native identifier-only error shape is accepted");
     listeners.get("error")({ error: new ReferenceError("Can't find variable: requestIdleCallback") });
     listeners.get("unhandledrejection")({ reason: new ReferenceError("Can't find variable: missingAPI") });
     assert.equal(logs().length, 2);
     assert.match(logs()[0].text, /Can't find variable: requestIdleCallback/);
     assert.match(logs()[1].text, /Can't find variable: missingAPI/);
+    listeners.get("error")({ message: "ReferenceError: Can't find variable: _missingAPI$" });
+    assert.equal(logs().length, 3);
     for (let i = 0; i < 12; i++) listeners.get("error")({ message: "missingAPI is not defined" });
     assert.equal(logs().length, 8);
     for (const message of logs()) {

@@ -92,12 +92,13 @@
   // broken browser API, without stacks; the browser keeps their wording,
   // stripped of addresses and quoted text, for bug reports.
   if (!config.diagnostics && !isContent && typeof runtime.sendNativeMessage === "function") {
-    const gap = /is not a function|is not an object|is not defined|Can't find variable|Cannot read propert|Invalid call to|is not supported|not implemented/i;
+    const gap = /is not a function|is not an object|is not defined|Cannot read propert|Invalid call to|is not supported|not implemented/i;
+    const missingVariable = /^(?:ReferenceError: )?Can't find variable: [A-Za-z_$][\w$]*$/;
     let left = 8;
     const where = isWorker ? "worker" : location.pathname;
     const report = (value) => {
       const text = String((value && value.message) || value || "").slice(0, 300);
-      if (left <= 0 || !gap.test(text)) return;
+      if (left <= 0 || (!gap.test(text) && !missingVariable.test(text))) return;
       left--;
       try {
         native("log", { level: "error", text: `[gap] [${where}] ${text}` }).catch(() => {});
