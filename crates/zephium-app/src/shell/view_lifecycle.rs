@@ -563,6 +563,30 @@ impl Shell {
             self.residency.dormant_sent = dormant.clone();
             self.engine.set_dormant(dormant);
         }
+        // The grace is short next to the maintenance tick: wake when the next
+        // hidden page is due rather than up to a tick late.
+        if let Some(queue) = &self.self_queue {
+            let now = std::time::Instant::now();
+            let next = self
+                .items
+                .view_ids()
+                .into_iter()
+                .filter(|id| {
+                    self.residency.sleeping
+                        && !shown.contains(id)
+                        && !self.residency.dormant_sent.contains(id)
+                        && !self.site_kept_awake(*id)
+                })
+                .filter_map(|id| {
+                    self.last_view_activity(id)
+                        .map(|at| *at + self.residency.dormant_min)
+                })
+                .filter(|due| *due > now)
+                .min();
+            if let Some(next) = next {
+                queue.schedule_dormancy(next);
+            }
+        }
 
         let urgent = self.discard_is_urgent(live_count);
         let capacity = !self.residency.capacity_requests.is_empty();
@@ -755,11 +779,16 @@ impl Shell {
         {
             return;
         }
+        // A sleeping page does not grow: once measured, it is not asked again.
         let hidden: Vec<ItemId> = self
             .items
             .view_ids()
             .into_iter()
-            .filter(|id| !shown.contains(id))
+            .filter(|id| {
+                !shown.contains(id)
+                    && (!self.residency.dormant_sent.contains(id)
+                        || !self.residency.page_bytes.contains_key(id))
+            })
             .collect();
         if !hidden.is_empty() {
             self.residency.memory_sampled = Some(now);

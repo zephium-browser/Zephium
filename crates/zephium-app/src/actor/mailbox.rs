@@ -163,6 +163,7 @@ pub(crate) struct TimerState {
     pub(crate) persist_deadline: Option<std::time::Instant>,
     focus_deadline: Option<std::time::Instant>,
     audio_deadline: Option<std::time::Instant>,
+    dormancy_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
@@ -565,6 +566,7 @@ impl CommandQueue {
         timer.persist_deadline = None;
         timer.focus_deadline = None;
         timer.audio_deadline = None;
+        timer.dormancy_deadline = None;
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
@@ -618,6 +620,26 @@ impl CommandQueue {
         timer.audio_deadline = Some(
             timer
                 .audio_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        self.inner.timer_ready.notify_one();
+    }
+
+    /// Wakes the shell for a maintenance pass when the next hidden page is
+    /// due to sleep, sooner than the regular tick. A later deadline never
+    /// postpones an earlier one.
+    pub(crate) fn schedule_dormancy(&self, deadline: std::time::Instant) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.dormancy_deadline = Some(
+            timer
+                .dormancy_deadline
                 .map_or(deadline, |current| current.min(deadline)),
         );
         self.inner.timer_ready.notify_one();
@@ -1068,7 +1090,12 @@ impl CommandQueue {
                     };
                 }
             }
-            if now >= maintenance_deadline {
+            if now >= maintenance_deadline
+                || timer
+                    .dormancy_deadline
+                    .is_some_and(|deadline| now >= deadline)
+            {
+                timer.dormancy_deadline = None;
                 return TimerWake::Maintenance;
             }
             let mut deadline = timer
@@ -1085,6 +1112,9 @@ impl CommandQueue {
             }
             if let Some(audio) = timer.audio_deadline {
                 deadline = deadline.min(audio);
+            }
+            if let Some(dormancy) = timer.dormancy_deadline {
+                deadline = deadline.min(dormancy);
             }
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
