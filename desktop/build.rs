@@ -10,6 +10,7 @@ mod navigation_probe_config;
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
 const DEVELOPMENT_IDENTIFIER: &str = "app.zephium.dev";
+const PROTECTION_QA_PROFILE: &str = "protection-qa";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -119,6 +120,14 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     if adblock_qa && env::var("OPT_LEVEL").as_deref() == Ok("0") {
         return Err("protection QA must be optimized: set CARGO_PROFILE_DEV_OPT_LEVEL=2".into());
     }
+    let protection_qa_profile = cargo_profile_name().as_deref() == Some(PROTECTION_QA_PROFILE);
+    println!("cargo:rustc-check-cfg=cfg(zephium_protection_qa_profile)");
+    if protection_qa_profile {
+        if !adblock_qa {
+            return Err("the protection-qa profile builds only the protection QA app".into());
+        }
+        println!("cargo:rustc-cfg=zephium_protection_qa_profile");
+    }
     let resource_ui_qa = env::var_os("CARGO_FEATURE_RESOURCE_UI_QA").is_some();
     let work_integration_qa = env::var_os("CARGO_FEATURE_WORK_INTEGRATION_QA").is_some();
     let file_workflows_qa = env::var_os("CARGO_FEATURE_FILE_WORKFLOWS_QA").is_some();
@@ -185,7 +194,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         let supported_target =
             target == "macos" || ((file_workflows_qa || adblock_qa) && target == "windows");
         if !supported_target
-            || env::var("PROFILE").as_deref() != Ok("debug")
+            || (env::var("PROFILE").as_deref() != Ok("debug") && !protection_qa_profile)
             || rendering_probe
             || navigation_probe
         {
@@ -269,6 +278,18 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+/// Cargo names only `debug` or `release` in `PROFILE`; a custom profile is
+/// known by its output directory, `<target>/<profile>/build/<package>/out`.
+fn cargo_profile_name() -> Option<String> {
+    let out_dir = env::var_os("OUT_DIR")?;
+    Path::new(&out_dir)
+        .ancestors()
+        .nth(3)?
+        .file_name()?
+        .to_str()
+        .map(str::to_owned)
 }
 
 fn validate_legal_resources(source: &str, config: &Value, root: &Path) -> io::Result<()> {

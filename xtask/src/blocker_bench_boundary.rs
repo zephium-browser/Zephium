@@ -1,7 +1,8 @@
 //! Mechanical checks that the protection QA benchmark driver stays inside the
-//! isolated `adblock-qa` debug application: the engine feature behind it is
-//! enabled by that one desktop feature and nothing else, and the sources keep
-//! every definition and hook behind the matching `cfg`.
+//! isolated `adblock-qa` application (a debug or `protection-qa` profile build):
+//! the engine feature behind it is enabled by that one desktop feature and
+//! nothing else, and the sources keep every definition and hook behind the
+//! matching `cfg`.
 
 use std::path::{Path, PathBuf};
 
@@ -19,13 +20,13 @@ const TOKENS: [&str; 2] = ["blocker_bench", "blocker-bench"];
 /// Trees without workspace manifests or sources of ours.
 const SKIPPED: [&str; 6] = ["target", "node_modules", ".git", "vendor", "dist", "gen"];
 const DESKTOP_RELEASE_REFUSAL: &str = concat!(
-    "#[cfg(all(feature=\"adblock-qa\",any(not(debug_assertions),",
+    "#[cfg(all(feature=\"adblock-qa\",any(not(any(debug_assertions,zephium_protection_qa_profile)),",
     "not(any(target_os=\"macos\",target_os=\"windows\")))))]",
-    "compile_error!(\"protectionQArequiresamacOSorWindowsdebugbuild\");"
+    "compile_error!(\"protectionQArequiresamacOSorWindowsdebugorprotection-qabuild\");"
 );
 const ENGINE_RELEASE_REFUSAL: &str = concat!(
-    "#[cfg(all(feature=\"blocker-bench\",not(debug_assertions)))]",
-    "compile_error!(\"theblockerbenchmarkdriverisforbiddeninoptimizedbuilds\");"
+    "#[cfg(all(feature=\"blocker-bench\",not(any(debug_assertions,zephium_protection_qa_profile))))]",
+    "compile_error!(\"theblockerbenchmarkdriverisforbiddeninoptimizedbuildsoutsideprotection-qa\");"
 );
 const ENGINE_DRIVER_MODULE: &str = concat!(
     "#[cfg(all(feature=\"blocker-bench\",",

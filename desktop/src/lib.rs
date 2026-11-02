@@ -4,11 +4,11 @@
 #[cfg(all(
     feature = "adblock-qa",
     any(
-        not(debug_assertions),
+        not(any(debug_assertions, zephium_protection_qa_profile)),
         not(any(target_os = "macos", target_os = "windows"))
     )
 ))]
-compile_error!("protection QA requires a macOS or Windows debug build");
+compile_error!("protection QA requires a macOS or Windows debug or protection-qa build");
 
 #[cfg(all(
     feature = "file-workflows-qa",

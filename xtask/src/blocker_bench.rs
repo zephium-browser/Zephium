@@ -11,6 +11,20 @@
 //! and the tables to `summary.md` beside it.
 //! uBlock Origin and the Brave and Edge template profiles are kept in
 //! `target/blocker-bench/` and refreshed weekly.
+//!
+//! Build the app with release code generation (the `protection-qa` profile),
+//! or numbers against other browsers and absolute startup times are unfair.
+//! Build the frontend once with `pnpm -C frame run build`, then:
+//!
+//! ```text
+//! TAURI_CONFIG="$(cat desktop/tauri.protection-qa.conf.json)" \
+//!   cargo build -p zephium-desktop --profile protection-qa --features adblock-qa
+//! ```
+//!
+//! and pass `--zephium target/protection-qa/zephium-desktop` (`.exe` on
+//! Windows, where PowerShell sets `$env:TAURI_CONFIG` from the same file). A
+//! debug build (`CARGO_PROFILE_DEV_OPT_LEVEL=2`, same command without
+//! `--profile`) is enough for on/off comparisons.
 
 mod measure;
 mod protocol;

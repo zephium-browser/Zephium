@@ -59,8 +59,13 @@ pub use platform::windows::{install_work_rendering_backing, remove_work_renderin
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
 
-#[cfg(all(feature = "blocker-bench", not(debug_assertions)))]
-compile_error!("the blocker benchmark driver is forbidden in optimized builds");
+#[cfg(all(
+    feature = "blocker-bench",
+    not(any(debug_assertions, zephium_protection_qa_profile))
+))]
+compile_error!(
+    "the blocker benchmark driver is forbidden in optimized builds outside protection-qa"
+);
 
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
