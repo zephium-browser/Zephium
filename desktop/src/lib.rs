@@ -524,6 +524,8 @@ impl UiStartupGate {
                     started.elapsed().as_millis()
                 );
             }
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::window_shown();
             on_main_window_mapped(window);
             #[cfg(feature = "work-development-traces")]
             startup_styles::after_show(window, &self.expected());

@@ -511,15 +511,16 @@ fn startup_section(results: &Results) -> String {
                 ready.len().to_string(),
                 (launches.len() - ready.len()).to_string(),
                 field("startupMs"),
+                field("windowMs"),
                 field("bootstrapMs"),
                 field("policyReadyMs"),
             ]
         })
         .collect();
     format!(
-        "## Launches\n\nMean ± sd in milliseconds. `startupMs` is the browser's own report of how long it took until it was ready; the Zephium protection app also reports when its bootstrap and its blocker policy were ready.\n\n{}\n",
+        "## Launches\n\nMean ± sd in milliseconds. `startupMs` is the browser's own report of how long it took until it was ready; the Zephium protection app also reports when its window was shown, when its bootstrap finished and when its blocker policy was ready, all from Tauri setup.\n\n{}\n",
         table(
-            &["config", "phase", "launched", "failed", "startupMs", "bootstrapMs", "policyReadyMs"],
+            &["config", "phase", "launched", "failed", "startupMs", "windowMs", "bootstrapMs", "policyReadyMs"],
             &rows
         )
     )

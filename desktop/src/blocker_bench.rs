@@ -36,6 +36,7 @@ struct Bench {
 #[derive(Default)]
 struct State {
     bootstrapped: Option<Duration>,
+    window_shown: Option<Duration>,
     profile: Option<String>,
     active: Option<String>,
     known: HashSet<String>,
@@ -224,6 +225,17 @@ pub(crate) fn tab(tab: &TabView) {
     }
 }
 
+/// The main window became visible: what a person sees as "started".
+pub(crate) fn window_shown() {
+    let Some(bench) = BENCH.get() else {
+        return;
+    };
+    let mut state = bench.lock();
+    if state.window_shown.is_none() {
+        state.window_shown = Some(uptime());
+    }
+}
+
 /// Only sent once the shell has restored or created its session.
 pub(crate) fn profiles(view: &ProfilesView) {
     let Some(bench) = BENCH.get() else {
@@ -280,6 +292,7 @@ fn drive(
             "event": "ready",
             "pid": std::process::id(),
             "startupMs": millis(uptime()),
+            "windowMs": bench.lock().window_shown.map(millis),
             "bootstrapMs": millis(bootstrap),
             "policyReadyMs": millis(policy),
         })),
