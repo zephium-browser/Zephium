@@ -5,7 +5,8 @@
 //! is the parent-pid tree plus the services `launchctl print pid/<pid>` names
 //! for any member. Each process is read with `proc_pid_rusage`, which has the
 //! physical footprint Activity Monitor shows and is far cheaper than
-//! `footprint`. On Windows one PowerShell call lists the tree.
+//! `footprint`. On Windows a ToolHelp snapshot lists the tree and each
+//! process is read for its times and private bytes.
 
 #![cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 
@@ -131,6 +132,7 @@ fn parse_nettop(output: &str) -> HashMap<u32, u64> {
 }
 
 /// `ps -A -o pid=,ppid=,comm=`: the command may hold spaces.
+#[cfg(any(target_os = "macos", test))]
 fn parse_ps(output: &str) -> Vec<Row> {
     fn token(text: &str) -> Option<(&str, &str)> {
         let text = text.trim_start();
@@ -185,40 +187,20 @@ fn helper_pids(launchctl: &str) -> Vec<u32> {
         .collect()
 }
 
+/// Windows leaves a dead parent's id on its children and may hand that id to
+/// a later process, so a "parent" that started after its child is not one.
 #[cfg(any(windows, test))]
-struct WindowsProcess {
-    row: Row,
-    private_bytes: u64,
-    cpu_ns: u64,
-    start: u64,
-}
-
-/// The JSON `windows_script` prints: an object per process, or a lone object.
-#[cfg(any(windows, test))]
-fn parse_windows(json: &str) -> Result<Vec<WindowsProcess>, String> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let items = match value {
-        serde_json::Value::Array(items) => items,
-        object @ serde_json::Value::Object(_) => vec![object],
-        _ => return Err("unexpected process list".into()),
-    };
-    let number = |item: &serde_json::Value, key: &str| item.get(key).and_then(|v| v.as_u64());
-    Ok(items
-        .iter()
-        .filter_map(|item| {
-            Some(WindowsProcess {
-                row: Row {
-                    pid: u32::try_from(number(item, "pid")?).ok()?,
-                    ppid: u32::try_from(number(item, "ppid")?).ok()?,
-                    name: item.get("name")?.as_str()?.to_string(),
-                },
-                private_bytes: number(item, "private").unwrap_or(0),
-                // Kernel and user time come in units of 100 ns.
-                cpu_ns: number(item, "cpu").unwrap_or(0).saturating_mul(100),
-                start: number(item, "start").unwrap_or(0),
-            })
+fn without_reused_parents(rows: &[(Row, u64)]) -> Vec<Row> {
+    let starts: HashMap<u32, u64> = rows.iter().map(|(row, start)| (row.pid, *start)).collect();
+    rows.iter()
+        .map(|(row, start)| {
+            let mut row = row.clone();
+            if starts.get(&row.ppid).is_some_and(|parent| parent > start) {
+                row.ppid = 0;
+            }
+            row
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -332,42 +314,104 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::{family, parse_windows, Process, Row};
+    use super::{family, without_reused_parents, Process, Row};
     use std::process::{Child, Command};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
-    /// Private bytes, CPU time and start time of every process in one call.
-    const SCRIPT: &str = "Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ \
-        pid = [int64]$_.ProcessId; ppid = [int64]$_.ParentProcessId; name = $_.Name; \
-        private = [int64]$_.PrivatePageCount; \
-        cpu = [int64]($_.KernelModeTime + $_.UserModeTime); \
-        start = $(if ($_.CreationDate) { [int64]$_.CreationDate.ToFileTimeUtc() } else { 0 }) } } \
-        | ConvertTo-Json -Compress";
+    // Read in-process: a PowerShell CIM query per sample cost about half a
+    // second of CPU next to the pages being measured.
+    fn rows() -> Result<Vec<Row>, String> {
+        // SAFETY: the snapshot handle is owned here and closed before returning.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+                .map_err(|e| format!("cannot list processes: {e}"))?;
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut rows = Vec::new();
+            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+            while more {
+                let name = &entry.szExeFile;
+                let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+                rows.push(Row {
+                    pid: entry.th32ProcessID,
+                    ppid: entry.th32ParentProcessID,
+                    name: String::from_utf16_lossy(&name[..end]),
+                });
+                more = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+            Ok(rows)
+        }
+    }
 
-    fn list() -> Result<Vec<super::WindowsProcess>, String> {
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-            .output()
-            .map_err(|e| format!("cannot run powershell: {e}"))?;
-        parse_windows(&String::from_utf8_lossy(&output.stdout))
+    fn ticks(time: FILETIME) -> u64 {
+        (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+    }
+
+    /// Start in FILETIME ticks, CPU time and private bytes; `None` once the
+    /// process is gone or out of reach.
+    fn usage(pid: u32) -> Option<Process> {
+        // SAFETY: a query-only handle, closed before returning.
+        unsafe {
+            let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let (mut created, mut exited, mut kernel, mut user) = Default::default();
+            let times = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+            let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();
+            let counted = GetProcessMemoryInfo(
+                handle,
+                &mut memory as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            );
+            let _ = CloseHandle(handle);
+            times.ok()?;
+            Some(Process {
+                pid,
+                start: ticks(created),
+                footprint_bytes: counted.map_or(0, |()| memory.PrivateUsage as u64),
+                // Kernel and user time come in units of 100 ns.
+                cpu_ns: (ticks(kernel) + ticks(user)).saturating_mul(100),
+            })
+        }
     }
 
     pub(super) fn process_table() -> Result<Vec<Row>, String> {
-        Ok(list()?.into_iter().map(|process| process.row).collect())
+        rows()
     }
 
     pub(super) fn read_family(root: u32) -> Result<Vec<Process>, String> {
-        let all = list()?;
-        let rows: Vec<Row> = all.iter().map(|process| process.row.clone()).collect();
-        let wanted = family(root, &rows);
-        Ok(all
+        let timed: Vec<(Row, Option<Process>)> = rows()?
             .into_iter()
-            .filter(|process| wanted.contains(&process.row.pid))
-            .map(|process| Process {
-                pid: process.row.pid,
-                start: process.start,
-                footprint_bytes: process.private_bytes,
-                cpu_ns: process.cpu_ns,
+            .map(|row| {
+                let used = usage(row.pid);
+                (row, used)
             })
+            .collect();
+        let started: Vec<(Row, u64)> = timed
+            .iter()
+            .map(|(row, used)| {
+                (
+                    row.clone(),
+                    used.as_ref().map_or(0, |process| process.start),
+                )
+            })
+            .collect();
+        let wanted = family(root, &without_reused_parents(&started));
+        Ok(timed
+            .into_iter()
+            .filter(|(row, _)| wanted.contains(&row.pid))
+            .filter_map(|(_, used)| used)
             .collect())
     }
 
@@ -477,25 +521,19 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_windows_process_list() {
-        let json = r#"[{"pid":4,"ppid":0,"name":"System","private":0,"cpu":0,"start":0},
-            {"pid":100,"ppid":4,"name":"brave.exe","private":52428800,"cpu":15000000,"start":133}]"#;
-        let processes = parse_windows(json).unwrap();
-        assert_eq!(processes.len(), 2);
-        assert_eq!(processes[1].row.name, "brave.exe");
-        assert_eq!(processes[1].private_bytes, 52_428_800);
-        assert_eq!(processes[1].cpu_ns, 1_500_000_000);
-        assert_eq!(processes[1].start, 133);
-        assert_eq!(
-            parse_windows(r#"{"pid":1,"ppid":0,"name":"a"}"#)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(parse_windows("not json").is_err());
+    fn a_reused_parent_id_does_not_adopt_older_processes() {
+        let row = |pid, ppid| Row {
+            pid,
+            ppid,
+            name: String::new(),
+        };
+        // 60 outlived its parent, whose id 50 now belongs to the browser.
+        let rows =
+            without_reused_parents(&[(row(50, 1), 200), (row(60, 50), 100), (row(70, 50), 300)]);
+        assert_eq!(family(50, &rows), vec![50, 70]);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn samples_this_process_family() {
         let sample = sample(std::process::id()).unwrap();
