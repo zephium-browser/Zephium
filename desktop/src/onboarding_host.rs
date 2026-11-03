@@ -4,9 +4,10 @@
 //! no other way to ask WebView2 for a fresh renderer.
 //!
 //! The host is the bundled frame, narrowed to onboarding: its own document and
-//! the static files it loads, never another page, and only for the main
-//! window. It is a custom protocol, which Tauri treats as a local origin, so
-//! onboarding keeps exactly the main window's capabilities.
+//! the static files it loads, never another page, only for the main window, and
+//! only until onboarding hands over. It is a custom protocol, which Tauri
+//! treats as a local origin, so onboarding keeps exactly the main window's
+//! capabilities.
 
 use std::borrow::Cow;
 
@@ -21,17 +22,37 @@ pub(crate) fn serve(
     request: Request<Vec<u8>>,
     responder: tauri::UriSchemeResponder,
 ) {
-    if ctx.webview_label() != super::MAIN_LABEL || request.method() != Method::GET {
-        return responder.respond(refused(403));
+    use tauri::Manager;
+    let handed_over = ctx
+        .app_handle()
+        .try_state::<super::UiStartupGate>()
+        .is_some_and(|gate| gate.handed_over.load(std::sync::atomic::Ordering::Acquire));
+    let path = request.uri().path();
+    if let Some(status) = refusal(ctx.webview_label(), request.method(), path, handed_over) {
+        return responder.respond(refused(status));
     }
     let app = ctx.app_handle().clone();
-    let path = request.uri().path().to_owned();
+    let path = path.to_owned();
     tauri::async_runtime::spawn_blocking(move || responder.respond(resolve(&app, &path)));
+}
+
+/// Why a request is refused, if it is. `label` is the requesting webview's:
+/// Tauri gives each webview its own handler and passes that webview's label,
+/// so nothing a request carries can choose it. Once onboarding has handed
+/// over, nothing on this host is needed and nothing is served.
+fn refusal(label: &str, method: &Method, path: &str, handed_over: bool) -> Option<u16> {
+    if label != super::MAIN_LABEL || method != Method::GET {
+        return Some(403);
+    }
+    if handed_over || !admitted(path) {
+        return Some(404);
+    }
+    None
 }
 
 /// Onboarding's document, or a file that is not a page at all.
 fn admitted(path: &str) -> bool {
-    path == DOCUMENT || (path.starts_with('/') && path != "/" && !path.ends_with(".html"))
+    path == DOCUMENT || (path.starts_with('/') && !path.ends_with('/') && !path.ends_with(".html"))
 }
 
 fn resolve(app: &tauri::AppHandle, path: &str) -> Response<Cow<'static, [u8]>> {
@@ -96,6 +117,36 @@ mod tests {
             "assets/onboarding.js",
         ] {
             assert!(!admitted(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn only_the_main_window_reaches_onboarding_and_only_until_handover() {
+        let get = Method::GET;
+        assert_eq!(
+            refusal(super::super::MAIN_LABEL, &get, DOCUMENT, false),
+            None
+        );
+        assert_eq!(
+            refusal(super::super::MAIN_LABEL, &get, "/assets/a.js", false),
+            None
+        );
+        assert_eq!(refusal("panel", &get, DOCUMENT, false), Some(403));
+        assert_eq!(refusal("", &get, DOCUMENT, false), Some(403));
+        assert_eq!(
+            refusal(super::super::MAIN_LABEL, &Method::POST, DOCUMENT, false),
+            Some(403)
+        );
+        assert_eq!(
+            refusal(super::super::MAIN_LABEL, &get, "/browser.html", false),
+            Some(404)
+        );
+        for path in [DOCUMENT, "/assets/a.js"] {
+            assert_eq!(
+                refusal(super::super::MAIN_LABEL, &get, path, true),
+                Some(404),
+                "{path}"
+            );
         }
     }
 
