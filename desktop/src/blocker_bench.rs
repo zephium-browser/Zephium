@@ -17,12 +17,15 @@ use zephium_app::{Command, Handle};
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 use zephium_engine::WebviewEngine;
-use zephium_ipc::{BlockerPhase, BlockerPreferenceState, ItemsState, ProfilesView, TabView};
+use zephium_ipc::{
+    BlockerPhase, BlockerPreferenceState, BlockerSourcePhase, ItemsState, ProfilesView, TabView,
+};
 
 const FLAG: &str = "--blocker-bench";
 const PROTECTION_FLAG: &str = "--blocker-bench-protection=";
 const SESSION_FLAG: &str = "--blocker-bench-session=";
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const SOURCES_TIMEOUT: Duration = Duration::from_secs(120);
 const READY_POLL: Duration = Duration::from_millis(25);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TIMEOUT: Duration = Duration::from_secs(600);
@@ -310,14 +313,19 @@ fn drive(
         return;
     };
     match await_ready(app, bench, options.protection) {
-        Ok((bootstrap, policy)) => emit(&json!({
-            "event": "ready",
-            "pid": std::process::id(),
-            "startupMs": millis(uptime()),
-            "windowMs": WINDOW_SHOWN.get().copied().map(millis),
-            "bootstrapMs": millis(bootstrap),
-            "policyReadyMs": millis(policy),
-        })),
+        Ok((bootstrap, policy)) => {
+            let (sources, phase) = await_sources(app);
+            emit(&json!({
+                "event": "ready",
+                "pid": std::process::id(),
+                "startupMs": millis(uptime()),
+                "windowMs": WINDOW_SHOWN.get().copied().map(millis),
+                "bootstrapMs": millis(bootstrap),
+                "policyReadyMs": millis(policy),
+                "sourcesSettledMs": sources.map(millis),
+                "sourcePhase": format!("{phase:?}"),
+            }));
+        }
         Err(message) => {
             emit(&json!({ "event": "error", "message": message }));
             app.exit(0);
@@ -385,6 +393,35 @@ fn await_ready(
                 "protection did not become ready (phase {:?}, preference {:?}, desired {:?}, applied {:?})",
                 status.phase, status.preference, status.desired_enabled, status.applied_enabled
             ));
+        }
+        std::thread::sleep(READY_POLL);
+    }
+}
+
+/// A fresh profile downloads and compiles the lists in the background, and that
+/// work would land in whatever the harness measures next. Ready waits for it;
+/// `None` when it was still running at the deadline.
+fn await_sources(app: &tauri::AppHandle) -> (Option<Duration>, BlockerSourcePhase) {
+    let deadline = Instant::now() + SOURCES_TIMEOUT;
+    loop {
+        let Some(shell) = app.try_state::<Handle>() else {
+            return (None, BlockerSourcePhase::Shutdown);
+        };
+        let status = shell
+            .focused_content_policy_status()
+            .recv_timeout(Duration::from_secs(2));
+        let phase = status.source_phase;
+        // An unanswered query reads as unavailable, which says nothing yet.
+        if status.phase != BlockerPhase::Unavailable
+            && !matches!(
+                phase,
+                BlockerSourcePhase::Stale | BlockerSourcePhase::Refreshing
+            )
+        {
+            return (Some(uptime()), phase);
+        }
+        if Instant::now() >= deadline {
+            return (None, phase);
         }
         std::thread::sleep(READY_POLL);
     }

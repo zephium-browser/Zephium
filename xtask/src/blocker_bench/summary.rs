@@ -531,13 +531,14 @@ fn startup_section(results: &Results) -> String {
                 field("windowMs"),
                 field("bootstrapMs"),
                 field("policyReadyMs"),
+                field("sourcesSettledMs"),
             ]
         })
         .collect();
     format!(
-        "## Launches\n\nMean ± sd in milliseconds. `startupMs` is the browser's own report of how long it took until it was ready; the Zephium protection app also reports when its window was shown, when its bootstrap finished and when its blocker policy was ready, all from Tauri setup.\n\n{}\n",
+        "## Launches\n\nMean ± sd in milliseconds. `startupMs` is the browser's own report of how long it took until it was ready; the Zephium protection app also reports when its window was shown, when its bootstrap finished and when its blocker policy was ready, all from Tauri setup. `sourcesSettledMs` is when its background list download and compile had finished; the measurement starts after it.\n\n{}\n",
         table(
-            &["config", "phase", "launched", "failed", "startupMs", "windowMs", "bootstrapMs", "policyReadyMs"],
+            &["config", "phase", "launched", "failed", "startupMs", "windowMs", "bootstrapMs", "policyReadyMs", "sourcesSettledMs"],
             &rows
         )
     )
