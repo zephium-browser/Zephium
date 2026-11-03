@@ -1592,6 +1592,14 @@ pub enum EngineEvent {
         id: ItemId,
         loading: bool,
     },
+    /// The view's native filters left it unprotected while resumed
+    /// (`degraded`), or a replaced policy left filters behind on it that a
+    /// retry on its next navigation tries to take back.
+    ContentProtectionChanged {
+        id: ItemId,
+        degraded: bool,
+        stranded_filters: u32,
+    },
     MediaCaptureChanged {
         id: ItemId,
         navigation: NavigationPresentationId,
