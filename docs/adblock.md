@@ -209,6 +209,92 @@ oldest first. Only the focused profile is queryable. New Tab queries on show,
 tab changes, calendar-day changes and visibility restoration; statistics add no polling timer or event
 stream. Unavailable statistics produce an error, never an invented zero.
 
+## Scriptlets and YouTube (design, not built)
+
+YouTube serves its ads from the hosts that serve the video, so network rules
+cannot remove them: with protection on, every watch page still shows a
+pre-roll. uBlock Origin and Brave remove them by editing what the page's own
+scripts read. This section is the plan for doing the same; nothing here is
+implemented yet.
+
+**What runs.** A scriptlet is a small function from our own library, run in a
+page's main world before its scripts, with arguments taken from a list rule
+`example.com##+js(name, arg, ...)`. The library is reviewed MPL code shipped in
+the app and never fetched; uBlock Origin's GPL implementations are not copied,
+only the documented behavior of each name. Rules that name a scriptlet we do not
+have, or use argument syntax we do not parse, are dropped and counted. The first
+set, which is what uBlock Origin's current YouTube rules use:
+
+- `set` (alias `set-constant`): defines a property path (`a.b.c`) to a fixed
+  value (`undefined`, `false`, `true`, `null`, `0`, `''`, `[]`, `{}`, `noopFunc`)
+  and keeps it there as the page assigns intermediate objects later.
+- `json-prune`: wraps `JSON.parse`; when every `propsToMatch` path is present,
+  deletes the listed paths from the result. Paths support `[]` (every element),
+  `[-]` (remove matching elements from their array) and `..` (any depth).
+- `json-prune-fetch-response` and `json-prune-xhr-response`: the same pruning
+  on fetch and XHR bodies, only for requests whose URL or method match the rule's
+  `propsToMatch`.
+- `no-fetch-if` and `no-xhr-if`: answer matching requests with an empty
+  successful response instead of sending them.
+- `trusted-replace-fetch-response` (`trusted-rpfr`),
+  `trusted-replace-xhr-response`: a text or regex replacement on matching
+  response bodies.
+- `trusted-edit-inbound-object`: edits an object passed to a named function
+  (YouTube's rules use it on `JSON.stringify` for the player request's client
+  context). Its path language is the largest part; it lands last and only for
+  the forms the rules in use need.
+
+**`trusted-*`.** A list source carries a trust flag in the source table; only
+uBlock Origin's lists have it. A `trusted-*` rule from any other source, or from
+a user's own filters, is dropped at compile time, not at run time.
+
+**Where it runs.** The compiler emits, per profile, a table from hostname to the
+invocations that apply, with `#@#+js()` exceptions and site pause applied. Pages
+whose host has no entry get nothing.
+
+- macOS: one `WKUserScript` per host group in the page content world, at
+  document start, in all frames, created with WebKit's include match patterns
+  (the initializer its web-extension support uses), so WebKit injects it only
+  into matching pages and other sites pay nothing. Zephium's user-content layer
+  accepts only all-URLs scripts today, so this adds a scoped path beside it; it
+  is verified on every supported macOS before use, with the Windows form below
+  as the fallback.
+- Windows: WebView2's document-start script cannot be scoped by URL, so one
+  script per profile runs everywhere: a hostname check against the table, then
+  the library inside a function body that only matching pages call. Its cost on
+  other pages is measured on Speedometer before it ships; the budget is no
+  measurable change.
+- Both: a site pause or protection off removes the scripts with the policy, and
+  YouTube embeds on other sites match by the frame's own host.
+
+**Editing responses without breaking playback.** `fetch` and `XMLHttpRequest`
+are wrapped once per page, through `Proxy` so their `toString` and identity
+look native. A request is examined only when its URL matches a rule's pattern
+(for YouTube: `/youtubei/v1/player`, `/next`, `/reel/`, playlist and prefetch
+requests); everything else, including `googlevideo.com` media and any streaming
+body, passes through untouched. A matched fetch body is read as text, edited,
+and returned as a new `Response` with the original status, status text,
+headers and URL; a body that is not JSON, or edits that throw, return the
+original response unchanged. XHR edits apply at load, through the
+`response`/`responseText` getters of that request only, keeping `readyState`
+and event order. Pruning keeps `streamingData`, `playabilityStatus` and
+`videoDetails`: removing ad fields must never remove what playback needs.
+
+**Tests.** Recorded YouTube responses (initial player response, `/player`,
+`/next`, Shorts reel batches, with and without ads) are fixtures. A headless
+WKWebView serves them from a local scheme to a page that calls them the way
+YouTube does, runs the scriptlets, and checks: ad fields gone, playback fields
+byte-identical, wrappers native-looking, untouched requests unchanged. The same
+fixtures run against the Windows script in WebView2. End to end, the bench's
+YouTube mode is the gate: no pre-roll, `adMs` 0, no player ad data, no
+enforcement wall, and stalls no worse than uBlock Origin's on the same run.
+
+**Order.** The runtime (compiler table, library, injection on both platforms,
+fixtures) is one PR with only `set` and `json-prune` rules active; the
+response-editing and trusted scriptlets with YouTube's rules from uBlock
+Origin's lists come in a second, after the phase 2 list work that ships those
+lists.
+
 ## Budgets and evidence
 
 | Resource | Ceiling |
