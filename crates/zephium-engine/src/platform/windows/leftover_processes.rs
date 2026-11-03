@@ -7,13 +7,14 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
 use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
-    WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32,
+    WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_BASIC_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
 use zephium_core::webview2::{
@@ -132,7 +133,8 @@ enum Child {
     Gone,
     /// Running, but not a WebView2 process.
     Foreign,
-    /// Running, or not known not to be, and could not be opened to be ended.
+    /// Running, or not known not to be, and could not be opened to be ended
+    /// or shown to be the browser's own child.
     Unopenable,
 }
 
@@ -171,6 +173,27 @@ fn created(handle: &OwnedHandle) -> Option<u64> {
     (value != 0).then_some(value)
 }
 
+/// The id of the process that started this one, read from the process
+/// itself.
+fn parent_id(handle: &OwnedHandle) -> Option<u32> {
+    let mut info = PROCESS_BASIC_INFORMATION::default();
+    let mut length = 0;
+    // SAFETY: a live handle with query rights and an output of the class's size.
+    let status = unsafe {
+        NtQueryInformationProcess(
+            raw(handle),
+            ProcessBasicInformation,
+            (&raw mut info).cast(),
+            size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+            &mut length,
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    u32::try_from(info.InheritedFromUniqueProcessId).ok()
+}
+
 fn exited(handle: &OwnedHandle, wait_ms: u32) -> bool {
     // SAFETY: a live handle opened with SYNCHRONIZE.
     unsafe { WaitForSingleObject(raw(handle), wait_ms) == WAIT_OBJECT_0 }
@@ -199,7 +222,8 @@ fn image_is(handle: &OwnedHandle, image: &str) -> bool {
 
 /// The browser's children, each opened for `access`, or None when they cannot
 /// be listed. A child is only one created after the browser, so an id the
-/// browser's parent slot once pointed at is never taken for it.
+/// browser's parent slot once pointed at is never taken for it; one that does
+/// not itself name the browser as its parent cannot be ended.
 fn children_of(parent: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> Option<Vec<Opened>> {
     // SAFETY: a process snapshot; the handle is owned below.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
@@ -219,6 +243,12 @@ fn children_of(parent: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> O
             match open(entry.th32ProcessID, access) {
                 Opened::Live(_, created) if created < parent.created => {}
                 Opened::Gone => {}
+                // The id may have been reused since the snapshot. The caller
+                // holds the browser open, so its id still names only it.
+                Opened::Live(handle, created) if parent_id(&handle) == Some(parent.id) => {
+                    children.push(Opened::Live(handle, created));
+                }
+                Opened::Live(..) => children.push(Opened::Unknown),
                 opened => children.push(opened),
             }
         }
@@ -290,6 +320,20 @@ mod tests {
             open_exact(system, query),
             Opened::Gone | Opened::Unknown
         ));
+    }
+
+    #[test]
+    fn a_child_names_its_own_parent() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        let Opened::Live(handle, _) = open(child.id(), PROCESS_QUERY_LIMITED_INFORMATION) else {
+            panic!("a child of this process opens");
+        };
+        assert_eq!(parent_id(&handle), Some(std::process::id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

@@ -679,8 +679,10 @@ gone, and keeps the generation. If every recorded process is gone, the data is d
 recorded process that still runs is an orphan of a dead run, because the exclusive root
 lease means no live Zephium instance owns anything in that root. If it is an
 `msedgewebview2.exe`, every one of its direct child processes created after it is checked
-first: if the children cannot be listed, or one is not WebView2 or cannot be opened to be
-ended, nothing is ended and the generation stays until reboot. Otherwise all of them are
+first: if the children cannot be listed, or one is not WebView2, cannot be opened to be
+ended, or does not itself name the browser as its parent, nothing is ended and the
+generation stays until reboot. The browser stays open while its children are checked, so
+its id cannot be reused meanwhile. Otherwise all of them are
 ended and the data is deleted once every exit is proven within two seconds. Ending is not
 all or nothing once it starts: a process that does not exit in time keeps the generation
 until reboot, though the others may already be gone. A generation holding nothing but its
