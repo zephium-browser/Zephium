@@ -1,5 +1,5 @@
 //! Single bounded worker for official HTTPS sources; idle workers block on IPC.
-use crate::official_store::{OfficialStore, Package, Record, Schedule, Source};
+use crate::official_store::{OfficialStore, Package, Record, Schedule, Source, REVERT_AFTER};
 use crate::types::*;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
@@ -636,6 +636,9 @@ struct Fetched {
     sources: Vec<Source>,
     checked: Vec<usize>,
     failed: Vec<(usize, (FailureKind, Option<u64>))>,
+    /// Checked lists that returned an older copy than the one kept, with that
+    /// copy's digest and how many checks in a row returned it.
+    stale: Vec<(usize, [u8; 32], u8)>,
 }
 
 /// The worker's next wake-up: the earliest list due.
@@ -654,10 +657,17 @@ fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
     for &index in &fetched.checked {
         let interval = fetched.sources[index].interval;
         let jitter = if interval >= DAY { next.jitter } else { 0 };
+        let rollbacks = next.schedule[index].rollbacks;
         next.schedule[index] = Schedule {
             due: now.saturating_add(interval + jitter),
-            failure_streak: 0,
+            rollbacks,
+            ..Schedule::default()
         };
+    }
+    for &(index, sha256, seen) in &fetched.stale {
+        let schedule = &mut next.schedule[index];
+        schedule.stale = Some((sha256, seen));
+        schedule.rollbacks = schedule.rollbacks.saturating_add(1);
     }
     for &(index, (_, retry)) in &fetched.failed {
         let schedule = &mut next.schedule[index];
@@ -717,6 +727,7 @@ where
         sources: Vec::with_capacity(OfficialFilter::ALL.len()),
         checked: Vec::new(),
         failed: Vec::new(),
+        stale: Vec::new(),
     };
     for (index, filter) in OfficialFilter::ALL.into_iter().enumerate() {
         let old = store.record.prior(filter);
@@ -731,6 +742,25 @@ where
             continue;
         }
         match fetch_one(store, fetch, cancelled, filter, old, cached.is_some()).await {
+            // An older copy than the one kept is a stale cache until the
+            // same copy comes back REVERT_AFTER checks in a row.
+            Ok(source)
+                if cached.is_some() && old.is_some_and(|old| source.version < old.version) =>
+            {
+                let seen = match store.record.schedule[index].stale {
+                    Some((sha256, seen)) if sha256 == source.sha256 => seen.saturating_add(1),
+                    _ => 1,
+                };
+                if seen >= REVERT_AFTER {
+                    fetched.sources.push(source);
+                } else {
+                    fetched
+                        .sources
+                        .push(old.expect("cached source descriptor").clone());
+                    fetched.stale.push((index, source.sha256, seen));
+                }
+                fetched.checked.push(index);
+            }
             Ok(source) => {
                 fetched.sources.push(source);
                 fetched.checked.push(index);
@@ -1101,6 +1131,7 @@ mod tests {
             sources,
             checked: vec![0],
             failed: Vec::new(),
+            stale: Vec::new(),
         };
         let candidate = stage(&mut store, fetched).unwrap();
         drop(store);
@@ -1253,5 +1284,81 @@ mod tests {
             ]
         );
         assert_eq!(result.sources[..2], package.sources[..2]);
+    }
+
+    fn quick_fixes_dated(date: &str, extra: &str) -> Vec<u8> {
+        let text = String::from_utf8(test_list(OfficialFilter::UblockQuickFixes)).unwrap();
+        let text = text.replace(
+            "! Last modified: Wed, 30 Sep 2026 00:01:00 +0000",
+            &format!("! Last modified: {date}"),
+        );
+        format!("{text}{extra}").into_bytes()
+    }
+
+    fn check_quick_fixes(store: &mut OfficialStore, bytes: &[u8]) -> Fetched {
+        due_only(store, OfficialFilter::UblockQuickFixes);
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = |_, _: Option<FilterValidators>| {
+            std::future::ready(Ok(FilterResponse::Modified {
+                bytes: bytes.to_vec(),
+                validators: FilterValidators::default(),
+            }))
+        };
+        let fetched = runtime()
+            .block_on(fetch_sources(store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        let mut next = store.record.clone();
+        reschedule(&mut next, &fetched, now());
+        store.persist(next).unwrap();
+        fetched
+    }
+
+    #[test]
+    fn an_older_copy_is_kept_out_until_upstream_returns_it_three_times() {
+        let (_dir, mut store, package) = fixture();
+        let older = quick_fixes_dated(
+            "Tue, 29 Sep 2026 00:01:00 +0000",
+            "||reverted.example.invalid^\n",
+        );
+        for seen in 1..REVERT_AFTER {
+            let fetched = check_quick_fixes(&mut store, &older);
+            assert_eq!(fetched.sources[3], package.sources[3], "check {seen}");
+            let schedule = store.record.schedule[3];
+            assert_eq!(schedule.stale.map(|(_, n)| n), Some(seen));
+            assert_eq!(schedule.rollbacks, u32::from(seen));
+            assert_eq!(schedule.failure_streak, 0);
+        }
+        let fetched = check_quick_fixes(&mut store, &older);
+        assert_eq!(fetched.sources[3].version, "202609290001");
+        assert_eq!(store.record.schedule[3].stale, None);
+        assert_eq!(
+            store.record.schedule[3].rollbacks,
+            u32::from(REVERT_AFTER - 1)
+        );
+    }
+
+    #[test]
+    fn a_different_older_copy_starts_the_count_again() {
+        let (_dir, mut store, package) = fixture();
+        let first = quick_fixes_dated("Tue, 29 Sep 2026 00:01:00 +0000", "||a.example.invalid^\n");
+        let second = quick_fixes_dated("Tue, 29 Sep 2026 00:01:00 +0000", "||b.example.invalid^\n");
+        check_quick_fixes(&mut store, &first);
+        check_quick_fixes(&mut store, &first);
+        let fetched = check_quick_fixes(&mut store, &second);
+        assert_eq!(fetched.sources[3], package.sources[3]);
+        assert_eq!(store.record.schedule[3].stale.map(|(_, n)| n), Some(1));
+    }
+
+    #[test]
+    fn the_same_version_with_other_bytes_is_accepted() {
+        let (_dir, mut store, package) = fixture();
+        let changed = quick_fixes_dated(
+            "Wed, 30 Sep 2026 00:01:00 +0000",
+            "||new.example.invalid^\n",
+        );
+        let fetched = check_quick_fixes(&mut store, &changed);
+        assert_eq!(fetched.sources[3].version, package.sources[3].version);
+        assert_ne!(fetched.sources[3].sha256, package.sources[3].sha256);
+        assert_eq!(store.record.schedule[3].rollbacks, 0);
     }
 }

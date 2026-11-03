@@ -109,13 +109,24 @@ pub(crate) struct Package {
     pub sources: Vec<Source>,
 }
 
-/// When one list is next due, and how many checks of it failed in a row.
+/// When one list is next due, how many checks of it failed in a row, and an
+/// older copy than the one kept that recent checks returned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Schedule {
     pub due: u64,
     pub failure_streak: u8,
+    /// The older copy, and how many checks in a row returned exactly it.
+    #[serde(default)]
+    pub stale: Option<([u8; 32], u8)>,
+    /// Checks that returned an older copy than the one kept.
+    #[serde(default)]
+    pub rollbacks: u32,
 }
+
+/// An older copy returned this many checks in a row is upstream's own revert,
+/// not a stale cache, and is accepted.
+pub(crate) const REVERT_AFTER: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,7 +168,7 @@ impl Record {
             schedule: vec![
                 Schedule {
                     due: now,
-                    failure_streak: 0
+                    ..Schedule::default()
                 };
                 OfficialFilter::ALL.len()
             ],
@@ -569,10 +580,12 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
             .attempted
             .is_some_and(|t| t > now.saturating_add(31 * DAY))
         || record.schedule.len() != OfficialFilter::ALL.len()
-        || record
-            .schedule
-            .iter()
-            .any(|s| s.due > now.saturating_add(31 * DAY) || s.failure_streak > 8)
+        || record.schedule.iter().any(|s| {
+            s.due > now.saturating_add(31 * DAY)
+                || s.failure_streak > 8
+                || s.stale
+                    .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
+        })
         || record.retained.len() > OfficialFilter::ALL.len()
         || record
             .retained
