@@ -493,15 +493,16 @@ fn navigate(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Va
     let tab = id.to_string();
     select(&shell, bench, &tab);
     // A load still in flight would end after the watch starts and pass for
-    // this one, and its end event cannot be told apart.
-    let started = Instant::now();
-    if !bench.wait_idle(&tab, started + timeout) {
+    // this one, and its end event cannot be told apart. The wait is not part
+    // of this navigation's time.
+    if !bench.wait_idle(&tab, Instant::now() + timeout) {
         return Err(format!(
             "the tab was still loading after {} ms",
             timeout.as_millis()
         ));
     }
     bench.watch(true);
+    let started = Instant::now();
     let command = Command::Navigate {
         id,
         input: url.to_owned(),
