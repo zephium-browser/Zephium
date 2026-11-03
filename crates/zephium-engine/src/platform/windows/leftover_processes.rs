@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
-use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, HANDLE, WAIT_OBJECT_0,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -252,9 +254,9 @@ fn children_of(parent: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> O
                 opened => children.push(opened),
             }
         }
-        // SAFETY: as above.
-        if unsafe { Process32NextW(raw(&snapshot), &mut entry) }.is_err() {
-            return Some(children);
+        // SAFETY: as above. Only the documented end of the list completes it.
+        if let Err(error) = unsafe { Process32NextW(raw(&snapshot), &mut entry) } {
+            return (error.code() == ERROR_NO_MORE_FILES.to_hresult()).then_some(children);
         }
     }
 }
