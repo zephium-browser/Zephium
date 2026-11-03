@@ -69,8 +69,10 @@ impl Default for PageActivity {
 
 impl Drop for ActivePageLoad {
     fn drop(&mut self) {
-        self.0.loading.fetch_sub(1, Ordering::AcqRel);
+        // Stamped first, so the count reaching zero never pairs with the
+        // load's start time.
         self.0.touch();
+        self.0.loading.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
