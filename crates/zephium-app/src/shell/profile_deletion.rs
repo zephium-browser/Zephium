@@ -306,6 +306,7 @@ impl Shell {
         self.residency
             .discard_protected_until
             .retain(|id, _| self.items.tab(*id).is_some());
+        self.forget_removed_views_protection();
         self.crash
             .crashes
             .retain(|id, _| self.items.tab(*id).is_some());

@@ -1148,6 +1148,14 @@ impl Shell {
         }
     }
 
+    /// Drops reports for views removed without a retirement, as a deleted
+    /// profile's are.
+    pub(super) fn forget_removed_views_protection(&mut self) {
+        self.blocker
+            .degraded_views
+            .retain(|id| self.items.tab(*id).is_some());
+    }
+
     pub(super) fn on_content_protection_changed(
         &mut self,
         id: ItemId,
