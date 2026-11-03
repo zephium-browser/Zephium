@@ -3598,6 +3598,10 @@ mod tests {
 
         completion.finish(ContentRuleValidationOutcome::Valid);
         assert!(!marker.exists(), "a settled check is not a crash");
+        // Their workers would otherwise recreate cache files after `root` is gone.
+        for service in [&service, &relaunched, &unrelated] {
+            let _ = service.shutdown_until(Instant::now() + Duration::from_secs(5));
+        }
     }
 
     #[cfg(feature = "official-https")]
