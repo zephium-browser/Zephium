@@ -24,6 +24,11 @@ pub(crate) const fn applies_to(target: CompileTarget) -> bool {
     matches!(target, CompileTarget::WebKit)
 }
 
+/// Physical lines and candidate rules, as the compiler counts them.
+pub(crate) fn line_counts() -> (usize, usize) {
+    crate::compiler::line_counts(SourceFormat::Standard, RULES)
+}
+
 pub(crate) const fn byte_len() -> usize {
     RULES.len()
 }
