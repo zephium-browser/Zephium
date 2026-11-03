@@ -409,6 +409,7 @@ fn prepare_source(
     let mut runtime_approximated_rules = 0usize;
     let mut runtime_resource_approximated_rules = 0usize;
     let mut runtime_source_kind_approximated_rules = 0usize;
+    let mut conditions = crate::conditions::ListConditions::default();
 
     for (line_index, raw_line) in source.contents.split('\n').enumerate() {
         *physical_line_total = physical_line_total
@@ -433,6 +434,10 @@ fn prepare_source(
             });
         }
         let line = line.trim();
+        if matches!(source.format, SourceFormat::Standard) && !conditions.keep(line) {
+            ignored_lines += 1;
+            continue;
+        }
         if is_ignored_line(source.format, line) {
             ignored_lines += 1;
             continue;
