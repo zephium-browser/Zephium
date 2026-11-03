@@ -441,6 +441,12 @@ impl CosmeticPolicy {
 }
 
 impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
+    fn scriptlet_program(&self) -> Option<Arc<str>> {
+        self.scriptlets
+            .as_ref()
+            .map(|program| program.script.clone())
+    }
+
     fn fingerprint(&self) -> zephium_core::blocker::ContentRuleDigest {
         zephium_core::blocker::ContentRuleDigest::from_bytes(self.fingerprint)
     }

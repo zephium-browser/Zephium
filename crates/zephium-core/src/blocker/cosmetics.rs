@@ -28,6 +28,11 @@ pub trait DocumentStyleProvider: Send + Sync + std::fmt::Debug {
         document_url: &str,
         tokens: &[String],
     ) -> Result<Vec<String>, DocumentStyleFailure>;
+    /// The scriptlet program every frame of the profile runs at document start
+    /// in its own world, when any host has scriptlets.
+    fn scriptlet_program(&self) -> Option<Arc<str>> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
