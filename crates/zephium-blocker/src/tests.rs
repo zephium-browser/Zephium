@@ -1149,6 +1149,8 @@ fn rules_inside_a_false_if_block_are_not_compiled() {
     assert_eq!(rules.report().sources()[0].ignored_lines(), 4);
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
 fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
     let rules = Compiler::default()
         .compile(
