@@ -481,12 +481,14 @@ impl Shell {
                             .get(&id)
                             .map(|(current, _)| *current)
                     });
+                let was_running = self.keeps_running(id);
                 if current_document == Some(navigation)
                     && self
                         .items
                         .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
                 {
                     self.project_tab(id);
+                    self.follow_running(id, was_running);
                 }
             }
             EngineEvent::AudioChanged { id, audible } => self.on_audio_changed(id, audible),
