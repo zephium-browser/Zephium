@@ -231,7 +231,7 @@ impl OfficialWorker {
                                 && identity.expires_unix <= now()
                             {
                                 let mut next = store.record.clone();
-                                next.rejected = next.candidate.take();
+                                next.reject_candidate();
                                 next.due = now();
                                 let failure = if store.persist(next).is_ok() {
                                     FailureKind::Manifest
@@ -258,13 +258,7 @@ impl OfficialWorker {
                                 .is_some_and(|p| p.identity == identity && store.intact(p))
                             {
                                 let mut next = store.record.clone();
-                                next.previous = next.current.take();
-                                next.current = next.candidate.take();
-                                next.checked = catalog_checked(&next);
-                                next.verification = next.verification.saturating_add(1);
-                                next.failure_streak = 0;
-                                next.due = next_due(&next);
-                                next.rejected = None;
+                                commit_candidate(&mut next);
                                 match store.persist(next) {
                                     Ok(()) => {
                                         let _ = store.collect();
@@ -307,7 +301,7 @@ impl OfficialWorker {
                                 .is_some_and(|p| p.identity == identity)
                             {
                                 let mut next = store.record.clone();
-                                next.rejected = next.candidate.take();
+                                next.reject_candidate();
                                 next.failure_streak = next.failure_streak.saturating_add(1).min(8);
                                 next.due = now().saturating_add(
                                     BACKOFF
@@ -672,6 +666,19 @@ fn next_due(record: &Record) -> u64 {
 
 /// Moves each list's schedule on: a checked list is due after its own
 /// interval (daily lists with the record's jitter), a failed one backs off.
+/// The candidate becomes current. A rejection stays until each list it held
+/// a copy of has been checked past that copy.
+fn commit_candidate(next: &mut Record) {
+    next.previous = next.current.take();
+    next.current = next.candidate.take();
+    next.checked = catalog_checked(next);
+    next.verification = next.verification.saturating_add(1);
+    next.failure_streak = 0;
+    next.due = next_due(next);
+}
+
+/// A list checked past its rejected copy no longer holds the rejection; it
+/// is forgotten once no list does.
 fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
     for &index in &fetched.checked {
         let interval = fetched.sources[index].interval;
@@ -683,6 +690,9 @@ fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
             checked: Some(now),
             ..Schedule::default()
         };
+    }
+    if next.schedule.iter().all(|schedule| !schedule.rejected) {
+        next.rejected = None;
     }
     for &(index, sha256, seen) in &fetched.stale {
         let schedule = &mut next.schedule[index];
@@ -907,15 +917,11 @@ fn stage(
     store.persist(next)?;
     Ok(package)
 }
-/// A refresh that found the current package's lists again. The rejected
-/// package is forgotten only when every list was checked: a list withheld
-/// because its copy was rejected counts as failed, and that copy must stay
-/// known or the next check stages it again.
+/// A refresh that found the current package's lists again.
 fn keep_current(next: &mut crate::official_store::Record, fetched: Fetched, now: u64) {
     if fetched.failed.is_empty() {
         next.verification = next.verification.saturating_add(1);
         next.failure_streak = 0;
-        next.rejected = None;
     }
     reschedule(next, &fetched, now);
     if let Some(current) = next.current.as_mut() {
@@ -1508,8 +1514,79 @@ mod tests {
         let rejected = store.new_package(sources, now()).unwrap();
         let mut next = store.record.clone();
         next.highest_revision = rejected.identity.revision;
-        next.rejected = Some(rejected);
+        next.candidate = Some(rejected);
+        next.reject_candidate();
         store.persist(next).unwrap();
+    }
+
+    fn serve_bad_easylist_and<'a>(
+        bad: &'a [u8],
+        newer: Option<&'a [u8]>,
+    ) -> impl FnMut(
+        OfficialFilter,
+        Option<FilterValidators>,
+    ) -> std::future::Ready<Result<FilterResponse, FilterFetchFailure>>
+           + 'a {
+        move |filter, _| {
+            std::future::ready(Ok(match (filter, newer) {
+                (OfficialFilter::EasyList, _) => FilterResponse::Modified {
+                    bytes: bad.to_vec(),
+                    validators: FilterValidators::default(),
+                },
+                (OfficialFilter::UblockFilters, Some(newer)) => FilterResponse::Modified {
+                    bytes: newer.to_vec(),
+                    validators: FilterValidators::default(),
+                },
+                _ => FilterResponse::NotModified,
+            }))
+        }
+    }
+
+    #[test]
+    fn a_commit_keeps_a_rejection_its_list_was_not_checked_past() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        reject(&mut store, &package, 0, &bad);
+        let mut newer = test_list(OfficialFilter::UblockFilters);
+        newer.extend_from_slice(b"||newer.example.invalid^\n");
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = serve_bad_easylist_and(&bad, Some(&newer));
+        let fetched = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        stage(&mut store, fetched).unwrap();
+        let mut next = store.record.clone();
+        commit_candidate(&mut next);
+        store.persist(next).unwrap();
+        assert!(store.record.rejected.is_some());
+        assert!(store.record.schedule[0].rejected);
+
+        let mut fetch = serve_bad_easylist_and(&bad, Some(&newer));
+        let fetched = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(fetched.failed, [(0, (FailureKind::Target, None))]);
+        assert_eq!(
+            fetched.sources[0],
+            store.record.current.as_ref().unwrap().sources[0]
+        );
+    }
+
+    #[test]
+    fn a_rejection_outlasts_a_round_its_list_was_not_due_in() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        reject(&mut store, &package, 0, &bad);
+        let changed = quick_fixes_dated(
+            "Wed, 30 Sep 2026 00:01:00 +0000",
+            "||new.example.invalid^\n",
+        );
+        check_quick_fixes(&mut store, &changed);
+        assert!(store.record.rejected.is_some());
+        assert!(store.record.schedule[0].rejected);
+        assert!(!store.record.schedule[3].rejected);
     }
 
     #[test]

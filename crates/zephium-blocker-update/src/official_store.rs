@@ -125,6 +125,10 @@ pub(crate) struct Schedule {
     /// When this list was last checked successfully.
     #[serde(default)]
     pub checked: Option<u64>,
+    /// The rejected package holds a copy of this list that the list has not
+    /// been checked past since.
+    #[serde(default)]
+    pub rejected: bool,
 }
 
 /// An older copy returned this many checks in a row is upstream's own revert,
@@ -177,6 +181,28 @@ impl Record {
             ],
             retained: Vec::new(),
         }
+    }
+
+    /// Remembers the candidate as rejected; each list it changed must be
+    /// checked past that copy before the rejection is forgotten.
+    pub fn reject_candidate(&mut self) {
+        let Some(rejected) = self.candidate.take() else {
+            return;
+        };
+        for schedule in &mut self.schedule {
+            schedule.rejected = false;
+        }
+        for (index, source) in rejected.sources.iter().enumerate() {
+            let kept = self
+                .current
+                .as_ref()
+                .and_then(|current| current.sources.get(index))
+                .is_some_and(|current| current.sha256 == source.sha256);
+            if !kept {
+                self.schedule[index].rejected = true;
+            }
+        }
+        self.rejected = Some(rejected);
     }
 
     /// The newest descriptor of `filter` this record holds.
@@ -591,6 +617,7 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
                 || s.stale
                     .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
                 || s.checked.is_some_and(|t| t > now.saturating_add(31 * DAY))
+                || (s.rejected && record.rejected.is_none())
         })
         || record.retained.len() > OfficialFilter::ALL.len()
         || record
