@@ -27,13 +27,13 @@ for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
   companion ||= visible(COMPANION);
   enforcement ||= visible(ENFORCEMENT);
   const now = video?.currentTime ?? 0;
-  started ||= now > 0;
+  started ||= now > last;
   if (!showing && video && !video.paused && now === last) stalledMs += step;
   last = now;
 }
-// A video that never played, ad or not, observed nothing, unless the player
-// was stopped by a blocker warning, which is the finding.
-if (!started && !enforcement) throw new Error('playback never started');
+// A video that never played, ad or not, observed nothing, unless a blocker
+// warning still stands over it at the end, which is the finding.
+if (!started && !visible(ENFORCEMENT)) throw new Error('playback never started');
 return {
   url: location.href,
   adPlacements: response?.adPlacements?.length ?? 0,

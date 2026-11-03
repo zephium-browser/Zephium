@@ -983,7 +983,8 @@ fn navigate(driver: &mut Driver, tab: &Value, url: &str) -> Result<Opened, Failu
     let reply = driver.call(
         "navigate",
         json!({ "tab": tab, "url": url, "timeoutMs": OPEN_TIMEOUT_MS }),
-        Duration::from_millis(OPEN_TIMEOUT_MS) + REPLY_GRACE,
+        // The app may first wait out an earlier load, then this one.
+        Duration::from_millis(2 * OPEN_TIMEOUT_MS) + REPLY_GRACE,
     )?;
     Ok(Opened {
         tab: tab.clone(),

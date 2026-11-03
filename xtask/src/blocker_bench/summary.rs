@@ -388,7 +388,7 @@ fn medians_section(tally: &Tally) -> String {
     };
     let _ = write!(
         out,
-        "\nMedian of each site's mean over its runs, on the sites measured in every configuration: {} sites for speed, CPU, memory and network, {} for the ad numbers",
+        "\nMedian of each site's mean over its runs, on the sites where every configuration with a number for that metric has one: {} sites for speed, CPU, memory and network, {} for the ad numbers",
         used(false).unwrap_or(0),
         used(true).unwrap_or(0)
     );
