@@ -608,8 +608,9 @@ native fetch seam must not be reintroduced for page-controlled URLs.
 ## 9. Blocker (bundled network policy implemented; TUF next)
 
 The native network blocker is implemented behind the core policy ports. The
-desktop embeds an immutable, release-authenticated EasyList + EasyPrivacy seed
-with exact license/provenance and compiler-quality manifests. Raw list bodies
+desktop embeds an immutable, release-authenticated EasyList, EasyPrivacy and
+uBlock Origin seed with exact license/provenance and compiler-quality
+manifests. Raw list bodies
 are inflated only after a compiled-cache miss, and every new profile still
 defaults to disabled. Enabling requires the exact authenticated catalog and
 holds first navigation until a non-empty native artifact is installed; it
