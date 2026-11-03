@@ -536,7 +536,18 @@ mod tests {
     #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn samples_this_process_family() {
-        let sample = sample(std::process::id()).unwrap();
+        // Windows charges CPU time in clock ticks, so a process that just
+        // started can read zero until it has run for one.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut sample = sample(std::process::id()).unwrap();
+        while sample.cpu_ms_since(&Sample::default()) == 0.0 && std::time::Instant::now() < deadline
+        {
+            let spin = std::time::Instant::now();
+            while spin.elapsed() < std::time::Duration::from_millis(20) {
+                std::hint::spin_loop();
+            }
+            sample = super::sample(std::process::id()).unwrap();
+        }
         assert!(sample.processes() >= 1);
         assert!(sample.footprint_bytes > 0);
         assert!(sample.pids().contains(&std::process::id()));
