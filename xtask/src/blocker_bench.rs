@@ -82,7 +82,10 @@ const SPEEDOMETER_SETTLE: Duration = Duration::from_secs(20);
 /// The score is in the page once `#result-number` has text; a failed run
 /// writes "Error" there.
 const SPEEDOMETER_STATE: &str = "const text = (id) => document.getElementById(id)?.textContent.trim() ?? '';\n\
-    return { score: text('result-number'), range: text('confidence-number'), progress: text('info-progress') };";
+    const score = text('result-number');\n\
+    const m = score && window.benchmarkClient && window.benchmarkClient.metrics;\n\
+    const suites = m ? Object.fromEntries(Object.entries(m).filter(([k]) => !k.includes('/')).map(([k, v]) => [k, v.mean])) : null;\n\
+    return { score, range: text('confidence-number'), progress: text('info-progress'), suites };";
 
 /// Long-lived, monetized music videos, and one of over twenty minutes.
 const VIDEOS: [(&str, &str); 5] = [
@@ -211,6 +214,9 @@ struct Options {
     speedometer: Option<usize>,
     speedometer_url: Option<String>,
     speedometer_settle: Duration,
+    /// Keep one profile per browser across Speedometer runs, after one uncounted
+    /// warm-up run, as a returning user's caches would be.
+    speedometer_warm: bool,
     label: Option<String>,
     compare: Option<PathBuf>,
     zephium: Option<PathBuf>,
@@ -232,6 +238,7 @@ impl Options {
             runs: 3,
             settle: Duration::from_millis(6000),
             speedometer_settle: SPEEDOMETER_SETTLE,
+            speedometer_warm: false,
             ..Options::default()
         };
         let mut arguments = arguments.iter();
@@ -273,6 +280,7 @@ impl Options {
                     options.speedometer = Some(number(&value()?, flag)?.max(1) as usize);
                 }
                 "--speedometer-url" => options.speedometer_url = Some(value()?),
+                "--speedometer-warm" => options.speedometer_warm = true,
                 "--speedometer-settle-ms" => {
                     options.speedometer_settle = Duration::from_millis(number(&value()?, flag)?);
                 }
@@ -1598,13 +1606,25 @@ fn run_speedometer(
         .speedometer_url
         .as_deref()
         .unwrap_or(SPEEDOMETER_URL);
-    for run in 1..=runs {
-        for config in rotated(&context.options.browsers, run - 1) {
+    let warm = context.options.speedometer_warm;
+    let kept: BTreeMap<&str, QaSession> = context
+        .options
+        .browsers
+        .iter()
+        .filter(|config| warm && config.zephium())
+        .map(|config| (config.name(), QaSession::new(*config, "sw")))
+        .collect();
+    for run in usize::from(!warm)..=runs {
+        for config in rotated(&context.options.browsers, run.saturating_sub(1)) {
             let name = config.name();
-            eprintln!("run {run}/{runs} {name}: leave the machine alone");
-            let qa = config
-                .zephium()
-                .then(|| QaSession::new(config, &format!("s{run}")));
+            if run == 0 {
+                eprintln!("warm-up {name}: leave the machine alone");
+            } else {
+                eprintln!("run {run}/{runs} {name}: leave the machine alone");
+            }
+            let fresh =
+                (!warm && config.zephium()).then(|| QaSession::new(config, &format!("s{run}")));
+            let qa = fresh.as_ref().or_else(|| kept.get(name));
             let mut launch = Launch {
                 config: name.to_string(),
                 run,
@@ -1612,7 +1632,7 @@ fn run_speedometer(
                 ..Launch::default()
             };
             let mut session =
-                match context.launch(config, qa.as_ref(), &format!("{name}-speedometer-r{run}")) {
+                match context.launch(config, qa, &format!("{name}-speedometer-r{run}")) {
                     Ok(session) => session,
                     Err(error) => {
                         eprintln!("  {name} did not start: {error}");
@@ -1642,10 +1662,12 @@ fn run_speedometer(
                     .first()
                     .map_or(String::new(), |error| format!("  ! {error}")),
             );
-            results.speedometer.push(record);
+            if run > 0 {
+                results.speedometer.push(record);
+            }
             session.driver.quit();
             drop(session);
-            drop(qa);
+            drop(fresh);
             results.save(saved)?;
         }
     }
@@ -1699,6 +1721,10 @@ fn speedometer_run(
                 record.range_text = text("range");
                 record.score = number_in(&score);
                 record.score_text = Some(score);
+                record.suites = last
+                    .get("suites")
+                    .cloned()
+                    .filter(|suites| !suites.is_null());
                 break true;
             }
             if started.elapsed() >= SPEEDOMETER_CAP {
