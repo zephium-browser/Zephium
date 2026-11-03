@@ -355,15 +355,17 @@ impl FilterCohort for ICoreWebView2_22 {
     }
 }
 
-/// How many times a resume rebuilds a cohort that would not install whole.
-const RESUME_ATTEMPTS: usize = 2;
+/// How many times a resume tries to install a cohort whole: the first time,
+/// then once more after removing what the first left.
+const RESUME_TRIES: usize = 2;
 
 /// Pausing removes the cohort's filters, so a paused view's requests never
 /// wait on this thread; resuming installs them again. A filter missing on a
-/// resumed view would let its requests through unseen, so a cohort is whole
-/// or empty: a resume that cannot install every filter rebuilds the cohort,
+/// resumed view would let its requests through unseen, so a cohort is meant to
+/// be whole or empty: a resume that cannot install every filter tries again,
 /// and after that removes them all, leaving the view unfiltered as if paused
-/// until its next resume tries again. A pause that cannot remove a filter
+/// until its next resume. Only filters that cannot be removed either are left
+/// in place, and the log says how many. A pause that cannot remove a filter
 /// leaves it to the callback's own pause check.
 fn follow_pause(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: bool) {
     if paused {
@@ -373,16 +375,27 @@ fn follow_pause(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: boo
         return;
     }
     let mut failure = None;
-    for _ in 0..RESUME_ATTEMPTS {
+    for _ in 0..RESUME_TRIES {
         match add_filters(cohort, installed) {
             Ok(()) => return,
             Err(error) => failure = Some(error),
         }
         let _ = remove_filters(cohort, installed);
     }
-    if let Some(error) = failure {
+    if installed.get() != 0 {
+        let _ = remove_filters(cohort, installed);
+    }
+    let Some(error) = failure else {
+        return;
+    };
+    if installed.get() == 0 {
         eprintln!(
             "content blocker: WebView2 filters could not be installed on resume, so the view stays unfiltered until its next resume: {error}"
+        );
+    } else {
+        eprintln!(
+            "content blocker: WebView2 filters could not be installed on resume or removed after, so the view is partially filtered ({} of {FILTER_REGISTRATION_COUNT}) until its next resume: {error}",
+            installed.get()
         );
     }
 }
@@ -499,7 +512,7 @@ mod tests {
     struct FlakyCohort {
         fail_at: usize,
         failures: Cell<usize>,
-        removes_fail: bool,
+        remove_failures: Cell<usize>,
     }
 
     impl FilterCohort for FlakyCohort {
@@ -512,7 +525,8 @@ mod tests {
         }
 
         fn remove(&self, _index: usize) -> windows_core::Result<()> {
-            if self.removes_fail {
+            if self.remove_failures.get() > 0 {
+                self.remove_failures.set(self.remove_failures.get() - 1);
                 return Err(E_INVALIDARG.into());
             }
             Ok(())
@@ -523,7 +537,7 @@ mod tests {
         FlakyCohort {
             fail_at,
             failures: Cell::new(failures),
-            removes_fail: false,
+            remove_failures: Cell::new(0),
         }
     }
 
@@ -537,11 +551,32 @@ mod tests {
     #[test]
     fn a_resume_that_keeps_failing_leaves_no_filter_half_installed() {
         let installed = Cell::new(0);
-        follow_pause(&flaky(3, RESUME_ATTEMPTS), &installed, false);
+        follow_pause(&flaky(3, RESUME_TRIES), &installed, false);
         assert_eq!(installed.get(), 0);
         // The next resume tries again.
         follow_pause(&flaky(3, 0), &installed, false);
         assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
+
+    #[test]
+    fn a_resume_whose_rollback_fails_still_ends_unfiltered_or_counts_what_stayed() {
+        // Both rollbacks fail, the last removal succeeds: nothing is left.
+        let installed = Cell::new(0);
+        let late = FlakyCohort {
+            remove_failures: Cell::new(RESUME_TRIES),
+            ..flaky(3, RESUME_TRIES)
+        };
+        follow_pause(&late, &installed, false);
+        assert_eq!(installed.get(), 0);
+        // Removals keep failing: the filters added before the failure stay,
+        // and only those.
+        let installed = Cell::new(0);
+        let stuck = FlakyCohort {
+            remove_failures: Cell::new(usize::MAX),
+            ..flaky(3, RESUME_TRIES)
+        };
+        follow_pause(&stuck, &installed, false);
+        assert_eq!(installed.get(), 3);
     }
 
     #[test]
@@ -551,7 +586,7 @@ mod tests {
         assert_eq!(installed.get(), 0);
         let installed = Cell::new(FILTER_REGISTRATION_COUNT);
         let stuck = FlakyCohort {
-            removes_fail: true,
+            remove_failures: Cell::new(usize::MAX),
             ..flaky(0, 0)
         };
         follow_pause(&stuck, &installed, true);
