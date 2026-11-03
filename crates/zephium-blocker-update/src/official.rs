@@ -22,6 +22,8 @@ pub(crate) struct OfficialWorker {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+    /// Told after each published status, outside the state lock.
+    waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 struct State {
     snapshot: StatusSnapshot,
@@ -75,6 +77,15 @@ impl Shared {
         state.candidate_identity = record.candidate.as_ref().map(|p| p.identity.clone());
         state.busy = false;
         self.changed.notify_all();
+        drop(state);
+        let waker = self
+            .waker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(wake) = waker {
+            wake();
+        }
     }
 }
 
@@ -156,6 +167,7 @@ impl OfficialWorker {
                 repairs: 0,
             }),
             changed: Condvar::new(),
+            waker: Mutex::new(None),
         });
         let (sender, receiver) = mpsc::sync_channel(2);
         let (cancel, mut cancelled) = watch::channel(false);
@@ -531,6 +543,13 @@ impl OfficialWorker {
         state.busy = true;
         Ok(())
     }
+    pub(crate) fn set_change_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .shared
+            .waker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(wake);
+    }
     pub(crate) fn wait_for_change(&self, revision: u64, timeout: Duration) -> WaitForStatus {
         let state = self.shared.lock();
         let (state, _) = self
@@ -885,6 +904,45 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn each_published_status_wakes_the_registered_caller_outside_the_lock() {
+        let (_dir, store, _package) = fixture();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                snapshot: StatusSnapshot {
+                    revision: 1,
+                    last_refresh_attempt_unix: None,
+                    status: UpdateStatus::Shutdown,
+                },
+                initial: None,
+                candidate: None,
+                candidate_identity: None,
+                due: 0,
+                verification: 0,
+                freshness_deadline: 0,
+                busy: false,
+                sealed: false,
+                operation: 0,
+                repairs: 0,
+            }),
+            changed: Condvar::new(),
+            waker: Mutex::new(None),
+        });
+        // Nothing is registered yet: publishing must not need a waker.
+        shared.publish(&store.record, UpdateStatus::Shutdown);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen, observed) = (wakes.clone(), Arc::downgrade(&shared));
+        *shared.waker.lock().unwrap() = Some(Arc::new(move || {
+            // The state lock is free while the caller is told.
+            let shared = observed.upgrade().unwrap();
+            assert!(shared.state.try_lock().is_ok());
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        shared.publish(&store.record, UpdateStatus::Shutdown);
+        shared.publish(&store.record, UpdateStatus::Shutdown);
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

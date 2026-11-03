@@ -1824,6 +1824,17 @@ impl BlockerCatalog for ManagedBlocker {
         self.drive_locked(true)
     }
 
+    fn set_change_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(updater) = self
+            .updater
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            updater.set_change_waker(wake);
+        }
+    }
+
     fn request_refresh(&self) -> BlockerCatalogRefreshDispatch {
         let _serial = self
             .maintenance_serial
