@@ -319,7 +319,12 @@ pub(crate) fn install_scoped_on_view(
     }
     registration.token = Some(token);
     let (installed, filters) = (registration.installed_filters.clone(), core22);
-    registration.pause = pause.register(move |paused| follow_pause(&filters, &installed, paused));
+    let (live, busy) = (pause.signal(), Cell::new(false));
+    registration.pause = pause.register(move |_| {
+        follow_pause(&filters, &installed, &busy, &|| {
+            live.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    });
     Ok(registration)
 }
 
@@ -333,6 +338,8 @@ impl FilterCohort for ICoreWebView2_22 {
     fn add(&self, index: usize) -> windows_core::Result<()> {
         let (pattern, context) =
             filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        // SAFETY: `self` is a live interface held by the registration on the
+        // UI thread that created it, and the pattern is a static wide string.
         unsafe {
             self.AddWebResourceRequestedFilterWithRequestSourceKinds(
                 pattern,
@@ -345,6 +352,7 @@ impl FilterCohort for ICoreWebView2_22 {
     fn remove(&self, index: usize) -> windows_core::Result<()> {
         let (pattern, context) =
             filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        // SAFETY: as in `add`; the tuple is one this cohort added.
         unsafe {
             self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
                 pattern,
@@ -358,6 +366,9 @@ impl FilterCohort for ICoreWebView2_22 {
 /// How many times a resume tries to install a cohort whole: the first time,
 /// then once more after removing what the first left.
 const RESUME_TRIES: usize = 2;
+/// How many times one pause change follows a pause that keeps changing while
+/// its filters are being changed.
+const MAX_FOLLOWS: usize = 4;
 
 /// Pausing removes the cohort's filters, so a paused view's requests never
 /// wait on this thread; resuming installs them again. A filter missing on a
@@ -367,23 +378,50 @@ const RESUME_TRIES: usize = 2;
 /// until its next resume. Only filters that cannot be removed either are left
 /// in place, and the log says how many. A pause that cannot remove a filter
 /// leaves it to the callback's own pause check.
-fn follow_pause(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: bool) {
-    if paused {
-        if let Err(error) = remove_filters(cohort, installed) {
-            eprintln!("content blocker: WebView2 filter removal on pause failed: {error}");
-        }
+///
+/// A native call can pump messages, and the pause can change again inside it.
+/// That nested change only finds the cohort busy; this call reads the live
+/// pause after every native call and follows wherever it ends up.
+fn follow_pause(
+    cohort: &impl FilterCohort,
+    installed: &Cell<usize>,
+    busy: &Cell<bool>,
+    paused: &dyn Fn() -> bool,
+) {
+    if busy.replace(true) {
         return;
     }
+    for _ in 0..MAX_FOLLOWS {
+        let target = paused();
+        let settled = || paused() == target;
+        if target {
+            if let Err(error) = remove_filters(cohort, installed, &settled) {
+                eprintln!("content blocker: WebView2 filter removal on pause failed: {error}");
+            }
+        } else {
+            resume(cohort, installed, &settled);
+        }
+        if settled() {
+            break;
+        }
+    }
+    busy.set(false);
+}
+
+fn resume(cohort: &impl FilterCohort, installed: &Cell<usize>, settled: &dyn Fn() -> bool) {
     let mut failure = None;
     for _ in 0..RESUME_TRIES {
-        match add_filters(cohort, installed) {
+        match add_filters(cohort, installed, settled) {
             Ok(()) => return,
             Err(error) => failure = Some(error),
         }
-        let _ = remove_filters(cohort, installed);
+        let _ = remove_filters(cohort, installed, settled);
+        if !settled() {
+            return;
+        }
     }
     if installed.get() != 0 {
-        let _ = remove_filters(cohort, installed);
+        let _ = remove_filters(cohort, installed, settled);
     }
     let Some(error) = failure else {
         return;
@@ -400,16 +438,26 @@ fn follow_pause(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: boo
     }
 }
 
-fn add_filters(cohort: &impl FilterCohort, installed: &Cell<usize>) -> windows_core::Result<()> {
-    while installed.get() < FILTER_REGISTRATION_COUNT {
+/// Adds the cohort's missing filters while the pause stays where it was.
+fn add_filters(
+    cohort: &impl FilterCohort,
+    installed: &Cell<usize>,
+    settled: &dyn Fn() -> bool,
+) -> windows_core::Result<()> {
+    while installed.get() < FILTER_REGISTRATION_COUNT && settled() {
         cohort.add(installed.get())?;
         installed.set(installed.get() + 1);
     }
     Ok(())
 }
 
-fn remove_filters(cohort: &impl FilterCohort, installed: &Cell<usize>) -> windows_core::Result<()> {
-    while installed.get() > 0 {
+/// Removes the cohort's filters while the pause stays where it was.
+fn remove_filters(
+    cohort: &impl FilterCohort,
+    installed: &Cell<usize>,
+    settled: &dyn Fn() -> bool,
+) -> windows_core::Result<()> {
+    while installed.get() > 0 && settled() {
         cohort.remove(installed.get() - 1)?;
         installed.set(installed.get() - 1);
     }
@@ -541,20 +589,80 @@ mod tests {
         }
     }
 
+    fn follow(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: bool) {
+        follow_pause(cohort, installed, &Cell::new(false), &|| paused);
+    }
+
+    /// A cohort whose `flip_at`th native call changes the pause and calls back
+    /// in, as a pause change pumped from inside a WebView2 call would.
+    struct Reentrant {
+        calls: Cell<usize>,
+        flip_at: usize,
+        paused: Rc<Cell<bool>>,
+        installed: Rc<Cell<usize>>,
+        busy: Rc<Cell<bool>>,
+    }
+
+    impl Reentrant {
+        fn call(&self) {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == self.flip_at {
+                self.paused.set(!self.paused.get());
+                let paused = self.paused.clone();
+                follow_pause(self, &self.installed, &self.busy, &|| paused.get());
+            }
+        }
+    }
+
+    impl FilterCohort for Reentrant {
+        fn add(&self, _index: usize) -> windows_core::Result<()> {
+            self.call();
+            Ok(())
+        }
+
+        fn remove(&self, _index: usize) -> windows_core::Result<()> {
+            self.call();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_pause_change_inside_a_native_call_is_followed_to_where_it_ends() {
+        for (start_paused, start_installed) in [(true, FILTER_REGISTRATION_COUNT), (false, 0)] {
+            let cohort = Reentrant {
+                calls: Cell::new(0),
+                flip_at: 3,
+                paused: Rc::new(Cell::new(start_paused)),
+                installed: Rc::new(Cell::new(start_installed)),
+                busy: Rc::default(),
+            };
+            let paused = cohort.paused.clone();
+            follow_pause(&cohort, &cohort.installed, &cohort.busy, &|| paused.get());
+            assert_ne!(cohort.paused.get(), start_paused);
+            let whole = if cohort.paused.get() {
+                0
+            } else {
+                FILTER_REGISTRATION_COUNT
+            };
+            assert_eq!(cohort.installed.get(), whole);
+            assert!(!cohort.busy.get());
+        }
+    }
+
     #[test]
     fn a_resume_rebuilds_a_cohort_that_did_not_install_whole() {
         let installed = Cell::new(0);
-        follow_pause(&flaky(3, 1), &installed, false);
+        follow(&flaky(3, 1), &installed, false);
         assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
     }
 
     #[test]
     fn a_resume_that_keeps_failing_leaves_no_filter_half_installed() {
         let installed = Cell::new(0);
-        follow_pause(&flaky(3, RESUME_TRIES), &installed, false);
+        follow(&flaky(3, RESUME_TRIES), &installed, false);
         assert_eq!(installed.get(), 0);
         // The next resume tries again.
-        follow_pause(&flaky(3, 0), &installed, false);
+        follow(&flaky(3, 0), &installed, false);
         assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
     }
 
@@ -566,7 +674,7 @@ mod tests {
             remove_failures: Cell::new(RESUME_TRIES),
             ..flaky(3, RESUME_TRIES)
         };
-        follow_pause(&late, &installed, false);
+        follow(&late, &installed, false);
         assert_eq!(installed.get(), 0);
         // Removals keep failing: the filters added before the failure stay,
         // and only those.
@@ -575,21 +683,21 @@ mod tests {
             remove_failures: Cell::new(usize::MAX),
             ..flaky(3, RESUME_TRIES)
         };
-        follow_pause(&stuck, &installed, false);
+        follow(&stuck, &installed, false);
         assert_eq!(installed.get(), 3);
     }
 
     #[test]
     fn a_pause_removes_every_filter_and_keeps_those_it_cannot() {
         let installed = Cell::new(FILTER_REGISTRATION_COUNT);
-        follow_pause(&flaky(0, 0), &installed, true);
+        follow(&flaky(0, 0), &installed, true);
         assert_eq!(installed.get(), 0);
         let installed = Cell::new(FILTER_REGISTRATION_COUNT);
         let stuck = FlakyCohort {
             remove_failures: Cell::new(usize::MAX),
             ..flaky(0, 0)
         };
-        follow_pause(&stuck, &installed, true);
+        follow(&stuck, &installed, true);
         assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
     }
 
