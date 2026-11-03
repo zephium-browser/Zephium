@@ -41,6 +41,7 @@ enum CoalescedKey {
     BlockerPreferenceRetry(ProfileId),
     BlockerStartupDeadline(ProfileId),
     BlockerCatalogPoll,
+    BlockerCatalogChanged,
     ContentRules(ProfileId, ContentPolicyGeneration),
     // Generations are monotonic and the newest settlement is authoritative;
     // scope-only coalescing prevents a rapid sequence from defeating the
@@ -1395,6 +1396,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
             Some(CoalescedKey::BlockerStartupDeadline(*profile))
         }
         Command::BlockerCatalogPoll { .. } => Some(CoalescedKey::BlockerCatalogPoll),
+        Command::BlockerCatalogChanged => Some(CoalescedKey::BlockerCatalogChanged),
         Command::ProfileDeletionReady(profile) => {
             Some(CoalescedKey::ProfileDeletionReady(*profile))
         }

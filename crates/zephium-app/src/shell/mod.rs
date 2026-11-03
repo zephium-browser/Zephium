@@ -574,6 +574,12 @@ impl Shell {
     }
 
     pub(super) fn attach_queue(&mut self, queue: CommandQueue) {
+        let waker = queue.clone();
+        self.blocker
+            .service
+            .set_change_waker(std::sync::Arc::new(move || {
+                let _ = waker.try_push(Command::BlockerCatalogChanged);
+            }));
         self.attach_queue_for_terminal_cleanup(queue);
         self.schedule_blocker_catalog_activation_poll();
     }
@@ -1380,6 +1386,7 @@ impl Shell {
             Command::BlockerCatalogPoll { operation, attempt } => {
                 self.on_blocker_catalog_poll(operation, attempt)
             }
+            Command::BlockerCatalogChanged => self.maintain_blocker_catalog(),
             Command::ProfileDeletionRetry {
                 profile,
                 generation,
