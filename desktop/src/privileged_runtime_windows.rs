@@ -62,6 +62,7 @@ pub fn record_browser_process(process_id: u32) {
         .ok_or_else(|| io::Error::other("the browser process could not be read"))
         .and_then(|record| runtime.record_browser_process(record));
     if let Err(error) = recorded {
+        runtime.invalidate_process_record();
         crate::write_diagnostic(format_args!(
             "privacy: a privileged WebView2 browser process was not recorded for cleanup after an unclean quit: {error}"
         ));
