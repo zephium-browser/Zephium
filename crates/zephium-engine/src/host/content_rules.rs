@@ -1355,11 +1355,31 @@ impl EngineHost {
         spare: Option<crate::platform::imp::ContentPolicyRegistration>,
     ) -> bool {
         let mut clean = true;
-        for (_, registration) in registrations {
+        // A replacement published its state on its view; the cohort still
+        // installed there takes the view back.
+        for (id, registration) in registrations {
             clean &= registration.retire().is_ok();
+            #[cfg(target_os = "windows")]
+            if let Some(live) = self
+                .views
+                .get(&id)
+                .and_then(|view| view.content_policy_registration.as_ref())
+            {
+                live.republish();
+            }
+            #[cfg(not(target_os = "windows"))]
+            let _ = id;
         }
         if let Some(registration) = spare {
             clean &= registration.retire().is_ok();
+            #[cfg(target_os = "windows")]
+            if let Some(live) = self
+                .spare
+                .as_ref()
+                .and_then(|spare| spare.view.content_policy_registration.as_ref())
+            {
+                live.republish();
+            }
         }
         if !clean {
             self.fail_content_policy_retirement();
