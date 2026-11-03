@@ -1135,14 +1135,16 @@ fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
         .unwrap();
     let action = |url: &str, page: &str| rules.evaluate(request(url, page)).unwrap().action();
     let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
-    assert_ne!(
-        action(loader, "https://www.allrecipes.com/recipe/1/"),
-        NetworkAction::Block
-    );
-    assert_eq!(
-        action(loader, "https://news.example/"),
-        NetworkAction::Block
-    );
+    for page in [
+        "https://www.allrecipes.com/recipe/1/",
+        "https://simplyrecipes.com/",
+        "https://m.people.com/a/",
+    ] {
+        assert_ne!(action(loader, page), NetworkAction::Block, "{page}");
+    }
+    for page in ["https://news.example/", "https://notallrecipes.com/"] {
+        assert_eq!(action(loader, page), NetworkAction::Block, "{page}");
+    }
     assert_eq!(
         action(
             "https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m1/show_ads_impl.js",
@@ -1169,7 +1171,35 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     let json = rules.webkit().unwrap().json();
     let exception = json.find("ignore-previous-rules").unwrap();
     assert!(json.find("\"block\"").unwrap() < exception);
-    assert!(
-        json[exception..].contains("adsbygoogle") && json[exception..].contains("*allrecipes.com")
+    let emitted: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    let mut domains: Vec<&str> = emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+        .flat_map(|rule| rule["trigger"]["if-domain"].as_array().unwrap())
+        .map(|domain| domain.as_str().unwrap())
+        .collect();
+    domains.sort_unstable();
+    // A leading `*` makes WebKit apply the exception on every subdomain too.
+    assert_eq!(
+        domains,
+        [
+            "*allrecipes.com",
+            "*bild.de",
+            "*mirror.co.uk",
+            "*people.com",
+            "*simplyrecipes.com",
+            "*tomsguide.com"
+        ]
     );
+}
+
+#[test]
+fn the_built_in_rules_are_exceptions_only() {
+    let rules = include_str!("zephium_rules.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('!'));
+    for rule in rules {
+        assert!(rule.starts_with("@@"), "{rule}");
+    }
 }

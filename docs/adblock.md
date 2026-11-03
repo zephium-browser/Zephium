@@ -214,16 +214,19 @@ stream. Unavailable statistics produce an error, never an invented zero.
 `crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
 own, reviewed and shipped with the app, compiled after every catalog's lists on
 both platforms; its digest is part of every compiled-artifact cache key. It
-holds fixes the downloaded lists do not have yet, each with its reason, and is
-reported upstream when it applies there.
+holds exceptions only, never blocks (a test enforces this), for breakage the
+downloaded lists do not fix yet. Each rule has a comment naming its site, the
+evidence and the date, and is reported upstream when it applies there.
 
 - Ad recovery: some sites (allrecipes, simplyrecipes, people, bild, mirror,
   tomsguide) probe AdSense's loader and, when it is blocked, re-serve the same
-  ads through rotating proxy hosts: 300 to 900 extra requests a page, more
-  than with protection off. Blocking the recovery instead replaces the page
-  with an "allow ads" wall. Allowing that one file there keeps the recovery
-  idle while the ads stay blocked: allrecipes went from 970 requests to 220
-  in a minute (1,395 with protection off).
+  ads through rotating proxy hosts: 40 to 710 requests to those hosts in 45
+  seconds of one article, against 2 or 3 with protection off. Blocking the
+  recovery instead replaces the page with an "allow ads" wall. Allowing that
+  one file on those sites and their subdomains keeps the recovery idle while
+  the ads stay blocked. In Zephium with the fix (3 runs each), protection on
+  used 4.4 s of CPU and 123 requests on allrecipes against 16.2 s and 301 off,
+  and 2.4 s and 89 requests on simplyrecipes against 8.6 s and 299.
 
 ## Budgets and evidence
 
