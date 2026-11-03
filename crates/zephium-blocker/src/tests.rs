@@ -1121,6 +1121,46 @@ proptest! {
     }
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                source("||pagead2.googlesyndication.com^"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let action = |url: &str, page: &str| rules.evaluate(request(url, page)).unwrap().action();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    for page in [
+        "https://www.allrecipes.com/recipe/1/",
+        "https://simplyrecipes.com/",
+        "https://m.people.com/a/",
+    ] {
+        assert_ne!(action(loader, page), NetworkAction::Block, "{page}");
+    }
+    for page in ["https://news.example/", "https://notallrecipes.com/"] {
+        assert_eq!(action(loader, page), NetworkAction::Block, "{page}");
+    }
+    assert_eq!(
+        action(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.jsx",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action(
+            "https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m1/show_ads_impl.js",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+}
+
 #[cfg(feature = "webkit")]
 fn pruned(text: String) -> &'static crate::webkit_prune::PrunedRules {
     Box::leak(Box::new(crate::webkit_prune::PrunedRules::parse(&text)))
@@ -1162,6 +1202,72 @@ fn a_listed_wildcard_block_is_pruned_and_counted_apart_from_unsupported_rules() 
     assert!(coverage.dropped().is_empty());
     let json = compiled.webkit().unwrap().json();
     assert!(json.contains("kept") && !json.contains("tracker"));
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn the_built_in_rules_compile_for_webkit_after_the_lists() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![
+                source("||pagead2.googlesyndication.com^"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.omitted_input_rules(), 0);
+    let json = rules.webkit().unwrap().json();
+    let exception = json.find("ignore-previous-rules").unwrap();
+    assert!(json.find("\"block\"").unwrap() < exception);
+    let emitted: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    let mut domains: Vec<&str> = emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+        .flat_map(|rule| rule["trigger"]["if-domain"].as_array().unwrap())
+        .map(|domain| domain.as_str().unwrap())
+        .collect();
+    domains.sort_unstable();
+    let filters: Vec<regex::Regex> = emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+        .map(|rule| {
+            regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
+                .case_insensitive(true)
+                .build()
+                .unwrap()
+        })
+        .collect();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    for filter in &filters {
+        assert!(filter.is_match(loader));
+        assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
+        assert!(!filter.is_match(&format!("{loader}x")));
+    }
+    // A leading `*` makes WebKit apply the exception on every subdomain too.
+    assert_eq!(
+        domains,
+        [
+            "*allrecipes.com",
+            "*bild.de",
+            "*mirror.co.uk",
+            "*people.com",
+            "*simplyrecipes.com",
+            "*tomsguide.com"
+        ]
+    );
+}
+
+#[test]
+fn the_built_in_rules_are_exceptions_only() {
+    let rules = include_str!("zephium_rules.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('!'));
+    for rule in rules {
+        assert!(rule.starts_with("@@"), "{rule}");
+    }
 }
 
 #[cfg(feature = "webkit")]
