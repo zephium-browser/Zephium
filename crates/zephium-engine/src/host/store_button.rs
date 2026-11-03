@@ -127,6 +127,21 @@ impl EngineHost {
         }
     }
 
+    /// The window came back in front: a listing waiting out the slow
+    /// interval is asked again at the fast one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn store_buttons_foreground(&mut self) {
+        let polling = self
+            .views
+            .iter()
+            .filter(|(_, view)| view.store_button.poll.is_some())
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in polling {
+            self.schedule_store_button_poll(id);
+        }
+    }
+
     fn send_store_button(&self, id: ItemId) {
         let Some(view) = self.views.get(&id) else {
             return;

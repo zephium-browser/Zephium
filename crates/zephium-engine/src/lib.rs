@@ -1733,6 +1733,14 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// The browser window came back in front.
+    #[cfg(target_os = "windows")]
+    pub fn window_foreground(&self) {
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.store_buttons_foreground());
+        });
+    }
+
     /// Installs the profile-scoped download service before raw views are made.
     pub fn initialize_downloads(
         &self,
