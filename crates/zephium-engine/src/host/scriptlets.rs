@@ -22,14 +22,14 @@ use objc2_web_kit::{
 use sha2::{Digest, Sha256};
 use zephium_core::blocker::{scriptlet_program_with_pauses, ContentPolicyGeneration};
 use zephium_core::ids::ProfileId;
-use zephium_core::ports::engine::Partition;
+use zephium_core::ports::engine::{BlockerSiteCompletion, Partition};
 use zephium_webext_macos::PageScript;
 
 use super::dispatch::with_scriptlets_ready;
 use super::EngineHost;
 
-/// How long a policy's settlement waits for WebKit to read a new program.
-/// The shell's startup hold is shorter and gives up first.
+/// How long a policy's settlement, or a site change's, waits for WebKit to
+/// read a new program. The shell's startup hold is shorter and gives up first.
 const READY_WITHIN: Duration = Duration::from_secs(2);
 
 pub(super) struct Scriptlets {
@@ -38,6 +38,7 @@ pub(super) struct Scriptlets {
     packages: HashMap<ProfileId, PathBuf>,
     private: HashMap<ProfileId, Private>,
     waits: HashMap<ProfileId, Wait>,
+    loads: u64,
     swept: bool,
 }
 
@@ -47,9 +48,15 @@ struct Private {
     controller: Retained<WKWebExtensionController>,
 }
 
+/// What waits for a profile's newest program to be in place: a policy's
+/// settlement, and site changes, whose page reloads must run the program
+/// that knows them.
+#[derive(Default)]
 struct Wait {
-    generation: ContentPolicyGeneration,
-    _timeout: Option<crate::platform::imp::ContentPolicyTimeout>,
+    load: u64,
+    generation: Option<ContentPolicyGeneration>,
+    sites: Vec<BlockerSiteCompletion>,
+    timeout: Option<crate::platform::imp::ContentPolicyTimeout>,
 }
 
 impl Scriptlets {
@@ -62,6 +69,7 @@ impl Scriptlets {
             packages: HashMap::new(),
             private: HashMap::new(),
             waits: HashMap::new(),
+            loads: 0,
             swept: false,
         }
     }
@@ -221,23 +229,38 @@ impl EngineHost {
         if !self.refresh_profile_scriptlets(profile) {
             return false;
         }
-        let timeout =
-            crate::platform::imp::schedule_content_policy_timeout(READY_WITHIN, move || {
-                with_scriptlets_ready(profile, move |host| host.scriptlets_ready(profile));
-            });
-        self.scriptlets.waits.insert(
-            profile,
-            Wait {
-                generation,
-                _timeout: timeout,
-            },
-        );
+        if let Some(wait) = self.scriptlets.waits.get_mut(&profile) {
+            wait.generation = Some(generation);
+        }
         true
     }
 
-    fn scriptlets_ready(&mut self, profile: ProfileId) {
-        if let Some(wait) = self.scriptlets.waits.remove(&profile) {
-            self.settle_applied_content_policy(profile, wait.generation);
+    /// Finishes a site change now, or once a program it caused is in place.
+    pub(crate) fn finish_site_change(
+        &mut self,
+        profile: ProfileId,
+        completion: BlockerSiteCompletion,
+    ) {
+        match self.scriptlets.waits.get_mut(&profile) {
+            Some(wait) => wait.sites.push(completion),
+            None => completion.finish(true),
+        }
+    }
+
+    /// `load` names the load that finished; `None` is the time limit.
+    fn scriptlets_ready(&mut self, profile: ProfileId, load: Option<u64>) {
+        let newest = self.scriptlets.waits.get(&profile).map(|wait| wait.load);
+        if newest.is_none() || load.is_some_and(|load| Some(load) != newest) {
+            return;
+        }
+        let Some(wait) = self.scriptlets.waits.remove(&profile) else {
+            return;
+        };
+        if let Some(generation) = wait.generation {
+            self.settle_applied_content_policy(profile, generation);
+        }
+        for site in wait.sites {
+            site.finish(true);
         }
     }
 
@@ -286,6 +309,8 @@ impl EngineHost {
         else {
             return false;
         };
+        self.scriptlets.loads += 1;
+        let load = self.scriptlets.loads;
         let waiting = Rc::new(std::cell::Cell::new(false));
         let notify = waiting.clone();
         let pending = script.set(dir.as_deref(), move |result| {
@@ -293,10 +318,26 @@ impl EngineHost {
                 eprintln!("content blocker: the scriptlet program did not load: {error}");
             }
             if notify.get() {
-                with_scriptlets_ready(profile, move |host| host.scriptlets_ready(profile));
+                with_scriptlets_ready(profile, move |host| {
+                    host.scriptlets_ready(profile, Some(load))
+                });
             }
         });
         waiting.set(pending);
+        if pending {
+            let wait = self.scriptlets.waits.entry(profile).or_default();
+            wait.load = load;
+            if wait.timeout.is_none() {
+                wait.timeout = crate::platform::imp::schedule_content_policy_timeout(
+                    READY_WITHIN,
+                    move || {
+                        with_scriptlets_ready(profile, move |host| {
+                            host.scriptlets_ready(profile, None)
+                        });
+                    },
+                );
+            }
+        }
         if before != dir || !self.scriptlets.swept {
             let running: Vec<PathBuf> = self
                 .webext

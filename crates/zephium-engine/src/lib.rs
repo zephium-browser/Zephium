@@ -2352,7 +2352,12 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| {
-                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+                let applied = host.set_blocker_site_preferences(profile, preferences);
+                #[cfg(target_os = "macos")]
+                if applied {
+                    return host.finish_site_change(profile, completion);
+                }
+                completion.finish(applied)
             });
         });
     }
