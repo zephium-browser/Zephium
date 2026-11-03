@@ -902,6 +902,35 @@ fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
 }
 
 #[test]
+fn a_hidden_page_that_keeps_running_is_not_probed_for_discard() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
+    shell.handle(Command::Bootstrap);
+    let playing = active_id(&screen);
+    navigate_and_commit(&mut shell, playing, "music.example");
+    shell.handle(Command::Engine(EngineEvent::AudioChanged {
+        id: playing,
+        audible: true,
+    }));
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    shell.handle(Command::Tick);
+    assert!(shell.residency.discard_probes.is_empty());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("probe-discard {playing} "))));
+
+    // Once it is quiet it is an ordinary candidate again.
+    shell.silence_tab_audio(playing);
+    shell.handle(Command::Tick);
+    assert_eq!(first_probing_discard(&shell).0, playing);
+}
+
+#[test]
 fn missing_probe_callback_times_out_fail_closed_with_bounded_state() {
     let (mut shell, _engine, screen) = setup();
     shell.residency.warm_view_limit = 1;

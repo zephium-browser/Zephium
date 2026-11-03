@@ -1501,6 +1501,12 @@ impl EngineHost {
 
     #[cfg(target_os = "windows")]
     fn retry_suspend(&mut self, id: ItemId) {
+        // A timed-out attempt may still answer, and nothing starts over it:
+        // the retry is not spent without asking; that answer schedules it anew.
+        if self.suspend_uncertain.contains(&id) {
+            self.suspend_retries.remove(&id);
+            return;
+        }
         let Some(retry) = self.suspend_retries.get_mut(&id) else {
             return;
         };

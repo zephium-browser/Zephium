@@ -244,8 +244,8 @@ impl Shell {
             })
     }
 
-    /// Suspending would cut off what the person hears, watches in picture in
-    /// picture, or sends from a camera or microphone.
+    /// Suspending or discarding would cut off what the person hears, watches
+    /// in picture in picture, or sends from a camera or microphone.
     pub(super) fn keeps_running(&self, id: ItemId) -> bool {
         self.items.tab(id).is_some_and(|tab| {
             tab.audio.shown()
@@ -749,9 +749,10 @@ impl Shell {
     /// Policy intent only; the engine probe still vetoes unsafe pages. The
     /// user's choices are honored: kept-awake sites never sleep, and with
     /// sleeping off only critical OS pressure, where the alternative is the
-    /// OS killing renderers outright, may still discard.
+    /// OS killing renderers outright, may still discard. A page that keeps
+    /// running is not asked: the probe would refuse it, and over and over.
     fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
-        if self.site_kept_awake(id) {
+        if self.site_kept_awake(id) || self.keeps_running(id) {
             return false;
         }
         if self.discard_is_urgent(live_count) {
