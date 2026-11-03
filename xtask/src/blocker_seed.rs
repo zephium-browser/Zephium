@@ -246,6 +246,7 @@ struct RuntimeGolden {
 struct WebKitGolden {
     accepted_input_rules: usize,
     converted_input_rules: usize,
+    pruned_input_rules: usize,
     omitted_input_rules: usize,
     approximated_input_rules: usize,
     attribution_approximated_input_rules: usize,
@@ -1479,6 +1480,7 @@ pub(crate) fn compile_hidden(
             max_rules: limits.max_rules(),
             max_physical_lines: limits.max_physical_lines(),
             max_webkit_rules: limits.max_webkit_rules(),
+        pruned_input_rules: coverage.pruned_input_rules(),
             max_webkit_json_bytes: limits.max_webkit_json_bytes(),
             max_request_url_bytes: limits.max_request_url_bytes(),
             max_source_url_bytes: limits.max_source_url_bytes(),

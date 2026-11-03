@@ -17,6 +17,8 @@ mod rules;
 mod sha256;
 #[cfg(feature = "webkit")]
 mod webkit;
+#[cfg(feature = "webkit")]
+mod webkit_prune;
 mod worker;
 
 pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};
@@ -38,6 +40,8 @@ pub use rules::{
 };
 #[doc(hidden)]
 pub use sha256::Sha256;
+#[cfg(feature = "webkit")]
+pub use webkit_prune::webkit_rule_digest;
 pub use worker::{
     CatalogError, CatalogPreparationOutcome, CatalogReplacementDispatch, PolicyCatalog,
     PolicySource, StaticPolicyCatalog, WorkerBlocker,
@@ -74,6 +78,8 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
+    #[cfg(feature = "webkit")]
+    digest.update(webkit_prune::PrunedRules::shipped().fingerprint());
     for value in [
         values.max_sources,
         values.max_source_bytes,
