@@ -542,7 +542,14 @@ fn reclaim_same_boot(
     leftovers: &dyn LeftoverProcesses,
     report: &mut GenerationReport,
 ) -> io::Result<Option<SameBootReclaim>> {
-    let unrecorded = is_unrecorded(boot, generation)?;
+    let Ok(unrecorded) = is_unrecorded(boot, generation) else {
+        keep_unchecked(
+            report,
+            generation,
+            "an earlier run's browser record could not be checked",
+        );
+        return Ok(None);
+    };
     let record = if unrecorded {
         None
     } else {
@@ -562,9 +569,9 @@ fn reclaim_same_boot(
                 .iter()
                 .any(|(_, state)| *state == RecordedProcessState::Indeterminate)
             {
-                report.kept_unchecked.push(generation.to_owned());
-                note_overdue(
+                keep_unchecked(
                     report,
+                    generation,
                     "a browser left by an earlier run could not be checked",
                 );
                 return Ok(None);
@@ -600,6 +607,11 @@ fn reclaim_same_boot(
     Ok(Some(reclaimed))
 }
 
+fn keep_unchecked(report: &mut GenerationReport, generation: &str, reason: &str) {
+    report.kept_unchecked.push(generation.to_owned());
+    note_overdue(report, reason);
+}
+
 fn note_overdue(report: &mut GenerationReport, reason: &str) {
     report
         .overdue
@@ -628,7 +640,11 @@ fn mark_unrecorded(kind: RuntimeGenerationKind, generation: &str) -> io::Result<
 
 fn is_unrecorded(boot: &RegKey, generation: &str) -> io::Result<bool> {
     match boot.open_subkey_with_flags(generation, KEY_READ) {
-        Ok(key) => Ok(key.get_raw_value(UNRECORDED).is_ok()),
+        Ok(key) => match key.get_raw_value(UNRECORDED) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        },
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
