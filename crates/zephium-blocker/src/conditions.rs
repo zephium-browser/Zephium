@@ -21,19 +21,19 @@ impl ListConditions {
     /// Whether `line` (trimmed) is a rule to keep. Directive lines and lines
     /// inside a false block are not.
     pub fn keep(&mut self, line: &str) -> bool {
-        if let Some(condition) = line.strip_prefix("!#if ") {
+        if let Some(condition) = directive(line, "!#if") {
             // Past the depth limit a block stays false, else and all.
             let within = self.blocks.len() < MAX_DEPTH;
             self.blocks.push((within && evaluate(condition), within));
             return false;
         }
-        if line == "!#else" || line.starts_with("!#else ") {
+        if directive(line, "!#else").is_some() {
             if let Some((value, true)) = self.blocks.last_mut() {
                 *value = !*value;
             }
             return false;
         }
-        if line == "!#endif" || line.starts_with("!#endif ") {
+        if directive(line, "!#endif").is_some() {
             self.blocks.pop();
             return false;
         }
@@ -44,6 +44,13 @@ impl ListConditions {
     pub fn active(&self) -> bool {
         self.blocks.iter().all(|(value, _)| *value)
     }
+}
+
+/// What follows a directive name, when the line is that directive: the name
+/// alone or followed by whitespace. A bare `!#if` has an empty, false condition.
+fn directive<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(name)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
 }
 
 fn evaluate(condition: &str) -> bool {
@@ -212,6 +219,14 @@ mod tests {
         ] {
             assert!(!evaluate(condition), "{condition}");
         }
+    }
+
+    #[test]
+    fn a_bare_or_tab_separated_if_is_a_directive() {
+        assert_eq!(kept("!#if\na\n!#else\nb\n!#endif\nc"), ["b", "c"]);
+        assert_eq!(kept("!#if\tenv_chromium\na\n!#endif"), ["a"]);
+        // Not a directive: the compiler skips it as a comment.
+        assert_eq!(kept("!#iffy\na"), ["!#iffy", "a"]);
     }
 
     #[test]
