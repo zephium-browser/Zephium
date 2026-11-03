@@ -103,6 +103,8 @@ mod media;
 mod memory_pressure;
 mod menu_text;
 mod notes;
+#[cfg(target_os = "windows")]
+mod onboarding_host;
 mod overlay;
 mod page_assist;
 mod page_source;
@@ -527,6 +529,20 @@ impl UiStartupGate {
     /// are still in the back-forward list, so history navigation of any kind
     /// (mouse button, swipe, shortcut, script) ends here.
     fn permits_navigation(&self, url: &tauri::Url) -> bool {
+        // Onboarding may be served from a host of its own, which nothing else
+        // admits: it is let in as this launch's onboarding, until handover.
+        let onboarding = self.handover.as_ref().is_some_and(|handover| {
+            let onboarding = &handover.onboarding;
+            url.scheme() == onboarding.scheme()
+                && url.host_str() == onboarding.host_str()
+                && url.port() == onboarding.port()
+                && url.path() == onboarding.path()
+        });
+        if onboarding {
+            return url.username().is_empty()
+                && url.password().is_none()
+                && !self.handed_over.load(Ordering::Acquire);
+        }
         if !ui_navigation_allowed(url) {
             return false;
         }
@@ -534,13 +550,7 @@ impl UiStartupGate {
             return !self.visible.load(Ordering::Acquire)
                 && !self.handed_over.load(Ordering::Acquire);
         }
-        let onboarding = self.handover.as_ref().map(|handover| &handover.onboarding);
-        !(self.handed_over.load(Ordering::Acquire)
-            && onboarding.is_some_and(|onboarding| {
-                url.scheme() == onboarding.scheme()
-                    && url.host_str() == onboarding.host_str()
-                    && url.path() == onboarding.path()
-            }))
+        true
     }
 
     /// Whether the caller is the onboarding page this launch opened, and it
@@ -5254,6 +5264,16 @@ fn panel_intent(
 /// instead of the browser.
 const ONBOARDING_PAGE: &str = "onboarding.html";
 
+/// Where a first run's onboarding loads. A bundled Windows build serves it
+/// from a host of its own; see `onboarding_host`.
+fn onboarding_url(app: &tauri::App) -> tauri::Result<tauri::Url> {
+    #[cfg(target_os = "windows")]
+    if !tauri::is_dev() {
+        return tauri::Url::parse(onboarding_host::URL).map_err(tauri::Error::InvalidUrl);
+    }
+    privileged_app_url(app, &tauri::WebviewUrl::App(ONBOARDING_PAGE.into()))
+}
+
 /// Whether this launch opens onboarding. `ZEPHIUM_ONBOARDING=1 pnpm dev`
 /// opens it on an existing profile without recording anything until it is
 /// finished.
@@ -6471,6 +6491,9 @@ pub fn run() {
     // backend below and uses either direct X11 grabs or the desktop portal.
     #[cfg(not(target_os = "linux"))]
     let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .register_asynchronous_uri_scheme_protocol(onboarding_host::SCHEME, onboarding_host::serve);
     // Windows hears the same from WebView2 ProcessFailed. Any other WebView
     // keeps Tauri's own plain reload, which this hook replaces for all.
     #[cfg(target_os = "macos")]
@@ -6638,7 +6661,7 @@ pub fn run() {
                 let onboarding = onboarding_first(store.as_ref());
                 let browser_url = privileged_app_url(app, &main_config.url)?;
                 let app_url = if onboarding {
-                    privileged_app_url(app, &tauri::WebviewUrl::App(ONBOARDING_PAGE.into()))?
+                    onboarding_url(app)?
                 } else {
                     browser_url.clone()
                 };
@@ -9372,6 +9395,30 @@ mod tests {
         assert!(!super::ui_navigation_allowed(
             &Url::parse("file:///etc/passwd").unwrap()
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn onboarding_on_its_own_host_is_admitted_only_as_onboarding_and_until_handover() {
+        let onboarding = Url::parse(super::onboarding_host::URL).unwrap();
+        let browser = Url::parse("http://tauri.localhost/browser.html").unwrap();
+        let gate = super::UiStartupGate::onboarding_first(onboarding.clone(), browser.clone());
+        assert!(gate.permits_navigation(&onboarding));
+        for stranger in [
+            "http://zephium-onboarding.localhost/browser.html",
+            "http://user@zephium-onboarding.localhost/onboarding.html",
+            "http://zephium-onboarding.localhost:8080/onboarding.html",
+        ] {
+            assert!(
+                !gate.permits_navigation(&Url::parse(stranger).unwrap()),
+                "{stranger}"
+            );
+        }
+        assert!(!super::UiStartupGate::new(browser.clone()).permits_navigation(&onboarding));
+        gate.handed_over
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(!gate.permits_navigation(&onboarding));
+        assert!(gate.permits_navigation(&browser));
     }
 
     #[test]

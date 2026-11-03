@@ -2,7 +2,12 @@ use url::Url;
 
 const SEARCH_BASE: &str = "https://duckduckgo.com/";
 const MAX_URL_BYTES: usize = 8 * 1024;
-const RESERVED_HOSTS: &[&str] = &["asset.localhost", "ipc.localhost", "tauri.localhost"];
+const RESERVED_HOSTS: &[&str] = &[
+    "asset.localhost",
+    "ipc.localhost",
+    "tauri.localhost",
+    "zephium-onboarding.localhost",
+];
 
 /// Turn raw omnibox text into an allowed URL. Explicit but forbidden or
 /// malformed URL-like input is rejected instead of being sent to the search
@@ -474,6 +479,7 @@ mod tests {
             "data:text/html,secret",
             "about:config",
             "tauri.localhost/index.html",
+            "zephium-onboarding.localhost/onboarding.html",
             "https://user:secret@example.com/",
             "https://",
             "/home/alice/private.txt",

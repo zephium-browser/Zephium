@@ -184,7 +184,11 @@ Any change that breaks one of these invariants must fail review and release:
    protocol. Page script cannot invoke Zephium commands.
 2. `main` and `panel` are constructed at exact `about:blank`, receive all mandatory
    native hardening, and only then navigate to the bundled application origin. Debug
-   builds additionally allow the exact local Vite origin. Other navigation is rejected.
+   builds additionally allow the exact local Vite origin. A bundled Windows first run
+   serves onboarding from its own custom-protocol host, `zephium-onboarding.localhost`,
+   which only `main` may load, only that exact document and the static files it needs,
+   and only until handover; the browser that replaces it is then cross-site and starts
+   in a new renderer process. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
    event, and every request to launch an OS-registered URI scheme is cancelled.
 3. Application-requested tab navigation is checked in core and again before the native
