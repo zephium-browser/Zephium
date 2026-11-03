@@ -31,6 +31,10 @@ pub(super) struct StoreButtonSlot {
     native: Option<crate::platform::macos::store_button::StoreButton>,
     #[cfg(target_os = "windows")]
     poll: Option<crate::platform::imp::ContentPolicyTimeout>,
+    // The armed poll is the fast one, so the window coming back has nothing
+    // to bring forward.
+    #[cfg(target_os = "windows")]
+    poll_fast: bool,
     // Polling stopped because the listing went out of view, and starts again
     // when it comes back.
     #[cfg(target_os = "windows")]
@@ -134,7 +138,7 @@ impl EngineHost {
         let polling = self
             .views
             .iter()
-            .filter(|(_, view)| view.store_button.poll.is_some())
+            .filter(|(_, view)| view.store_button.poll.is_some() && !view.store_button.poll_fast)
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         for id in polling {
@@ -214,11 +218,13 @@ impl EngineHost {
             view.store_button.poll = None;
             return;
         }
-        let interval = if in_front(&view.view) {
+        let fast = in_front(&view.view);
+        let interval = if fast {
             POLL_INTERVAL
         } else {
             BACKGROUND_POLL_INTERVAL
         };
+        view.store_button.poll_fast = fast;
         view.store_button.poll =
             crate::platform::imp::schedule_browser_timeout(interval, move || {
                 let _ = super::try_with(move |host| host.poll_store_button(id));
