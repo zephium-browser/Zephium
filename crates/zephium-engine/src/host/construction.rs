@@ -2771,6 +2771,7 @@ impl EngineHost {
             None
         };
         let existing_environment = self.environments.get(&profile).cloned();
+        let mut browser_running = false;
         if let Some(environment) = &existing_environment {
             if extensions_enabled
                 && startup
@@ -2802,9 +2803,12 @@ impl EngineHost {
             if !current && !prior_exit_settled {
                 return Err(WindowsProfileEnvironmentFailure::Busy);
             }
+            browser_running = current;
         }
-        if existing_environment.is_none()
-            && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+        if super::profiles::bootstrap_starts_browser(
+            existing_environment.is_some(),
+            browser_running,
+        ) && !super::profiles::expect_private_browser(&self.private_runtime, &path)
         {
             return Err(WindowsProfileEnvironmentFailure::Construction);
         }

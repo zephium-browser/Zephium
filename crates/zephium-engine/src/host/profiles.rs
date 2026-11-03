@@ -1391,7 +1391,7 @@ pub(super) fn expect_private_browser(
     }
     match private_runtime.expect_browser() {
         Ok(()) => true,
-        Err(error @ zephium_core::webview2::UnexpectedBrowser::Invalidated(_)) => {
+        Err(error) if error.is_covered() => {
             eprintln!(
                 "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
             );
@@ -1404,4 +1404,11 @@ pub(super) fn expect_private_browser(
             false
         }
     }
+}
+
+/// Whether a profile environment's bootstrap starts a browser process: a new
+/// environment always does, and so does one whose browser has exited.
+#[cfg(target_os = "windows")]
+pub(super) fn bootstrap_starts_browser(existing_environment: bool, browser_running: bool) -> bool {
+    !existing_environment || !browser_running
 }
