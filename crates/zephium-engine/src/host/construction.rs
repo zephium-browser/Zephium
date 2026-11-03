@@ -940,6 +940,14 @@ impl EngineHost {
                     return None;
                 }
             };
+            if cached_environment.is_none()
+                && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+            {
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
@@ -2785,6 +2793,7 @@ impl EngineHost {
             None
         };
         let existing_environment = self.environments.get(&profile).cloned();
+        let mut browser_running = false;
         if let Some(environment) = &existing_environment {
             if extensions_enabled
                 && startup
@@ -2816,6 +2825,14 @@ impl EngineHost {
             if !current && !prior_exit_settled {
                 return Err(WindowsProfileEnvironmentFailure::Busy);
             }
+            browser_running = current;
+        }
+        if super::profiles::bootstrap_starts_browser(
+            existing_environment.is_some(),
+            browser_running,
+        ) && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+        {
+            return Err(WindowsProfileEnvironmentFailure::Construction);
         }
         let mut construction_resource = Some(
             self.native_resources
