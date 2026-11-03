@@ -1631,17 +1631,32 @@ fn run_speedometer(
     // other browsers' profile directory.
     let mut kept_sessions: BTreeMap<&str, QaSession> = BTreeMap::new();
     let mut kept_profiles: BTreeMap<&str, tempfile::TempDir> = BTreeMap::new();
+    // A browser whose warm-up gave no score is not measured as warm.
+    let mut unwarmed: Vec<&str> = Vec::new();
     if warm {
         for config in &context.options.browsers {
+            let name = config.name();
             if config.zephium() {
-                kept_sessions.insert(config.name(), QaSession::new(*config, "sw"));
-            } else {
-                kept_profiles.insert(config.name(), context.profile(*config)?);
+                kept_sessions.insert(name, QaSession::new(*config, "sw"));
+                continue;
+            }
+            match context.profile(*config) {
+                Ok(profile) => {
+                    kept_profiles.insert(name, profile);
+                }
+                Err(error) => {
+                    eprintln!("  {name}: no profile to keep warm: {error}");
+                    results.launches.push(Launch {
+                        config: name.to_string(),
+                        phase: "warm-up".into(),
+                        error: Some(error),
+                        ..Launch::default()
+                    });
+                    unwarmed.push(name);
+                }
             }
         }
     }
-    // A browser whose warm-up gave no score is not measured as warm.
-    let mut unwarmed: Vec<&str> = Vec::new();
     for run in usize::from(!warm)..=runs {
         for config in rotated(&context.options.browsers, run.saturating_sub(1)) {
             let name = config.name();
