@@ -1080,17 +1080,6 @@ fn compile_webkit(
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;
             }
-            let emitted = blocking_rules
-                .len()
-                .checked_add(exception_rules.len())
-                .and_then(|emitted| emitted.checked_add(native_rules.len()))
-                .ok_or(CompileError::RuleCountOverflow)?;
-            if emitted > limits.max_webkit_rules() {
-                return Err(CompileError::TooManyWebKitRules {
-                    actual: emitted,
-                    limit: limits.max_webkit_rules(),
-                });
-            }
             let mut kept = Vec::with_capacity(native_rules.len());
             for native in native_rules {
                 let converted_rule = ConvertedRule {
@@ -1113,6 +1102,17 @@ fn compile_webkit(
                     .checked_add(1)
                     .ok_or(CompileError::RuleCountOverflow)?;
                 continue;
+            }
+            let emitted = blocking_rules
+                .len()
+                .checked_add(exception_rules.len())
+                .and_then(|emitted| emitted.checked_add(kept.len()))
+                .ok_or(CompileError::RuleCountOverflow)?;
+            if emitted > limits.max_webkit_rules() {
+                return Err(CompileError::TooManyWebKitRules {
+                    actual: emitted,
+                    limit: limits.max_webkit_rules(),
+                });
             }
             for converted_rule in kept {
                 let destination = match converted_rule.native.action.typ {

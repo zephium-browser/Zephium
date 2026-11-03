@@ -1166,6 +1166,30 @@ fn a_listed_wildcard_block_is_pruned_and_counted_apart_from_unsupported_rules() 
 
 #[cfg(feature = "webkit")]
 #[test]
+fn only_kept_rules_count_against_the_webkit_rule_limit() {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules: 1,
+        max_webkit_json_bytes: 64 * 1024,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = Compiler::new(limits)
+        .with_webkit_pruned(pruned(entry_for(PRUNABLE)))
+        .compile(CompileTarget::WebKit, vec![source(&input)])
+        .unwrap();
+    assert_eq!(compiled.report().webkit().unwrap().pruned_input_rules(), 1);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
 fn an_edited_rule_is_not_pruned() {
     // Case changes emit the same rule, since url-filters are case-insensitive.
     let edited = PRUNABLE.replace("beacon", "beacom");
