@@ -335,7 +335,15 @@ impl WebExtensions {
                 continue;
             }
             let revision = compat_revision(&entry.access);
-            if entry.compat != revision
+            let too_deep = match self.too_deep(entry) {
+                Ok(too_deep) => too_deep,
+                Err(error) => {
+                    push_failure(&mut failures, entry, error);
+                    continue;
+                }
+            };
+            if too_deep
+                || entry.compat != revision
                 || entry.source.is_empty()
                 || entry.prepared_digest.is_empty()
             {
@@ -343,13 +351,7 @@ impl WebExtensions {
                     Ok(()) => changed = true,
                     Err(error) => {
                         eprintln!("extensions: could not rebuild {}: {error}", entry.id);
-                        if failures.len()
-                            < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE
-                        {
-                            if let Some(install) = ExtensionInstallId::parse(&entry.install) {
-                                failures.push((install, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into()));
-                            }
-                        }
+                        push_failure(&mut failures, entry, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into());
                         continue;
                     }
                 }
@@ -368,6 +370,30 @@ impl WebExtensions {
             loads.push(self.load(entry, install, start_background));
         }
         (loads, failures, changed)
+    }
+
+    /// Whether a package published under a long name, before names were
+    /// shortened, sits too deep for WebView2 to load and must be republished
+    /// under a short one. An error says why even a short name won't do.
+    fn too_deep(&self, entry: &Entry) -> Result<bool, String> {
+        use zephium_webext::windows::{longest_relative_path, path_budget};
+        if !cfg!(target_os = "windows")
+            || !zephium_webext::package::is_long_publication(&entry.package)
+        {
+            return Ok(false);
+        }
+        let packages = self.packages(&entry.id);
+        let published = packages.join(&entry.package);
+        // A missing tree fails its load the usual way.
+        let Ok(longest) = longest_relative_path(&published) else {
+            return Ok(false);
+        };
+        if path_budget(&published, longest).is_ok() {
+            return Ok(false);
+        }
+        let short = zephium_webext::package::publication_identity("", "", "");
+        path_budget(&packages.join(short), longest)?;
+        Ok(true)
     }
 
     fn rebuild(
@@ -456,6 +482,14 @@ impl WebExtensions {
             let _ = std::fs::remove_dir_all(staged);
         }
         result
+    }
+}
+
+fn push_failure(failures: &mut Vec<(ExtensionInstallId, String)>, entry: &Entry, message: String) {
+    if failures.len() < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+        if let Some(install) = ExtensionInstallId::parse(&entry.install) {
+            failures.push((install, message));
+        }
     }
 }
 
