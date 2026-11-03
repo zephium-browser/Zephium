@@ -669,44 +669,48 @@ clean relaunches do not grow HKCU for the rest of the boot.
 Each generation also keeps a versioned, append-only process record of every WebView2
 browser process its data belongs to. Before anything that may start a browser there, the
 record gains a `pending` entry; once that browser is recorded, its id and creation time
-and a `resolved` entry follow. The privileged root expects both of its browsers when it is
-prepared; the private root expects one each time a private environment is created. A
-same-boot generation whose run never proved its exit is reclaimed by the next launch,
-before any environment or view exists, only when that record proves it safe. A recorded
-process is gone only when its id names no process at all, or names one created at another
-time; a process that cannot be opened or queried for any other reason is never taken for
-gone, and keeps the generation. If every recorded process is gone, the data is deleted. A
-recorded process that still runs is an orphan of a dead run, because the exclusive root
-lease means no live Zephium instance owns anything in that root. If it is an
-`msedgewebview2.exe`, every one of its direct child processes created after it is checked
-first: if the children cannot be listed, or one is not WebView2, cannot be opened to be
-ended, or does not itself name the browser as its parent, nothing is ended and the
-generation stays until reboot. The browser stays open while its children are checked, so
-its id cannot be reused meanwhile. Otherwise all of them are
-ended and the data is deleted once every exit is proven within two seconds. Ending is not
-all or nothing once it starts: a process that does not exit in time keeps the generation
-until reboot, though the others may already be gone. A generation holding nothing but its
-own marker and a whole record with nothing pending and no browser is deleted outright.
-Every other generation keeps the reboot-only rule: one from a build that predates the
-record, one whose record is missing, still has a `pending` entry or is malformed in any
-way, including a torn last line, and one whose record was invalidated. A browser in any of
-those may still be starting with no files of its own yet. A boot key whose invalidation
-mark cannot be read keeps its generation, reported as unchecked. Any failure to expect or record a
-browser, or to confirm it is outside the private root, invalidates the record: it is marked
-on the generation's volatile boot registry key first, where a record file that cannot be
-changed cannot contradict it, and the file is then removed or made unreadable. If neither
-holds when a browser is expected, that browser is not started: a private window fails to
-open, and privileged chrome does not start. Each outcome is logged as one line.
+and a `resolved` entry follow. The privileged root expects both of its browsers when
+it is prepared; the private root expects one each time a private browser may start:
+for a new environment, and for a reused one whose browser has exited. A same-boot
+generation whose run never proved its exit is reclaimed by the next launch, before any
+environment or view exists, only when that record proves it safe. A recorded process
+is gone only when its id names no process at all, or names one created at another
+time; a process that cannot be opened or queried for any other reason is never taken
+for gone, and keeps the generation. If every recorded process is gone, the data is
+deleted. A recorded process that still runs is an orphan of a dead run, because the
+exclusive root lease means no live Zephium instance owns anything in that root. If it
+is an `msedgewebview2.exe`, every one of its direct child processes created after it
+is checked first: if the children cannot be listed, or one is not WebView2, cannot be
+opened to be ended, or does not itself name the browser as its parent, nothing is ended
+and the generation stays until reboot. The browser stays open while its children are
+checked, so its id cannot be reused meanwhile. Otherwise all of them are ended, and the
+data is deleted once every exit is proven within two seconds and a fresh listing shows
+no child of the browser still running. Ending is not all or nothing once it starts:
+a process that does not exit in time keeps the generation until reboot, though the
+others may already be gone. A generation holding nothing but its own marker and a whole
+record with nothing pending and no browser is deleted outright. Every other generation
+keeps the reboot-only rule: one from a build that predates the record, one whose record
+is missing, still has a `pending` entry or is malformed in any way, including a torn
+last line, and one whose record was invalidated. A browser in any of those may still
+be starting with no files of its own yet. A boot key whose invalidation mark cannot
+be read keeps its generation, reported as unchecked. Any failure to expect or record
+a browser, or to confirm it is outside the private root, invalidates the record: it
+is marked on the generation's volatile boot registry key first, where a record file
+that cannot be changed cannot contradict it, and the file is then removed or made
+unreadable. If neither holds when a browser is expected, a private window fails to
+open; privileged chrome still starts, and its generation may be cleared at the next
+same-boot launch. Each outcome is logged as one line.
 
 Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
 file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,
-or when a leftover cannot be inspected, removed or recognised, has no complete record, or
-keeps an orphan that cannot be ended, that leftover stays in place and the launch goes
-ahead with only its own new generation, logging the overdue cleanup and its reason.
-Privileged chrome receives the closed `cleanup_overdue` advisory. It asks for a restart,
+or when a leftover cannot be inspected, removed or recognised, has no complete record,
+or keeps an orphan that cannot be ended, that leftover stays in place and the launch
+goes ahead with only its own new generation, logging the overdue cleanup and its
+reason. Privileged chrome receives the closed `cleanup_overdue` advisory, as it does
+when one of its own browsers starts uncovered by the record. It asks for a restart,
 names the manual step below for data a restart cannot clear, and carries no path or
-reason. Opaque data that remains after reboot requires the runtime directory to be moved
-aside manually while Zephium is closed.
+reason. Opaque data that remains after reboot requires the runtime directory to be
+moved aside manually while Zephium is closed.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a

@@ -533,6 +533,14 @@ pub enum UnexpectedBrowser {
     },
 }
 
+impl UnexpectedBrowser {
+    /// Whether the generation still keeps the reboot-only rule with this
+    /// browser running.
+    pub fn is_covered(&self) -> bool {
+        matches!(self, Self::Invalidated(_))
+    }
+}
+
 impl std::fmt::Display for UnexpectedBrowser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1271,6 +1279,7 @@ mod tests {
             matches!(unexpected, UnexpectedBrowser::Invalidated(_)),
             "{unexpected:?}"
         );
+        assert!(unexpected.is_covered());
         let left = run.cleanup_ticket();
         drop(run);
         drop(held);
@@ -1280,6 +1289,41 @@ mod tests {
         assert!(next.report().reclaimed_after_exit.is_empty());
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn a_browser_neither_expected_nor_invalidated_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::RawPrivate;
+        let mut run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        run.expect_browser().unwrap();
+        run.record_browser_process(BROWSER).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(run.root().join(PROCESS_RECORD))
+            .unwrap();
+        // No registry key name may exceed 255 characters, so the boot key
+        // cannot be marked either.
+        let generation = std::mem::replace(&mut run.generation, "x".repeat(300));
+        let unexpected = run.expect_browser().unwrap_err();
+        run.generation = generation;
+        assert!(
+            matches!(unexpected, UnexpectedBrowser::Refused { .. }),
+            "{unexpected:?}"
+        );
+        assert!(!unexpected.is_covered());
+        // The record still reads as complete: a browser started now could be
+        // cleared under it, which is why it is refused.
+        assert_eq!(
+            read_process_record(run.root()).unwrap(),
+            Some(ProcessRecord {
+                processes: vec![BROWSER],
+                pending: 0
+            })
+        );
+        drop(held);
+        run.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
 
     #[test]

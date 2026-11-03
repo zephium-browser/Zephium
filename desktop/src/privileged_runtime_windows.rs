@@ -3,12 +3,15 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use zephium_core::runtime_security::RuntimeSecurityAdvisory;
 use zephium_core::webview2::{RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser};
 
 static RUNTIME_STATE: OnceLock<RuntimeGeneration> = OnceLock::new();
+/// A privileged browser started that this run's record does not cover.
+static UNCOVERED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 pub struct PreparedDirectories {
@@ -37,17 +40,11 @@ pub fn prepare(
     }
     // Main and the panel each start one browser, before either is recorded.
     for _ in [main_label, panel_label] {
-        match runtime.expect_browser() {
-            Ok(()) => {}
-            Err(error @ UnexpectedBrowser::Invalidated(_)) => {
-                crate::write_diagnostic(format_args!(
-                    "privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
-                ));
-            }
-            Err(error) => {
-                return Err(io::Error::other(format!(
-                    "a privileged WebView2 browser cannot start, since its data could be cleared while it runs: {error}"
-                )));
+        if let Err(error) = runtime.expect_browser() {
+            let (line, uncovered) = unexpected_browser(&error);
+            crate::write_diagnostic(format_args!("{line}"));
+            if uncovered {
+                UNCOVERED.store(true, Ordering::Relaxed);
             }
         }
     }
@@ -91,15 +88,29 @@ pub fn record_browser_process(process_id: u32) {
     }
 }
 
+/// The line logged when this run's record could not expect a privileged
+/// browser, and whether that browser starts uncovered. Chrome starts either
+/// way: refusing it would refuse startup. An uncovered browser risks only its
+/// own data, which a same-boot launch may clear, never data kept too long.
+fn unexpected_browser(error: &UnexpectedBrowser) -> (String, bool) {
+    match error {
+        UnexpectedBrowser::Invalidated(_) => (
+            format!("privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"),
+            false,
+        ),
+        UnexpectedBrowser::Refused { .. } => (
+            format!("privacy: a privileged WebView2 browser starts uncovered by its record, so its data may be cleared at the next launch this boot: {error}"),
+            true,
+        ),
+    }
+}
+
 /// Chrome's advisory when preparing this run's generation left earlier
-/// runtime data waiting for a reboot; the reason is already in the log.
+/// runtime data waiting for a reboot, or started a browser its record does
+/// not cover; the reason is already in the log.
 pub fn cleanup_advisory() -> Option<RuntimeSecurityAdvisory> {
-    RUNTIME_STATE
-        .get()?
-        .report()
-        .overdue
-        .is_some()
-        .then(RuntimeSecurityAdvisory::cleanup_overdue)
+    let overdue = RUNTIME_STATE.get()?.report().overdue.is_some();
+    (overdue || UNCOVERED.load(Ordering::Relaxed)).then(RuntimeSecurityAdvisory::cleanup_overdue)
 }
 
 /// Delete this run's generation only after the composition root has proven
@@ -118,5 +129,24 @@ pub fn cleanup_current_after_proven_exit() -> bool {
             ));
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_uncovered_privileged_browser_still_starts_and_is_flagged() {
+        let (line, uncovered) =
+            unexpected_browser(&UnexpectedBrowser::Invalidated(io::Error::other("full")));
+        assert!(!uncovered);
+        assert!(line.contains("waits for a reboot"), "{line}");
+        let (line, uncovered) = unexpected_browser(&UnexpectedBrowser::Refused {
+            expect: io::Error::other("full"),
+            invalidate: io::Error::other("denied"),
+        });
+        assert!(uncovered);
+        assert!(line.contains("may be cleared at the next launch"), "{line}");
     }
 }
