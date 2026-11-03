@@ -1110,10 +1110,13 @@ precompiled frozen matcher to document-sourced WebView2 request contexts. Servic
 shared-worker requests remain unsupported until one profile/environment owner can avoid
 WebView2's per-view callback fanout. The synchronous callback
 performs no I/O or actor dispatch and fails open on malformed/oversized native data, lock
-contention, matcher failure, or the per-request filter-evaluation ceiling. Because WebView2
-does not supply the exact initiating frame URL, only source-independent blocks are applied;
-a potentially applicable source-sensitive exception makes a normal generic block fail
-open. macOS and Linux install digest-exact
+contention, matcher failure, or the per-request filter-evaluation ceiling. WebView2 does
+not supply the initiating frame URL, so each request is matched against the view's
+last-committed HTTP(S) main document: domain and party options are judged against that
+page, never the frame. The source changes at commit, not at navigation start, so a
+document's late requests keep their own source. Without a committed HTTP(S) document,
+only source-independent blocks apply and a potentially applicable source-sensitive
+exception makes a normal generic block fail open. macOS and Linux install digest-exact
 native WebKit declarative filters and validate native cache identities. The application
 holds first raw navigation until native installation settles, retains a proved previous
 generation on replacement failure, and exposes only a trusted in-process typed status and

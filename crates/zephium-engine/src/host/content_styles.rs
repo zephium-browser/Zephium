@@ -21,6 +21,7 @@ pub(super) struct ViewSiteScope {
     target: RefCell<String>,
     pub(super) pause: crate::platform::content_pause::ContentPause,
     pub(super) protection: crate::platform::content_protection::ViewProtection,
+    pub(super) top_document: crate::platform::top_document::TopDocument,
 }
 
 impl ViewSiteScope {
@@ -30,6 +31,7 @@ impl ViewSiteScope {
             target: RefCell::new(url.to_owned()),
             pause: Default::default(),
             protection: Default::default(),
+            top_document: Default::default(),
         });
         scope.refresh();
         scope

@@ -1128,6 +1128,7 @@ impl EngineHost {
                 &native,
                 &view.site_scope.pause,
                 &view.site_scope.protection,
+                &view.site_scope.top_document,
             ) {
                 Ok(registration) => registrations.push((id, registration)),
                 Err(failure) => {
@@ -1158,6 +1159,7 @@ impl EngineHost {
                     &native,
                     &spare.view.site_scope.pause,
                     &spare.view.site_scope.protection,
+                    &spare.view.site_scope.top_document,
                 )
             })
             .transpose();

@@ -221,7 +221,9 @@ impl SourceReport {
     }
 
     /// Returns rules whose source predicates or declared request types cannot
-    /// be evaluated by the audited WebView2 interception API.
+    /// be evaluated exactly by the audited WebView2 interception API. Source
+    /// predicates are judged against the view's main document, not the
+    /// initiating frame, and only once the view has committed one.
     pub const fn runtime_omitted_rules(&self) -> usize {
         self.runtime_omitted_rules
     }
@@ -401,8 +403,9 @@ impl CompilationReport {
             .sum()
     }
 
-    /// Returns runtime rules which cannot match any audited WebView2 request
-    /// context.
+    /// Returns runtime rules which WebView2 cannot evaluate exactly: their
+    /// source predicates see only the view's main document, or their request
+    /// types reach no audited context.
     pub fn runtime_omitted_rules(&self) -> usize {
         self.sources
             .iter()

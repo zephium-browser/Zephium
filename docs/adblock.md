@@ -124,11 +124,24 @@ contexts, service workers and already-running shared-worker requests are not
 intercepted by the current adapter. Registering environment worker requests on
 every tab would multiply synchronous work; they need a future environment owner.
 
-WebView2 does not supply an exact initiating frame URL in this callback. The
-matcher therefore applies source-independent decisions and conservatively
-allows requests where an unknown-attribution exception could matter. It never
-substitutes the mutable top-level URL or invents third-party classification.
-The report records this coverage loss separately from resource-type losses.
+WebView2 does not supply the initiating frame URL in this callback. Each view
+instead keeps the HTTP(S) main document it last committed, and every request it
+filters is matched with that document as its source: `$domain` options and
+first/third-party classification are judged against the main document, not the
+frame. A frame's requests are therefore third party to the page that embeds it
+whenever their host's site differs from the page's.
+
+The source changes at commit (WebView2 `ContentLoading`, which runs before the
+new document's scripts), not when a navigation starts. The old document keeps its
+own source until then, so its late requests and unload beacons are not judged
+against the incoming site, and a redirect, failed navigation or download changes
+nothing. A request the new document makes before its commit, such as an Early
+Hints preload, is judged against the previous document. Before a view's first
+HTTP(S) commit, and after a commit to any other scheme, matching is
+source-independent: domain- and party-scoped rules are skipped, and a block that
+such an exception could cancel fails open. Service- and shared-worker requests
+are not intercepted, so they have no main-document source either. The report
+still counts attribution-sensitive rules separately from resource-type losses.
 
 Document-created fixed scripts and constructed sheets provide main-document
 cosmetics and personal hides. Live updates use `ExecuteScript`, with exact
@@ -212,13 +225,14 @@ stream. Unavailable statistics produce an error, never an invented zero.
 ## Zephium's own rules
 
 `crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
-own, reviewed and shipped with the app, compiled after every catalog's lists
-on macOS; its digest is part of the WebKit artifact's cache key. Windows leaves
-it out until its requests carry their page: the runtime matcher sees them
-without one, and a site-scoped exception would then apply on every site. It
-holds exceptions only, never blocks (a test enforces this), for breakage the
-downloaded lists do not fix yet. Each rule has a comment naming its site, the
-evidence and the date, and is reported upstream when it applies there.
+own, reviewed and shipped with the app, compiled after every catalog's lists;
+its digest is part of the artifact's cache key. On Windows its site-scoped
+exceptions are judged against the view's main document, like every rule there
+(see above); before a view's first HTTP(S) commit they fail open on any site,
+as any site-scoped exception does there. It holds exceptions only, never
+blocks (a test enforces this), for breakage the downloaded lists do not fix
+yet. Each rule has a comment naming its site, the evidence and the date, and is
+reported upstream when it applies there.
 
 - Ad recovery: some sites (allrecipes, simplyrecipes, people, bild, mirror,
   tomsguide) probe AdSense's loader and, when it is blocked, re-serve the same

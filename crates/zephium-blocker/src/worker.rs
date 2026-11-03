@@ -1586,41 +1586,58 @@ impl NetworkRequestPolicy for RuntimePolicy {
         let attribution = request.attribution();
         let resource_type = map_resource_type(request.resource_type());
         let method = map_method(request.method());
-        let decision =
-            match attribution {
-                NetworkAttribution::Exact => {
-                    #[cfg(feature = "runtime-exact")]
-                    {
-                        let Some(source_url) = request.source_url() else {
-                            self.counters.record_attribution_unavailable();
-                            return CoreDecision::Allow;
-                        };
-                        self.evaluate(NetworkRequest::new(
-                            request.url(),
-                            source_url,
-                            resource_type,
-                            method,
-                        ))
-                    }
-                    #[cfg(not(feature = "runtime-exact"))]
-                    {
-                        // The shipped WebView2 callback has no exact initiating-frame
-                        // URL. The resolver is used for document cosmetics only;
-                        // it does not grant request attribution. Treat an unexpected
-                        // exact request as a capability mismatch and fail open.
+        let decision = match attribution {
+            NetworkAttribution::Exact => {
+                #[cfg(feature = "runtime-exact")]
+                {
+                    let Some(source_url) = request.source_url() else {
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
-                    }
+                    };
+                    self.evaluate(NetworkRequest::new(
+                        request.url(),
+                        source_url,
+                        resource_type,
+                        method,
+                    ))
                 }
-                NetworkAttribution::TopLevelApproximation
-                | NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
-                    NetworkRequest::source_independent(request.url(), resource_type, method),
-                ),
-                NetworkAttribution::Unavailable => {
+                #[cfg(not(feature = "runtime-exact"))]
+                {
+                    // The shipped WebView2 callback has no exact initiating-frame
+                    // URL. The resolver is used for document cosmetics only;
+                    // it does not grant request attribution. Treat an unexpected
+                    // exact request as a capability mismatch and fail open.
                     self.counters.record_attribution_unavailable();
                     return CoreDecision::Allow;
                 }
-            };
+            }
+            // The main document stands in for the frame WebView2 cannot
+            // name: `$domain` and party options are judged against it.
+            #[cfg(feature = "runtime-exact")]
+            NetworkAttribution::TopLevelApproximation => {
+                let Some(top_level_url) = request.source_url() else {
+                    self.counters.record_attribution_unavailable();
+                    return CoreDecision::Allow;
+                };
+                self.evaluate(NetworkRequest::new(
+                    request.url(),
+                    top_level_url,
+                    resource_type,
+                    method,
+                ))
+            }
+            #[cfg(not(feature = "runtime-exact"))]
+            NetworkAttribution::TopLevelApproximation => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::Unavailable => {
+                self.counters.record_attribution_unavailable();
+                return CoreDecision::Allow;
+            }
+        };
         match decision {
             Ok(decision) if decision.action() == NetworkAction::Block => CoreDecision::Block,
             Ok(_) => CoreDecision::Allow,
@@ -2466,7 +2483,41 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_exact_runtime_target_applies_zephium_s_own_site_exceptions_per_page() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                with_own_rules(
+                    vec![FilterSource::new(
+                        SourceId::new("list").unwrap(),
+                        SourceFormat::Standard,
+                        "||pagead2.googlesyndication.com^".to_owned(),
+                    )],
+                    CompileTarget::Runtime,
+                ),
+            )
+            .unwrap();
+        let on = |page| {
+            rules
+                .evaluate(NetworkRequest::new(
+                    "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                    page,
+                    ResourceType::Script,
+                    RequestMethod::Get,
+                ))
+                .unwrap()
+                .action()
+        };
+        assert_eq!(
+            on("https://www.allrecipes.com/recipe/1/"),
+            NetworkAction::Allow
+        );
+        assert_eq!(on("https://news.example/story"), NetworkAction::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
     #[test]
     fn the_runtime_target_leaves_out_zephium_s_own_site_exceptions() {
         let compile = |sources| {
@@ -2720,6 +2771,123 @@ mod tests {
             policy.decide(&request("https://unrelated.example/")),
             CoreDecision::Allow
         );
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn top_level_attribution_applies_domain_party_and_scoped_exception_rules() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||tracker.example^$script,domain=publisher.example
+",
+                        "||cdn.example^$third-party
+",
+                        "||ads.example/loader.js
+",
+                        "@@||ads.example/loader.js$domain=friendly.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url, top| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    top,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let unattributed = |url| {
+            policy.decide(
+                &CoreRequest::source_independent(
+                    url,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+
+        let tracker = "https://tracker.example/t.js";
+        assert_eq!(
+            decide(tracker, "https://publisher.example/a"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(tracker, "https://unrelated.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(tracker), CoreDecision::Allow);
+
+        let cdn = "https://cdn.example/lib.js";
+        assert_eq!(
+            decide(cdn, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(decide(cdn, "https://www.cdn.example/"), CoreDecision::Allow);
+        assert_eq!(unattributed(cdn), CoreDecision::Allow);
+
+        // Unattributed, a block that one site excepts fails open everywhere.
+        let loader = "https://ads.example/loader.js";
+        assert_eq!(
+            decide(loader, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(loader, "https://friendly.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(loader), CoreDecision::Allow);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+    #[test]
+    fn runtime_only_policy_keeps_top_level_requests_source_independent() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||generic.example^
+",
+                        "||tracker.example^$script,domain=publisher.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    "https://publisher.example/",
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(decide("https://generic.example/a.js"), CoreDecision::Block);
+        assert_eq!(decide("https://tracker.example/t.js"), CoreDecision::Allow);
+        assert_eq!(policy.diagnostics().attribution_unavailable, 0);
     }
 
     #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]

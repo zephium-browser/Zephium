@@ -252,6 +252,7 @@ pub(crate) fn install_on_view(
         policy,
         &crate::platform::content_pause::ContentPause::default(),
         &crate::platform::content_protection::ViewProtection::default(),
+        &crate::platform::top_document::TopDocument::default(),
     )
 }
 
@@ -260,6 +261,7 @@ pub(crate) fn install_scoped_on_view(
     policy: &NativeContentPolicy,
     pause: &crate::platform::content_pause::ContentPause,
     protection: &crate::platform::content_protection::ViewProtection,
+    top_document: &crate::platform::top_document::TopDocument,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
     let NativeContentPolicy::Runtime { policy, .. } = policy else {
         let mut registration = ContentPolicyRegistration::allow_all();
@@ -294,6 +296,7 @@ pub(crate) fn install_scoped_on_view(
     .map_err(|_| ContentRuleApplyFailure::NativeInstallation)?;
     let paused = pause.signal();
     let statistics = pause.statistics().cloned();
+    let top_document = top_document.clone();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
         #[cfg(test)]
         let mut sample = qualification::CallbackSample::start();
@@ -311,7 +314,7 @@ pub(crate) fn install_scoped_on_view(
             let Some(args) = args else {
                 return Ok(());
             };
-            match decide_observed_request(&args, callback_policy.as_ref()) {
+            match decide_observed_request(&args, callback_policy.as_ref(), &top_document) {
                 Some(NetworkDecision::Block) => {}
                 Some(NetworkDecision::Allow) => {
                     #[cfg(test)]
@@ -658,20 +661,34 @@ struct RequestBuffers {
 fn decide_observed_request(
     args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs,
     policy: &dyn NetworkRequestPolicy,
+    top_document: &crate::platform::top_document::TopDocument,
 ) -> Option<NetworkDecision> {
     REQUEST_BUFFERS
         .try_with(|buffers| {
             let mut buffers = buffers.try_borrow_mut().ok()?;
             let resource_type = extract_request_into(args, &mut buffers)?;
-            let request = NetworkRequest::source_independent(
-                &buffers.url,
-                &buffers.method,
-                resource_type,
-                // The registration admits only the DOCUMENT source kind. Avoid a
-                // redundant per-request interface cast and COM query on this
-                // synchronous hot path.
-                NetworkRequestSourceKind::Document,
-            )?;
+            // The registration admits only the DOCUMENT source kind. Avoid a
+            // redundant per-request interface cast and COM query on this
+            // synchronous hot path.
+            let source_kind = NetworkRequestSourceKind::Document;
+            // A frame's requests are judged against the view's main document:
+            // WebView2 does not say which frame sent them.
+            let top = top_document.current();
+            let request = match top.as_deref() {
+                Some(top) => NetworkRequest::top_level_approximation(
+                    &buffers.url,
+                    top,
+                    &buffers.method,
+                    resource_type,
+                    source_kind,
+                ),
+                None => NetworkRequest::source_independent(
+                    &buffers.url,
+                    &buffers.method,
+                    resource_type,
+                    source_kind,
+                ),
+            }?;
             #[cfg(test)]
             let started = std::time::Instant::now();
             let decision = policy.decide(&request);

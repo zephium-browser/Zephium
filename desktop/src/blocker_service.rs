@@ -182,8 +182,8 @@ mod tests {
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
         // Zephium's own six exceptions compile with the lists where requests
-        // carry their page, which Windows requests do not.
-        let own = if cfg!(target_os = "windows") { 0 } else { 6 };
+        // carry their page; on Windows that is the view's main document.
+        let own = 6;
         assert_eq!(rules.coverage().source_rules, 131_724 + own);
         assert_eq!(rules.coverage().accepted_rules, 103_789 + own);
         assert_eq!(
