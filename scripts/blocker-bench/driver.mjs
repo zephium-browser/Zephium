@@ -294,7 +294,7 @@ class Firefox extends Driver {
   }
 }
 
-const state = { child: null, quitting: false, gone: false, exited: null };
+const state = { child: null, driver: null, quitting: false, gone: false, exited: null };
 
 function spawnBrowser(args, argv, stderr) {
   const child = spawn(args.executable, argv, {
@@ -437,12 +437,18 @@ async function main() {
   const startupMs = Math.round(performance.now() - started);
   await sleep(args.settleMs);
   out({ event: "ready", pid: state.child.pid, startupMs });
+  state.driver = driver;
 
   let queue = Promise.resolve();
   const lines = createInterface({ input: process.stdin });
   lines.on("line", line => { if (line.trim()) queue = queue.then(() => handle(driver, line)); });
   lines.on("close", () => { queue = queue.then(async () => { await quit(driver); exit(0); }); });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => quit(driver).then(() => exit(1)));
+}
+
+// The browser is detached, so a terminal's signal does not reach it. Before
+// ready, exiting is enough: the exit hook below kills it.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => (state.driver ? quit(state.driver) : Promise.resolve()).then(() => exit(1)));
 }
 
 process.on("exit", () => {
