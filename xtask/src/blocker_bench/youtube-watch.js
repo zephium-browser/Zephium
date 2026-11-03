@@ -5,6 +5,7 @@ const player = document.getElementById('movie_player');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 for (let i = 0; i < 40 && !document.querySelector('#movie_player video'); i += 1) await sleep(250);
 const video = document.querySelector('#movie_player video');
+if (!video) throw new Error('the player has no video element');
 try { player.mute(); player.playVideo(); } catch {}
 const response = (() => { try { return player.getPlayerResponse(); } catch { return null; } })()
   ?? window.ytInitialPlayerResponse ?? null;

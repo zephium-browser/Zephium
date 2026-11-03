@@ -599,7 +599,7 @@ fn youtube_section(results: &Results) -> String {
         })
         .collect();
     format!(
-        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight shorts; on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
+        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
         table(
             &[
                 "config",

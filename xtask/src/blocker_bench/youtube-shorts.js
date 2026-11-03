@@ -28,4 +28,5 @@ for (let short = 0; short < SHORTS; short += 1) {
   await sleep(1000);
   visited.add(location.pathname);
 }
+if (visited.size < 2) throw new Error('the reel did not advance');
 return { url: location.href, feedAds: seen.size, shorts: visited.size, enforcement, hiddenMs };
