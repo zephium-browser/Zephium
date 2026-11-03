@@ -4,7 +4,8 @@
 //! no other way to ask WebView2 for a fresh renderer.
 //!
 //! The host is the bundled frame, narrowed to onboarding: its own document and
-//! the static files it loads, never another page, only for the main window, and
+//! the bundle's non-page files, which the main window already reads from its
+//! app origin, never another page, only for the main window, and
 //! only until onboarding hands over. It is a custom protocol, which Tauri
 //! treats as a local origin, so onboarding keeps exactly the main window's
 //! capabilities.

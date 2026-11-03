@@ -186,8 +186,9 @@ Any change that breaks one of these invariants must fail review and release:
    native hardening, and only then navigate to the bundled application origin. Debug
    builds additionally allow the exact local Vite origin. A bundled Windows first run
    serves onboarding from its own custom-protocol host, `zephium-onboarding.localhost`,
-   which only `main` may load, only that exact document and the static files it needs,
-   and only until handover; the browser that replaces it is then cross-site and starts
+   which only `main` may load, and only until handover. It serves that exact document and
+   the bundle's non-page files, the same bytes `main` already reads from its app origin,
+   and no other page; the browser that replaces it is then cross-site and starts
    in a new renderer process. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
    event, and every request to launch an OS-registered URI scheme is cancelled.
