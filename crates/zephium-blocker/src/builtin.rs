@@ -4,7 +4,8 @@
 use crate::sha256::Sha256;
 use crate::{FilterSource, SourceFormat, SourceId};
 
-const ID: &str = "zephium";
+/// Reserved: no catalog source may use it.
+pub(crate) const ID: &str = "zephium";
 const RULES: &str = include_str!("zephium_rules.txt");
 
 pub(crate) fn source() -> FilterSource {
@@ -13,6 +14,10 @@ pub(crate) fn source() -> FilterSource {
         SourceFormat::Standard,
         RULES.to_owned(),
     )
+}
+
+pub(crate) const fn byte_len() -> usize {
+    RULES.len()
 }
 
 /// Changes whenever the rules do, so compiled artifacts made without them are

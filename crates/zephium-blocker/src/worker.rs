@@ -216,14 +216,19 @@ impl StaticPolicyCatalog {
     ///
     /// Catalog admission happens before the worker can clone source strings,
     /// so an updater cannot queue oversized deep copies for every profile.
+    /// Zephium's own rules compile with every catalog, so admission keeps a
+    /// source slot and their bytes free for them and refuses their ID.
     pub fn new(sources: Vec<PolicySource>) -> Result<Self, CatalogError> {
         let limits = crate::CompileLimits::default();
-        if sources.len() > limits.max_sources() {
+        if sources.len() >= limits.max_sources() {
             return Err(CatalogError::TooManySources);
         }
-        let mut total_bytes = 0usize;
+        let mut total_bytes = crate::builtin::byte_len();
         let mut ids = HashSet::with_capacity(sources.len());
         for source in &sources {
+            if source.id.as_str() == crate::builtin::ID {
+                return Err(CatalogError::ReservedSource);
+            }
             if !ids.insert(&source.id) {
                 return Err(CatalogError::DuplicateSource);
             }
@@ -281,6 +286,9 @@ pub enum CatalogError {
     /// Source identifiers were not unique.
     #[error("blocker catalog contains a duplicate source identifier")]
     DuplicateSource,
+    /// A source used the identifier reserved for Zephium's own rules.
+    #[error("blocker catalog source uses a reserved identifier")]
+    ReservedSource,
     /// One source exceeded the immutable per-source byte ceiling.
     #[error("blocker catalog source exceeds its byte limit")]
     SourceTooLarge,
@@ -2372,6 +2380,80 @@ mod tests {
         assert!(matches!(
             StaticPolicyCatalog::new(vec![source("a"), source("b")]),
             Err(CatalogError::DuplicateSource)
+        ));
+    }
+
+    fn numbered_sources(count: usize) -> Vec<PolicySource> {
+        (0..count)
+            .map(|n| {
+                PolicySource::new(
+                    SourceId::new(format!("list{n}")).unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(format!("||ads{n}.zephium.invalid^")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn catalog_keeps_a_source_slot_for_zephium_s_own_rules() {
+        let limit = crate::CompileLimits::default().max_sources();
+        assert!(matches!(
+            StaticPolicyCatalog::new(numbered_sources(limit)),
+            Err(CatalogError::TooManySources)
+        ));
+        StaticPolicyCatalog::new(numbered_sources(limit - 1)).unwrap();
+    }
+
+    #[cfg(any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    ))]
+    #[test]
+    fn a_catalog_one_below_the_source_limit_compiles_with_zephium_s_own_rules() {
+        let limit = crate::CompileLimits::default().max_sources();
+        let catalog = StaticPolicyCatalog::new(numbered_sources(limit - 1)).unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = None;
+        assert!(matches!(
+            cache.resolve(Compiler::default(), &mut persistent),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+    }
+
+    #[test]
+    fn catalog_keeps_room_for_zephium_s_own_rule_bytes() {
+        let limits = crate::CompileLimits::default();
+        let source = |id: &str, len: usize| {
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from("!".repeat(len)),
+            )
+        };
+        let half = limits.max_total_source_bytes() / 2;
+        assert!(half <= limits.max_source_bytes());
+        assert!(matches!(
+            StaticPolicyCatalog::new(vec![source("a", half), source("b", half)]),
+            Err(CatalogError::TotalBytesExceeded)
+        ));
+        StaticPolicyCatalog::new(vec![
+            source("a", half),
+            source("b", half - crate::builtin::byte_len()),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn catalog_refuses_the_id_of_zephium_s_own_rules() {
+        let source = PolicySource::new(
+            SourceId::new(crate::builtin::ID).unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^"),
+        );
+        assert!(matches!(
+            StaticPolicyCatalog::new(vec![source]),
+            Err(CatalogError::ReservedSource)
         ));
     }
 
