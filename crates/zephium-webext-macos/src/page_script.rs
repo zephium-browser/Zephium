@@ -5,7 +5,7 @@
 //! sees each frame's own address, never the page it is embedded in.
 
 use std::cell::RefCell;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -71,18 +71,26 @@ impl PageScript {
         }
     }
 
-    /// Writes a package for `program` into `dir`, which must not exist yet.
-    /// The package is complete before `dir` appears.
+    /// Writes a package for `program` into `dir`, which must not exist yet,
+    /// readable by its owner alone. The package is complete before `dir`
+    /// appears.
     pub fn write(dir: &Path, program: &str) -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         let parent = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
         let name = dir.file_name().ok_or(io::ErrorKind::InvalidInput)?;
         let staging = parent.join(format!(".{}.partial", name.to_string_lossy()));
         if staging.exists() {
             std::fs::remove_dir_all(&staging)?;
         }
-        std::fs::create_dir_all(&staging)?;
-        std::fs::write(staging.join("manifest.json"), MANIFEST)?;
-        std::fs::write(staging.join(PROGRAM), program)?;
+        std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+        for (file, text) in [("manifest.json", MANIFEST), (PROGRAM, program)] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(staging.join(file))?
+                .write_all(text.as_bytes())?;
+        }
         std::fs::rename(&staging, dir)
     }
 

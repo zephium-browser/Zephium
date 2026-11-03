@@ -110,6 +110,15 @@ impl Scriptlets {
         let _ = std::fs::remove_dir_all(self.private_dir(profile));
     }
 
+    /// Every private session ends with the engine.
+    pub(super) fn end_private(&mut self) {
+        let profiles: Vec<ProfileId> = self.private.keys().copied().collect();
+        for profile in profiles {
+            self.forget(profile);
+        }
+        empty(&self.private_root);
+    }
+
     fn private_dir(&self, profile: ProfileId) -> PathBuf {
         self.private_root.join(hex(&profile.bytes()))
     }
@@ -122,9 +131,15 @@ impl Scriptlets {
             self.root.join(name)
         };
         if !dir.is_dir() {
+            use std::os::unix::fs::DirBuilderExt;
             let written = dir
                 .parent()
-                .map_or(Ok(()), std::fs::create_dir_all)
+                .map_or(Ok(()), |parent| {
+                    std::fs::DirBuilder::new()
+                        .recursive(true)
+                        .mode(0o700)
+                        .create(parent)
+                })
                 .and_then(|()| PageScript::write(&dir, program));
             if let Err(error) = written {
                 eprintln!("content blocker: cannot write the scriptlet package: {error}");
@@ -372,6 +387,13 @@ mod tests {
         let program = scriptlet_program_with_pauses("globalThis.a = 1;", [&site]);
         let dir = scriptlets.package(private, true, &program).unwrap();
         assert!(dir.starts_with(temp.path().join("private")));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&scriptlets.private_dir(private)), 0o700);
+        assert_eq!(mode(&dir), 0o700);
+        for file in files(&dir) {
+            assert_eq!(mode(&file), 0o600, "{}", file.display());
+        }
         let shared = scriptlets
             .package(ProfileId::generate(), false, "globalThis.a = 1;")
             .unwrap();
@@ -385,6 +407,10 @@ mod tests {
         assert!(!leaked, "a private pause reached the shared store");
         assert!(dir.is_dir());
         scriptlets.forget(private);
+        assert!(files(&temp.path().join("private")).is_empty());
+
+        scriptlets.package(private, true, &program).unwrap();
+        scriptlets.end_private();
         assert!(files(&temp.path().join("private")).is_empty());
     }
 

@@ -718,9 +718,18 @@ names the manual step below for data a restart cannot clear, and carries no path
 reason. Opaque data that remains after reboot requires the runtime directory to be
 moved aside manually while Zephium is closed.
 
+On macOS, a private window's ad blocker scriptlets also touch disk. WebKit loads a
+WebExtension only from files, so the program a private profile runs, with the sites
+paused in that private profile and no others, is written to
+`private-scriptlets/<profile>` below the engine's data root, readable by its
+owner alone. It exists only while that private profile lives: the profile's files are
+removed when its data is erased, the directory is emptied when the engine shuts down and
+again when it starts, so a crash leaves them until the next launch. Normal profiles' packages are kept apart and
+never shared with a private one.
+
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
-guarantee on Windows. Crash, power loss, swap, filesystem snapshots, and engine defects
+guarantee on Windows or, for paused sites, on macOS. Crash, power loss, swap, filesystem snapshots, and engine defects
 remain relevant to private data on every OS. Windows does not provide the Unix directory
 fsync durability used by Zephium's deletion journal. The cross-restart completed
 tombstone prevents the application from forgetting cleanup authorization after a single
