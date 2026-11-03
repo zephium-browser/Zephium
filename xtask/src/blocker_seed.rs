@@ -531,6 +531,13 @@ pub(crate) fn update(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
+    reject_future_sources(
+        &sources,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the system clock is before 1970")?
+            .as_secs(),
+    )?;
     let catalog = build_catalog(&sources)?;
     let catalog_bytes = canonical_json(&catalog)?;
     let compressed = sources
@@ -696,6 +703,18 @@ fn validate_generation_progression(
         }
     }
     Ok(())
+}
+
+/// A source dated ahead of the clock (beyond five minutes of skew) is a bad
+/// header or a bad clock.
+fn reject_future_sources(sources: &[SourceInput], now: u64) -> Result<(), String> {
+    match sources
+        .iter()
+        .find(|source| source.header.modified_unix > now.saturating_add(300))
+    {
+        Some(source) => Err(format!("{} is dated in the future", source.header.title)),
+        None => Ok(()),
+    }
 }
 
 fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
@@ -2151,5 +2170,28 @@ mod tests {
         )
         .unwrap_err()
         .contains("identity changed"));
+    }
+
+    fn dated_input(index: usize, version: &str, raw: &[u8]) -> SourceInput {
+        SourceInput {
+            spec: &SOURCES[index],
+            raw: raw.to_vec(),
+            header: SourceHeader {
+                title: SOURCES[index].id.into(),
+                version: version.into(),
+                commit: None,
+                modified_unix: timestamp_from_version(version).unwrap().0,
+                expiry_seconds: 4 * 24 * 60 * 60,
+            },
+        }
+    }
+
+    #[test]
+    fn a_source_dated_in_the_future_is_refused() {
+        let input = [dated_input(3, "202611021200", b"q")];
+        let modified = input[0].header.modified_unix;
+        assert!(reject_future_sources(&input, modified).is_ok());
+        assert!(reject_future_sources(&input, modified - 300).is_ok());
+        assert!(reject_future_sources(&input, modified - 301).is_err());
     }
 }
