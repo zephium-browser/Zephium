@@ -289,6 +289,8 @@
   "update_report_problem": "Algo deu errado? Conte para nós",
   "session_set_aside_title": "Não foi possível reabrir suas últimas abas",
   "session_set_aside_detail": "O Zephium não conseguiu ler a sessão salva, então começou com abas novas. O histórico, os favoritos e os ajustes não foram alterados, e uma cópia da sessão antiga está na pasta de dados do Zephium.",
+  "runtime_cleanup_title": "Reinicie para terminar de apagar dados antigos",
+  "runtime_cleanup_detail": "Dados de sessões anteriores que não foram fechadas corretamente ainda estão neste computador. Reinicie o computador e o Zephium os apagará na próxima vez que abrir.",
   "update_dismiss": "Dispensar",
   "update_security_mac_title": "O macOS tem atualizações de segurança",
   "update_security_system_title": "Seu sistema tem atualizações de segurança",

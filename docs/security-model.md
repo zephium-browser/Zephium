@@ -663,12 +663,31 @@ so a correctly marked generation whose volatile key is absent has crossed a rebo
 boundary and may be reclaimed without inferring process death from filesystem access.
 Pre-provenance Zephium directories are first bounded, marked, and classified as
 same-boot; they cannot be reclaimed until a later reboot. Malformed or unowned objects
-are never adopted or deleted. Startup is bounded to 32 same-boot generations, 128 total
-including the new allocation, 2 GiB of quarantined logical file bytes, and 250,000
-inspected entries. Saturation fails with an explicit full-Windows-restart remediation;
-opaque data that remains after reboot requires the runtime directory to be moved aside
-manually while Zephium is closed. Successful exact cleanup removes its volatile subkey,
-so clean relaunches do not grow HKCU for the rest of the boot.
+are never adopted or deleted. Successful exact cleanup removes its volatile subkey, so
+clean relaunches do not grow HKCU for the rest of the boot.
+
+Each generation also keeps a versioned process record: the id and creation time of every
+WebView2 browser process its data belongs to. The privileged root records both browser
+processes; the private root records each private window's. A same-boot generation whose
+run never proved its exit is reclaimed by the next launch, before any environment or
+view exists, when that record proves it safe. If every recorded process is gone, meaning
+no process has that id with that creation time, the data is deleted. A recorded process
+that still runs is an orphan of a dead run, because the exclusive root lease means no
+live Zephium instance owns anything in that root. If it is an `msedgewebview2.exe`, it
+is ended together with its direct child processes created after it, and its data is
+deleted once its exit is proven within two seconds. If it cannot be ended, the generation
+stays quarantined until reboot. A generation holding nothing but its own marker and
+record is deleted outright, since a running browser always holds files in its folder. A
+generation without a record, from a build that predates it, keeps the reboot-only rule.
+Each outcome is logged as one line.
+
+Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
+file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,
+or when a leftover cannot be inspected or removed, that leftover stays in place and the
+launch goes ahead with only its own new generation, logging the overdue cleanup and its
+reason. Privileged chrome receives the closed `cleanup_overdue` advisory, which asks for a
+restart and carries no path or reason. Opaque data that remains after reboot requires the
+runtime directory to be moved aside manually while Zephium is closed.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
@@ -1003,10 +1022,11 @@ eight seconds for native teardown. Windows spends at most five seconds of that b
 on its internal whole-process-group proof before bounded private-root cleanup. A
 negative result or timeout is logged and permits forced process exit with a non-zero
 status; the sealed actor never resumes. On Windows, a failed cleanup leaves that
-generation quarantined. A later startup never reuses it: the shared bounded generation
-manager reclaims only exact marked prior-boot data, baselines legacy data for one reboot,
-and keeps same-boot or opaque state quarantined. Hitting a crash-loop budget produces a
-recoverable full-Windows-restart instruction instead of an irreversible assertion.
+generation quarantined. A later startup never reuses it. The shared bounded generation
+manager reclaims exact marked prior-boot data, and same-boot data once its recorded
+browser processes are proven gone or have been ended. It baselines legacy data for one
+reboot and keeps unrecorded or opaque state quarantined. A crash-loop budget never stops
+a launch; it is logged as overdue cleanup.
 Store worker queues are also bounded. Page-controlled history growth and extraction
 results are capped. These are denial-of-service controls, not proof that arbitrary web
 pages cannot exhaust an engine renderer.

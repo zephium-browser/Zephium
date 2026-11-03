@@ -6606,6 +6606,9 @@ pub fn run() {
 
                 #[cfg(target_os = "windows")]
                 let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
+                #[cfg(target_os = "windows")]
+                let runtime_security_advisories = runtime_security_advisories
+                    .with_optional(privileged_runtime_windows::cleanup_advisory());
 
                 let mut main_config = app
                 .config()

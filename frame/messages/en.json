@@ -289,6 +289,8 @@
   "update_report_problem": "Something broke? Tell us",
   "session_set_aside_title": "Your last tabs couldn’t be reopened",
   "session_set_aside_detail": "Zephium couldn’t read its saved session, so it started with fresh tabs. History, bookmarks and settings are untouched, and a copy of the old session is in Zephium’s data folder.",
+  "runtime_cleanup_title": "Restart to finish clearing old data",
+  "runtime_cleanup_detail": "Data from earlier sessions that didn’t close properly is still on this computer. Restart your computer, and Zephium clears it the next time it starts.",
   "update_dismiss": "Dismiss",
   "update_security_mac_title": "macOS has security updates",
   "update_security_system_title": "Your system has security updates",
