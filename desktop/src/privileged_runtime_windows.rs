@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use zephium_core::runtime_security::RuntimeSecurityAdvisory;
-use zephium_core::webview2::{RuntimeGeneration, RuntimeGenerationKind};
+use zephium_core::webview2::{RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser};
 
 static RUNTIME_STATE: OnceLock<RuntimeGeneration> = OnceLock::new();
 
@@ -37,10 +37,18 @@ pub fn prepare(
     }
     // Main and the panel each start one browser, before either is recorded.
     for _ in [main_label, panel_label] {
-        if let Err(error) = runtime.expect_browser() {
-            crate::write_diagnostic(format_args!(
-                "privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
-            ));
+        match runtime.expect_browser() {
+            Ok(()) => {}
+            Err(error @ UnexpectedBrowser::Invalidated(_)) => {
+                crate::write_diagnostic(format_args!(
+                    "privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+                ));
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "a privileged WebView2 browser cannot start, since its data could be cleared while it runs: {error}"
+                )));
+            }
         }
     }
     let main = runtime.root().join(main_label);
@@ -70,10 +78,16 @@ pub fn record_browser_process(process_id: u32) {
         .ok_or_else(|| io::Error::other("the browser process could not be read"))
         .and_then(|record| runtime.record_browser_process(record));
     if let Err(error) = recorded {
-        runtime.invalidate_process_record();
+        let invalidated = runtime.invalidate_process_record();
         crate::write_diagnostic(format_args!(
             "privacy: a privileged WebView2 browser process was not recorded for cleanup after an unclean quit: {error}"
         ));
+        // Its expectation is still pending, which keeps the generation.
+        if let Err(error) = invalidated {
+            crate::write_diagnostic(format_args!(
+                "privacy: the privileged cleanup record could not be invalidated: {error}"
+            ));
+        }
     }
 }
 

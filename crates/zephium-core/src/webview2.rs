@@ -23,7 +23,7 @@ mod runtime;
 #[cfg(target_os = "windows")]
 pub use runtime::{
     BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
-    RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind,
+    RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser,
 };
 
 /// Windows Stable security release published by Microsoft on 2026-10-29.

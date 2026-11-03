@@ -926,6 +926,14 @@ impl EngineHost {
                     return None;
                 }
             };
+            if cached_environment.is_none()
+                && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+            {
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
@@ -1473,11 +1481,6 @@ impl EngineHost {
             }
             if let Some(environment) = cached_environment {
                 builder = builder.with_environment(environment);
-            } else {
-                super::profiles::expect_private_browser(
-                    &self.private_runtime,
-                    &expected_user_data_folder,
-                );
             }
             builder = builder
                 .with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
@@ -2800,8 +2803,10 @@ impl EngineHost {
                 return Err(WindowsProfileEnvironmentFailure::Busy);
             }
         }
-        if existing_environment.is_none() {
-            super::profiles::expect_private_browser(&self.private_runtime, &path);
+        if existing_environment.is_none()
+            && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+        {
+            return Err(WindowsProfileEnvironmentFailure::Construction);
         }
         let mut construction_resource = Some(
             self.native_resources

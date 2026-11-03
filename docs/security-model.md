@@ -684,16 +684,17 @@ ended, nothing is ended and the generation stays until reboot. Otherwise all of 
 ended and the data is deleted once every exit is proven within two seconds. Ending is not
 all or nothing once it starts: a process that does not exit in time keeps the generation
 until reboot, though the others may already be gone. A generation holding nothing but its
-own marker and record is deleted outright, since a running browser always holds files in
-its folder, unless a browser was expected and never recorded, or the record was
-invalidated: such a browser may still be starting.
+own marker and a whole record with nothing pending and no browser is deleted outright.
 Every other generation keeps the reboot-only rule: one from a build that predates the
-record, one whose record still has a `pending` entry or is malformed in any way, including
-a torn last line, and one whose record was invalidated. Any failure to expect or record a
+record, one whose record is missing, still has a `pending` entry or is malformed in any
+way, including a torn last line, and one whose record was invalidated. A browser in any of
+those may still be starting with no files of its own yet. A boot key whose invalidation
+mark cannot be read keeps its generation, reported as unchecked. Any failure to expect or record a
 browser, or to confirm it is outside the private root, invalidates the record: it is marked
 on the generation's volatile boot registry key first, where a record file that cannot be
-changed cannot contradict it, and the file is then removed or made unreadable. Each
-outcome is logged as one line.
+changed cannot contradict it, and the file is then removed or made unreadable. If neither
+holds when a browser is expected, that browser is not started: a private window fails to
+open, and privileged chrome does not start. Each outcome is logged as one line.
 
 Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
 file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,

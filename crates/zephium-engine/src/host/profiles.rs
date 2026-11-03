@@ -616,10 +616,14 @@ impl EngineHost {
         // A browser that may be private and is not recorded leaves the
         // record incomplete, so this generation keeps the reboot-only rule.
         if let Err(error) = recorded {
-            self.private_runtime.invalidate_process_record();
+            let invalidated = self.private_runtime.invalidate_process_record();
             eprintln!(
                 "privacy: a WebView2 browser process was not recorded for private cleanup after an unclean quit: {error}"
             );
+            // Its expectation is still pending, which keeps the generation.
+            if let Err(error) = invalidated {
+                eprintln!("privacy: the private cleanup record could not be invalidated: {error}");
+            }
         }
     }
 
@@ -1373,19 +1377,31 @@ mod tests;
 
 /// Before anything that may start a browser process in `folder`: one in the
 /// private generation is expected there first, so a run that ends before
-/// recording it leaves the generation for a reboot. It takes the runtime
-/// alone, for callers that hold other parts of the host mutably.
+/// recording it leaves the generation for a reboot. False when that browser
+/// must not start. It takes the runtime alone, for callers that hold other
+/// parts of the host mutably.
 #[cfg(target_os = "windows")]
+#[must_use]
 pub(super) fn expect_private_browser(
     private_runtime: &zephium_core::webview2::RuntimeGeneration,
     folder: &std::path::Path,
-) {
+) -> bool {
     if !folder.starts_with(private_runtime.root()) {
-        return;
+        return true;
     }
-    if let Err(error) = private_runtime.expect_browser() {
-        eprintln!(
-            "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
-        );
+    match private_runtime.expect_browser() {
+        Ok(()) => true,
+        Err(error @ zephium_core::webview2::UnexpectedBrowser::Invalidated(_)) => {
+            eprintln!(
+                "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "privacy: a private WebView2 browser was not started, since its data could be cleared while it runs: {error}"
+            );
+            false
+        }
     }
 }

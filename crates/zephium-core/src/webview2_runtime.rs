@@ -519,6 +519,32 @@ fn maintain_generation(
     }
 }
 
+/// Why a generation's record could not expect a browser.
+#[derive(Debug)]
+pub enum UnexpectedBrowser {
+    /// The record was invalidated instead: the browser may start, and the
+    /// generation waits for a reboot.
+    Invalidated(io::Error),
+    /// The record could not be invalidated either, and may still prove the
+    /// generation clear while the browser runs: it must not start.
+    Refused {
+        expect: io::Error,
+        invalidate: io::Error,
+    },
+}
+
+impl std::fmt::Display for UnexpectedBrowser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalidated(expect) => write!(f, "{expect}"),
+            Self::Refused { expect, invalidate } => write!(
+                f,
+                "{expect}; the record could not be invalidated either: {invalidate}"
+            ),
+        }
+    }
+}
+
 enum SameBootReclaim {
     AfterExit,
     AfterTermination,
@@ -810,9 +836,10 @@ impl RuntimeGeneration {
     /// Called before anything that may start a browser process in this
     /// generation: until that browser is recorded the record is incomplete,
     /// so a run that ends first, or never records it, keeps the generation
-    /// for a reboot. On failure the record is invalidated.
-    pub fn expect_browser(&self) -> io::Result<()> {
-        let expected = self.append_to_record(|record| {
+    /// for a reboot. On failure the record is invalidated, and the browser
+    /// may start only if that held.
+    pub fn expect_browser(&self) -> Result<(), UnexpectedBrowser> {
+        let Err(expect) = self.append_to_record(|record| {
             if record.processes.len() + record.pending >= MAX_RECORDED_PROCESSES {
                 return Err(io::Error::new(
                     io::ErrorKind::StorageFull,
@@ -820,11 +847,13 @@ impl RuntimeGeneration {
                 ));
             }
             Ok(Some("pending\n".to_owned()))
-        });
-        if expected.is_err() {
-            self.invalidate_process_record();
-        }
-        expected
+        }) else {
+            return Ok(());
+        };
+        Err(match self.invalidate_process_record() {
+            Ok(()) => UnexpectedBrowser::Invalidated(expect),
+            Err(invalidate) => UnexpectedBrowser::Refused { expect, invalidate },
+        })
     }
 
     /// Records a browser process this generation's data belongs to, so a
@@ -847,29 +876,43 @@ impl RuntimeGeneration {
                 process.id, process.created
             )))
         });
-        if recorded.is_err() {
-            self.invalidate_process_record();
-        }
-        recorded
+        let Err(error) = recorded else {
+            return Ok(());
+        };
+        Err(match self.invalidate_process_record() {
+            Ok(()) => error,
+            Err(invalidate) => io::Error::new(
+                error.kind(),
+                format!("{error}; the record could not be invalidated either: {invalidate}"),
+            ),
+        })
     }
 
     /// The record no longer covers every browser, so the generation keeps
     /// the reboot-only rule. The boot registry says so first, where a record
-    /// file that cannot be changed cannot contradict it.
-    pub fn invalidate_process_record(&self) {
-        let _ = mark_unrecorded(self.kind, &self.generation);
+    /// file that cannot be changed cannot contradict it; the file is then
+    /// removed or, failing that, made unparseable. An error means neither
+    /// held, and the record may still read as complete.
+    pub fn invalidate_process_record(&self) -> io::Result<()> {
+        let marked = mark_unrecorded(self.kind, &self.generation);
         let path = self.root.join(PROCESS_RECORD);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        let spoiled = match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             // A line that never parses invalidates the record as well.
-            Err(_) => {
-                if let Ok(mut record) = OpenOptions::new().append(true).open(&path) {
-                    let _ = record
-                        .write_all(b"incomplete\n")
-                        .and_then(|()| record.sync_all());
-                }
-            }
+            Err(_) => OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut record| {
+                    record.write_all(b"incomplete\n")?;
+                    record.sync_all()
+                }),
+        };
+        match (marked, spoiled) {
+            (Err(mark), Err(file)) => Err(io::Error::other(format!(
+                "the boot registry could not mark it ({mark}) and its file could not change ({file})"
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -1198,7 +1241,7 @@ mod tests {
             .share_mode(1)
             .open(run.root().join(PROCESS_RECORD))
             .unwrap();
-        run.invalidate_process_record();
+        run.invalidate_process_record().unwrap();
         assert!(read_process_record(run.root()).unwrap().is_some());
         let left = run.cleanup_ticket();
         drop(run);
@@ -1206,6 +1249,35 @@ mod tests {
         assert!(left.root().join("private-data").exists());
         assert!(next.report().reclaimed_after_exit.is_empty());
         drop(held);
+        left.cleanup_after_proven_exit().unwrap();
+        next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn a_browser_the_record_cannot_expect_starts_only_once_it_is_invalidated() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::RawPrivate;
+        let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        fs::write(run.root().join("private-data"), b"private").unwrap();
+        run.expect_browser().unwrap();
+        run.record_browser_process(BROWSER).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(run.root().join(PROCESS_RECORD))
+            .unwrap();
+        let unexpected = run.expect_browser().unwrap_err();
+        assert!(
+            matches!(unexpected, UnexpectedBrowser::Invalidated(_)),
+            "{unexpected:?}"
+        );
+        let left = run.cleanup_ticket();
+        drop(run);
+        drop(held);
+        let next = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        assert!(left.root().join("private-data").exists());
+        assert!(boot_knows(kind, &left.generation));
+        assert!(next.report().reclaimed_after_exit.is_empty());
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
@@ -1336,7 +1408,10 @@ mod tests {
                 .unwrap();
         }
         let full = run.expect_browser().unwrap_err();
-        assert_eq!(full.kind(), io::ErrorKind::StorageFull);
+        assert!(
+            matches!(&full, UnexpectedBrowser::Invalidated(error) if error.kind() == io::ErrorKind::StorageFull),
+            "{full:?}"
+        );
         run.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
 
