@@ -70,7 +70,9 @@ independent publisher signature. The app trusts the official publishers' sites.
 The signed application also embeds the same four lists as a licensed offline
 seed. EasyList lists carry a numeric `Version` and upstream `Commit`; the uBlock
 Origin lists have neither and are versioned by the UTC minute of their
-`Last modified` header. Their `!#include` lines are not followed.
+`Last modified` header; the seed also records that header in full, so a copy
+changed within the same minute is accepted only when it was modified later.
+Their `!#include` lines are not followed.
 Optional TUF support remains independently tested, but no TUF publication
 infrastructure or signing keys are required by this release design.
 
@@ -91,6 +93,14 @@ source material provide recovery; current bytes are verified with a bounded
 streaming buffer. A 304 is accepted only for the exact verified retained bytes
 and validators actually sent; otherwise one unconditional retry is allowed.
 Unchanged source bytes avoid policy recompilation.
+
+A rejected candidate is remembered. A list whose download is a copy that
+candidate held keeps its current copy, so the other lists' updates go through;
+that holds for an older copy too, so a revert to rejected bytes is never staged
+again. The rejection is forgotten only after a refresh that checked every list.
+Known limit: the candidate is rejected as a whole, so every list that changed
+in it is withheld, including those that compiled fine. Each recovers when its
+publisher next changes it (quick fixes within about 8 hours, the others daily).
 
 The current bundled seed is **202611021408**, 4,073,004 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
