@@ -116,6 +116,76 @@
   if (g.scheduler && typeof g.scheduler.yield !== "function") {
     g.scheduler.yield = () => new Promise((resolve) => setTimeout(resolve, 0));
   }
+  // WebKit has no idle callbacks. Extensions then fall back to a 1 ms timer
+  // and redo work meant for quiet moments after every change the page makes,
+  // in the middle of the page's own work. Chrome holds that work until the
+  // page is idle or the callback's timeout passes; so does this, waiting a
+  // second at most.
+  if (!isWorker && typeof g.requestIdleCallback !== "function") {
+    const QUIET = 50;
+    const LATE = 10;
+    const LONGEST = 1000;
+    const pending = new Map();
+    let next = 0;
+    let timer = 0;
+    let expected = 0;
+    let flushing = false;
+    const fail = (error) => {
+      if (typeof g.reportError === "function") g.reportError(error);
+      else setTimeout(() => { throw error; });
+    };
+    const arm = () => {
+      if (timer || flushing || !pending.size) return;
+      let delay = QUIET;
+      const now = performance.now();
+      for (const entry of pending.values()) delay = Math.min(delay, entry.latest - now);
+      delay = Math.max(0, delay);
+      expected = now + delay;
+      timer = setTimeout(flush, delay);
+    };
+    const flush = () => {
+      timer = 0;
+      const start = performance.now();
+      const busy = start - expected > LATE;
+      const end = start + QUIET;
+      flushing = true;
+      for (const [id, entry] of [...pending]) {
+        if (!pending.has(id)) continue;
+        const didTimeout = entry.due <= start;
+        if (entry.latest > start && (busy || performance.now() >= end)) continue;
+        pending.delete(id);
+        try {
+          entry.callback({ didTimeout, timeRemaining: () => (didTimeout ? 0 : Math.max(0, end - performance.now())) });
+        } catch (error) {
+          fail(error);
+        }
+      }
+      flushing = false;
+      arm();
+    };
+    const define = (name, value) => {
+      try {
+        Object.defineProperty(g, name, { value, configurable: true, writable: true });
+      } catch {}
+    };
+    define("requestIdleCallback", function requestIdleCallback(callback, options) {
+      if (typeof callback !== "function") throw new TypeError("requestIdleCallback requires a function");
+      const timeout = options && Number(options.timeout) > 0 ? Number(options.timeout) : Infinity;
+      const id = ++next;
+      const now = performance.now();
+      const latest = now + Math.min(timeout, LONGEST);
+      pending.set(id, { callback, due: now + timeout, latest });
+      if (timer && latest < expected) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+      arm();
+      return id;
+    });
+    define("cancelIdleCallback", function cancelIdleCallback(id) {
+      pending.delete(id);
+    });
+  }
   if (typeof Symbol.dispose !== "symbol") {
     Object.defineProperty(Symbol, "dispose", { value: Symbol.for("Symbol.dispose") });
   }
@@ -263,6 +333,138 @@
       },
     };
   };
+
+  // ---- Frame lifetime ------------------------------------------------------
+  // WebKit keeps a removed frame alive through the listeners it registered
+  // and the ports its scripts still hold: every later frame in the tab gets
+  // slower and the page's memory grows without bound. Chrome lets the frame
+  // go. A hidden document's listeners leave, and return if the back/forward
+  // cache restores it; its ports close, as in Chrome, and scripts hold
+  // stand-ins that let go of the real ones.
+  const eventProto = isContent && runtime.onMessage && Object.getPrototypeOf(runtime.onMessage);
+  const nativeAdd = eventProto && eventProto.addListener;
+  const nativeRemove = eventProto && eventProto.removeListener;
+  if (typeof nativeAdd === "function" && typeof nativeRemove === "function") {
+    const registered = new Map();
+    const relays = new Map();
+    const open = new Map();
+    let closed = [];
+    let hidden = false;
+    const onConnect = runtime.onConnect;
+    const received = new WeakMap();
+    const quietly = (apply, event, listener) => {
+      try {
+        apply.call(event, listener);
+      } catch {}
+    };
+    const standIn = (native) => {
+      const onMessage = makeEvent();
+      const onDisconnect = makeEvent();
+      let live = native;
+      const relay = (message) => onMessage.dispatch(message, port);
+      const ended = () => {
+        release();
+        onDisconnect.dispatch(port);
+      };
+      const release = () => {
+        if (!live) return null;
+        const was = live;
+        quietly(nativeRemove, was.onMessage, relay);
+        quietly(nativeRemove, was.onDisconnect, ended);
+        live = null;
+        open.delete(port);
+        return was;
+      };
+      const facade = (event) => ({
+        addListener: event.addListener,
+        removeListener: event.removeListener,
+        hasListener: event.hasListener,
+        hasListeners: event.hasListeners,
+      });
+      const port = {
+        name: native.name,
+        sender: native.sender,
+        onMessage: facade(onMessage),
+        onDisconnect: facade(onDisconnect),
+        postMessage(message) {
+          if (!live) throw new Error("Attempting to use a disconnected port object");
+          live.postMessage(message);
+        },
+        disconnect() {
+          const was = release();
+          if (was) quietly(was.disconnect, was);
+        },
+      };
+      quietly(nativeAdd, native.onMessage, relay);
+      quietly(nativeAdd, native.onDisconnect, ended);
+      open.set(port, () => {
+        port.disconnect();
+        closed.push(() => onDisconnect.dispatch(port));
+      });
+      return port;
+    };
+    const nativeListener = (event, listener) => {
+      if (event !== onConnect) return listener;
+      let relay = relays.get(listener);
+      if (!relay) {
+        relay = (native, ...rest) => {
+          let port = received.get(native);
+          if (!port) received.set(native, (port = standIn(native)));
+          return listener(port, ...rest);
+        };
+        relays.set(listener, relay);
+      }
+      return relay;
+    };
+    const define = (target, name, value) => {
+      try {
+        Object.defineProperty(target, name, { value, configurable: true, writable: true });
+      } catch {}
+    };
+    define(eventProto, "addListener", function (listener) {
+      if (typeof listener !== "function") return nativeAdd.call(this, listener);
+      const target = nativeListener(this, listener);
+      let listeners = registered.get(this);
+      if (!listeners) registered.set(this, (listeners = new Set()));
+      listeners.add(target);
+      return hidden ? undefined : nativeAdd.call(this, target);
+    });
+    define(eventProto, "removeListener", function (listener) {
+      const target = this === onConnect ? relays.get(listener) || listener : listener;
+      if (target !== listener) relays.delete(listener);
+      const listeners = registered.get(this);
+      if (listeners) {
+        listeners.delete(target);
+        if (!listeners.size) registered.delete(this);
+      }
+      return nativeRemove.call(this, target);
+    });
+    define(eventProto, "hasListener", function (listener) {
+      const listeners = registered.get(this);
+      return !!listeners && listeners.has(this === onConnect ? relays.get(listener) : listener);
+    });
+    if (typeof runtime.connect === "function" && namespace("runtime")) {
+      const connect = runtime.connect;
+      pin(runtime, "connect", (...args) => standIn(connect.apply(runtime, args)));
+    }
+    const each = (apply) => {
+      for (const [event, listeners] of registered) for (const listener of listeners) quietly(apply, event, listener);
+    };
+    g.addEventListener("pagehide", () => {
+      if (hidden) return;
+      hidden = true;
+      each(nativeRemove);
+      for (const close of [...open.values()]) close();
+    });
+    g.addEventListener("pageshow", () => {
+      if (!hidden) return;
+      hidden = false;
+      each(nativeAdd);
+      const ended = closed;
+      closed = [];
+      for (const notify of ended) notify();
+    });
+  }
 
   // ---- Browser events ------------------------------------------------------
   // Events of the APIs the browser implements reach listening contexts over a
@@ -1004,6 +1206,54 @@
     }
   }
   if (webRequest) {
+    // WebKit reports a frame's own document as a main_frame request, with the
+    // frame's id; Chrome calls it sub_frame, and filters see it that way.
+    const framed = (details) => !!details && details.type === "main_frame" && details.frameId !== 0;
+    for (const name of [
+      "onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
+      "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred",
+    ]) {
+      let event;
+      try {
+        event = webRequest[name];
+      } catch {}
+      if (!event || typeof event.addListener !== "function") continue;
+      kept.push(event);
+      pin(webRequest, name, event);
+      const add = event.addListener;
+      const remove = event.removeListener;
+      const has = event.hasListener;
+      const relays = new WeakMap();
+      pin(event, "addListener", function (listener, filter, ...rest) {
+        if (typeof listener !== "function") return add.call(this, listener, filter, ...rest);
+        // A listener is registered once; a second add, whatever its filter,
+        // changes nothing, as in Chrome.
+        if (relays.has(listener)) return undefined;
+        const types = filter && Array.isArray(filter.types) ? filter.types : null;
+        const wantsSub = !types || types.includes("sub_frame");
+        const wantsMain = !types || types.includes("main_frame");
+        const relay = function (details, ...more) {
+          if (framed(details)) {
+            if (!wantsSub) return undefined;
+            return listener.call(this, Object.assign({}, details, { type: "sub_frame" }), ...more);
+          }
+          if (!wantsMain && details && details.type === "main_frame") return undefined;
+          return listener.call(this, details, ...more);
+        };
+        const widened = wantsSub && !wantsMain ? Object.assign({}, filter, { types: [...types, "main_frame"] }) : filter;
+        const registered = add.call(this, relay, widened, ...rest);
+        relays.set(listener, relay);
+        return registered;
+      });
+      pin(event, "removeListener", function (listener) {
+        const relay = relays.get(listener);
+        relays.delete(listener);
+        return remove.call(this, relay || listener);
+      });
+      pin(event, "hasListener", function (listener) {
+        return has.call(this, relays.get(listener) || listener);
+      });
+    }
     const headers = { REQUEST_HEADERS: "requestHeaders", RESPONSE_HEADERS: "responseHeaders" };
     const BLOCKING = "blocking";
     const EXTRA_HEADERS = "extraHeaders";
@@ -1242,6 +1492,17 @@
       const type = info && info.windowType;
       if (type !== undefined && type !== "normal" && type !== "popup") return withCallback(Promise.resolve([]), callback);
       return query.apply(this, arguments);
+    });
+  }
+  if (tabsApi && typeof tabsApi.sendMessage === "function") {
+    // Chrome takes a frame and the document in it together; WebKit wants one.
+    const sendMessage = tabsApi.sendMessage;
+    pin(tabsApi, "sendMessage", function (tabId, message, options, ...rest) {
+      if (options && typeof options === "object" && options.documentId !== undefined && options.frameId !== undefined) {
+        const { frameId: _frameId, ...document } = options;
+        return sendMessage.call(this, tabId, message, document, ...rest);
+      }
+      return sendMessage.call(this, tabId, message, options, ...rest);
     });
   }
 
