@@ -972,6 +972,26 @@ fn finish_refresh(
         Err(_) => failed_refresh(store, seed, shared, operation, FailureKind::Storage, None),
     }
 }
+/// A refresh that checked no list backs off the lists it tried, each on its
+/// own schedule, such as one whose only due list served its rejected copy;
+/// lists it did not try keep their own times.
+fn back_off(next: &mut Record, retry: Option<u64>, now: u64) {
+    next.failure_streak = next.failure_streak.saturating_add(1).min(8);
+    let started = next.attempted.unwrap_or(now);
+    let any_due = next.schedule.iter().any(|schedule| schedule.due <= started);
+    for schedule in &mut next.schedule {
+        if any_due && schedule.due > started {
+            continue;
+        }
+        schedule.failure_streak = schedule.failure_streak.saturating_add(1).min(8);
+        schedule.due = now.saturating_add(
+            BACKOFF[usize::from(schedule.failure_streak.saturating_sub(1).min(3))]
+                .max(retry.unwrap_or(0)),
+        );
+    }
+    next.due = next_due(next);
+}
+
 fn failed_refresh(
     store: &mut OfficialStore,
     seed: &ActivatedCatalog,
@@ -981,10 +1001,7 @@ fn failed_refresh(
     retry: Option<u64>,
 ) {
     let mut next = store.record.clone();
-    next.failure_streak = next.failure_streak.saturating_add(1).min(8);
-    next.due = now().saturating_add(
-        BACKOFF[usize::from(next.failure_streak.saturating_sub(1).min(3))].max(retry.unwrap_or(0)),
-    );
+    back_off(&mut next, retry, now());
     let failure = if store.persist(next).is_err() {
         FailureKind::Storage
     } else {
@@ -1571,6 +1588,40 @@ mod tests {
             fetched.sources[0],
             store.record.current.as_ref().unwrap().sources[0]
         );
+    }
+
+    #[test]
+    fn a_failure_of_withheld_lists_alone_backs_off_only_those_lists() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        reject(&mut store, &package, 0, &bad);
+        let started = now();
+        let mut next = store.record.clone();
+        next.attempted = Some(started);
+        next.schedule[0].due = started;
+        next.schedule[0].failure_streak = 2;
+        next.schedule[1].due = started + 1_800;
+        next.schedule[2].due = started + DAY;
+        next.schedule[3].due = started + DAY;
+        store.persist(next).unwrap();
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = serve_bad_easylist_and(&bad, None);
+        let Err(failure) =
+            runtime().block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+        else {
+            panic!("a refresh that checked no list succeeded");
+        };
+        assert_eq!(failure, (FailureKind::Target, None));
+        let mut next = store.record.clone();
+        back_off(&mut next, failure.1, started);
+        assert_eq!(next.schedule[0].due, started + BACKOFF[2]);
+        assert_eq!(next.schedule[0].failure_streak, 3);
+        assert_eq!(next.schedule[1].due, started + 1_800);
+        assert_eq!(next.schedule[1].failure_streak, 0);
+        // The other list keeps its own time instead of the withheld one's backoff.
+        assert_eq!(next.due, started + 1_800);
+        assert!(next.rejected.is_some() && next.schedule[0].rejected);
     }
 
     #[test]
