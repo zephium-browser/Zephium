@@ -252,8 +252,9 @@ unsupported.
 
 - Only block rules with `.*` are pruned; exceptions never are. Each entry is the
   SHA-256 of one rule exactly as emitted for WebKit, one per line, sorted, with
-  no rule text. An edited or new upstream rule emits a different rule and is
-  kept until the next refresh.
+  no rule text. A new upstream rule, or an edit that changes the emitted rule,
+  is kept until the next refresh. An edit that only changes letter case emits
+  the same rule, since url-filters are case-insensitive, and stays pruned.
 - The Windows runtime matcher has no such per-rule cost and compiles every rule.
 - The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
   sites, the top sites, pages where exceptions apply

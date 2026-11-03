@@ -3,7 +3,8 @@
 //! and runs them all on every load, so these rules carried most of the list's
 //! per-load cost while blocking nothing seen. Entries are SHA-256 digests of a
 //! rule exactly as it is emitted for WebKit: an upstream edit or a converter
-//! change emits a different rule, and that rule is kept.
+//! change that alters the emitted rule is kept. A letter-case-only edit emits
+//! the same rule and stays pruned.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
