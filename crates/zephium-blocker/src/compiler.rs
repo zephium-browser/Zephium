@@ -844,6 +844,22 @@ fn parse_drop_reason(error: &FilterParseError) -> InputDropReason {
     }
 }
 
+/// A source's physical lines, and an upper bound on its candidate rules (lines
+/// the compiler does not skip as comments or blanks), as the compiler counts
+/// them against the line and rule ceilings.
+pub(crate) fn line_counts(format: SourceFormat, text: &str) -> (usize, usize) {
+    let mut lines = 0;
+    let mut rules = 0;
+    for line in text.split('\n') {
+        lines += 1;
+        let line = line.strip_suffix('\r').unwrap_or(line).trim();
+        if !is_ignored_line(format, line) {
+            rules += 1;
+        }
+    }
+    (lines, rules)
+}
+
 fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
     if line.is_empty() {
         return true;

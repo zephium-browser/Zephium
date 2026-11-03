@@ -289,6 +289,8 @@
   "update_report_problem": "Etwas kaputt? Sag uns Bescheid",
   "session_set_aside_title": "Deine letzten Tabs konnten nicht wieder geöffnet werden",
   "session_set_aside_detail": "Zephium konnte die gespeicherte Sitzung nicht lesen und hat deshalb mit neuen Tabs begonnen. Verlauf, Lesezeichen und Einstellungen bleiben unverändert. Eine Kopie der alten Sitzung liegt im Datenordner von Zephium.",
+  "runtime_cleanup_title": "Alte Browserdaten liegen noch auf diesem Computer",
+  "runtime_cleanup_detail": "Zephium konnte Daten von Sitzungen, die nicht richtig beendet wurden, noch nicht löschen. Ein Neustart des Computers ermöglicht das meistens. Erscheint dieser Hinweis nach einem Neustart erneut, beende Zephium und verschiebe die Ordner privileged-runtime und web-content\\private-runtime aus seinem Datenordner.",
   "update_dismiss": "Ausblenden",
   "update_security_mac_title": "macOS hat Sicherheitsupdates",
   "update_security_system_title": "Dein System hat Sicherheitsupdates",

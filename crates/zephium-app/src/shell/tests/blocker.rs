@@ -3180,3 +3180,89 @@ fn pending_source_candidate_does_not_withhold_the_working_compiler_catalog() {
     shell.handle(Command::Bootstrap);
     assert!(shell.focused_blocker_status_view().can_enable);
 }
+
+#[test]
+fn a_view_its_filters_left_unprotected_shows_degraded_until_they_are_back() {
+    let mut bundled = catalog_revision(2, 2);
+    bundled.package_provenance =
+        Some(zephium_core::ports::blocker::BlockerCatalogProvenance::ReleaseBundle);
+    bundled.installed_provenance =
+        Some(zephium_core::ports::blocker::BlockerCatalogProvenance::ReleaseBundle);
+    bundled.refresh_supported = false;
+    bundled.last_refresh_attempt_unix = None;
+    let (mut shell, compiler) = shell_with_initial_catalog(bundled);
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let initial = initial_installation(&shell, profile);
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: initial,
+        settlement: ContentRuleSettlement::Applied {
+            generation: initial,
+        },
+    }));
+    shell.handle(blocker_operation("enable", true));
+    let enabled = compiler.complete_next(enabled_rules());
+    shell.handle(Command::BlockerReady(profile));
+    shell.handle(Command::Engine(EngineEvent::ContentRulesSettled {
+        profile,
+        requested: enabled,
+        settlement: ContentRuleSettlement::Applied {
+            generation: enabled,
+        },
+    }));
+    let tab = shell.windows.focused().unwrap().active.unwrap();
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://news.example/".into(),
+    });
+    assert!(shell.items.tab(tab).unwrap().has_view());
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+
+    let changed = |degraded| {
+        Command::Engine(EngineEvent::ContentProtectionChanged {
+            id: tab,
+            degraded,
+            stranded_filters: 0,
+        })
+    };
+    shell.handle(changed(true));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Degraded
+    );
+    shell.handle(changed(false));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+
+    // A replacement view reports afresh; the retired view's report goes with it.
+    shell.handle(changed(true));
+    shell.handle(Command::Engine(EngineEvent::Crashed { id: tab }));
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://news.example/".into(),
+    });
+    assert!(shell.items.tab(tab).unwrap().has_view());
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+
+    // A report for a view the shell does not know changes nothing.
+    shell.handle(Command::Engine(EngineEvent::ContentProtectionChanged {
+        id: ItemId::generate(),
+        degraded: true,
+        stranded_filters: 2,
+    }));
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+}

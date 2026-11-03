@@ -1032,6 +1032,7 @@ impl Shell {
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {
         self.residency.resident_since.remove(&id);
         self.residency.inactive_since.remove(&id);
+        self.forget_view_protection(id);
     }
 
     fn record_inactive_leaves(

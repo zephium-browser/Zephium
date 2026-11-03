@@ -479,7 +479,8 @@ fn native_protection_qualification() {
         } else {
             &policy
         };
-        registrations.push(install_scoped_on_view(&view, selected, &pause).unwrap());
+        registrations
+            .push(install_scoped_on_view(&view, selected, &pause, &Default::default()).unwrap());
         loaded.set(None);
         let started = Instant::now();
         view.load_url(&url).unwrap();

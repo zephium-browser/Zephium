@@ -586,11 +586,45 @@ impl EngineHost {
             };
         self.browser_version_observers
             .insert(profile, version_observer);
+        self.record_private_browser_process(&environment, process_id);
         self.environments.insert(profile, environment);
         self.browser_processes.insert(profile, process);
         self.browser_process_exit_observers
             .insert(profile, observer);
         Ok((process_id, generation))
+    }
+
+    /// A private window's browser process goes into this run's private
+    /// generation, so the next launch can wipe that data even if this run
+    /// never proves the process gone.
+    #[cfg(target_os = "windows")]
+    fn record_private_browser_process(
+        &self,
+        environment: &ICoreWebView2Environment,
+        process_id: u32,
+    ) {
+        let folder = crate::platform::imp::environment_user_data_folder(environment)
+            .ok_or_else(|| std::io::Error::other("its user data folder could not be read"))
+            .and_then(|folder| zephium_core::webview2::canonical_user_data_directory(&folder));
+        let recorded = match folder {
+            Ok(folder) if !folder.starts_with(self.private_runtime.root()) => return,
+            Ok(_) => crate::platform::imp::browser_process_record(process_id)
+                .ok_or_else(|| std::io::Error::other("the browser process could not be read"))
+                .and_then(|record| self.private_runtime.record_browser_process(record)),
+            Err(error) => Err(error),
+        };
+        // A browser that may be private and is not recorded leaves the
+        // record incomplete, so this generation keeps the reboot-only rule.
+        if let Err(error) = recorded {
+            let invalidated = self.private_runtime.invalidate_process_record();
+            eprintln!(
+                "privacy: a WebView2 browser process was not recorded for private cleanup after an unclean quit: {error}"
+            );
+            // Its expectation is still pending, which keeps the generation.
+            if let Err(error) = invalidated {
+                eprintln!("privacy: the private cleanup record could not be invalidated: {error}");
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1340,3 +1374,41 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests;
+
+/// Before anything that may start a browser process in `folder`: one in the
+/// private generation is expected there first, so a run that ends before
+/// recording it leaves the generation for a reboot. False when that browser
+/// must not start. It takes the runtime alone, for callers that hold other
+/// parts of the host mutably.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub(super) fn expect_private_browser(
+    private_runtime: &zephium_core::webview2::RuntimeGeneration,
+    folder: &std::path::Path,
+) -> bool {
+    if !folder.starts_with(private_runtime.root()) {
+        return true;
+    }
+    match private_runtime.expect_browser() {
+        Ok(()) => true,
+        Err(error) if error.is_covered() => {
+            eprintln!(
+                "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "privacy: a private WebView2 browser was not started, since its data could be cleared while it runs: {error}"
+            );
+            false
+        }
+    }
+}
+
+/// Whether a profile environment's bootstrap starts a browser process: a new
+/// environment always does, and so does one whose browser has exited.
+#[cfg(target_os = "windows")]
+pub(super) fn bootstrap_starts_browser(existing_environment: bool, browser_running: bool) -> bool {
+    !existing_environment || !browser_running
+}
