@@ -704,7 +704,13 @@ fn validate_generation_progression(
                 asset.upstream_title, version, previous_version
             ));
         }
+        // A list versioned by its modification date can change twice in a
+        // minute; one with a published version cannot change under it.
+        let dated = SOURCES
+            .iter()
+            .any(|spec| spec.id == source.id && spec.header == HeaderFormat::Dated);
         if version == previous_version
+            && !dated
             && (source != previous_source
                 || asset.upstream_commit != previous_asset.upstream_commit)
         {
@@ -2280,5 +2286,61 @@ mod tests {
         assert!(reject_future_sources(&input, modified).is_ok());
         assert!(reject_future_sources(&input, modified - 300).is_ok());
         assert!(reject_future_sources(&input, modified - 301).is_err());
+    }
+
+    #[test]
+    fn a_dated_list_may_change_within_its_minute_and_a_versioned_one_may_not() {
+        for (index, target, license, dated) in [
+            (3, "ublock-quick-fixes.txt", &GPL_3, true),
+            (0, "easylist.txt", &CC_BY_SA, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            for name in file_set([(target, license)]) {
+                std::fs::write(directory.path().join(name), b"fixture").unwrap();
+            }
+            let source = CatalogSource {
+                id: SOURCES[index].id.into(),
+                format: SourceFormat::Standard,
+                target: target.into(),
+                length: 7,
+                sha256: "0".repeat(64),
+                license: license_metadata(&SOURCES[index]),
+            };
+            let previous = CatalogManifest {
+                schema_version: 1,
+                revision: 202_611_021_408,
+                created_unix: 2,
+                expires_unix: 3,
+                sources: vec![source.clone()],
+            };
+            let previous_bytes = canonical_json(&previous).unwrap();
+            let asset = ReleaseSeedAsset {
+                target: target.into(),
+                compression: CompressionFormat::Gzip,
+                compressed_length: 7,
+                compressed_sha256: "1".repeat(64),
+                upstream_title: SOURCES[index].id.into(),
+                upstream_version: "202611021408".into(),
+                upstream_commit: (!dated).then(|| "2".repeat(40)),
+            };
+            let seed = ReleaseSeedManifest {
+                schema_version: SEED_SCHEMA_VERSION,
+                catalog_manifest_sha256: hex_sha256(&previous_bytes),
+                assets: vec![asset],
+            };
+            std::fs::write(directory.path().join(CATALOG_FILE), &previous_bytes).unwrap();
+            std::fs::write(
+                directory.path().join(SEED_FILE),
+                canonical_json(&seed).unwrap(),
+            )
+            .unwrap();
+            let mut changed = previous.clone();
+            changed.revision = 202_611_021_409;
+            changed.sources[0].sha256 = "f".repeat(64);
+            let changed_bytes = canonical_json(&changed).unwrap();
+            let result =
+                validate_generation_progression(directory.path(), &changed, &changed_bytes, &seed);
+            assert_eq!(result.is_ok(), dated, "{target}");
+        }
     }
 }
