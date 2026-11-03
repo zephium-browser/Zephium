@@ -202,7 +202,12 @@ impl Tally {
     /// has a number for count, so the configurations are compared on the same
     /// pages, and a site with a wall that stayed up gives no ad number.
     fn medians(&self) -> BTreeMap<(String, Metric), (f64, usize)> {
-        self.medians_over(|_, _| true)
+        self.medians_over(|metric| {
+            self.usable(metric, &self.measured(metric))
+                .into_iter()
+                .cloned()
+                .collect()
+        })
     }
 
     fn measured(&self, metric: Metric) -> Vec<&String> {
@@ -216,37 +221,32 @@ impl Tally {
             .collect()
     }
 
-    fn usable(&self, metric: Metric) -> Vec<&String> {
-        let measured = self.measured(metric);
+    /// The sites where every one of `configs` has a number for `metric`.
+    fn usable(&self, metric: Metric, configs: &[&String]) -> Vec<&String> {
         self.sites
             .iter()
-            .filter(|_| !measured.is_empty())
+            .filter(|_| !configs.is_empty())
             .filter(|site| !(metric.is_ad() && self.flagged.contains(*site)))
             .filter(|site| {
-                measured
+                configs
                     .iter()
                     .all(|config| self.site_mean(site, config, metric).is_some())
             })
             .collect()
     }
 
-    /// `medians` over the usable sites `keep` accepts.
-    fn medians_over(&self, keep: impl Fn(Metric, &str) -> bool) -> Medians {
+    /// `medians` over the sites `sites` names for each metric.
+    fn medians_over(&self, sites: impl Fn(Metric) -> Vec<String>) -> Medians {
         let mut medians = BTreeMap::new();
         for metric in METRICS {
-            let measured = self.measured(metric);
-            let usable: Vec<&String> = self
-                .usable(metric)
-                .into_iter()
-                .filter(|site| keep(metric, site))
-                .collect();
-            for config in &measured {
+            let usable = sites(metric);
+            for config in self.measured(metric) {
                 let means: Vec<f64> = usable
                     .iter()
                     .filter_map(|site| self.site_mean(site, config, metric))
                     .collect();
                 if let Some(median) = stats::median(&means) {
-                    medians.insert(((*config).clone(), metric), (median, usable.len()));
+                    medians.insert((config.clone(), metric), (median, usable.len()));
                 }
             }
         }
@@ -713,24 +713,39 @@ fn speedometer_section(results: &Results) -> String {
     out
 }
 
-/// Each metric is compared over the sites both runs could use for it, so a
-/// different `--only` or a failed site does not move a median by itself.
+/// Each metric is compared over the sites where both runs measured every
+/// configuration they share, so a different `--only`, a failed site or a
+/// configuration only one run had does not move a median by itself.
 pub(super) fn compare(old: &Results, new: &Results) -> String {
     let (before, after) = (Tally::new(old), Tally::new(new));
-    let mut shared: BTreeSet<(Metric, String)> = BTreeSet::new();
+    let mut shared: BTreeMap<Metric, Vec<String>> = BTreeMap::new();
     let mut left_out: BTreeSet<String> = BTreeSet::new();
     for metric in METRICS {
-        let (a, b) = (before.usable(metric), after.usable(metric));
+        let names = |tally: &Tally| -> BTreeSet<String> {
+            tally.measured(metric).into_iter().cloned().collect()
+        };
+        let configs: Vec<String> = names(&before)
+            .intersection(&names(&after))
+            .cloned()
+            .collect();
+        let configs: Vec<&String> = configs.iter().collect();
+        let (a, b) = (
+            before.usable(metric, &configs),
+            after.usable(metric, &configs),
+        );
         for site in a.iter().chain(&b) {
             if a.contains(site) && b.contains(site) {
-                shared.insert((metric, (*site).clone()));
+                let sites = shared.entry(metric).or_default();
+                if !sites.contains(site) {
+                    sites.push((*site).clone());
+                }
             } else {
                 left_out.insert((*site).clone());
             }
         }
     }
-    let both = |metric: Metric, site: &str| shared.contains(&(metric, site.to_string()));
-    let (old_medians, new_medians) = (before.medians_over(both), after.medians_over(both));
+    let sites = |metric: Metric| shared.get(&metric).cloned().unwrap_or_default();
+    let (old_medians, new_medians) = (before.medians_over(sites), after.medians_over(sites));
     let mut rows = Vec::new();
     for ((config, metric), (now, _)) in &new_medians {
         let Some((before, _)) = old_medians.get(&(config.clone(), *metric)) else {
@@ -1027,6 +1042,22 @@ mod tests {
             text.contains("left out of some or all metrics: b."),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_configuration_only_one_run_measured_does_not_empty_the_comparison() {
+        let old = results(vec![
+            visit(ZEPHIUM_OFF, "a", 100.0, 100.0, 5.0),
+            visit(ZEPHIUM_ON, "a", 80.0, 60.0, 1.0),
+        ]);
+        let new = results(vec![
+            visit(ZEPHIUM_OFF, "a", 100.0, 100.0, 5.0),
+            visit(ZEPHIUM_ON, "a", 60.0, 60.0, 1.0),
+            visit("ublock", "b", 70.0, 60.0, 1.0),
+        ]);
+        let text = compare(&old, &new);
+        assert!(text.contains("-25.0%"), "{text}");
+        assert!(!text.contains("share no configuration"), "{text}");
     }
 
     #[test]
