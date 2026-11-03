@@ -588,6 +588,12 @@ fn youtube_section(results: &Results) -> String {
                     Some(field("adPlacements")? + field("playerAds")? + field("adSlots")?)
                 })
                 .collect();
+            let seeks: Vec<Option<f64>> = steps
+                .iter()
+                .filter_map(|s| s.result.as_ref()?.get("seekMs")?.as_array().cloned())
+                .flatten()
+                .map(|seek| seek.as_f64())
+                .collect();
             let column = |values: Vec<f64>, places: usize| spread(&values, places);
             let numbers = |pick: fn(&YoutubeStep) -> Option<f64>| -> Vec<f64> {
                 steps.iter().filter_map(|s| pick(s)).collect()
@@ -610,6 +616,17 @@ fn youtube_section(results: &Results) -> String {
                 flag("enforcement"),
                 column(result("played"), 1),
                 column(result("stalledMs"), 0),
+                column(result("contentFrameMs"), 0),
+                column(seeks.iter().flatten().copied().collect(), 0),
+                if seeks.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        seeks.iter().filter(|s| s.is_none()).count(),
+                        seeks.len()
+                    )
+                },
                 column(player_ads, 1),
                 column(numbers(|s| s.blocked.map(|b| b as f64)), 1),
                 column(numbers(|s| s.cpu_ms), 0),
@@ -618,7 +635,7 @@ fn youtube_section(results: &Results) -> String {
         })
         .collect();
     format!(
-        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
+        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first frame that was not an ad, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts seeks that did not play within 15 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
         table(
             &[
                 "config",
@@ -634,6 +651,9 @@ fn youtube_section(results: &Results) -> String {
                 "enforcement",
                 "played s",
                 "stalled ms",
+                "start ms",
+                "seek ms",
+                "seek missed",
                 "player ad data",
                 "blocked",
                 "cpuMs",
@@ -1109,7 +1129,7 @@ mod tests {
         results.youtube.push(YoutubeStep {
             config: ZEPHIUM_ON.into(),
             step: "watch".into(),
-            result: Some(json!({ "adSeen": false, "adMs": 0, "adPlacements": 2, "playerAds": 0, "adSlots": 1, "played": 29.5, "stalledMs": 0 })),
+            result: Some(json!({ "adSeen": false, "adMs": 0, "adPlacements": 2, "playerAds": 0, "adSlots": 1, "played": 29.5, "stalledMs": 0, "contentFrameMs": 1840, "seekMs": [420, null] })),
             ..YoutubeStep::default()
         });
         let text = render(&results);
@@ -1117,5 +1137,8 @@ mod tests {
         assert!(text.contains("| 2 "), "{text}");
         assert!(text.contains("0/1"), "{text}");
         assert!(text.contains("3.0"), "{text}");
+        assert!(text.contains("| 1840 "), "{text}");
+        assert!(text.contains("| 420 "), "{text}");
+        assert!(text.contains("| 1/2 "), "{text}");
     }
 }
