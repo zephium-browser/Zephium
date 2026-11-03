@@ -603,18 +603,22 @@ impl EngineHost {
         environment: &ICoreWebView2Environment,
         process_id: u32,
     ) {
-        let private = crate::platform::imp::environment_user_data_folder(environment)
-            .and_then(|folder| zephium_core::webview2::canonical_user_data_directory(&folder).ok())
-            .is_some_and(|folder| folder.starts_with(self.private_runtime.root()));
-        if !private {
-            return;
-        }
-        let recorded = crate::platform::imp::browser_process_record(process_id)
-            .ok_or_else(|| std::io::Error::other("the browser process could not be read"))
-            .and_then(|record| self.private_runtime.record_browser_process(record));
+        let folder = crate::platform::imp::environment_user_data_folder(environment)
+            .ok_or_else(|| std::io::Error::other("its user data folder could not be read"))
+            .and_then(|folder| zephium_core::webview2::canonical_user_data_directory(&folder));
+        let recorded = match folder {
+            Ok(folder) if !folder.starts_with(self.private_runtime.root()) => return,
+            Ok(_) => crate::platform::imp::browser_process_record(process_id)
+                .ok_or_else(|| std::io::Error::other("the browser process could not be read"))
+                .and_then(|record| self.private_runtime.record_browser_process(record)),
+            Err(error) => Err(error),
+        };
+        // A browser that may be private and is not recorded leaves the
+        // record incomplete, so this generation keeps the reboot-only rule.
         if let Err(error) = recorded {
+            self.private_runtime.invalidate_process_record();
             eprintln!(
-                "privacy: a private WebView2 browser process was not recorded for cleanup after an unclean quit: {error}"
+                "privacy: a WebView2 browser process was not recorded for private cleanup after an unclean quit: {error}"
             );
         }
     }

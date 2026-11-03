@@ -4,6 +4,7 @@
 //! termination on the exact process that was recorded.
 
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{FILETIME, HANDLE, WAIT_OBJECT_0};
@@ -20,7 +21,8 @@ use zephium_core::webview2::{
 };
 
 const BROWSER_IMAGE: &str = "msedgewebview2.exe";
-/// How long an ended orphan may take to be gone before its data is left alone.
+/// How long an ended orphan and its children may take to be gone, together,
+/// before their data is left alone.
 const EXIT_WAIT_MS: u32 = 2_000;
 
 pub struct WindowsLeftoverProcesses;
@@ -39,7 +41,7 @@ impl LeftoverProcesses for WindowsLeftoverProcesses {
     fn terminate(&self, process: BrowserProcessRecord) -> bool {
         let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE;
         let Some(browser) = open_exact(process, access) else {
-            return true;
+            return !still_running(process);
         };
         // A record names a WebView2 browser; anything else is left running.
         if !image_is(&browser, BROWSER_IMAGE) {
@@ -48,18 +50,63 @@ impl LeftoverProcesses for WindowsLeftoverProcesses {
         // Renderers, the GPU process and utilities are the browser's direct
         // children. A child is only one created after the browser, so an id
         // the browser's parent slot once pointed at is never taken for it.
+        // Every child is checked before anything is ended: one this launch
+        // may not end could still hold the generation's files open.
+        let mut ended = Vec::new();
+        let mut checks = Vec::new();
         for child in children_of(process) {
-            if let Some(child) = open_exact(child, access) {
-                if image_is(&child, BROWSER_IMAGE) {
-                    // SAFETY: a live handle opened with PROCESS_TERMINATE.
-                    let _ = unsafe { TerminateProcess(raw(&child), 1) };
+            checks.push(match open_exact(child, access) {
+                Some(handle) if image_is(&handle, BROWSER_IMAGE) => {
+                    ended.push(handle);
+                    Child::Endable
                 }
-            }
+                Some(_) => Child::Foreign,
+                None if still_running(child) => Child::Unopenable,
+                None => Child::Gone,
+            });
         }
-        // SAFETY: a live handle opened with PROCESS_TERMINATE.
-        let _ = unsafe { TerminateProcess(raw(&browser), 1) };
-        exited(&browser, EXIT_WAIT_MS)
+        if !children_may_end(&checks) {
+            return false;
+        }
+        ended.push(browser);
+        for handle in &ended {
+            // SAFETY: a live handle opened with PROCESS_TERMINATE.
+            let _ = unsafe { TerminateProcess(raw(handle), 1) };
+        }
+        let deadline = Instant::now() + Duration::from_millis(u64::from(EXIT_WAIT_MS));
+        ended.iter().all(|handle| {
+            let left = deadline.saturating_duration_since(Instant::now());
+            exited(
+                handle,
+                u32::try_from(left.as_millis()).unwrap_or(EXIT_WAIT_MS),
+            )
+        })
     }
+}
+
+/// What checking one of an orphan's children found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Child {
+    Endable,
+    Gone,
+    /// Running, but not a WebView2 process.
+    Foreign,
+    /// Running, and could not be opened to be ended.
+    Unopenable,
+}
+
+fn children_may_end(children: &[Child]) -> bool {
+    children
+        .iter()
+        .all(|child| matches!(child, Child::Endable | Child::Gone))
+}
+
+fn still_running(process: BrowserProcessRecord) -> bool {
+    open_exact(
+        process,
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+    )
+    .is_some_and(|handle| !exited(&handle, 0))
 }
 
 /// The record for a running browser process, read from the process itself.
@@ -186,4 +233,38 @@ pub fn generation_report_lines(root: &str, report: &GenerationReport) -> Vec<Str
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_orphan_is_ended_only_when_every_child_can_be_ended_too() {
+        assert!(children_may_end(&[]));
+        assert!(children_may_end(&[Child::Endable, Child::Gone]));
+        assert!(!children_may_end(&[Child::Endable, Child::Foreign]));
+        assert!(!children_may_end(&[Child::Gone, Child::Unopenable]));
+    }
+
+    #[test]
+    fn a_recorded_process_that_is_not_webview2_is_left_running() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        let record = browser_process_record(child.id()).unwrap();
+        assert_eq!(
+            WindowsLeftoverProcesses.state(record),
+            RecordedProcessState::Running
+        );
+        assert!(!WindowsLeftoverProcesses.terminate(record));
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            WindowsLeftoverProcesses.state(record),
+            RecordedProcessState::Gone
+        );
+    }
 }
