@@ -1811,6 +1811,15 @@ fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
     });
     assert_eq!(created(&engine), 1, "{:?}", engine.calls());
     assert_eq!(shell.blocker.startup_unprotected_views, 1);
+    shell.handle(Command::OpenUrl {
+        input: "https://late-protection.example/second".into(),
+        new_tab: true,
+    });
+    assert_eq!(created(&engine), 2, "{:?}", engine.calls());
+    assert_eq!(
+        shell.blocker.startup_unprotected_views, 2,
+        "a view opened after the deadline is counted too"
+    );
 
     let generation = compiler.complete_next(enabled_rules());
     shell.handle(Command::BlockerReady(profile));
@@ -1823,8 +1832,14 @@ fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
         shell.focused_blocker_status_view().protection,
         BlockerProtection::Active
     );
-    assert_eq!(created(&engine), 1);
-    assert_eq!(shell.blocker.startup_unprotected_views, 1);
+    assert_eq!(created(&engine), 2);
+    assert_eq!(shell.blocker.startup_unprotected_views, 2);
+    shell.handle(Command::OpenUrl {
+        input: "https://late-protection.example/third".into(),
+        new_tab: true,
+    });
+    assert_eq!(created(&engine), 3);
+    assert_eq!(shell.blocker.startup_unprotected_views, 2);
 }
 
 #[test]

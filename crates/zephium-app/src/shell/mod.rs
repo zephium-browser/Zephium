@@ -2152,6 +2152,7 @@ impl Shell {
                 queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
             }
         }
+        self.rearm_blocker_startup_deadlines();
         if let Some(reads) = &self.store_reads {
             reads.resume();
         }

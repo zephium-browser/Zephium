@@ -97,9 +97,10 @@ pub struct ManagedBlocker {
     /// profile's policy is what holds the first pages.
     startup_candidate_yield: Option<(Instant, Arc<AtomicBool>)>,
     /// A downloaded list then waits until no page has been loading for a
-    /// moment, so its compile never competes with one. The wait started here.
+    /// moment, so its compile never competes with one. The wait for the list
+    /// with this manifest started here; a retry of the same list keeps it.
     page_activity: Arc<PageActivity>,
-    candidate_quiet_wait: Mutex<Option<Instant>>,
+    candidate_quiet_wait: Mutex<Option<([u8; 32], Instant)>>,
 }
 
 const STARTUP_CANDIDATE_YIELD: Duration = Duration::from_secs(10);
@@ -634,18 +635,16 @@ impl ManagedBlocker {
         state.snapshot
     }
 
-    fn pages_allow_candidate(&self, now: Instant) -> bool {
+    fn pages_allow_candidate(&self, manifest: [u8; 32], now: Instant) -> bool {
         let mut waiting = self
             .candidate_quiet_wait
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let since = *waiting.get_or_insert(now);
-        let allowed =
-            candidate_may_prepare_while_browsing(self.page_activity.quiet_for(now), since, now);
-        if allowed {
-            *waiting = None;
-        }
-        allowed
+        let since = match *waiting {
+            Some((waiting_for, since)) if waiting_for == manifest => since,
+            _ => waiting.insert((manifest, now)).1,
+        };
+        candidate_may_prepare_while_browsing(self.page_activity.quiet_for(now), since, now)
     }
 
     fn drive_catalog_transition(&self) {
@@ -690,7 +689,7 @@ impl ManagedBlocker {
                 state
                     .pending
                     .clone()
-                    .filter(|_| {
+                    .filter(|pending| {
                         state
                             .native_retry
                             .as_ref()
@@ -699,7 +698,10 @@ impl ManagedBlocker {
                                 self.startup_candidate_yield.as_ref(),
                                 Instant::now(),
                             )
-                            && self.pages_allow_candidate(Instant::now())
+                            && self.pages_allow_candidate(
+                                pending.identity.manifest_sha256,
+                                Instant::now(),
+                            )
                     })
                     .map(Action::Prepare)
             }
@@ -712,8 +714,17 @@ impl ManagedBlocker {
                 let identity = candidate.identity.clone();
                 let callback_identity = identity.clone();
                 let marker = self.compile_marker.clone();
+                // Without its name on disk, a list that crashes the browser
+                // would be compiled again on every launch; it waits instead.
                 if let Some(marker) = marker.as_ref() {
-                    let _ = std::fs::write(marker, hex_digest(&identity.manifest_sha256));
+                    if let Err(error) =
+                        std::fs::write(marker, hex_digest(&identity.manifest_sha256))
+                    {
+                        eprintln!(
+                            "blocker: downloaded list waits; compile marker not written: {error}"
+                        );
+                        return;
+                    }
                 }
                 let completion = Arc::clone(&self.transition_completion);
                 let native_validation = self.native_validation.clone();
@@ -1999,11 +2010,6 @@ impl BlockerCompiler for ManagedBlocker {
         };
         self.sealed.store(true, Ordering::Release);
         self.source_material_signal.seal();
-        // A list still compiling or under WebKit's check at a clean exit did
-        // not crash the browser.
-        if let Some(marker) = &self.compile_marker {
-            let _ = std::fs::remove_file(marker);
-        }
 
         let (updater, updater_lock_failed) = match lock_until(&self.updater, deadline) {
             Some(mut updater) => (updater.take(), false),
@@ -2027,6 +2033,13 @@ impl BlockerCompiler for ManagedBlocker {
                 .ok()
         });
         let compiler_outcome = self.compiler.shutdown_until(deadline);
+        // A list still compiling or under WebKit's check did not crash the
+        // browser if the compiler stopped; one that never let it stop did.
+        if compiler_outcome == BlockerShutdownOutcome::Clean {
+            if let Some(marker) = &self.compile_marker {
+                let _ = std::fs::remove_file(marker);
+            }
+        }
         let updater_outcome = match updater_thread {
             Some(thread) => join_until(thread, deadline).flatten(),
             None => updater_slot.and_then(|slot| {
@@ -2382,11 +2395,13 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
         assert!(service.lock_state().transition.is_none());
 
-        *service.candidate_quiet_wait.lock().unwrap() =
-            Some(Instant::now() - CANDIDATE_QUIET_WAIT_CAP);
+        let capped = Instant::now() - CANDIDATE_QUIET_WAIT_CAP;
+        *service.candidate_quiet_wait.lock().unwrap() = Some(([2; 32], capped));
         service.drive_locked(false);
         let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(service.candidate_quiet_wait.lock().unwrap().is_none());
+        // A native retry of the same list does not wait the whole cap again.
+        assert!(service.pages_allow_candidate([2; 32], Instant::now()));
+        assert!(!service.pages_allow_candidate([3; 32], Instant::now()));
         drop(loading);
         completion.finish(ContentRuleValidationOutcome::Valid);
     }

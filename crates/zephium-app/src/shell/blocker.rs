@@ -94,6 +94,9 @@ pub(super) struct BlockerProfile {
     /// Views keep waiting past the provisional allow-all for the enabled
     /// policy, until it is installed or the startup deadline with this token.
     startup_hold: Option<u64>,
+    /// The startup deadline passed first: views open behind the provisional
+    /// allow-all until a real policy is applied.
+    startup_unprotected: bool,
 }
 
 pub(super) struct RuntimePolicyObserver {
@@ -492,6 +495,7 @@ impl BlockerCoordinator {
                     applied_catalog_revision: None,
                     startup_provisional: false,
                     startup_hold: None,
+                    startup_unprotected: false,
                 },
             );
         }
@@ -529,6 +533,7 @@ impl BlockerCoordinator {
                 applied_catalog_revision: None,
                 startup_provisional: false,
                 startup_hold: None,
+                startup_unprotected: false,
             },
         );
         true
@@ -2570,6 +2575,9 @@ impl Shell {
                 // The provisional allow-all keeps views waiting; the policy
                 // that follows it, enabled or deliberately disabled, ends it.
                 if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+                    if !entry.startup_provisional {
+                        entry.startup_unprotected = false;
+                    }
                     if !entry.startup_provisional && entry.startup_hold.take().is_some() {
                         if let Some(queue) = &self.self_queue {
                             queue.cancel_blocker_startup_deadline(profile);
@@ -2672,19 +2680,33 @@ impl Shell {
             return;
         }
         entry.startup_hold = None;
-        let views = entry
+        entry.startup_unprotected = true;
+        let waiting = entry
             .held_effects
             .iter()
             .filter(|effect| matches!(effect, Effect::CreateView { .. }))
-            .count() as u64;
-        self.blocker.startup_unprotected_views =
-            self.blocker.startup_unprotected_views.saturating_add(views);
-        crate::diagnostic!(
-            "content blocker: startup protection was not ready in time; views_opened_unprotected={views} total={}",
-            self.blocker.startup_unprotected_views
-        );
+            .count();
+        // The gate counts each view as it opens behind the allow-all.
         if self.blocker.native_policy_available(profile) {
             self.release_held_blocker_effects(profile);
+        }
+        crate::diagnostic!(
+            "content blocker: startup protection was not ready in time; views_waiting={waiting} opened_unprotected_total={}",
+            self.blocker.startup_unprotected_views
+        );
+    }
+
+    /// A shutdown barrier drops every timer; views still held for startup
+    /// protection get a fresh deadline when the browser resumes.
+    pub(super) fn rearm_blocker_startup_deadlines(&mut self) {
+        let Some(queue) = &self.self_queue else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + STARTUP_PROTECTION_DEADLINE;
+        for (profile, entry) in &self.blocker.profiles {
+            if let Some(token) = entry.startup_hold {
+                queue.schedule_blocker_startup_deadline(*profile, token, deadline);
+            }
         }
     }
 
@@ -2739,6 +2761,12 @@ impl Shell {
             if self.blocker.native_policy_available(profile)
                 && self.blocker.startup_hold(profile).is_none()
             {
+                if matches!(effect, Effect::CreateView { .. })
+                    && self.blocker.profiles[&profile].startup_unprotected
+                {
+                    self.blocker.startup_unprotected_views =
+                        self.blocker.startup_unprotected_views.saturating_add(1);
+                }
                 admitted.push(effect);
             } else if self.blocker.hold_effect(profile, effect) {
                 native.scheduled = true;
