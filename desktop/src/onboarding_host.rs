@@ -1,7 +1,8 @@
 //! Windows serves onboarding from a host of its own. The browser that replaces
-//! it in the same window is then a cross-site navigation, and WebView2 starts
-//! it in a new renderer process instead of the one onboarding grew; there is
-//! no other way to ask WebView2 for a fresh renderer.
+//! it in the same window is then a cross-site navigation, for which WebView2
+//! starts a new renderer process instead of the one onboarding grew. That is
+//! Chromium's choice, seen in every measured run but not guaranteed, and only
+//! memory depends on it; there is no API to ask WebView2 for a fresh renderer.
 //!
 //! The host is the bundled frame, narrowed to onboarding: its own document and
 //! the bundle's non-page files, which the main window already reads from its

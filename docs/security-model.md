@@ -188,8 +188,9 @@ Any change that breaks one of these invariants must fail review and release:
    serves onboarding from its own custom-protocol host, `zephium-onboarding.localhost`,
    which only `main` may load, and only until handover. It serves that exact document and
    the bundle's non-page files, the same bytes `main` already reads from its app origin,
-   and no other page; the browser that replaces it is then cross-site and starts
-   in a new renderer process. Other navigation is rejected.
+   and no other page. The browser that replaces it is then a cross-site navigation;
+   this is a memory measure, not an isolation boundary, and WebView2 does not guarantee
+   a new renderer process for it. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
    event, and every request to launch an OS-registered URI scheme is cancelled.
 3. Application-requested tab navigation is checked in core and again before the native
