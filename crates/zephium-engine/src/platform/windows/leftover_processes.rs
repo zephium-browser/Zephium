@@ -83,13 +83,21 @@ impl LeftoverProcesses for WindowsLeftoverProcesses {
             let _ = unsafe { TerminateProcess(raw(handle), 1) };
         }
         let deadline = Instant::now() + Duration::from_millis(u64::from(EXIT_WAIT_MS));
-        ended.iter().all(|handle| {
+        let all_exited = ended.iter().all(|handle| {
             let left = deadline.saturating_duration_since(Instant::now());
             exited(
                 handle,
                 u32::try_from(left.as_millis()).unwrap_or(EXIT_WAIT_MS),
             )
-        })
+        });
+        // A child started after the first listing was never ended. The
+        // browser is still held open, so its id names only it.
+        all_exited
+            && children_of(
+                process,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            )
+            .is_some_and(|children| none_left(&children))
     }
 }
 
@@ -144,6 +152,16 @@ fn children_may_end(children: &[Child]) -> bool {
     children
         .iter()
         .all(|child| matches!(child, Child::Endable | Child::Gone))
+}
+
+/// Whether every child listed once the browser was ended is proven gone: an
+/// ended process can still be listed while a handle to it is open.
+fn none_left(children: &[Opened]) -> bool {
+    children.iter().all(|child| match child {
+        Opened::Live(handle, _) => exited(handle, 0),
+        Opened::Gone => true,
+        Opened::Unknown => false,
+    })
 }
 
 /// The record for a running browser process, read from the process itself.
@@ -322,6 +340,23 @@ mod tests {
             open_exact(system, query),
             Opened::Gone | Opened::Unknown
         ));
+    }
+
+    #[test]
+    fn a_child_still_running_after_the_end_keeps_the_generation() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        let query = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+        let opened = || open(child.id(), query);
+        assert!(!none_left(&[opened()]));
+        assert!(!none_left(&[Opened::Gone, Opened::Unknown]));
+        let held = opened();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Ended, yet still openable while this handle is held.
+        assert!(none_left(&[held, Opened::Gone]));
     }
 
     #[test]
