@@ -538,7 +538,19 @@ pub(crate) fn update(
             .map_err(|_| "the system clock is before 1970")?
             .as_secs(),
     )?;
-    let catalog = build_catalog(&sources)?;
+    let previous = repository
+        .join(ASSET_DIRECTORY)
+        .join(CATALOG_FILE)
+        .exists()
+        .then(|| {
+            let bytes = read_regular_file(
+                &repository.join(ASSET_DIRECTORY).join(CATALOG_FILE),
+                128 * 1024,
+            )?;
+            parse_canonical_json::<CatalogManifest>(&bytes, CATALOG_FILE)
+        })
+        .transpose()?;
+    let catalog = build_catalog(&sources, next_revision(&sources, previous.as_ref())?)?;
     let catalog_bytes = canonical_json(&catalog)?;
     let compressed = sources
         .iter()
@@ -717,8 +729,9 @@ fn reject_future_sources(sources: &[SourceInput], now: u64) -> Result<(), String
     }
 }
 
-fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
-    let revision = sources
+/// The newest source version, the least revision a catalog of them may carry.
+fn newest_version(sources: &[SourceInput]) -> Result<u64, String> {
+    sources
         .iter()
         .map(|source| {
             source
@@ -730,7 +743,48 @@ fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .max()
-        .ok_or_else(|| "blocker seed has no sources".to_owned())?;
+        .ok_or_else(|| "blocker seed has no sources".to_owned())
+}
+
+/// A new catalog's revision: unchanged sources keep the previous revision;
+/// any change advances it past both the previous revision and the newest
+/// source, in the same `YYYYMMDDHHMM` form, so a list with a lower version
+/// changing still moves the revision.
+fn next_revision(
+    sources: &[SourceInput],
+    previous: Option<&CatalogManifest>,
+) -> Result<u64, String> {
+    let newest = newest_version(sources)?;
+    let Some(previous) = previous else {
+        return Ok(newest);
+    };
+    let unchanged = previous.sources.len() == sources.len()
+        && previous.sources.iter().zip(sources).all(|(old, new)| {
+            old.id == new.spec.id
+                && old.sha256 == hex_sha256(&new.raw)
+                && old.length == new.raw.len() as u64
+        });
+    if unchanged {
+        return Ok(previous.revision.max(newest));
+    }
+    let (unix, _) = timestamp_from_version(&previous.revision.to_string())?;
+    let minutes = i64::try_from(unix / 60 + 1).map_err(|_| "revision overflows")?;
+    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
+    let minute = minutes.rem_euclid(1440);
+    let after: u64 = format!(
+        "{year:04}{month:02}{day:02}{:02}{:02}",
+        minute / 60,
+        minute % 60
+    )
+    .parse()
+    .map_err(|_| "revision overflows")?;
+    Ok(after.max(newest))
+}
+
+fn build_catalog(sources: &[SourceInput], revision: u64) -> Result<CatalogManifest, String> {
+    if revision < newest_version(sources)? {
+        return Err("blocker seed revision is older than its newest source".into());
+    }
     // The oldest list dates the seed, so the release gate measures the
     // stalest list rather than the most recently refreshed one.
     let created_unix = sources
@@ -791,7 +845,7 @@ fn build_release_seed(
 }
 
 fn validate_catalog(catalog: &CatalogManifest, sources: &[SourceInput]) -> Result<(), String> {
-    if catalog != &build_catalog(sources)? {
+    if catalog != &build_catalog(sources, catalog.revision)? {
         return Err("blocker seed catalog differs from exact source metadata".into());
     }
     Ok(())
@@ -2184,6 +2238,39 @@ mod tests {
                 expiry_seconds: 4 * 24 * 60 * 60,
             },
         }
+    }
+
+    fn catalog_of(inputs: &[SourceInput], revision: u64) -> CatalogManifest {
+        build_catalog(inputs, revision).unwrap()
+    }
+
+    #[test]
+    fn any_source_change_advances_the_revision_by_at_least_a_minute() {
+        let old = [
+            dated_input(0, "202611021000", b"a"),
+            dated_input(3, "202611021459", b"b"),
+        ];
+        let previous = catalog_of(&old, 202611021459);
+        assert_eq!(next_revision(&old, Some(&previous)).unwrap(), 202611021459);
+        // The lower-versioned list changes; the revision still moves, with the minute carried.
+        let changed = [
+            dated_input(0, "202611021000", b"a2"),
+            dated_input(3, "202611021459", b"b"),
+        ];
+        assert_eq!(
+            next_revision(&changed, Some(&previous)).unwrap(),
+            202611021500
+        );
+        let newer = [
+            dated_input(0, "202611021000", b"a"),
+            dated_input(3, "202611031200", b"b2"),
+        ];
+        assert_eq!(
+            next_revision(&newer, Some(&previous)).unwrap(),
+            202611031200
+        );
+        assert_eq!(next_revision(&old, None).unwrap(), 202611021459);
+        assert!(build_catalog(&newer, 202611021459).is_err());
     }
 
     #[test]
