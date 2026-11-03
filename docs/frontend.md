@@ -115,7 +115,10 @@ security boundary, not a rendering optimization.
   over `browser.html` before either loads (`zephium_app::onboarding_due`), and
   `onboarding_finish` replaces it with the browser in the same window: the
   chrome view stays hidden until the browser passes the same `uiReady` gate as a
-  normal launch. It is built separately (`vite.onboarding.config.ts`) so it never
+  normal launch. On Windows a bundled build serves it from its own host
+  (`desktop/src/onboarding_host.rs`), so the browser is a cross-site navigation and
+  WebView2 starts it in a new renderer instead of the one onboarding grew (seen in every
+  measured run, not guaranteed). It is built separately (`vite.onboarding.config.ts`) so it never
   splits code out of the browser graph; the build fails if the browser can reach
   any onboarding module, and reports to `frame/reports/bootstrap-report.onboarding.json`.
 - `frame/bundle-budgets.json` records each page's startup graph and what each
