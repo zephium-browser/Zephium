@@ -258,11 +258,14 @@
       );
       return;
     }
+    const edge = position;
     // Native stacks the chrome over the page before the card slides in, so
     // the slide is seen from its first frame.
     void commands.sidebarPeek(true, true, false).then(() =>
       requestAnimationFrame(() => {
-        if (away) peeking = true;
+        if (!away || position !== edge) return;
+        peeking = true;
+        if (!atEdge && !pointerIn) release();
       }),
     );
   }

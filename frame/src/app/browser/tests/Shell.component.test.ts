@@ -12,6 +12,10 @@ import * as sidebar from "$session/sidebar-mode.svelte";
 import { flushSync } from "svelte";
 import { IS_MAC } from "$shared/platform";
 
+const native = vi.hoisted(() => ({
+  peek: vi.fn(async (_peek: boolean, _lights: boolean, _slide: boolean) => {}),
+}));
+
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -21,7 +25,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsBootstrap: async () => {},
     sidebarSetHidden: async () => {},
     sidebarSetWidth: async () => {},
-    sidebarPeek: async () => {},
+    sidebarPeek: native.peek,
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
     settingGet: async () => null,
@@ -33,6 +37,7 @@ afterEach(() => {
   tabs.dispose();
   preferences.dispose();
   sidebar.setMode("default");
+  native.peek.mockReset().mockImplementation(async () => {});
   delete document.documentElement.dataset.reduceMotion;
 });
 test("Settings stands beside the tab rail and returns to the same web tab", async () => {
@@ -272,5 +277,56 @@ test.each(["new-tab", "navigation-failure"] as const)(
       flushSync();
       expect(pane.getBoundingClientRect().top).toBe(40);
     }
+  },
+);
+
+test.each(["left", "right"] as const)(
+  "%s hidden reveal settles closed when the pointer leaves before native raise completes",
+  async (position) => {
+    await page.viewport(900, 640);
+    document.documentElement.dataset.reduceMotion = "true";
+    await preferences.init();
+    await surface.init();
+    await tabs.init();
+    const projection = position === "left" ? 70 : 80;
+    const tab = tabFixture({ id: `hover-${position}`, projection_revision: revision(projection) });
+    emitNativeEvent("itemsChanged", {
+      projection_revision: revision(projection),
+      profile: null,
+      spaces: [],
+      active_space_id: null,
+      nodes: [],
+      tabs: [tab],
+      active: tab.id,
+      split_group: null,
+    });
+    emitNativeEvent("uiCommand", `preference.sidebar.position=${position}`);
+    sidebar.setMode("hidden");
+    const screen = await render(Shell);
+    const column = screen.container.querySelector<HTMLElement>("aside")!;
+    await expect.poll(() => column.dataset.hidden).toBe("true");
+    await page.elementLocator(screen.container.querySelector<HTMLElement>(".stage-column")!).hover();
+    const raise = Promise.withResolvers<void>();
+    native.peek.mockImplementationOnce(() => raise.promise);
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: false } }));
+    raise.resolve();
+    await expect.poll(() => column.dataset.peek).toBe("true");
+    await expect.poll(() => column.dataset.peek, { timeout: 2000 }).toBeUndefined();
+    await expect.poll(() => native.peek.mock.calls.at(-1)?.[0], { timeout: 2000 }).toBe(false);
+    expect(sidebar.isHidden()).toBe(true);
+
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
+    await expect.poll(() => column.dataset.peek).toBe("true");
+    await page.elementLocator(column).hover();
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: false } }));
+    // Real browser hover and animation frames must span the platform-clock settle interval.
+    const dwell = Promise.withResolvers<void>();
+    setTimeout(dwell.resolve, 600);
+    await dwell.promise;
+    expect(column.dataset.peek).toBe("true");
+    await page.elementLocator(screen.container.querySelector<HTMLElement>(".stage-column")!).hover();
+    await expect.poll(() => column.dataset.peek, { timeout: 2000 }).toBeUndefined();
+    expect(sidebar.isHidden()).toBe(true);
   },
 );

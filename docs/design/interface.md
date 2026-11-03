@@ -76,7 +76,9 @@ WKWebView, so settings controls need no special machinery.
 Appearance's Sidebar position preference selects Left (the saved default) or
 Right. Right mirrors the sidebar and content geometry; tool panels and Settings
 navigation stay inward, toward the content. Hidden mode reveals the sidebar
-from the selected window edge.
+from the selected window edge and withdraws after the pointer leaves, even
+when the pointer moves away before the reveal finishes. A focused field or
+open sidebar popup keeps the card available until released.
 Page-slide masks and hidden-card clipping follow the selected edge, so native
 pages and the sidebar move together in either position.
 The resize handle stays on the sidebar's inner edge. With the handle focused,
