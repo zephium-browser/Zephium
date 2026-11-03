@@ -531,8 +531,9 @@ enum SameBootReclaim {
 /// launch may end. The caller holds the root's exclusive lease, so no other
 /// Zephium instance can own any process recorded here. A record that is
 /// incomplete, invalidated, or names a process that cannot be checked proves
-/// nothing. Without one, only a generation holding no browsing data at all is
-/// cleared, since a running browser always keeps files open in its folder.
+/// nothing. A whole record with nothing pending and no browser clears a
+/// generation holding no browsing data; a generation without a whole,
+/// pending-free record is kept until reboot.
 fn reclaim_same_boot(
     path: &Path,
     boot: &RegKey,
@@ -548,8 +549,8 @@ fn reclaim_same_boot(
         read_process_record(path)?
     };
     // A browser expected and never recorded may still be starting, with no
-    // files of its own yet.
-    let quiet = !unrecorded && record.as_ref().is_none_or(|record| record.pending == 0);
+    // files of its own yet; a lost or torn record may have named one.
+    let quiet = !unrecorded && record.as_ref().is_some_and(|record| record.pending == 0);
     let reclaimed = match record {
         Some(record) if record.pending == 0 && !record.processes.is_empty() => {
             let states = record
@@ -1245,6 +1246,32 @@ mod tests {
             std::slice::from_ref(&left.generation)
         );
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn a_torn_or_lost_record_keeps_a_generation_holding_only_its_bookkeeping() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::Privileged;
+        for torn in [
+            Some(&b"pending\n4242 5"[..]),
+            Some(b"pending\n4242 5\nresol"),
+            None,
+        ] {
+            let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+            let record = run.root().join(PROCESS_RECORD);
+            match torn {
+                Some(torn) => fs::write(record, torn).unwrap(),
+                None => fs::remove_file(record).unwrap(),
+            }
+            let left = run.cleanup_ticket();
+            drop(run);
+            let next = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+            assert!(left.root().exists());
+            assert!(boot_knows(kind, &left.generation));
+            assert!(next.report().reclaimed_empty.is_empty());
+            left.cleanup_after_proven_exit().unwrap();
+            next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+        }
     }
 
     #[test]
