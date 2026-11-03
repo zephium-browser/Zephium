@@ -23,6 +23,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_SHARED_WORKER,
 };
 use webview2_com::WebResourceRequestedEventHandler;
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows_core::{Interface, PCWSTR, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::blocker::{
@@ -322,44 +323,84 @@ pub(crate) fn install_scoped_on_view(
     Ok(registration)
 }
 
-/// Pausing removes the cohort's filters, so a paused view's requests never
-/// wait on this thread; resuming installs them again. A failure leaves the
-/// filters as they are and the callback's own pause check in charge.
-fn follow_pause(core22: &ICoreWebView2_22, installed: &Cell<usize>, paused: bool) {
-    let target = if paused { 0 } else { FILTER_REGISTRATION_COUNT };
-    while installed.get() != target {
-        let adding = installed.get() < target;
-        let index = if adding {
-            installed.get()
-        } else {
-            installed.get() - 1
-        };
-        let Some((pattern, context)) = filter_registration(index) else {
-            return;
-        };
-        let changed = if adding {
-            unsafe {
-                core22.AddWebResourceRequestedFilterWithRequestSourceKinds(
-                    pattern,
-                    context,
-                    FILTER_SOURCE_KINDS,
-                )
-            }
-        } else {
-            unsafe {
-                core22.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
-                    pattern,
-                    context,
-                    FILTER_SOURCE_KINDS,
-                )
-            }
-        };
-        if let Err(error) = changed {
-            eprintln!("content blocker: WebView2 filter change on pause failed: {error}");
-            return;
+/// One view's cohort of request filters, as pausing and resuming change it.
+trait FilterCohort {
+    fn add(&self, index: usize) -> windows_core::Result<()>;
+    fn remove(&self, index: usize) -> windows_core::Result<()>;
+}
+
+impl FilterCohort for ICoreWebView2_22 {
+    fn add(&self, index: usize) -> windows_core::Result<()> {
+        let (pattern, context) =
+            filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        unsafe {
+            self.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                context,
+                FILTER_SOURCE_KINDS,
+            )
         }
-        installed.set(if adding { index + 1 } else { index });
     }
+
+    fn remove(&self, index: usize) -> windows_core::Result<()> {
+        let (pattern, context) =
+            filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        unsafe {
+            self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                context,
+                FILTER_SOURCE_KINDS,
+            )
+        }
+    }
+}
+
+/// How many times a resume rebuilds a cohort that would not install whole.
+const RESUME_ATTEMPTS: usize = 2;
+
+/// Pausing removes the cohort's filters, so a paused view's requests never
+/// wait on this thread; resuming installs them again. A filter missing on a
+/// resumed view would let its requests through unseen, so a cohort is whole
+/// or empty: a resume that cannot install every filter rebuilds the cohort,
+/// and after that removes them all, leaving the view unfiltered as if paused
+/// until its next resume tries again. A pause that cannot remove a filter
+/// leaves it to the callback's own pause check.
+fn follow_pause(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: bool) {
+    if paused {
+        if let Err(error) = remove_filters(cohort, installed) {
+            eprintln!("content blocker: WebView2 filter removal on pause failed: {error}");
+        }
+        return;
+    }
+    let mut failure = None;
+    for _ in 0..RESUME_ATTEMPTS {
+        match add_filters(cohort, installed) {
+            Ok(()) => return,
+            Err(error) => failure = Some(error),
+        }
+        let _ = remove_filters(cohort, installed);
+    }
+    if let Some(error) = failure {
+        eprintln!(
+            "content blocker: WebView2 filters could not be installed on resume, so the view stays unfiltered until its next resume: {error}"
+        );
+    }
+}
+
+fn add_filters(cohort: &impl FilterCohort, installed: &Cell<usize>) -> windows_core::Result<()> {
+    while installed.get() < FILTER_REGISTRATION_COUNT {
+        cohort.add(installed.get())?;
+        installed.set(installed.get() + 1);
+    }
+    Ok(())
+}
+
+fn remove_filters(cohort: &impl FilterCohort, installed: &Cell<usize>) -> windows_core::Result<()> {
+    while installed.get() > 0 {
+        cohort.remove(installed.get() - 1)?;
+        installed.set(installed.get() - 1);
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -453,6 +494,69 @@ fn resource_type(context: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<NetworkRe
 mod tests {
     use super::*;
     use zephium_core::blocker::{ContentRuleCoverage, NetworkAttribution};
+
+    /// A cohort whose adds fail at `fail_at` for the first `failures` attempts.
+    struct FlakyCohort {
+        fail_at: usize,
+        failures: Cell<usize>,
+        removes_fail: bool,
+    }
+
+    impl FilterCohort for FlakyCohort {
+        fn add(&self, index: usize) -> windows_core::Result<()> {
+            if index == self.fail_at && self.failures.get() > 0 {
+                self.failures.set(self.failures.get() - 1);
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        }
+
+        fn remove(&self, _index: usize) -> windows_core::Result<()> {
+            if self.removes_fail {
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        }
+    }
+
+    fn flaky(fail_at: usize, failures: usize) -> FlakyCohort {
+        FlakyCohort {
+            fail_at,
+            failures: Cell::new(failures),
+            removes_fail: false,
+        }
+    }
+
+    #[test]
+    fn a_resume_rebuilds_a_cohort_that_did_not_install_whole() {
+        let installed = Cell::new(0);
+        follow_pause(&flaky(3, 1), &installed, false);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
+
+    #[test]
+    fn a_resume_that_keeps_failing_leaves_no_filter_half_installed() {
+        let installed = Cell::new(0);
+        follow_pause(&flaky(3, RESUME_ATTEMPTS), &installed, false);
+        assert_eq!(installed.get(), 0);
+        // The next resume tries again.
+        follow_pause(&flaky(3, 0), &installed, false);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
+
+    #[test]
+    fn a_pause_removes_every_filter_and_keeps_those_it_cannot() {
+        let installed = Cell::new(FILTER_REGISTRATION_COUNT);
+        follow_pause(&flaky(0, 0), &installed, true);
+        assert_eq!(installed.get(), 0);
+        let installed = Cell::new(FILTER_REGISTRATION_COUNT);
+        let stuck = FlakyCohort {
+            removes_fail: true,
+            ..flaky(0, 0)
+        };
+        follow_pause(&stuck, &installed, true);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
 
     struct PanickingPolicy;
 
