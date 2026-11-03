@@ -537,3 +537,11 @@ fn macos_store_release_is_exact_attempt_and_terminal_only() {
     ));
     assert!(!macos_erasure_release_matches(None, &completed));
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_reused_environment_whose_browser_exited_expects_a_new_one() {
+    assert!(bootstrap_starts_browser(false, false));
+    assert!(bootstrap_starts_browser(true, false));
+    assert!(!bootstrap_starts_browser(true, true));
+}

@@ -48,7 +48,9 @@ use sites::{ConsentMode, Recipe, Site};
 
 const OPEN_TIMEOUT_MS: u64 = 30_000;
 const EVAL_TIMEOUT_MS: u64 = 20_000;
-const READY_WITHIN: Duration = Duration::from_secs(240);
+/// Above the Zephium driver's own waits: 120 s for its policy, then 120 s for
+/// its list sources, plus startup.
+const READY_WITHIN: Duration = Duration::from_secs(300);
 const REFRESH_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// What a Chromium template profile runs on `about:blank` so the browser
 /// finishes the background downloads (Brave's Shields lists among them) that

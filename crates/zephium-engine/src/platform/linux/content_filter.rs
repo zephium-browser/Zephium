@@ -121,7 +121,10 @@ pub(crate) fn install_scoped_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,
     pause: &crate::platform::content_pause::ContentPause,
+    protection: &crate::platform::content_protection::ViewProtection,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
+    // A content rule list is on the view whole, or the install fails with it.
+    protection.settle(false);
     let NativeContentPolicy::Declarative { filter, .. } = policy else {
         return Ok(ContentPolicyRegistration::allow_all());
     };

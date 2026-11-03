@@ -1162,6 +1162,49 @@ fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
 }
 
 #[cfg(feature = "webkit")]
+fn pruned(text: String) -> &'static crate::webkit_prune::PrunedRules {
+    Box::leak(Box::new(crate::webkit_prune::PrunedRules::parse(&text)))
+}
+
+#[cfg(feature = "webkit")]
+fn webkit_with(input: &str, entries: &[String]) -> CompiledRules {
+    Compiler::default()
+        .with_webkit_pruned(pruned(entries.join("\n")))
+        .compile(CompileTarget::WebKit, vec![source(input)])
+        .unwrap()
+}
+
+/// The digest entry for the last rule `input` emits.
+#[cfg(feature = "webkit")]
+fn entry_for(input: &str) -> String {
+    let compiled = webkit_with(input, &[]);
+    let emitted: Vec<Box<serde_json::value::RawValue>> =
+        serde_json::from_str(compiled.webkit().unwrap().json()).unwrap();
+    crate::webkit_rule_digest(emitted.last().unwrap().get().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(feature = "webkit")]
+const PRUNABLE: &str = "||tracker.example/collect/*/beacon.gif$image";
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_listed_wildcard_block_is_pruned_and_counted_apart_from_unsupported_rules() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = webkit_with(&input, &[entry_for(PRUNABLE)]);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.accepted_input_rules(), 2);
+    assert_eq!(coverage.converted_input_rules(), 1);
+    assert_eq!(coverage.pruned_input_rules(), 1);
+    assert_eq!(coverage.omitted_input_rules(), 0);
+    assert!(coverage.dropped().is_empty());
+    let json = compiled.webkit().unwrap().json();
+    assert!(json.contains("kept") && !json.contains("tracker"));
+}
+
+#[cfg(feature = "webkit")]
 #[test]
 fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     let rules = Compiler::default()
@@ -1225,4 +1268,96 @@ fn the_built_in_rules_are_exceptions_only() {
     for rule in rules {
         assert!(rule.starts_with("@@"), "{rule}");
     }
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn only_kept_rules_count_against_the_webkit_rule_limit() {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules: 1,
+        max_webkit_json_bytes: 64 * 1024,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = Compiler::new(limits)
+        .with_webkit_pruned(pruned(entry_for(PRUNABLE)))
+        .compile(CompileTarget::WebKit, vec![source(&input)])
+        .unwrap();
+    assert_eq!(compiled.report().webkit().unwrap().pruned_input_rules(), 1);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn an_edited_rule_is_not_pruned() {
+    // Case changes emit the same rule, since url-filters are case-insensitive.
+    let edited = PRUNABLE.replace("beacon", "beacom");
+    let compiled = webkit_with(&edited, &[entry_for(PRUNABLE)]);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.pruned_input_rules(), 0);
+    assert_eq!(coverage.converted_input_rules(), 1);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn an_entry_that_matches_no_rule_changes_nothing() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let without = webkit_with(&input, &[]);
+    let stray = webkit_with(&input, &[entry_for("||elsewhere.example/a/*/b.gif$image")]);
+    assert_eq!(
+        without.webkit().unwrap().json(),
+        stray.webkit().unwrap().json()
+    );
+    assert_eq!(stray.report().webkit().unwrap().pruned_input_rules(), 0);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn listed_exceptions_and_rules_without_a_wildcard_are_never_pruned() {
+    let exception = "@@||tracker.example/collect/*/beacon.gif$image";
+    let plain = "||plain.example/beacon.gif$image";
+    let input = format!("{PRUNABLE}\n{exception}\n{plain}\n");
+    let entries = [
+        entry_for(&format!("{PRUNABLE}\n{exception}")),
+        entry_for(plain),
+    ];
+    let compiled = webkit_with(&input, &entries);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.pruned_input_rules(), 0);
+    assert_eq!(coverage.converted_input_rules(), 3);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn release_tooling_can_compile_every_rule() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = Compiler::default()
+        .with_webkit_pruned(pruned(entry_for(PRUNABLE)))
+        .without_webkit_pruning()
+        .compile(CompileTarget::WebKit, vec![source(&input)])
+        .unwrap();
+    assert_eq!(compiled.report().webkit().unwrap().pruned_input_rules(), 0);
+    assert!(compiled.webkit().unwrap().json().contains("tracker"));
+}
+
+#[cfg(all(feature = "webkit", feature = "runtime"))]
+#[test]
+fn the_runtime_target_ignores_pruned_rules() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compile = |entries: &[String]| {
+        Compiler::default()
+            .with_webkit_pruned(pruned(entries.join("\n")))
+            .compile(CompileTarget::Runtime, vec![source(&input)])
+            .unwrap()
+    };
+    let (with, without) = (compile(&[entry_for(PRUNABLE)]), compile(&[]));
+    assert_eq!(with.digest(), without.digest());
+    assert_eq!(with.report(), without.report());
 }

@@ -246,6 +246,7 @@ struct RuntimeGolden {
 struct WebKitGolden {
     accepted_input_rules: usize,
     converted_input_rules: usize,
+    pruned_input_rules: usize,
     omitted_input_rules: usize,
     approximated_input_rules: usize,
     attribution_approximated_input_rules: usize,
@@ -262,6 +263,32 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
 
 pub(crate) fn materialize_webkit(repository: &Path, output: &Path) -> Result<(), String> {
     check_inner(repository, Some(output))
+}
+
+/// The bundled lists' WebKit artifact with every rule kept, as the pruned
+/// rule list is measured against. Its compile report is not a golden.
+pub(crate) fn materialize_webkit_unpruned(repository: &Path, output: &Path) -> Result<(), String> {
+    let directory = repository.join(ASSET_DIRECTORY);
+    validate_closed_file_set(&directory)?;
+    let catalog_bytes = read_regular_file(&directory.join(CATALOG_FILE), 128 * 1024)?;
+    let seed_bytes = read_regular_file(&directory.join(SEED_FILE), 128 * 1024)?;
+    let catalog: CatalogManifest = parse_canonical_json(&catalog_bytes, CATALOG_FILE)?;
+    let seed: ReleaseSeedManifest = parse_canonical_json(&seed_bytes, SEED_FILE)?;
+    if seed.catalog_manifest_sha256 != hex_sha256(&catalog_bytes) {
+        return Err("blocker seed manifest identities do not match exact bytes".into());
+    }
+    let raw_sources = verify_and_inflate_sources(&directory, &catalog, &seed)?;
+    let temporary = tempfile::tempdir()
+        .map_err(|error| format!("cannot create blocker seed directory: {error}"))?;
+    let source_paths = write_compile_inputs(temporary.path(), &raw_sources)?;
+    compile_one(
+        repository,
+        CompileTarget::Webkit,
+        &source_paths,
+        Some(output),
+        true,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn check_release_freshness(repository: &Path, now: u64) -> Result<(), String> {
@@ -1280,6 +1307,7 @@ fn compile_all(
                 (target == CompileTarget::Webkit)
                     .then_some(webkit_output)
                     .flatten(),
+                false,
             )
         })
         .collect()
@@ -1290,6 +1318,7 @@ fn compile_one(
     target: CompileTarget,
     paths: &[PathBuf; 2],
     artifact_output: Option<&Path>,
+    unpruned: bool,
 ) -> Result<CompileGolden, String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut command = Command::new(cargo);
@@ -1310,6 +1339,9 @@ fn compile_one(
     command.arg(&paths[0]).arg(&paths[1]);
     if let Some(output) = artifact_output {
         command.arg("--artifact").arg(output);
+    }
+    if unpruned {
+        command.arg("--unpruned");
     }
     let output = command.stdin(Stdio::null()).output().map_err(|error| {
         format!(
@@ -1341,6 +1373,7 @@ pub(crate) fn compile_hidden(
     easylist: &Path,
     easyprivacy: &Path,
     artifact_output: Option<&Path>,
+    unpruned: bool,
 ) -> Result<(), String> {
     use zephium_blocker::{Compiler, FilterSource, SourceFormat, SourceId};
 
@@ -1378,7 +1411,18 @@ pub(crate) fn compile_hidden(
         CompileTarget::Runtime => zephium_blocker::CompileTarget::Runtime,
         CompileTarget::Webkit => zephium_blocker::CompileTarget::WebKit,
     };
-    let compiled = Compiler::default()
+    let compiler = Compiler::default();
+    #[cfg(feature = "blocker-seed-webkit")]
+    let compiler = if unpruned {
+        compiler.without_webkit_pruning()
+    } else {
+        compiler
+    };
+    #[cfg(not(feature = "blocker-seed-webkit"))]
+    if unpruned {
+        return Err("only the WebKit compiler prunes rules".into());
+    }
+    let compiled = compiler
         .compile(native_target, sources)
         .map_err(|error| format!("{error:?}"))?;
     #[cfg(feature = "blocker-seed-runtime")]
@@ -1436,6 +1480,7 @@ pub(crate) fn compile_hidden(
     let webkit = report.webkit().map(|coverage| WebKitGolden {
         accepted_input_rules: coverage.accepted_input_rules(),
         converted_input_rules: coverage.converted_input_rules(),
+        pruned_input_rules: coverage.pruned_input_rules(),
         omitted_input_rules: coverage.omitted_input_rules(),
         approximated_input_rules: coverage.approximated_input_rules(),
         attribution_approximated_input_rules: coverage.attribution_approximated_input_rules(),

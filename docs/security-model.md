@@ -184,7 +184,13 @@ Any change that breaks one of these invariants must fail review and release:
    protocol. Page script cannot invoke Zephium commands.
 2. `main` and `panel` are constructed at exact `about:blank`, receive all mandatory
    native hardening, and only then navigate to the bundled application origin. Debug
-   builds additionally allow the exact local Vite origin. Other navigation is rejected.
+   builds additionally allow the exact local Vite origin. A bundled Windows first run
+   serves onboarding from its own custom-protocol host, `zephium-onboarding.localhost`,
+   which only `main` may load, and only until handover. It serves that exact document and
+   the bundle's non-page files, the same bytes `main` already reads from its app origin,
+   and no other page. The browser that replaces it is then a cross-site navigation;
+   this is a memory measure, not an isolation boundary, and WebView2 does not guarantee
+   a new renderer process for it. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
    event, and every request to launch an OS-registered URI scheme is cancelled.
 3. Application-requested tab navigation is checked in core and again before the native
@@ -663,12 +669,54 @@ so a correctly marked generation whose volatile key is absent has crossed a rebo
 boundary and may be reclaimed without inferring process death from filesystem access.
 Pre-provenance Zephium directories are first bounded, marked, and classified as
 same-boot; they cannot be reclaimed until a later reboot. Malformed or unowned objects
-are never adopted or deleted. Startup is bounded to 32 same-boot generations, 128 total
-including the new allocation, 2 GiB of quarantined logical file bytes, and 250,000
-inspected entries. Saturation fails with an explicit full-Windows-restart remediation;
-opaque data that remains after reboot requires the runtime directory to be moved aside
-manually while Zephium is closed. Successful exact cleanup removes its volatile subkey,
-so clean relaunches do not grow HKCU for the rest of the boot.
+are never adopted or deleted. Successful exact cleanup removes its volatile subkey, so
+clean relaunches do not grow HKCU for the rest of the boot.
+
+Each generation also keeps a versioned, append-only process record of every WebView2
+browser process its data belongs to. Before anything that may start a browser there, the
+record gains a `pending` entry; once that browser is recorded, its id and creation time
+and a `resolved` entry follow. The privileged root expects both of its browsers when
+it is prepared; the private root expects one each time a private browser may start:
+for a new environment, and for a reused one whose browser has exited. A same-boot
+generation whose run never proved its exit is reclaimed by the next launch, before any
+environment or view exists, only when that record proves it safe. A recorded process
+is gone only when its id names no process at all, or names one created at another
+time; a process that cannot be opened or queried for any other reason is never taken
+for gone, and keeps the generation. If every recorded process is gone, the data is
+deleted. A recorded process that still runs is an orphan of a dead run, because the
+exclusive root lease means no live Zephium instance owns anything in that root. If it
+is an `msedgewebview2.exe`, every one of its direct child processes created after it
+is checked first: if the children cannot be listed, or one is not WebView2, cannot be
+opened to be ended, or does not itself name the browser as its parent, nothing is ended
+and the generation stays until reboot. The browser stays open while its children are
+checked, so its id cannot be reused meanwhile. Otherwise all of them are ended, and the
+data is deleted once every exit is proven within two seconds and a fresh listing shows
+no child of the browser still running. Ending is not all or nothing once it starts:
+a process that does not exit in time keeps the generation until reboot, though the
+others may already be gone. A generation holding nothing but its own marker and a whole
+record with nothing pending and no browser is deleted outright. Every other generation
+keeps the reboot-only rule: one from a build that predates the record, one whose record
+is missing, still has a `pending` entry or is malformed in any way, including a torn
+last line, and one whose record was invalidated. A browser in any of those may still
+be starting with no files of its own yet. A boot key whose invalidation mark cannot
+be read keeps its generation, reported as unchecked. Any failure to expect or record
+a browser, or to confirm it is outside the private root, invalidates the record: it
+is marked on the generation's volatile boot registry key first, where a record file
+that cannot be changed cannot contradict it, and the file is then removed or made
+unreadable. If neither holds when a browser is expected, a private window fails to
+open; privileged chrome still starts, and its generation may be cleared at the next
+same-boot launch. Each outcome is logged as one line.
+
+Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
+file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,
+or when a leftover cannot be inspected, removed or recognised, has no complete record,
+or keeps an orphan that cannot be ended, that leftover stays in place and the launch
+goes ahead with only its own new generation, logging the overdue cleanup and its
+reason. Privileged chrome receives the closed `cleanup_overdue` advisory, as it does
+when one of its own browsers starts uncovered by the record. It asks for a restart,
+names the manual step below for data a restart cannot clear, and carries no path or
+reason. Opaque data that remains after reboot requires the runtime directory to be
+moved aside manually while Zephium is closed.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
@@ -1003,10 +1051,11 @@ eight seconds for native teardown. Windows spends at most five seconds of that b
 on its internal whole-process-group proof before bounded private-root cleanup. A
 negative result or timeout is logged and permits forced process exit with a non-zero
 status; the sealed actor never resumes. On Windows, a failed cleanup leaves that
-generation quarantined. A later startup never reuses it: the shared bounded generation
-manager reclaims only exact marked prior-boot data, baselines legacy data for one reboot,
-and keeps same-boot or opaque state quarantined. Hitting a crash-loop budget produces a
-recoverable full-Windows-restart instruction instead of an irreversible assertion.
+generation quarantined. A later startup never reuses it. The shared bounded generation
+manager reclaims exact marked prior-boot data, and same-boot data once its recorded
+browser processes are proven gone or have been ended. It baselines legacy data for one
+reboot and keeps unrecorded or opaque state quarantined. A crash-loop budget never stops
+a launch; it is logged as overdue cleanup.
 Store worker queues are also bounded. Page-controlled history growth and extraction
 results are capped. These are denial-of-service controls, not proof that arbitrary web
 pages cannot exhaust an engine renderer.

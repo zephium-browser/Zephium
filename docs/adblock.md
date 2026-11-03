@@ -261,6 +261,48 @@ fixed stale site controls after navigation: site identity/readiness now particip
 in status deduplication and focused tab updates publish that status.
 No test result claims Windows runtime, installer, battery or broad-web coverage.
 
+## Rules WebKit never needed
+
+WebKit turns a content rule list into automata and runs every one of them on
+every resource load. Rules without `.*` share a few large automata; each rule
+with `.*` gets one of its own, so the list's ~860 wildcard block rules carry
+most of its per-load cost. `crates/zephium-blocker/src/webkit_pruned.txt` lists
+the wildcard block rules a recorded page corpus never matched, and the WebKit
+compiler leaves them out. The compile report counts them as pruned, not as
+unsupported.
+
+- Only block rules with `.*` are pruned; exceptions never are. Each entry is the
+  SHA-256 of one rule exactly as emitted for WebKit, one per line, sorted, with
+  no rule text. A new upstream rule, or an edit that changes the emitted rule,
+  is kept until the next refresh. An edit that only changes letter case emits
+  the same rule, since url-filters are case-insensitive, and stays pruned.
+- The Windows runtime matcher has no such per-rule cost and compiles every rule.
+- The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
+  sites, the top sites, pages where exceptions apply
+  (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.
+  Adult sites are left out of every list.
+- A rule is listed only when the replay could test it and nothing matched. A
+  load WebKit did not check as its recorded type keeps every rule of that type
+  whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
+  late; a rule that applies only on sites whose page did not load (an
+  `if-domain` rule, or a first-party rule for the host it names) is kept. A
+  replay batch that never reports back, or a recorded load with no replay row,
+  fails the pass.
+
+Refreshing the list is a release step, not CI: it loads hundreds of real pages
+in WebKit with the network on (about five hours), then replays every recorded
+load against the bundled lists through a local listener that answers nothing.
+After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:
+
+```bash
+scripts/blocker-corpus/run.sh target/blocker-corpus
+```
+
+Review the diff of `webkit_pruned.txt` (its header records the corpus, the
+replay, the visits that loaded and the rules kept for untested loads), then run `cargo xtask update-blocker-seed` again with the same lists
+so `compile-report.json` records the pruned count, and
+`cargo xtask check-blocker-seed`.
+
 Use `cargo xtask check-blocker-seed` for exact bundled artifacts; blocker
 property/fuzz/fork-contract tests for compiler boundaries; and
 `synthetic_blocker_lab` for bounded matcher measurements. The native child-frame probe was removed with that delivery path. The `adblock-qa` desktop feature builds a separate,

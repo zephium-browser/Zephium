@@ -456,6 +456,11 @@ impl Shell {
                 probe,
                 can_discard,
             } => self.on_discard_safety(id, probe, can_discard),
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded,
+                stranded_filters,
+            } => self.on_content_protection_changed(id, degraded, stranded_filters),
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
@@ -792,6 +797,7 @@ impl Shell {
             | EngineEvent::ZoomGesture { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }
+            | EngineEvent::ContentProtectionChanged { id, .. }
             | EngineEvent::FaviconPixels { id, .. }
             | EngineEvent::FaviconRasterFailed { id, .. }
             | EngineEvent::FaviconCandidates { id, .. }
