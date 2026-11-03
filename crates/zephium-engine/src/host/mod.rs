@@ -698,9 +698,9 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
-    // A refused view's one retry: its timer while waiting, none once used.
+    // A refused view's one retry.
     #[cfg(target_os = "windows")]
-    suspend_retries: HashMap<ItemId, Option<crate::platform::imp::ContentPolicyTimeout>>,
+    suspend_retries: HashMap<ItemId, discard::SuspendRetry>,
     #[cfg(target_os = "windows")]
     suspend_uncertain: std::collections::HashSet<ItemId>,
     // Dormant views that skipped a cosmetic refresh, owed one when they wake.

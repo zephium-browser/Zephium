@@ -253,6 +253,10 @@ enum HostTaskKey {
     // deadline (or the reverse) would leave the attempt's guard unsettled.
     #[cfg(target_os = "windows")]
     SuspendDeadline(ItemId),
+    // A suspend retry's timer: kept in the lifecycle band, so a full queue
+    // of ordinary work cannot drop it and leave a hidden page awake.
+    #[cfg(target_os = "windows")]
+    SuspendRetry(ItemId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
 }
@@ -1186,6 +1190,18 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::Suspend(id)),
+        f,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::SuspendRetry(id)),
         f,
     )
 }
