@@ -3,7 +3,7 @@
 use super::*;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use zephium_core::blocker::{
     BlockerCompileFailure, BlockerConfig, BlockerConfigRevision, ContentPolicyFailure,
@@ -251,6 +251,9 @@ pub(super) struct BlockerCoordinator {
     catalog_initialized: bool,
     last_projected_status: Cell<Option<FocusedBlockerStatus>>,
     last_projected_site: RefCell<Option<zephium_ipc::BlockerSiteView>>,
+    last_projected_degraded: Cell<bool>,
+    /// Live views whose native filters left them unprotected while resumed.
+    degraded_views: HashSet<ItemId>,
     /// Views that opened before their profile's enabled policy was installed
     /// because the startup deadline passed first.
     pub(super) startup_unprotected_views: u64,
@@ -279,6 +282,8 @@ impl BlockerCoordinator {
             catalog_initialized: false,
             last_projected_status: Cell::new(None),
             last_projected_site: RefCell::new(None),
+            last_projected_degraded: Cell::new(false),
+            degraded_views: HashSet::new(),
             startup_unprotected_views: 0,
         }
     }
@@ -435,13 +440,18 @@ impl BlockerCoordinator {
         &self,
         status: FocusedBlockerStatus,
         site: &Option<zephium_ipc::BlockerSiteView>,
+        degraded: bool,
     ) -> bool {
         let mut previous_site = self.last_projected_site.borrow_mut();
-        if self.last_projected_status.get() == Some(status) && *previous_site == *site {
+        if self.last_projected_status.get() == Some(status)
+            && *previous_site == *site
+            && self.last_projected_degraded.get() == degraded
+        {
             return false;
         }
         self.last_projected_status.set(Some(status));
         previous_site.clone_from(site);
+        self.last_projected_degraded.set(degraded);
         true
     }
 
@@ -1115,7 +1125,59 @@ impl Shell {
             self.next_projection_revision(),
         );
         view.site = self.focused_blocker_site_view().map(Box::new);
+        degrade_for_view(&mut view, self.focused_view_degraded());
         view
+    }
+
+    /// Whether the focused tab's own filters leave it unprotected, though its
+    /// profile's policy is installed.
+    fn focused_view_degraded(&self) -> bool {
+        self.windows
+            .focused()
+            .and_then(|window| window.active)
+            .is_some_and(|id| {
+                self.blocker.degraded_views.contains(&id)
+                    && self.items.tab(id).is_some_and(TabState::has_view)
+            })
+    }
+
+    /// A retired view's report ends with it; its replacement reports afresh.
+    pub(super) fn forget_view_protection(&mut self, id: ItemId) {
+        if self.blocker.degraded_views.remove(&id) {
+            self.project_blocker_status();
+        }
+    }
+
+    /// Drops reports for views removed without a retirement, as a deleted
+    /// profile's are.
+    pub(super) fn forget_removed_views_protection(&mut self) {
+        self.blocker
+            .degraded_views
+            .retain(|id| self.items.tab(*id).is_some());
+    }
+
+    pub(super) fn on_content_protection_changed(
+        &mut self,
+        id: ItemId,
+        degraded: bool,
+        stranded_filters: u32,
+    ) {
+        if !self.items.tab(id).is_some_and(TabState::has_view) {
+            return;
+        }
+        if stranded_filters > 0 {
+            eprintln!(
+                "content blocker: {stranded_filters} filters stayed on a view after its policy changed"
+            );
+        }
+        let changed = if degraded {
+            self.blocker.degraded_views.insert(id)
+        } else {
+            self.blocker.degraded_views.remove(&id)
+        };
+        if changed {
+            self.project_blocker_status();
+        }
     }
 
     #[cfg(feature = "work-execution")]
@@ -1151,13 +1213,15 @@ impl Shell {
     pub(super) fn project_blocker_status(&self) {
         let status = self.focused_blocker_status();
         let site = self.focused_blocker_site_view();
-        if self.blocker.should_project(status, &site) {
+        let degraded = self.focused_view_degraded();
+        if self.blocker.should_project(status, &site, degraded) {
             let mut view = blocker_status_view(
                 status,
                 self.focused_runtime_policy_diagnostics(),
                 self.next_projection_revision(),
             );
             view.site = site.map(Box::new);
+            degrade_for_view(&mut view, degraded);
             (self.emit)(Projection::BlockerStatus(view));
         }
     }
@@ -2790,6 +2854,14 @@ impl Shell {
     fn rollback_blocker_rejected_effect(&mut self, id: ItemId) {
         self.zoom.pending.remove(&id);
         self.items.view_creation_failed(id);
+    }
+}
+
+/// An active policy whose filters miss the focused view protects other tabs,
+/// not this one.
+fn degrade_for_view(view: &mut BlockerStatusView, degraded: bool) {
+    if degraded && view.protection == BlockerProtection::Active {
+        view.protection = BlockerProtection::Degraded;
     }
 }
 

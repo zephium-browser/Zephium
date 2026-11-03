@@ -430,6 +430,8 @@ fn configure_with_credential_denied(
     // separate event for frames; cancel first so URI extraction or policy
     // evaluation failure cannot accidentally authorize the navigation.
     let frame_navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
+        // A frame navigating keeps list-update work waiting for quiet pages.
+        zephium_core::blocker::PageActivity::shared().note_navigation();
         let Some(args) = args else {
             return Ok(());
         };

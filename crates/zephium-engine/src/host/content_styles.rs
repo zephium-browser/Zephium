@@ -20,6 +20,7 @@ pub(super) struct ViewSiteScope {
     preferences: SitePreferencesSlot,
     target: RefCell<String>,
     pub(super) pause: crate::platform::content_pause::ContentPause,
+    pub(super) protection: crate::platform::content_protection::ViewProtection,
 }
 
 impl ViewSiteScope {
@@ -28,6 +29,7 @@ impl ViewSiteScope {
             preferences,
             target: RefCell::new(url.to_owned()),
             pause: Default::default(),
+            protection: Default::default(),
         });
         scope.refresh();
         scope

@@ -669,6 +669,20 @@ impl EngineHost {
         if let Some(counter) = self.blocker_statistics.get(&partition.profile()) {
             site_scope.pause.set_statistics(counter.clone());
         }
+        {
+            let (sink, permit, id) = (self.sink.clone(), event_permit.clone(), id.clone());
+            site_scope.protection.on_change(move |report| {
+                permit.emit(
+                    &sink,
+                    EngineEvent::ContentProtectionChanged {
+                        id: id.get(),
+                        degraded: report.degraded,
+                        stranded_filters: u32::try_from(report.stranded_filters)
+                            .unwrap_or(u32::MAX),
+                    },
+                );
+            });
+        }
         let load_site_scope = site_scope.clone();
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
@@ -1096,6 +1110,10 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
+                // WebKitGTK asks here for every frame, WebView2 only for the
+                // top (its frames count in FrameNavigationStarting); macOS
+                // asks the Apple handler below instead.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 may ask here before LaunchingExternalUriScheme; the
@@ -1176,6 +1194,8 @@ impl EngineHost {
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
+                // Wry calls only this handler when it is set, for every frame.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 // A page's own srcdoc, data: and blob: frames (challenge and
                 // payment widgets, editors) load under WebKit's origin rules;
                 // browser policy governs what a tab itself may show.
@@ -1760,6 +1780,7 @@ impl EngineHost {
                         watch.committed();
                     }
                     load_site_scope.navigating(&event.url);
+                    load_site_scope.protection.retry();
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
@@ -2234,6 +2255,7 @@ impl EngineHost {
                 &view,
                 &content_policy,
                 &site_scope.pause,
+                &site_scope.protection,
             ) {
                 Ok(registration) => registration,
                 Err(error) => {

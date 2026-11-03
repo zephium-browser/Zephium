@@ -1172,6 +1172,7 @@ impl RetirementGate {
             | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::ContentProtectionChanged { id, .. }
             | event @ EngineEvent::MediaCaptureChanged { id, .. }
             | event @ EngineEvent::AudioChanged { id, .. }
             | event @ EngineEvent::MediaChanged { id, .. }
@@ -4684,6 +4685,11 @@ mod tests {
                 action: zephium_core::ports::engine::NativeAction::GoBack,
             },
             EngineEvent::LoadingChanged { id, loading: true },
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded: true,
+                stranded_filters: 0,
+            },
             EngineEvent::FaviconPixels {
                 id,
                 page_url: "https://late.invalid".into(),
