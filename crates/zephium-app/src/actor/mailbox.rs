@@ -39,6 +39,7 @@ enum CoalescedKey {
     BlockerReady(ProfileId),
     BlockerStoreReady(ProfileId),
     BlockerPreferenceRetry(ProfileId),
+    BlockerStartupDeadline(ProfileId),
     BlockerCatalogPoll,
     ContentRules(ProfileId, ContentPolicyGeneration),
     // Generations are monotonic and the newest settlement is authoritative;
@@ -169,6 +170,7 @@ pub(crate) struct TimerState {
     capacity_deadlines: std::collections::HashMap<ItemId, std::time::Instant>,
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_preference_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
+    blocker_startup_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_catalog_deadline: Option<(std::time::Instant, u64, u8)>,
     page_permission_deadline: Option<(
         std::time::Instant,
@@ -213,6 +215,10 @@ pub(crate) enum TimerWake {
         generation: u64,
     },
     BlockerPreference {
+        profile: ProfileId,
+        token: u64,
+    },
+    BlockerStartup {
         profile: ProfileId,
         token: u64,
     },
@@ -571,6 +577,7 @@ impl CommandQueue {
         timer.capacity_deadlines.clear();
         timer.profile_deletion_deadlines.clear();
         timer.blocker_preference_deadlines.clear();
+        timer.blocker_startup_deadlines.clear();
         timer.blocker_catalog_deadline = None;
         timer.page_permission_deadline = None;
         self.inner.timer_ready.notify_all();
@@ -892,6 +899,35 @@ impl CommandQueue {
         self.inner.timer_ready.notify_one();
     }
 
+    pub(crate) fn schedule_blocker_startup_deadline(
+        &self,
+        profile: ProfileId,
+        token: u64,
+        deadline: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer
+            .blocker_startup_deadlines
+            .insert(profile, (deadline, token));
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_blocker_startup_deadline(&self, profile: ProfileId) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        timer.blocker_startup_deadlines.remove(&profile);
+    }
+
     pub(crate) fn cancel_blocker_preference_reconciliation(&self, profile: ProfileId) {
         let mut timer = self
             .inner
@@ -1050,6 +1086,17 @@ impl CommandQueue {
                     return TimerWake::BlockerPreference { profile, token };
                 }
             }
+            let next_blocker_startup = timer
+                .blocker_startup_deadlines
+                .iter()
+                .min_by_key(|(_, (deadline, _))| *deadline)
+                .map(|(profile, (deadline, token))| (*profile, *deadline, *token));
+            if let Some((profile, deadline, token)) = next_blocker_startup {
+                if now >= deadline {
+                    timer.blocker_startup_deadlines.remove(&profile);
+                    return TimerWake::BlockerStartup { profile, token };
+                }
+            }
             let next_blocker_catalog = timer.blocker_catalog_deadline;
             if let Some((deadline, operation, attempt)) = next_blocker_catalog {
                 if now >= deadline {
@@ -1103,6 +1150,9 @@ impl CommandQueue {
             }
             if let Some((_, blocker_preference, _)) = next_blocker_preference {
                 deadline = deadline.min(blocker_preference);
+            }
+            if let Some((_, blocker_startup, _)) = next_blocker_startup {
+                deadline = deadline.min(blocker_startup);
             }
             if let Some((blocker_catalog, _, _)) = next_blocker_catalog {
                 deadline = deadline.min(blocker_catalog);
@@ -1310,6 +1360,9 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::BlockerStoreReady(profile) => Some(CoalescedKey::BlockerStoreReady(*profile)),
         Command::BlockerPreferenceRetry { profile, .. } => {
             Some(CoalescedKey::BlockerPreferenceRetry(*profile))
+        }
+        Command::BlockerStartupDeadline { profile, .. } => {
+            Some(CoalescedKey::BlockerStartupDeadline(*profile))
         }
         Command::BlockerCatalogPoll { .. } => Some(CoalescedKey::BlockerCatalogPoll),
         Command::ProfileDeletionReady(profile) => {

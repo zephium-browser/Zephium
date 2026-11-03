@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::Sha256;
 use adblock::filters::cosmetic::{CosmeticFilter, CosmeticFilterMask};
 use adblock::{Engine, FilterSet};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const MAX_RULES: usize = 50_000;
 const MAX_SELECTOR_BYTES: usize = 4 * 1024;
@@ -359,11 +359,11 @@ impl CosmeticPolicy {
         }
         let policy = Arc::new(Self {
             report: data.report,
-            fingerprint: Sha256::digest(&encoded).into(),
+            fingerprint: Sha256::digest(&encoded),
             encoded: encoded.into(),
             selective,
             generic_index_digest: zephium_core::blocker::ContentRuleDigest::from_bytes(
-                Sha256::digest(generic_index.as_bytes()).into(),
+                Sha256::digest(generic_index.as_bytes()),
             ),
             generic_index,
             fallback_generic,

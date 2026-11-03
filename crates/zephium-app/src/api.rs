@@ -845,6 +845,12 @@ pub enum Command {
         profile: ProfileId,
         token: u64,
     },
+    /// The startup protection deadline for one profile: views held for its
+    /// enabled policy open without it from here on.
+    BlockerStartupDeadline {
+        profile: ProfileId,
+        token: u64,
+    },
     /// Bounded follow-up for an exact user-requested refresh or the reserved
     /// internal activation token. Ordinary refresh scheduling remains on the
     /// low-frequency maintenance heartbeat.

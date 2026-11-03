@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use crate::Sha256;
 use thiserror::Error;
 use zephium_core::blocker::{
     BlockerConfig, ContentPolicyGeneration, ContentRuleCoverage, ContentRuleDigest, ContentRules,
@@ -1006,7 +1006,7 @@ fn run_worker(
                 prepared = None;
                 let mut candidate = ArtifactCache::new(preparation.catalog);
                 let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    candidate.resolve(compiler, &mut persistent)
+                    crate::priority::in_background(|| candidate.resolve(compiler, &mut persistent))
                 })) {
                     Ok(BlockerCompileOutcome::Compiled(rules)) => {
                         prepared = Some((preparation.identity, candidate));
@@ -1427,20 +1427,14 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             encoded,
             cosmetics,
         } => {
-            let rules = ContentRules::declarative(
+            let rules = ContentRules::declarative_with_digest(
                 digest,
                 coverage,
                 zephium_core::blocker::DeclarativeRuleFormat::WebKitContentBlockerV1,
+                artifact_digest,
                 encoded,
             )?;
-            let zephium_core::blocker::ContentRulesPayload::Declarative {
-                artifact_digest: observed,
-                ..
-            } = rules.payload()
-            else {
-                return None;
-            };
-            (observed.as_bytes() == &artifact_digest).then(|| attach_cosmetics(rules, cosmetics))
+            Some(attach_cosmetics(rules, cosmetics))
         }
     }
 }
@@ -1650,7 +1644,7 @@ fn map_method(method: &str) -> RequestMethod {
 }
 
 fn allow_all_digest() -> ContentRuleDigest {
-    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN).into())
+    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN))
 }
 
 fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {

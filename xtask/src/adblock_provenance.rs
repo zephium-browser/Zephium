@@ -950,7 +950,6 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "async-trait",
             "serde",
             "serde_json",
-            "sha2",
             "thiserror",
             "tokio",
             "tough",
@@ -967,7 +966,6 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     )?;
     require_string(async_trait, "version", "=0.1.89")?;
     require_bool(async_trait, "optional", true)?;
-    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
     for name in ["serde", "serde_json", "thiserror", "url"] {
         require_workspace_dependency(dependencies, name, &[])?;
     }
@@ -1197,9 +1195,9 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
         dependencies,
         &[
             "flate2",
+            "ring",
             "serde",
             "serde_json",
-            "sha2",
             "thiserror",
             "zephium-blocker",
             "zephium-blocker-update",
@@ -1208,8 +1206,8 @@ fn validate_blocker_service_manifest(repository: &Path) -> Result<(), String> {
         "zephium-blocker-service dependency table",
     )?;
     require_dependency_version(dependencies, "flate2", "=1.1.9")?;
-    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
     for name in [
+        "ring",
         "serde",
         "serde_json",
         "thiserror",
@@ -1389,6 +1387,7 @@ fn validate_blocker_fuzz_deny_source(source: &str) -> Result<(), String> {
         &[
             "Apache-2.0",
             "BSD-2-Clause",
+            "ISC",
             "MIT",
             "MPL-2.0",
             "NCSA",

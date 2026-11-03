@@ -67,6 +67,10 @@ pub(super) struct BlockerInbox {
 
 pub(super) type BlockerProfileState = ProfileContentPolicyState;
 
+/// How long views wait at startup for a profile's enabled policy before they
+/// open without it. A warm launch installs the cached list well within this.
+const STARTUP_PROTECTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(super) struct BlockerProfile {
     pub(super) sites: super::blocker_sites::SitePreferencesState,
     pub(super) config: ProfileBlockerConfig,
@@ -87,6 +91,12 @@ pub(super) struct BlockerProfile {
     /// A locally constructed allow-all is being installed before the enabled
     /// startup target. This never changes the durable preference.
     startup_provisional: bool,
+    /// Views keep waiting past the provisional allow-all for the enabled
+    /// policy, until it is installed or the startup deadline with this token.
+    startup_hold: Option<u64>,
+    /// The startup deadline passed first: views open behind the provisional
+    /// allow-all until a real policy is applied.
+    startup_unprotected: bool,
 }
 
 pub(super) struct RuntimePolicyObserver {
@@ -241,6 +251,9 @@ pub(super) struct BlockerCoordinator {
     catalog_initialized: bool,
     last_projected_status: Cell<Option<FocusedBlockerStatus>>,
     last_projected_site: RefCell<Option<zephium_ipc::BlockerSiteView>>,
+    /// Views that opened before their profile's enabled policy was installed
+    /// because the startup deadline passed first.
+    pub(super) startup_unprotected_views: u64,
 }
 
 impl BlockerCoordinator {
@@ -266,6 +279,7 @@ impl BlockerCoordinator {
             catalog_initialized: false,
             last_projected_status: Cell::new(None),
             last_projected_site: RefCell::new(None),
+            startup_unprotected_views: 0,
         }
     }
 
@@ -405,6 +419,12 @@ impl BlockerCoordinator {
         })
     }
 
+    pub(super) fn startup_hold(&self, profile: ProfileId) -> Option<u64> {
+        self.profiles
+            .get(&profile)
+            .and_then(|entry| entry.startup_hold)
+    }
+
     pub(super) fn native_policy_available(&self, profile: ProfileId) -> bool {
         self.profiles.get(&profile).is_some_and(|profile| {
             Self::retained_generation(profile.state).is_some() && profile.applied_config.is_some()
@@ -474,6 +494,8 @@ impl BlockerCoordinator {
                     compiling_catalog: None,
                     applied_catalog_revision: None,
                     startup_provisional: false,
+                    startup_hold: None,
+                    startup_unprotected: false,
                 },
             );
         }
@@ -510,6 +532,8 @@ impl BlockerCoordinator {
                 compiling_catalog: None,
                 applied_catalog_revision: None,
                 startup_provisional: false,
+                startup_hold: None,
+                startup_unprotected: false,
             },
         );
         true
@@ -535,6 +559,7 @@ impl BlockerCoordinator {
             .get_mut(&profile)
             .expect("profile was checked above");
         entry.startup_provisional = target.enabled;
+        entry.startup_hold = target.enabled.then_some(generation.get());
         entry.desired_config = BlockerConfig { enabled: false };
         entry.background_target = target.enabled.then_some(target);
         entry.state = BlockerProfileState::Compiling {
@@ -585,12 +610,21 @@ impl BlockerCoordinator {
         // generation the engine actually applied. A future live-settings path
         // can coalesce a bounded latest desired config outside this state
         // machine; it must not displace the in-flight authority.
-        if matches!(
-            previous,
-            BlockerProfileState::Compiling { .. }
-                | BlockerProfileState::Installing { .. }
-                | BlockerProfileState::Retired
-        ) {
+        //
+        // Turning protection off is the exception before native work starts:
+        // it needs no compiler, and must not wait behind an enabled compile
+        // that can take seconds on a cold launch. That compile's late result
+        // is stale by generation.
+        let supersedes_compile =
+            !config.enabled && matches!(previous, BlockerProfileState::Compiling { .. });
+        if !supersedes_compile
+            && matches!(
+                previous,
+                BlockerProfileState::Compiling { .. }
+                    | BlockerProfileState::Installing { .. }
+                    | BlockerProfileState::Retired
+            )
+        {
             return false;
         }
         if let Some(entry) = self.profiles.get_mut(&profile) {
@@ -615,6 +649,38 @@ impl BlockerCoordinator {
             return false;
         };
         let retained = Self::retained_generation(previous);
+        if supersedes_compile {
+            if let Some(entry) = self.profiles.get_mut(&profile) {
+                entry.desired_config = config;
+                entry.pending_coverage = None;
+                entry.pending_runtime_policy = None;
+                entry.compiling_catalog = None;
+                entry.state = BlockerProfileState::Compiling {
+                    desired: generation,
+                    retained,
+                    retries_remaining,
+                };
+            }
+            self.inbox
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .results
+                .insert(
+                    profile,
+                    PendingCompileResult {
+                        generation,
+                        outcome: BlockerCompileOutcome::Compiled(
+                            zephium_core::blocker::ContentRules::allow_all(
+                                ContentRuleDigest::from_bytes([0; 32]),
+                            ),
+                        ),
+                    },
+                );
+            if let Some(callback) = callback {
+                let _ = callback.dispatch(Command::BlockerReady(profile));
+            }
+            return true;
+        }
         if self.compiler_terminal {
             if let Some(entry) = self.profiles.get_mut(&profile) {
                 entry.desired_config = config;
@@ -1475,6 +1541,13 @@ impl Shell {
         self.ensure_blocker_site_preferences(profile);
         self.ensure_popup_sites(profile);
         let accepted = self.blocker.start_uninitialized(profile);
+        if let (Some(token), Some(queue)) = (self.blocker.startup_hold(profile), &self.self_queue) {
+            queue.schedule_blocker_startup_deadline(
+                profile,
+                token,
+                std::time::Instant::now() + STARTUP_PROTECTION_DEADLINE,
+            );
+        }
         self.finish_terminalized_blocker_native_operations();
         self.project_blocker_status();
         // Deterministic compilers may complete inside `compile`. Consume that
@@ -2024,6 +2097,10 @@ impl Shell {
             return;
         };
         match entry.state {
+            // Turning protection off replaces an enabled compile still in
+            // flight instead of waiting for it.
+            BlockerProfileState::Compiling { .. }
+                if !target.enabled && entry.desired_config != target => {}
             BlockerProfileState::Compiling { desired, .. }
             | BlockerProfileState::Installing { desired, .. } => {
                 if entry.desired_config == target {
@@ -2495,12 +2572,20 @@ impl Shell {
                         return;
                     }
                 }
-                let effects = self.blocker.take_held_effects(profile);
-                if !effects.is_empty() {
-                    let _ = self.apply(effects);
-                    let _ = self.relayout();
-                    self.maintain_views();
-                    self.project_items();
+                // The provisional allow-all keeps views waiting; the policy
+                // that follows it, enabled or deliberately disabled, ends it.
+                if let Some(entry) = self.blocker.profiles.get_mut(&profile) {
+                    if !entry.startup_provisional {
+                        entry.startup_unprotected = false;
+                    }
+                    if !entry.startup_provisional && entry.startup_hold.take().is_some() {
+                        if let Some(queue) = &self.self_queue {
+                            queue.cancel_blocker_startup_deadline(profile);
+                        }
+                    }
+                }
+                if self.blocker.startup_hold(profile).is_none() {
+                    self.release_held_blocker_effects(profile);
                 }
             }
             ContentRuleSettlement::Retained {
@@ -2587,6 +2672,54 @@ impl Shell {
         self.project_blocker_status();
     }
 
+    pub(super) fn on_blocker_startup_deadline(&mut self, profile: ProfileId, token: u64) {
+        let Some(entry) = self.blocker.profiles.get_mut(&profile) else {
+            return;
+        };
+        if entry.startup_hold != Some(token) {
+            return;
+        }
+        entry.startup_hold = None;
+        entry.startup_unprotected = true;
+        let waiting = entry
+            .held_effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::CreateView { .. }))
+            .count();
+        // The gate counts each view as it opens behind the allow-all.
+        if self.blocker.native_policy_available(profile) {
+            self.release_held_blocker_effects(profile);
+        }
+        crate::diagnostic!(
+            "content blocker: startup protection was not ready in time; views_waiting={waiting} opened_unprotected_total={}",
+            self.blocker.startup_unprotected_views
+        );
+    }
+
+    /// A shutdown barrier drops every timer; views still held for startup
+    /// protection get a fresh deadline when the browser resumes.
+    pub(super) fn rearm_blocker_startup_deadlines(&mut self) {
+        let Some(queue) = &self.self_queue else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + STARTUP_PROTECTION_DEADLINE;
+        for (profile, entry) in &self.blocker.profiles {
+            if let Some(token) = entry.startup_hold {
+                queue.schedule_blocker_startup_deadline(*profile, token, deadline);
+            }
+        }
+    }
+
+    fn release_held_blocker_effects(&mut self, profile: ProfileId) {
+        let effects = self.blocker.take_held_effects(profile);
+        if !effects.is_empty() {
+            let _ = self.apply(effects);
+            let _ = self.relayout();
+            self.maintain_views();
+            self.project_items();
+        }
+    }
+
     pub(super) fn blocker_gate_effects(
         &mut self,
         effects: Vec<Effect>,
@@ -2625,7 +2758,15 @@ impl Shell {
                     "content blocker: profile policy compilation was not admitted; views remain unavailable"
                 );
             }
-            if self.blocker.native_policy_available(profile) {
+            if self.blocker.native_policy_available(profile)
+                && self.blocker.startup_hold(profile).is_none()
+            {
+                if matches!(effect, Effect::CreateView { .. })
+                    && self.blocker.profiles[&profile].startup_unprotected
+                {
+                    self.blocker.startup_unprotected_views =
+                        self.blocker.startup_unprotected_views.saturating_add(1);
+                }
                 admitted.push(effect);
             } else if self.blocker.hold_effect(profile, effect) {
                 native.scheduled = true;

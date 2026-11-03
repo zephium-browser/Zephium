@@ -53,8 +53,9 @@ macos-work-retained-notion-write-probe = [
     "macos-work-retained-product-probe",
     "zephium-work-composition/retained-notion-write-qualification",
 ]
-# Isolated actual-product protection QA; never a shipping application.
-adblock-qa = ["tauri/custom-protocol"]
+# Isolated actual-product protection QA; never a shipping application. It
+# also carries the stdin/stdout benchmark driver and its page-script seam.
+adblock-qa = ["tauri/custom-protocol", "zephium-engine/blocker-bench"]
 # Isolated actual-product file workflow verification, never a shipping app.
 file-workflows-qa = ["tauri/custom-protocol"]
 # Isolated user-resource UI verification; never a shipping application.

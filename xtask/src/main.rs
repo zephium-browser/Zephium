@@ -6,6 +6,8 @@ mod agent_model_catalog_boundary;
 mod agent_runtime_boundary;
 mod agentic_evidence;
 mod agentic_probe_boundary;
+mod blocker_bench;
+mod blocker_bench_boundary;
 mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_process_family;
@@ -72,6 +74,12 @@ fn main() {
             check_security_fork_locks()
         }
         Some("check-blocker-security-fork") => check_blocker_security_fork(),
+        Some("blocker-bench") => {
+            if let Err(error) = blocker_bench::run(&arguments[1..]) {
+                eprintln!("blocker bench: {error}");
+                exit(1);
+            }
+        }
         Some("webext-suite") => {
             if let Err(error) = webext_suite::run(&arguments[1..]) {
                 eprintln!("extension suite: {error}");
@@ -130,7 +138,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
@@ -823,6 +831,7 @@ fn check_agentic_probe_boundary() {
         .and_then(|()| work_persistence_boundary::check(&repository))
         .and_then(|()| work_resource_boundary::check(&repository))
         .and_then(|()| agent_runtime_boundary::check(&repository))
+        .and_then(|()| blocker_bench_boundary::check(&repository))
     {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);

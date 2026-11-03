@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use flate2::bufread::GzDecoder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zephium_blocker::Sha256;
 use zephium_blocker::{PolicyCatalog, StaticPolicyCatalog};
 use zephium_blocker_update::{
     CatalogIdentity, CatalogManifest, LicensePolicy, ManifestError, UpdateLimits,
@@ -97,7 +97,7 @@ impl ReleaseCatalogSeed {
             CatalogManifest::parse_release_seed(catalog_manifest_bytes, limits, &license_policy)
                 .map_err(|_| ReleaseSeedError::CatalogManifest)?;
         let seed = ReleaseSeedManifest::parse_canonical(seed_manifest_bytes)?;
-        let catalog_manifest_sha256: [u8; 32] = Sha256::digest(catalog_manifest_bytes).into();
+        let catalog_manifest_sha256: [u8; 32] = Sha256::digest(catalog_manifest_bytes);
         if decode_sha256(&seed.catalog_manifest_sha256)? != catalog_manifest_sha256 {
             return Err(ReleaseSeedError::CatalogIdentity);
         }
@@ -198,7 +198,7 @@ fn validate_exact_asset_set(
             return Err(ReleaseSeedError::CompressedAsset);
         }
         let expected = decode_sha256(&descriptor.compressed_sha256)?;
-        let actual: [u8; 32] = Sha256::digest(embedded.bytes).into();
+        let actual: [u8; 32] = Sha256::digest(embedded.bytes);
         if actual != expected {
             return Err(ReleaseSeedError::CompressedAsset);
         }

@@ -1739,6 +1739,18 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
+                TimerWake::BlockerStartup { profile, token } => {
+                    match timer_queue.try_push(Command::BlockerStartupDeadline { profile, token }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue
+                            .schedule_blocker_startup_deadline(
+                                profile,
+                                token,
+                                std::time::Instant::now() + std::time::Duration::from_millis(25),
+                            ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
                 TimerWake::BlockerCatalog { operation, attempt } => {
                     match timer_queue.try_push(Command::BlockerCatalogPoll { operation, attempt }) {
                         Ok(()) | Err(TryPushError::Sealed(_)) => {}
