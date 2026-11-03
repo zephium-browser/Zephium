@@ -888,6 +888,21 @@ fn stage(
     store.persist(next)?;
     Ok(package)
 }
+/// A refresh that found the current package's lists again. The rejected
+/// package is forgotten only when every list was checked: a list withheld
+/// because its copy was rejected counts as failed, and that copy must stay
+/// known or the next check stages it again.
+fn keep_current(next: &mut crate::official_store::Record, fetched: Fetched, now: u64) {
+    if fetched.failed.is_empty() {
+        next.verification = next.verification.saturating_add(1);
+        next.failure_streak = 0;
+        next.rejected = None;
+    }
+    reschedule(next, &fetched, now);
+    if let Some(current) = next.current.as_mut() {
+        current.sources = fetched.sources;
+    }
+}
 fn finish_refresh(
     store: &mut OfficialStore,
     seed: &ActivatedCatalog,
@@ -902,15 +917,7 @@ fn finish_refresh(
         .is_some_and(|p| same_sources(p, &fetched.sources))
     {
         let mut next = store.record.clone();
-        if fetched.failed.is_empty() {
-            next.verification = next.verification.saturating_add(1);
-            next.failure_streak = 0;
-        }
-        reschedule(&mut next, &fetched, now());
-        if let Some(current) = next.current.as_mut() {
-            current.sources = fetched.sources;
-        }
-        next.rejected = None;
+        keep_current(&mut next, fetched, now());
         if store.persist(next).is_err() {
             failed_refresh(store, seed, shared, operation, FailureKind::Storage, None);
             return;
@@ -1476,6 +1483,31 @@ mod tests {
             reschedule(&mut next, &fetched, now());
             store.persist(next).unwrap();
         }
+    }
+
+    #[test]
+    fn a_withheld_rejected_copy_stays_known_until_every_list_checks() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        reject(&mut store, &package, 0, &bad);
+        let withheld = Fetched {
+            sources: package.sources.clone(),
+            checked: vec![1, 2, 3],
+            failed: vec![(0, (FailureKind::Target, None))],
+            stale: Vec::new(),
+        };
+        let mut next = store.record.clone();
+        keep_current(&mut next, withheld, now());
+        assert!(next.rejected.is_some());
+        let clean = Fetched {
+            sources: package.sources.clone(),
+            checked: vec![0, 1, 2, 3],
+            failed: Vec::new(),
+            stale: Vec::new(),
+        };
+        keep_current(&mut next, clean, now());
+        assert!(next.rejected.is_none());
     }
 
     #[test]
