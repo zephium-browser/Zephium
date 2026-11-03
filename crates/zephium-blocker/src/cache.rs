@@ -172,7 +172,9 @@ fn cache_key_prefix(target: CompileTarget, limits: CompileLimits) -> Sha256 {
     for value in limit_values(limits) {
         digest.update((value as u64).to_be_bytes());
     }
-    digest.update(crate::builtin::fingerprint());
+    if crate::builtin::applies_to(target) {
+        digest.update(crate::builtin::fingerprint());
+    }
     digest
 }
 

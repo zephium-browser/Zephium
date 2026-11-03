@@ -212,8 +212,10 @@ stream. Unavailable statistics produce an error, never an invented zero.
 ## Zephium's own rules
 
 `crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
-own, reviewed and shipped with the app, compiled after every catalog's lists on
-both platforms; its digest is part of every compiled-artifact cache key. It
+own, reviewed and shipped with the app, compiled after every catalog's lists
+on macOS; its digest is part of the WebKit artifact's cache key. Windows leaves
+it out until its requests carry their page: the runtime matcher sees them
+without one, and a site-scoped exception would then apply on every site. It
 holds exceptions only, never blocks (a test enforces this), for breakage the
 downloaded lists do not fix yet. Each rule has a comment naming its site, the
 evidence and the date, and is reported upstream when it applies there.
@@ -224,7 +226,7 @@ evidence and the date, and is reported upstream when it applies there.
   seconds of one article, against 2 or 3 with protection off. Blocking the
   recovery instead replaces the page with an "allow ads" wall. Allowing that
   one file on those sites and their subdomains keeps the recovery idle while
-  the ads stay blocked. In Zephium with the fix (3 runs each), protection on
+  the ads stay blocked. In Zephium on macOS with the fix (3 runs each), protection on
   used 4.4 s of CPU and 123 requests on allrecipes against 16.2 s and 301 off,
   and 2.4 s and 89 requests on simplyrecipes against 8.6 s and 299.
 

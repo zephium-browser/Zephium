@@ -75,7 +75,9 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
-    digest.update(builtin::fingerprint());
+    if cfg!(feature = "webkit") {
+        digest.update(builtin::fingerprint());
+    }
     for value in [
         values.max_sources,
         values.max_source_bytes,

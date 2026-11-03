@@ -1235,9 +1235,7 @@ impl ArtifactCache {
         let failure = if catalog.is_empty() {
             BlockerCompileFailure::SourceUnavailable
         } else {
-            let mut sources = catalog.instantiate();
-            sources.push(crate::builtin::source());
-            match compiler.compile(target, sources) {
+            match compiler.compile(target, with_own_rules(catalog.instantiate(), target)) {
                 Ok(compiled) => {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
@@ -1301,6 +1299,13 @@ fn complete_job(
         }));
         admission.finish_delivery(job.profile, job.generation);
     }
+}
+
+fn with_own_rules(mut sources: Vec<FilterSource>, target: CompileTarget) -> Vec<FilterSource> {
+    if crate::builtin::applies_to(target) {
+        sources.push(crate::builtin::source());
+    }
+    sources
 }
 
 #[cfg(target_os = "windows")]
@@ -2442,6 +2447,36 @@ mod tests {
             source("b", half - crate::builtin::byte_len()),
         ])
         .unwrap();
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_runtime_target_leaves_out_zephium_s_own_site_exceptions() {
+        let compile = |sources| {
+            Compiler::default()
+                .compile(CompileTarget::Runtime, sources)
+                .unwrap()
+        };
+        let blocklist = || {
+            FilterSource::new(
+                SourceId::new("list").unwrap(),
+                SourceFormat::Standard,
+                "||pagead2.googlesyndication.com^".to_owned(),
+            )
+        };
+        let loader = NetworkRequest::source_independent(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+            ResourceType::Script,
+            RequestMethod::Get,
+        );
+        let action =
+            |rules: &CompiledRules| rules.evaluate_source_independent(loader).unwrap().action();
+        let rules = compile(with_own_rules(vec![blocklist()], CompileTarget::Runtime));
+        assert_eq!(action(&rules), NetworkAction::Block);
+        // Without the page, a site-scoped exception would allow the loader on
+        // every site.
+        let scoped = compile(vec![blocklist(), crate::builtin::source()]);
+        assert_ne!(action(&scoped), NetworkAction::Block);
     }
 
     #[test]
