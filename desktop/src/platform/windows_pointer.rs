@@ -30,10 +30,12 @@ const SUBCLASS: usize = 0x5a50_4e54;
 const SETTLE: usize = 1;
 const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
 const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
-/// A sink or registration that failed is tried again this often, this many
-/// times in a row, so the watch recovers without waiting for another listen.
+/// A sink or registration that failed is tried again a second later, this many
+/// times in a row, then every half minute until it works, so the watch
+/// recovers without waiting for another listen.
 const RETRY_MS: u32 = 1_000;
-const MAX_RETRIES: u8 = 8;
+const FAST_RETRIES: u8 = 8;
+const SLOW_RETRY_MS: u32 = 30_000;
 
 /// Told that the pointer moved, or that a window came to the front or left
 /// it. Receives the window it listens for; it reads the pointer itself.
@@ -190,15 +192,21 @@ fn register(on: bool) {
     }
 }
 
-/// Arms one retry of the sink and the registration, unless one is armed or
-/// the retries in a row ran out.
+/// Arms one retry of the sink and the registration, unless one is armed. A
+/// timer that cannot be set counts for nothing: the next listen or change
+/// of the window in front arms it again.
 fn retry_later() {
-    if RETRY.get() != 0 || RETRIES.get() >= MAX_RETRIES {
+    if RETRY.get() != 0 {
         return;
     }
-    RETRIES.set(RETRIES.get() + 1);
+    let fast = RETRIES.get() < FAST_RETRIES;
+    let delay = if fast { RETRY_MS } else { SLOW_RETRY_MS };
     // SAFETY: a thread timer whose callback runs on this thread's loop.
-    RETRY.set(unsafe { SetTimer(None, 0, RETRY_MS, Some(retry)) });
+    let timer = unsafe { SetTimer(None, 0, delay, Some(retry)) };
+    if timer != 0 && fast {
+        RETRIES.set(RETRIES.get() + 1);
+    }
+    RETRY.set(timer);
 }
 
 unsafe extern "system" fn retry(_: HWND, _: u32, id: usize, _: u32) {
