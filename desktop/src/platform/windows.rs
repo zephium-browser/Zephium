@@ -436,8 +436,7 @@ pub fn harden_privileged(
                 on_runtime_update,
             )?;
             let mut browser = 0_u32;
-            // An id left unread records nothing, which invalidates the record.
-            let _ = core.BrowserProcessId(&mut browser);
+            core.BrowserProcessId(&mut browser)?;
             crate::privileged_runtime_windows::record_browser_process(browser);
             Ok(())
         })();

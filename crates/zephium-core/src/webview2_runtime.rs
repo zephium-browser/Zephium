@@ -108,9 +108,8 @@ pub struct GenerationReport {
     pub reclaimed_empty: Vec<String>,
     /// An orphan could not be ended, so its data stays until a reboot.
     pub kept_running: Vec<String>,
-    /// Leftovers this launch could not clear: over a startup budget, kept
-    /// for a reboot, or not Zephium's to judge. The launch went ahead and
-    /// this says why.
+    /// Over a startup budget: the launch went ahead and this says why the
+    /// leftovers still need a reboot.
     pub overdue: Option<String>,
 }
 
@@ -464,19 +463,11 @@ fn maintain_generation(
     });
     let Some(generation) = canonical else {
         usage.generations = usage.generations.saturating_add(1);
-        note_overdue(
-            report,
-            "a runtime folder holds data Zephium does not recognise",
-        );
         return measure_tree(path, usage, true);
     };
     match marker_status(path, kind, generation)? {
         MarkerStatus::Invalid => {
             usage.generations = usage.generations.saturating_add(1);
-            note_overdue(
-                report,
-                "a runtime generation's marker is not one Zephium wrote",
-            );
             measure_tree(path, usage, true)
         }
         MarkerStatus::Missing => {
@@ -485,7 +476,6 @@ fn maintain_generation(
             // cannot be reclaimed until a later reboot, so an old child still
             // terminating during this launch remains protected.
             usage.generations = usage.generations.saturating_add(1);
-            note_overdue(report, "data from an older Zephium waits for a reboot");
             usage.same_boot_generations = usage.same_boot_generations.saturating_add(1);
             measure_tree(path, usage, true)?;
             ensure_current_boot(boot, generation)?;
@@ -543,30 +533,20 @@ fn reclaim_same_boot(
                 SameBootReclaim::AfterTermination
             } else {
                 report.kept_running.push(generation.to_owned());
-                note_overdue(
-                    report,
-                    "a browser left by an earlier run could not be ended",
-                );
                 return Ok(None);
             }
         }
         _ if holds_only_bookkeeping(path)? => SameBootReclaim::Empty,
-        _ => {
-            note_overdue(
-                report,
-                "data from an earlier run has no complete process record",
-            );
-            return Ok(None);
-        }
+        _ => return Ok(None),
     };
     reclaim_generation(path, kind, generation)?;
     Ok(Some(reclaimed))
 }
 
 fn note_overdue(report: &mut GenerationReport, reason: &str) {
-    report
-        .overdue
-        .get_or_insert_with(|| format!("{reason}. Zephium started anyway"));
+    report.overdue.get_or_insert_with(|| {
+        format!("{reason}. Zephium started anyway; restarting Windows lets it clear them")
+    });
 }
 
 fn forget_current_boot(boot: &RegKey, generation: &str) -> io::Result<()> {
@@ -613,10 +593,6 @@ fn read_process_record(root: &Path) -> io::Result<Option<Vec<BrowserProcessRecor
 }
 
 fn parse_process_record(text: &str) -> Option<Vec<BrowserProcessRecord>> {
-    // Every entry ends its line, so a torn last write reads as malformed.
-    if !text.is_empty() && !text.ends_with('\n') {
-        return None;
-    }
     let processes = text
         .lines()
         .map(|line| {
@@ -715,36 +691,7 @@ impl RuntimeGeneration {
 
     /// Records a browser process this generation's data belongs to, so a
     /// later launch can prove it gone, or end it, if this run never does.
-    /// On failure the record is invalidated: a record missing one browser
-    /// would let a later launch wipe that browser's live data.
     pub fn record_browser_process(&self, process: BrowserProcessRecord) -> io::Result<()> {
-        let recorded = self.append_browser_process(process);
-        if recorded.is_err() {
-            self.invalidate_process_record();
-        }
-        recorded
-    }
-
-    /// A browser this generation's data belongs to could not be recorded,
-    /// so the record no longer covers every process and the generation
-    /// keeps the reboot-only rule.
-    pub fn invalidate_process_record(&self) {
-        let path = self.root.join(PROCESS_RECORD);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            // A line that never parses invalidates the record as well.
-            Err(_) => {
-                if let Ok(mut record) = OpenOptions::new().append(true).open(&path) {
-                    let _ = record
-                        .write_all(b"incomplete\n")
-                        .and_then(|()| record.sync_all());
-                }
-            }
-        }
-    }
-
-    fn append_browser_process(&self, process: BrowserProcessRecord) -> io::Result<()> {
         let recorded = read_process_record(&self.root)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -939,11 +886,6 @@ mod tests {
             next.report().kept_running,
             std::slice::from_ref(&left.generation)
         );
-        assert!(next
-            .report()
-            .overdue
-            .as_deref()
-            .is_some_and(|reason| reason.contains("could not be ended")));
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
@@ -959,80 +901,8 @@ mod tests {
         assert!(left.root().join("private-data").exists());
         assert!(boot_knows(kind, &left.generation));
         assert!(next.report().reclaimed_after_exit.is_empty());
-        assert!(next
-            .report()
-            .overdue
-            .as_deref()
-            .is_some_and(|reason| reason.contains("no complete process record")));
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
-    }
-
-    #[test]
-    fn a_browser_that_cannot_be_recorded_keeps_the_generation_until_reboot() {
-        let temp = tempfile::tempdir().unwrap();
-        let kind = RuntimeGenerationKind::RawPrivate;
-        let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
-        fs::write(run.root().join("private-data"), b"private").unwrap();
-        run.record_browser_process(BROWSER).unwrap();
-        for id in 1..MAX_RECORDED_PROCESSES as u32 {
-            run.record_browser_process(BrowserProcessRecord { id, ..BROWSER })
-                .unwrap();
-        }
-        // A ninth browser, still alive, that the full record cannot take.
-        let unrecorded = BrowserProcessRecord { id: 99, ..BROWSER };
-        run.record_browser_process(unrecorded).unwrap_err();
-        assert!(run.record_browser_process(BROWSER).is_err());
-        let left = run.cleanup_ticket();
-        drop(run);
-        let running = Running::new(&[unrecorded], false);
-        let next = RuntimeGeneration::prepare(temp.path(), kind, &running).unwrap();
-        assert_eq!(
-            fs::read(left.root().join("private-data")).unwrap(),
-            b"private"
-        );
-        assert!(boot_knows(kind, &left.generation));
-        assert!(next.report().reclaimed_after_exit.is_empty());
-        assert!(running.ended.borrow().is_empty());
-        left.cleanup_after_proven_exit().unwrap();
-        next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
-    }
-
-    #[test]
-    fn a_torn_record_write_reads_as_no_record() {
-        assert_eq!(parse_process_record(""), Some(Vec::new()));
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-"
-            ),
-            Some(vec![BrowserProcessRecord {
-                id: 4242,
-                created: 5
-            }])
-        );
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-77"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-77 1"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-incomplete
-"
-            ),
-            None
-        );
     }
 
     #[test]
@@ -1060,9 +930,11 @@ incomplete
             .map(|_| unclean_run(temp.path(), kind, None))
             .collect::<Vec<_>>();
         let next = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
-        // The first reason is kept; these leftovers also lack a complete record.
-        assert!(next.report().overdue.is_some());
-        assert_eq!(left.len(), MAX_SAME_BOOT_GENERATIONS);
+        assert!(next
+            .report()
+            .overdue
+            .as_deref()
+            .is_some_and(|reason| reason.contains("32 WebView2 generations")));
         for ticket in left {
             ticket.cleanup_after_proven_exit().unwrap();
         }

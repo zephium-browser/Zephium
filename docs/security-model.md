@@ -675,25 +675,19 @@ no process has that id with that creation time, the data is deleted. A recorded 
 that still runs is an orphan of a dead run, because the exclusive root lease means no
 live Zephium instance owns anything in that root. If it is an `msedgewebview2.exe`, it
 is ended together with its direct child processes created after it, and its data is
-deleted once every one of their exits is proven within two seconds. If it, or any such
-child, cannot be ended, nothing is ended and the generation stays quarantined until
-reboot. A generation holding nothing but its own marker and record is deleted outright,
-since a running browser always holds files in its folder. A generation without a complete
-record keeps the reboot-only rule: one from a build that predates the record, or one whose
-run could not record a browser. Any failure to record a browser, or to confirm it is
-outside the private root, invalidates the record first, and an entry without its line
-ending reads as no record, so a partial record never looks complete. Each outcome is
-logged as one line.
+deleted once its exit is proven within two seconds. If it cannot be ended, the generation
+stays quarantined until reboot. A generation holding nothing but its own marker and
+record is deleted outright, since a running browser always holds files in its folder. A
+generation without a record, from a build that predates it, keeps the reboot-only rule.
+Each outcome is logged as one line.
 
 Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
 file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,
-or when a leftover cannot be inspected, removed or recognised, has no complete record, or
-keeps an orphan that cannot be ended, that leftover stays in place and the launch goes
-ahead with only its own new generation, logging the overdue cleanup and its reason.
-Privileged chrome receives the closed `cleanup_overdue` advisory. It asks for a restart,
-names the manual step below for data a restart cannot clear, and carries no path or
-reason. Opaque data that remains after reboot requires the runtime directory to be moved
-aside manually while Zephium is closed.
+or when a leftover cannot be inspected or removed, that leftover stays in place and the
+launch goes ahead with only its own new generation, logging the overdue cleanup and its
+reason. Privileged chrome receives the closed `cleanup_overdue` advisory, which asks for a
+restart and carries no path or reason. Opaque data that remains after reboot requires the
+runtime directory to be moved aside manually while Zephium is closed.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
