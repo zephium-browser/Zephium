@@ -139,6 +139,7 @@ struct ControlledCompiler {
     shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
     catalog: Mutex<Option<BlockerCatalogSnapshot>>,
     refresh_admissions: Mutex<VecDeque<BlockerCatalogRefreshDispatch>>,
+    change_waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl ControlledCompiler {
@@ -172,6 +173,12 @@ impl ControlledCompiler {
 
     fn set_catalog(&self, catalog: BlockerCatalogSnapshot) {
         *self.catalog.lock().unwrap() = Some(catalog);
+    }
+
+    /// What the update worker does when it publishes a status.
+    fn wake(&self) {
+        let wake = self.change_waker.lock().unwrap().clone();
+        (wake.expect("the shell registers a waker"))();
     }
 
     fn admit_refresh(&self, dispatch: BlockerCatalogRefreshDispatch) {
@@ -247,6 +254,10 @@ impl BlockerCompiler for ControlledCompiler {
 }
 
 impl BlockerCatalog for ControlledCompiler {
+    fn set_change_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        *self.change_waker.lock().unwrap() = Some(wake);
+    }
+
     fn maintain(&self) -> BlockerCatalogSnapshot {
         self.catalog
             .lock()
@@ -582,6 +593,33 @@ fn startup_candidate_advances_on_internal_polls_without_waiting_for_heartbeat() 
     assert_eq!(catalog.installed_revision, Some(2));
     assert!(!catalog.activation_pending);
     assert_eq!(shell.pending_catalog_activation_poll_for_test(), None);
+}
+
+#[test]
+fn a_finished_download_is_taken_at_once_not_at_the_next_heartbeat() {
+    let (mut shell, compiler) = shell_with_initial_catalog(catalog_revision(1, 1));
+    let queue = CommandQueue::new();
+    shell.attach_queue(queue.clone());
+    while queue.try_recv().is_some() {}
+
+    let mut downloaded = catalog_revision(2, 2);
+    downloaded.installed_revision = Some(1);
+    downloaded.installed_manifest_sha256 = Some([1; 32]);
+    set_catalog_candidate(&mut downloaded, 2);
+    compiler.set_catalog(downloaded);
+    // Two published statuses before the actor runs make one wake.
+    compiler.wake();
+    compiler.wake();
+    let wake = queue
+        .try_recv()
+        .expect("a published status wakes the actor");
+    assert!(matches!(wake, Command::BlockerCatalogChanged));
+    assert!(queue.try_recv().is_none());
+
+    shell.handle(wake);
+    let catalog = shell.blocker_catalog_for_test();
+    assert_eq!(catalog.package_revision, Some(2));
+    assert!(catalog.activation_pending);
 }
 
 #[test]
