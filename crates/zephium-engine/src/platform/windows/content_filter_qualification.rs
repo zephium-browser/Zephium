@@ -351,6 +351,8 @@ fn native_protection_qualification() {
         "news" => "https://www.theguardian.com/technology/2026/sep/02/google-defeats-justice-department-bid-ad-tech-sale".into(),
         "github" => "https://github.com/rust-lang/rust".into(),
         "google" => "https://www.google.com/search?q=rust+programming".into(),
+        "cnn" => "https://www.cnn.com/".into(),
+        "nytimes" => "https://www.nytimes.com/".into(),
         _ => panic!("unknown fixed qualification site"),
     };
     let (worker, rules) = policy();
@@ -608,6 +610,27 @@ fn native_protection_qualification() {
             ),
         );
     }
+    if mode == "paused" && site != "coverage" {
+        // A paused view's filters are removed, so no request reaches the handler.
+        assert!(samples.callback.is_empty());
+        if site == "fixture" {
+            pause.set(false);
+            evaluate(&views[0], "globalThis.qaBeforeResume = true");
+            views[0].load_url(&url).unwrap();
+            until(
+                || {
+                    evaluate(
+                        &views[0],
+                        "!globalThis.qaBeforeResume && document.readyState === 'complete'",
+                    ) == true
+                },
+                30,
+            );
+            assert_eq!(evaluate(&views[0], "globalThis.usefulExecuted || 0"), 100);
+            assert_eq!(evaluate(&views[0], "globalThis.adExecuted || 0"), 0);
+            pause.set(true);
+        }
+    }
     let count = counter.0.load(Ordering::Relaxed);
     if site == "fixture" {
         assert_eq!(
@@ -616,10 +639,11 @@ fn native_protection_qualification() {
         );
         assert_eq!(
             count,
-            if mode == "on" && counting == "on" {
-                100 * tabs as u64
-            } else {
-                0
+            match (mode.as_str(), counting.as_str()) {
+                ("on", "on") => 100 * tabs as u64,
+                // The first view reloads once with protection resumed.
+                ("paused", "on") => 100,
+                _ => 0,
             }
         );
     }

@@ -7335,6 +7335,8 @@ pub fn run() {
 
             let resize_shell = shell.clone();
             let resize_window = window.clone();
+            #[cfg(target_os = "windows")]
+            let focus_engine = engine.clone();
             let exit_handle = handle.clone();
             let window_shutdown = shutdown.inner().clone();
             window.on_window_event(move |event| {
@@ -7453,6 +7455,8 @@ pub fn run() {
                         resize_shell.dispatch(Command::SetWindowVisible(true));
                         #[cfg(target_os = "windows")]
                         platform::imp::set_chrome_minimized(&resize_window, false);
+                        #[cfg(target_os = "windows")]
+                        focus_engine.window_foreground();
                         presence::report_app_active(resize_window.app_handle());
                     }
                     // Losing focus alone does not make a browser tab

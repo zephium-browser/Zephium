@@ -219,6 +219,9 @@ pub(crate) struct Downloads {
     timer: RefCell<Option<Timer>>,
     /// The running timer is the slow one: nothing is moving, only waiting.
     timer_slow: Cell<bool>,
+    /// When the running timer fires; a sooner deadline replaces it.
+    #[cfg(target_os = "windows")]
+    timer_due: Cell<Option<Instant>>,
     stopping: Cell<bool>,
     retired: RefCell<HashSet<ProfileId>>,
     drained_profiles: RefCell<HashSet<ProfileId>>,
@@ -292,6 +295,8 @@ impl Downloads {
             receiver: RefCell::new(receiver),
             timer: RefCell::new(None),
             timer_slow: Cell::new(false),
+            #[cfg(target_os = "windows")]
+            timer_due: Cell::new(None),
             stopping: Cell::new(false),
             retired: RefCell::new(HashSet::new()),
             drained_profiles: RefCell::new(HashSet::new()),
@@ -617,6 +622,26 @@ impl Downloads {
                         DownloadState::Pending | DownloadState::Paused | DownloadState::Held
                     )
             })
+    }
+
+    /// Paused and held transfers only wait for their deadlines, so the slow
+    /// timer sleeps until the earliest one; a pending transfer is also
+    /// watched for its page going away.
+    #[cfg(target_os = "windows")]
+    fn waiting_period(&self) -> std::time::Duration {
+        let active = self.active.borrow();
+        if active
+            .values()
+            .any(|transfer| transfer.record.state == DownloadState::Pending)
+        {
+            return WAITING_TICK;
+        }
+        let now = Instant::now();
+        active
+            .values()
+            .map(|transfer| transfer.deadline.expires.saturating_duration_since(now))
+            .min()
+            .map_or(WAITING_TICK, |until| until.max(WAITING_TICK))
     }
 
     /// The timer's period for what is going on now, and whether that is the slow one.

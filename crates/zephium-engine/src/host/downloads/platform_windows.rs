@@ -338,9 +338,15 @@ fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> b
 
 impl Downloads {
     pub(super) fn ensure_timer(self: &Rc<Self>) {
-        let (period, slow) = self.tick_period();
+        let (mut period, slow) = self.tick_period();
+        if slow {
+            period = self.waiting_period();
+        }
+        let due = std::time::Instant::now() + period;
         if self.timer.borrow().is_some() {
-            if self.timer_slow.get() == slow {
+            if self.timer_slow.get() == slow
+                && self.timer_due.get().is_some_and(|current| current <= due)
+            {
                 return;
             }
             if let Some(timer) = self.timer.borrow_mut().take() {
@@ -348,6 +354,7 @@ impl Downloads {
             }
         }
         self.timer_slow.set(slow);
+        self.timer_due.set(Some(due));
         let weak = Rc::downgrade(self);
         let timer = timer::schedule(period, move || {
             if let Some(manager) = weak.upgrade() {
@@ -594,6 +601,14 @@ impl Downloads {
                     DownloadStoreReply::Error(DownloadError::Storage),
                 ));
             }
+        }
+        // The timer armed above saw neither this transfer nor the work it
+        // just started, so it may be the slow one; its replies wait on a tick.
+        // Without one, nothing would ever answer them: the transfer ends, as
+        // the gate above refuses one it could not time.
+        self.ensure_timer();
+        if self.timer.borrow().is_none() {
+            self.cancel(id, Some(DownloadError::Unavailable));
         }
     }
 

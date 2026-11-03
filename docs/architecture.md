@@ -426,11 +426,13 @@ New(empty) -navigate-> Active <-> Inactive -idle-> Hibernated -> Closed(restorab
   `view: bool` on Tab).
 - Three tiers, built (shell = policy via idle clock + maintenance tick;
   engine = mechanism). Hidden views drop their tiles and are throttled at once
-  (WebView2 low-memory hint; WebKit's throttle scheduling policy). Hidden AND
-  idle (5 min) views are suspended losslessly: WebView2 `TrySuspend`, or
-  WebKit's suspend scheduling policy, which still runs audible or capturing
-  pages; both resume when shown. Older hidden pages beyond a small warm set of
-  recent ones (4, or 2 to save memory, 10 to keep tabs ready) are discarded
+  (WebView2 hidden-view throttling; WebKit's throttle scheduling policy). Hidden
+  AND idle (30 s) views are suspended losslessly: WebView2 `TrySuspend`, or
+  WebKit's suspend scheduling policy; both resume when shown. A `TrySuspend`
+  that is refused is asked once more after 30 s; refused twice, the page keeps
+  running until it is shown. Pages that are audible, capturing or in picture in
+  picture stay awake. Older hidden pages beyond a small warm set of
+  recent ones (2, or 10 to keep tabs ready) are discarded
   after the chosen idle grace, whatever the tab count; a hidden page whose
   renderer exceeds a heavy threshold (256 MB, or 160 MB to save memory)
   sleeps after three minutes (one) unless it is the most recent hidden page,
