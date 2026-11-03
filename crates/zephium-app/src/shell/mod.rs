@@ -465,12 +465,22 @@ impl Shell {
             chrome,
             emit,
         } = ports;
+        let mut windows = Windows::default();
+        let sidebar_position = store
+            .app_setting("sidebar.position")
+            .as_deref()
+            .and_then(layout::SidebarPosition::from_id)
+            .unwrap_or_default();
+        windows.set_sidebar_position(
+            sidebar_position,
+            window_layout::sidebar_caption(sidebar_position),
+        );
         Self {
             profiles: Profiles::default(),
             spaces: Spaces::default(),
             items: Items::default(),
             recently_closed: Vec::new(),
-            windows: Windows::default(),
+            windows,
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
@@ -980,7 +990,13 @@ impl Shell {
                     // Only a hidden sidebar is beneath the page to come over it.
                     if !peek || win.metrics.sidebar_hidden {
                         let card = layout::hidden_card(win.size, win.metrics);
-                        let _ = self.engine.raise_chrome(win.id, peek, card, slide);
+                        let _ = self.engine.raise_chrome(
+                            win.id,
+                            peek,
+                            card,
+                            slide,
+                            win.metrics.sidebar_position,
+                        );
                     }
                 }
             }
@@ -991,8 +1007,16 @@ impl Shell {
                 if let Some(win) = self.windows.focused() {
                     let zone = width.filter(|width| width.is_finite()).map(|width| {
                         let padding = win.metrics.padding;
-                        let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
-                            .min((win.size.width - padding - 2.0).max(padding));
+                        let edge = (padding + zephium_core::layout::clamp_sidebar_width(width)
+                            - 2.0)
+                            .min((win.size.width - padding - 2.0).max(padding))
+                            .clamp(0.0, (win.size.width - 2.0).max(0.0));
+                        let x = match win.metrics.sidebar_position {
+                            layout::SidebarPosition::Left => edge,
+                            layout::SidebarPosition::Right => {
+                                (win.size.width - edge - 2.0).max(0.0)
+                            }
+                        };
                         Rect::new(x, padding, 2.0, (win.size.height - 2.0 * padding).max(0.0))
                     });
                     let _ = self.engine.set_resize_guide(win.id, zone);

@@ -73,16 +73,28 @@ WKWebView, so settings controls need no special machinery.
 +------------------------------+
 ```
 
+Appearance's Sidebar position preference selects Left (the saved default) or
+Right. Right mirrors the sidebar and content geometry; tool panels and Settings
+navigation stay inward, toward the content. Hidden mode reveals the sidebar
+from the selected window edge.
+Page-slide masks and hidden-card clipping follow the selected edge, so native
+pages and the sidebar move together in either position.
+The resize handle stays on the sidebar's inner edge. With the handle focused,
+ArrowLeft widens a Right sidebar and ArrowRight widens a Left sidebar; the
+opposite arrow narrows it. Home and End select the minimum and maximum
+expanded widths.
+
 **Only the tab lists scroll.** Header, address, essentials and the space header
 are pinned. Scrolling the whole sidebar is why the scrollbar reads as belonging
 to the nav area; the fix is structural, and hiding the scrollbar comes after.
 
-**Header.** macOS insets the traffic lights; Windows and Linux put min, max and
-close at the top right of the sidebar column. There is no other option: on those
-platforms the content WebView owns every pixel inward of the 8px window padding,
-so a window-level title strip would have to be reserved (costing vertical space
-and the silhouette) or drawn over content (impossible). Hover-reveal is rejected
-because our top edge is the nav row itself.
+**Header.** Window controls keep their native sides regardless of sidebar
+position: macOS traffic lights remain at the window's top left, and Windows
+and Linux caption controls remain at the top right. Sidebar mirroring must not
+mirror these controls or place interactive chrome beneath them.
+On macOS, a Right sidebar leaves a 32px title band above the page, including
+New Tab and internal pages, for the native traffic lights. The sidebar itself
+keeps its top edge. Fullscreen removes this page-only band.
 
 **No split button.** Split is entered by dragging a tab onto another tab or a
 content edge, from the tab context menu, or from the launcher. Arming a picker
@@ -107,7 +119,7 @@ already in the backend needs a visible home, and this is the honest answer to
 
 ## 4. Compact mode
 
-Two modes only: Default (240-280px) and Compact (~52px, icons). No hidden mode.
+The sidebar supports Expanded, Compact and Hidden modes on either side.
 
 **Compact never hover-expands.** An expanding overlay would have to cover page
 pixels, which we cannot do, and hover-expand is twitchy regardless.
@@ -117,7 +129,7 @@ pixels, which we cannot do, and hover-expand is twitchy regardless.
   is what makes the launcher load-bearing rather than decorative, and it is free
   because the panel is already warm.
 - The tabs affordance opens the tab list as a flyout on the utility surface.
-- Window controls fold into the app menu; a 52px rail has no room.
+- Window controls retain their native window-side placement in Compact mode.
 
 ## 5. Tools
 

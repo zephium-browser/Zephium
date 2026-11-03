@@ -27,6 +27,13 @@ pub fn watch(window: &WebviewWindow, on: bool) {
     }
     let any = WINDOWS.with(|windows| {
         let mut windows = windows.borrow_mut();
+        if on
+            && windows
+                .iter()
+                .any(|watched| watched.label() == window.label())
+        {
+            return true;
+        }
         windows.retain(|watched| watched.label() != window.label());
         if on {
             windows.push(window.clone());

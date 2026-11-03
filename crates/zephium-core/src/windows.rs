@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::geometry::Size;
 use crate::ids::{ItemId, ProfileId, SpaceId, WindowId};
-use crate::layout::{Metrics, Mode};
+use crate::layout::{Metrics, Mode, SidebarPosition};
 use crate::split::Pane;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct Windows {
     map: HashMap<WindowId, Window>,
     focused: Option<WindowId>,
     next: WindowId,
+    sidebar_position: SidebarPosition,
+    sidebar_caption: f64,
 }
 
 impl Windows {
@@ -55,7 +57,11 @@ impl Windows {
                 space,
                 mode: Mode::Sidebar,
                 size,
-                metrics: Metrics::default(),
+                metrics: Metrics {
+                    sidebar_position: self.sidebar_position,
+                    caption: self.sidebar_caption,
+                    ..Metrics::default()
+                },
                 active: None,
                 splits: None,
             },
@@ -63,6 +69,20 @@ impl Windows {
         self.order.push(id);
         self.focused = Some(id);
         id
+    }
+
+    /// Applies the app-wide preference to current and future windows.
+    pub fn set_sidebar_position(&mut self, position: SidebarPosition, caption: f64) -> bool {
+        if self.sidebar_position == position && self.sidebar_caption == caption {
+            return false;
+        }
+        self.sidebar_position = position;
+        self.sidebar_caption = caption;
+        for window in self.map.values_mut() {
+            window.metrics.sidebar_position = position;
+            window.metrics.caption = caption;
+        }
+        true
     }
 
     pub fn get(&self, id: WindowId) -> Option<&Window> {

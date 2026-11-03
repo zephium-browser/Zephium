@@ -5,6 +5,7 @@ pub const KEYS: &[&str] = &[
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
+    "sidebar.position",
     "ui.accent",
     "ui.material",
     "ui.reduce-motion",
@@ -190,6 +191,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "sidebar.mode" => matches!(value, "default" | "compact" | "hidden"),
+        "sidebar.position" => crate::layout::SidebarPosition::from_id(value).is_some(),
         "ui.accent" => matches!(
             value,
             "graphite" | "sky" | "sage" | "rose" | "amber" | "teal" | "lavender" | "orchid"
@@ -466,6 +468,12 @@ mod tests {
     #[test]
     fn settings_are_closed_and_values_are_bounded() {
         assert!(value_allowed("sidebar.mode", "compact"));
+        assert!(KEYS.contains(&"sidebar.position"));
+        assert!(value_allowed("sidebar.position", "left"));
+        assert!(value_allowed("sidebar.position", "right"));
+        for value in ["", "Left", "right ", "top", "default"] {
+            assert!(!value_allowed("sidebar.position", value), "{value:?}");
+        }
         assert!(value_allowed("ui.accent", "sage"));
         assert!(value_allowed("ui.accent", "orchid"));
         assert!(!value_allowed("ui.accent", "purple"));

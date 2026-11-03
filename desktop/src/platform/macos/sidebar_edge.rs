@@ -1,5 +1,5 @@
 //! A hidden sidebar waits beneath the page, so the page's own view takes
-//! every pointer move along the window's left edge and the chrome never sees
+//! every pointer move along the window's edge and the chrome never sees
 //! the pointer arrive. Reading the moves app-wide tells the chrome the moment
 //! the pointer reaches the edge, or is plainly about to.
 
@@ -12,14 +12,16 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask, NSWindow};
 use objc2_foundation::MainThreadMarker;
 use tauri::{Manager, WebviewWindow};
+use zephium_core::layout::SidebarPosition;
 
-use crate::edge_reach::at_edge;
+use crate::edge_reach::{at_edge, sidebar_distance};
 
 struct Edge {
     window: WebviewWindow,
     number: isize,
     near: bool,
     last: Option<f64>,
+    position: SidebarPosition,
 }
 
 thread_local! {
@@ -35,10 +37,15 @@ fn observe(event: &NSEvent) {
         return;
     };
     let number = window.windowNumber();
-    let x = event.locationInWindow().x;
+    let local_x = event.locationInWindow().x;
     let changed = EDGES.with(|edges| {
         let mut edges = edges.try_borrow_mut().ok()?;
         let edge = edges.iter_mut().find(|edge| edge.number == number)?;
+        let x = sidebar_distance(
+            local_x,
+            window.contentView()?.bounds().size.width,
+            edge.position,
+        );
         let step = edge.last.map_or(0.0, |last| x - last);
         edge.last = Some(x);
         let near = at_edge(x, step, edge.near);
@@ -57,8 +64,8 @@ fn observe(event: &NSEvent) {
     }
 }
 
-/// Starts or stops watching `window`'s left edge. Runs on the main thread.
-pub fn watch(window: &WebviewWindow, on: bool) {
+/// Starts or stops watching `window`'s selected edge. Runs on the main thread.
+pub fn watch(window: &WebviewWindow, on: bool, position: SidebarPosition) {
     if MainThreadMarker::new().is_none() {
         return;
     }
@@ -69,6 +76,13 @@ pub fn watch(window: &WebviewWindow, on: bool) {
     let number = unsafe { &*(pointer as *const NSWindow) }.windowNumber();
     let watching = EDGES.with(|edges| {
         let mut edges = edges.borrow_mut();
+        if edges
+            .iter()
+            .any(|edge| edge.number == number && edge.position == position)
+            && on
+        {
+            return true;
+        }
         edges.retain(|edge| edge.number != number);
         if on {
             edges.push(Edge {
@@ -76,6 +90,7 @@ pub fn watch(window: &WebviewWindow, on: bool) {
                 number,
                 near: false,
                 last: None,
+                position,
             });
         }
         !edges.is_empty()

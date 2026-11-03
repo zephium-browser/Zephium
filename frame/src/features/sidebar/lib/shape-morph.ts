@@ -163,14 +163,18 @@ export function play(snapshot: Snapshot | null) {
   // somewhere the page still covers, flying on the page's own curve, would
   // pass underneath it and be seen only once it had landed. Those travel on a
   // gentler curve that keeps them behind the page's edge all the way.
-  const edgeFrom = snapshot.rect.right;
-  const widening = incoming.getBoundingClientRect().right - edgeFrom > 1;
+  const right =
+    snapshot.host.closest("[data-sidebar-position]")?.getAttribute("data-sidebar-position") ===
+    "right";
+  const edgeFrom = right ? snapshot.rect.left : snapshot.rect.right;
+  const widening = incoming.getBoundingClientRect().width - snapshot.rect.width > 1;
   for (const element of incoming.querySelectorAll<HTMLElement>(COUNTERPARTS)) {
     const key = keyOf(element);
     const from = key ? snapshot.marks.get(key) : undefined;
     const to = from ? shownRect(markOf(element)) : null;
     if (!from || !to) continue;
-    const trailing = widening && to.left + to.width / 2 > edgeFrom;
+    const center = to.left + to.width / 2;
+    const trailing = widening && (right ? center < edgeFrom : center > edgeFrom);
     const dx = from.left + from.width / 2 - (to.left + to.width / 2);
     const dy = from.top + from.height / 2 - (to.top + to.height / 2);
     travelling.add(element);
@@ -186,7 +190,8 @@ export function play(snapshot: Snapshot | null) {
     // The view itself is widened by native a moment after the shape changes;
     // until it is, the destination is outside it and the flight would be
     // drawn nowhere. It waits, still where it was, until there is room.
-    if (trailing && to.right > window.innerWidth) holdUntilRoom(flight, to.right);
+    if (trailing && (right ? to.left < 0 : to.right > window.innerWidth))
+      holdUntilRoom(flight, right ? window.innerWidth - to.left : to.right);
     // A row's name is new to the list shape; it arrives behind its mark.
     element.querySelector<HTMLElement>(".tab-label")?.animate([{ opacity: 0 }, { opacity: 1 }], {
       duration: duration("slow"),

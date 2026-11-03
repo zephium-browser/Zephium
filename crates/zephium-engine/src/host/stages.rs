@@ -8,6 +8,8 @@ use wry::WebView;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, WindowId};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use zephium_core::layout::SidebarPosition;
 use zephium_core::ports::engine::{EngineEvent, StageMotion};
 use zephium_core::split::Pane;
 
@@ -261,13 +263,19 @@ impl EngineHost {
             return !stage.has_terminal_failure();
         }
         let Some(r) = region else {
+            stage.settle_motion();
             let applied = stage.finish_content_update(update_epoch);
             if applied {
                 self.refresh_visible_generic_styles();
             }
             return applied;
         };
-        if !stage_set_frame(&stage, &self.parent, r, motion) {
+        if !stage_set_frame(
+            &stage,
+            &self.parent,
+            r,
+            motion.filter(|_| !next_tabs.is_empty()),
+        ) {
             stage.abort_content_update(update_epoch);
             return false;
         }
@@ -361,15 +369,22 @@ impl EngineHost {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(crate) fn raise_chrome(&mut self, window: WindowId, raised: bool, card: Rect, slide: bool) {
+    pub(crate) fn raise_chrome(
+        &mut self,
+        window: WindowId,
+        raised: bool,
+        card: Rect,
+        slide: bool,
+        sidebar_position: SidebarPosition,
+    ) {
         if let Some(stage) = self.stages.get(&window) {
             #[cfg(target_os = "macos")]
             {
-                let _ = (card, slide);
+                let _ = (card, slide, sidebar_position);
                 stage.raise_chrome(raised);
             }
             #[cfg(target_os = "windows")]
-            stage.raise_chrome(raised, card, slide);
+            stage.raise_chrome(raised, card, slide, sidebar_position);
         }
     }
 
@@ -656,9 +671,9 @@ fn stage_set_frame(
             && a.size.width == frame.size.width
             && a.size.height == frame.size.height
     };
-    // A layout that only restates where a slide is already going lets it
-    // finish; anything else ends it where it is and takes over.
-    if !same(stage.motion_target()) {
+    // Repeated slide requests may finish; an immediate layout settles the
+    // held width and clears its presentation mask before taking over.
+    if motion != Some(StageMotion::Slide) || !same(stage.motion_target()) {
         stage.settle_motion();
         if !same(stage.frame()) {
             stage.setFrame(frame);

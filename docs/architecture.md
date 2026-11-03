@@ -128,7 +128,10 @@ one window fight over the cursor: NSTrackingArea fires regardless of z-occlusion
 
 - **Tiling, never overlap.** Chrome = one region rectangle (sidebar or top bar),
   content = another, gaps = window vibrancy. `core::layout` computes both rects
-  from (window size, mode, metrics).
+  from (window size, mode, metrics). The saved `sidebar.position` preference
+  defaults to Left; Right mirrors sidebar/content geometry and keeps tool
+  panels and Settings navigation inward. Hidden reveal uses the selected edge.
+  OS window controls retain their native sides rather than mirroring.
 - **Native content stage owns content geometry.** A custom NSView subclass
   (objc2 `define_class`) hosts content webviews as subviews and lays out the
   split tree inside AppKit's layout pass (`resizeSubviewsWithOldSize:`), so

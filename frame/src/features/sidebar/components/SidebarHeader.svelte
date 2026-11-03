@@ -17,6 +17,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import { fullscreen } from "$shared/lib/fullscreen.svelte";
+  import { preferences } from "$domain/preferences";
   import IconButton from "$shared/ui/IconButton";
   import ModeTabs from "./ModeTabs.svelte";
   import SidebarSearch from "./SidebarSearch.svelte";
@@ -38,7 +39,8 @@
 
   let active = $derived(tabs.activeTab());
   // In fullscreen the lights are gone, and so is the room kept for them.
-  let lights = $derived(IS_MAC && !fullscreen());
+  let right = $derived(preferences.sidebarPosition() === "right");
+  let lights = $derived(IS_MAC && !right && !fullscreen());
 
   // At rail width the extensions' buttons live in this menu; a popup chosen
   // there hangs from the button that opened it.
@@ -106,6 +108,11 @@
   controls at the top-right edge. On Linux the controls are ours, and at rail width they move into the collapsed menu
   because three buttons cannot fit beside anything else.
 -->
+{#if IS_WINDOWS && right}<div
+    class="shrink-0"
+    style:height="var(--titlebar-height)"
+    aria-hidden="true"
+  ></div>{/if}
 {#if compact}
   <!--
     The rail's head: which environment you are in, then the two controls that
@@ -135,6 +142,7 @@
   </header>
 {:else}
   <header
+    data-sidebar-position={right ? "right" : "left"}
     class="flex shrink-0 items-center gap-px pe-1.5"
     style:height="var(--titlebar-height)"
     style:padding-inline-start={lights
@@ -144,12 +152,14 @@
         : "6px"}
     aria-label={m.ui_navigation()}
   >
+    {#if right && !IS_MAC && !IS_WINDOWS}<WindowControls />{/if}
     <!-- Beside a tool panel the panel's own close button already gives the
          column back, so a second way to the same shape would only crowd the
          lights; search stands there instead. -->
     {#if launcher && IS_WINDOWS}<span class="flex w-14 shrink-0 justify-center"
         ><ModeTabs compact /></span
       >{:else if launcher}<span class="ms-1.5 flex"><SidebarSearch /></span>{:else}<IconButton
+        class={right ? "sidebar-toggle-right" : ""}
         icon={SidebarLeftIcon}
         label={m.ui_compact_mode()}
         onclick={ontoggle}
@@ -191,8 +201,18 @@
         />
       </div>{/if}
 
-    {#if !IS_MAC && !IS_WINDOWS}
+    {#if !right && !IS_MAC && !IS_WINDOWS}
       <WindowControls />
     {/if}
   </header>
 {/if}
+
+<style>
+  header[data-sidebar-position="right"] {
+    flex-direction: row-reverse;
+  }
+
+  :global(.sidebar-toggle-right svg) {
+    scale: -1 1;
+  }
+</style>

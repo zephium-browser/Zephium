@@ -9,6 +9,7 @@ const defaults = {
   "search.custom-url": "",
   "search.suggestions": "true",
   "sidebar.mode": "default",
+  "sidebar.position": "left",
   "ui.accent": "graphite",
   "ui.material": "auto",
   "ui.reduce-motion": "false",
@@ -79,6 +80,8 @@ let initializing: Promise<void> | null = null;
 let lifetime: AbortController | null = null;
 const versions: Partial<Record<PreferenceKey, number>> = {};
 export const value = (key: PreferenceKey) => values[key];
+export const sidebarPosition = (): "left" | "right" =>
+  values["sidebar.position"] === "right" ? "right" : "left";
 export const saving = () => pending !== null;
 export const saveFailed = () => failed;
 /** AI: models, agents and dictation. Off, no AI surface is shown. */

@@ -68,6 +68,16 @@ export const fields = {
     description: m.settings_sidebar_desc,
     initial: "default",
   },
+  "appearance.sidebar-position": {
+    section: "appearance",
+    label: m.settings_sidebar_position,
+    description: m.settings_sidebar_position_desc,
+    initial: "left",
+    options: [
+      { value: "left", label: m.settings_sidebar_left },
+      { value: "right", label: m.settings_sidebar_right },
+    ],
+  },
   "appearance.material": {
     section: "appearance",
     label: m.settings_material,

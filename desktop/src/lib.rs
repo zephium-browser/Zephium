@@ -4300,6 +4300,7 @@ fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalP
     {
         return None;
     }
+    let (x, y) = platform::imp::to_window(x, y);
     Some(LogicalPosition::new(x, y))
 }
 
@@ -5427,8 +5428,6 @@ fn sidebar_set_hidden(caller: WebviewWindow, shell: State<'_, Handle>, hidden: b
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_hidden") {
         return;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    platform::imp::sidebar_hidden(&caller, hidden);
     shell.dispatch(Command::SetSidebarHidden(hidden));
 }
 

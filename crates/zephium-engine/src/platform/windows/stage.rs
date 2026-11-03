@@ -17,10 +17,10 @@ use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRoundRectRgn,
-    CreateSolidBrush, DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC, SelectObject,
-    SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-    DIB_RGB_COLORS, HDC, RGN_AND,
+    ClientToScreen, CombineRgn, CreateCompatibleDC, CreateDIBSection, CreateRectRgn,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, FillRect, GetDC, ReleaseDC,
+    SelectObject, SetWindowRgn, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BLENDFUNCTION, DIB_RGB_COLORS, HDC, RGN_AND,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -36,13 +36,14 @@ use wry::WebViewExtWindows;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+use zephium_core::layout::SidebarPosition;
 use zephium_core::ports::engine::{DropPreview, StageMotion};
 use zephium_core::split::{self, Pane};
 
 use crate::motion_curve::EMPHASIZED;
 use std::time::{Duration, Instant};
 
-use crate::pane_geometry::rounded_native_size;
+use crate::pane_geometry::{native_clip_bounds, rounded_native_size, SidebarSlide};
 
 const RADIUS: f64 = 8.0;
 const INDICATOR_RADIUS: f64 = 10.0;
@@ -184,6 +185,7 @@ struct State {
     /// Where the hidden sidebar's card stands over the page, while the
     /// chrome is up for it, and what has been cut to for it.
     card: Option<Rect>,
+    card_position: SidebarPosition,
     card_clip: Option<(PhysicalRect, i32, Vec<PhysicalRect>)>,
     /// The card on its way in or out, and the timer that steps the cut.
     card_motion: Option<CardMotion>,
@@ -199,10 +201,6 @@ struct CardMotion {
     from: f64,
     to: f64,
 }
-
-/// How far past its own width the card waits beside the window, as the
-/// frame's `translate: calc(-100% - 24px)` puts it.
-const CARD_AWAY: f64 = 24.0;
 
 impl CardMotion {
     /// The share still to go, and whether the card has arrived.
@@ -224,15 +222,7 @@ impl CardMotion {
 #[derive(Clone, Copy, Debug)]
 struct Slide {
     started: Instant,
-    /// The logical geometry the panes are laid out in for the journey.
-    origin: (f64, f64),
-    size: (f64, f64),
-    /// Horizontal offset in logical pixels, at the start and at the end.
-    from: f64,
-    to: f64,
-    /// It set off from under a hidden sidebar's card, which the page gives
-    /// way to as it travels.
-    beside: bool,
+    geometry: SidebarSlide,
 }
 
 /// The chrome's --motion-page, so the page and the sidebar travel together.
@@ -246,7 +236,7 @@ impl Slide {
             return None;
         }
         let progress = EMPHASIZED.at(elapsed.as_secs_f64() / SLIDE.as_secs_f64());
-        Some(self.from + (self.to - self.from) * progress)
+        Some(self.geometry.from + (self.geometry.to - self.geometry.from) * progress)
     }
 }
 
@@ -425,6 +415,7 @@ impl Stage {
             fullscreen: None,
             chrome: None,
             card: None,
+            card_position: SidebarPosition::Left,
             card_clip: None,
             card_motion: None,
             card_tick: None,
@@ -470,34 +461,17 @@ impl Stage {
                     .is_some_and(|transition| transition.active())
             });
             s.slide = match (motion, region) {
-                (Some(StageMotion::Slide), Some(r))
-                    if !s.hidden
-                        && !s.visible.is_empty()
-                        && s.origin.1 == r.y
-                        && s.size.1 == r.height
-                        && s.origin.0 != r.x =>
+                (Some(StageMotion::Slide), Some(target))
+                    if !s.hidden && !s.visible.is_empty() && !visible.is_empty() =>
                 {
-                    let started = Instant::now();
-                    Some(if r.width >= s.size.0 {
-                        // Wider: take the new size now, slide from where it was.
-                        Slide {
-                            started,
-                            origin: (r.x, r.y),
-                            size: (r.width, r.height),
-                            from: s.origin.0 - r.x,
-                            to: 0.0,
-                            beside: s.card.is_some(),
-                        }
-                    } else {
-                        // Narrower: keep the old size for the journey.
-                        Slide {
-                            started,
-                            origin: s.origin,
-                            size: s.size,
-                            from: 0.0,
-                            to: r.x - s.origin.0,
-                            beside: s.card.is_some(),
-                        }
+                    SidebarSlide::between(
+                        Rect::new(s.origin.0, s.origin.1, s.size.0, s.size.1),
+                        target,
+                        s.card.is_some(),
+                    )
+                    .map(|geometry| Slide {
+                        started: Instant::now(),
+                        geometry,
                     })
                 }
                 _ => None,
@@ -673,10 +647,17 @@ impl Stage {
     /// or puts it back beneath them. With `slide`, the cut follows the card
     /// in, or out before the chrome goes back beneath; a card turned back
     /// part way goes from where it has got to.
-    pub fn raise_chrome(&self, raised: bool, card: Rect, slide: bool) {
+    pub fn raise_chrome(
+        &self,
+        raised: bool,
+        card: Rect,
+        slide: bool,
+        sidebar_position: SidebarPosition,
+    ) {
         let Ok(mut state) = self.state.try_borrow_mut() else {
             return;
         };
+        state.card_position = sidebar_position;
         let now = Instant::now();
         let away = match (state.card, state.card_motion) {
             (None, _) => 1.0,
@@ -1446,27 +1427,19 @@ fn sync(state: &Rc<RefCell<State>>) {
             }
             state.dirty.extend(visible);
         }
-        // Travelling right from under a hidden sidebar's card, the stage gives
-        // way to the column the card becomes: its pages are cut at its new
-        // edge, which stays put while they slide out past it, so no page
-        // shows where the column now stands.
-        let cut = travelling
-            .filter(|(slide, _)| slide.beside && slide.to > slide.from)
-            .map(|(slide, _)| {
-                (
-                    slide.origin.0 + slide.to,
-                    slide.origin.1,
-                    slide.size.0 - slide.to,
-                    slide.size.1,
-                )
-            });
+        // The stationary cut also bounds the hit region of each child HWND.
+        let cut = travelling.map(|(slide, _)| {
+            let clip = slide.geometry.clip;
+            (clip.x, clip.y, clip.width, clip.height)
+        });
         let dirty = std::mem::take(&mut state.dirty);
         if dirty.is_empty() {
             return;
         }
-        let (origin, size, offset) = travelling
-            .map_or((state.origin, state.size, 0.0), |(slide, offset)| {
-                (slide.origin, slide.size, offset)
+        let (origin, size, offset) =
+            travelling.map_or((state.origin, state.size, 0.0), |(slide, offset)| {
+                let frame = slide.geometry.frame;
+                ((frame.x, frame.y), (frame.width, frame.height), offset)
             });
         (
             state.parent,
@@ -1625,7 +1598,7 @@ fn sync(state: &Rc<RefCell<State>>) {
 /// the card's shadow on the pages, for as long as the card is out; and puts
 /// it back as it was when it is not. A fullscreen page stays above all.
 fn settle_card(state: &Rc<RefCell<State>>) {
-    let (parent, card, chrome, clip, pages, away, moving) = {
+    let (parent, card, sidebar_position, chrome, clip, pages, away, moving) = {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
@@ -1654,6 +1627,7 @@ fn settle_card(state: &Rc<RefCell<State>>) {
         (
             state.parent,
             state.card.filter(|_| state.fullscreen.is_none()),
+            state.card_position,
             state.chrome,
             state.card_clip.clone(),
             pages,
@@ -1689,8 +1663,13 @@ fn settle_card(state: &Rc<RefCell<State>>) {
     else {
         return;
     };
-    let travel = ((card.width + CARD_AWAY) * scale * away).round() as i32;
-    let rect = (placed.0 - travel, placed.1, placed.2, placed.3);
+    let rect = crate::card_geometry::sliding_card_pixels(
+        placed,
+        card.width,
+        scale,
+        away,
+        sidebar_position,
+    );
     let chrome = match chrome.filter(|chrome| super::sidebar_card::is_live(*chrome)) {
         Some(chrome) => chrome,
         None => {
@@ -1789,14 +1768,8 @@ fn clip_to_stage(
     let Some(view) = state.views.get(&id) else {
         return;
     };
-    let (x, y, width, height) = rect;
-    let left = (stage.0 - x).max(0);
-    let top = (stage.1 - y).max(0);
-    let right = (stage.0 + stage.2 - x).min(width);
-    let bottom = (stage.1 + stage.3 - y).min(height);
-    if right <= left || bottom <= top {
-        return;
-    }
+    let (_, _, width, height) = rect;
+    let (left, top, right, bottom) = native_clip_bounds(rect, stage);
     // SAFETY: GDI regions created and consumed on this thread; the system owns
     // the final region only when SetWindowRgn succeeds.
     unsafe {
@@ -1808,14 +1781,18 @@ fn clip_to_stage(
             radius,
             radius,
         );
-        let inside = CreateRoundRectRgn(
-            left,
-            top,
-            right.saturating_add(1),
-            bottom.saturating_add(1),
-            radius,
-            radius,
-        );
+        let inside = if right <= left || bottom <= top {
+            CreateRectRgn(0, 0, 0, 0)
+        } else {
+            CreateRoundRectRgn(
+                left,
+                top,
+                right.saturating_add(1),
+                bottom.saturating_add(1),
+                radius,
+                radius,
+            )
+        };
         if !rounded.0.is_null() && !inside.0.is_null() {
             let _ = CombineRgn(Some(rounded), Some(rounded), Some(inside), RGN_AND);
             if SetWindowRgn(view.container, Some(rounded), true) == 0 {

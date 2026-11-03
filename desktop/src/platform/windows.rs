@@ -715,30 +715,6 @@ pub fn set_chrome_minimized(window: &WebviewWindow, minimized: bool) {
     });
 }
 
-thread_local! {
-    /// The windows whose sidebar is hidden. The caption's reveal begins where
-    /// the sidebar's card ends, not where the chrome behind the page does.
-    static HIDDEN_SIDEBARS: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-/// The sidebar is hidden or back: the pointer is read for its left edge
-/// while it is away.
-pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
-    let owner = window.clone();
-    let _ = window.run_on_main_thread(move || {
-        HIDDEN_SIDEBARS.with(|windows| {
-            let mut windows = windows.borrow_mut();
-            if hidden {
-                windows.insert(owner.label().to_owned());
-            } else {
-                windows.remove(owner.label());
-            }
-        });
-        sidebar_edge::watch(&owner, hidden);
-    });
-}
-
 pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter {
         window: window.clone(),
@@ -755,15 +731,35 @@ struct ChromeAdapter {
 impl Chrome for ChromeAdapter {
     fn position(&self, frame: ChromeFrame) -> bool {
         let window = self.window.clone();
-        let hidden = HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(self.window.label()));
-        let edge = if hidden {
-            zephium_core::layout::hidden_card_edge(frame.rect.width)
-        } else {
-            frame.rect.width
-        };
-        let page_left = (!frame.fill_width).then_some(frame.rect.x + edge);
         self.window
-            .run_on_main_thread(move || caption::set_page_left(&window, page_left))
+            .run_on_main_thread(move || {
+                sidebar_edge::watch(&window, frame.sidebar_hidden, frame.sidebar_position);
+                let page = if frame.fill_width {
+                    None
+                } else {
+                    let width = window
+                        .inner_size()
+                        .ok()
+                        .zip(window.scale_factor().ok())
+                        .map(|(size, scale)| f64::from(size.width) / scale);
+                    width.map(|width| {
+                        let edge = if frame.sidebar_hidden {
+                            zephium_core::layout::hidden_card_edge(frame.rect.width)
+                        } else {
+                            frame.rect.width
+                        };
+                        match frame.sidebar_position {
+                            zephium_core::layout::SidebarPosition::Left => {
+                                (frame.rect.x + edge, width)
+                            }
+                            zephium_core::layout::SidebarPosition::Right => {
+                                (0.0, frame.rect.x + frame.rect.width - edge)
+                            }
+                        }
+                    })
+                };
+                caption::set_page_interval(&window, page);
+            })
             .is_ok()
     }
 }

@@ -10,12 +10,30 @@ pub enum Mode {
     Sidebar,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarPosition {
+    #[default]
+    Left,
+    Right,
+}
+
+impl SidebarPosition {
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
     pub sidebar_width: f64,
+    pub sidebar_position: SidebarPosition,
     pub padding: f64,
     pub gap: f64,
-    /// Optional reserved title band. Native overlay controls reserve no space.
+    /// Reserved title band above the page; the sidebar keeps its full height.
     pub caption: f64,
     /// The column is put away until the pointer asks for it.
     pub sidebar_hidden: bool,
@@ -25,6 +43,7 @@ impl Default for Metrics {
     fn default() -> Self {
         Self {
             sidebar_width: 240.0,
+            sidebar_position: SidebarPosition::default(),
             padding: 8.0,
             gap: 8.0,
             caption: 0.0,
@@ -94,13 +113,12 @@ pub struct Layout {
 /// it casts over the page while it is shown is not cut off.
 pub const HIDDEN_SHADOW_REACH: f64 = 64.0;
 
-/// The gap a hidden sidebar's card keeps from the window's left, top and
+/// The gap a hidden sidebar's card keeps from its window edge, top and
 /// bottom, and the padding it keeps inside its own edge.
 pub const HIDDEN_CARD_INSET: f64 = 8.0;
 
-/// How far from the window's left the card ends, given the width of the
-/// chrome a hidden sidebar keeps beneath the page: the column and its
-/// gutter, the shadow's reach, and the card's padding beyond the column.
+/// The card's inward edge measured from the sidebar's window edge, given
+/// the chrome width: column and gutter, shadow reach, and card padding.
 pub fn hidden_card_edge(chrome_width: f64) -> f64 {
     (chrome_width - HIDDEN_SHADOW_REACH + 2.0 * HIDDEN_CARD_INSET).max(0.0)
 }
@@ -109,10 +127,17 @@ pub fn hidden_card_edge(chrome_width: f64) -> f64 {
 /// with the inset all round it, as the frame draws it.
 pub fn hidden_card(window: Size, m: Metrics) -> Rect {
     let inset = HIDDEN_CARD_INSET;
+    let window_width = window.width.max(0.0);
+    let width = (m.sidebar_width + 2.0 * inset).min((window_width - inset).max(0.0));
+    let edge = inset.min(window_width);
+    let x = match m.sidebar_position {
+        SidebarPosition::Left => edge,
+        SidebarPosition::Right => (window_width - edge - width).max(0.0),
+    };
     Rect::new(
-        inset,
-        inset,
-        (m.sidebar_width + 2.0 * inset).min((window.width - inset).max(0.0)),
+        x,
+        inset.min(window.height.max(0.0)),
+        width,
         (window.height - 2.0 * inset).max(0.0),
     )
 }
@@ -123,39 +148,50 @@ pub fn compute(window: Size, mode: Mode, m: Metrics, content_present: bool) -> L
     }
 }
 
-/// Chrome is anchored at the window's corner and draws the gutter around the
-/// column itself, so its origin is the same in every shape and only its width
-/// changes. Moving the origin between shapes made the whole column jump for
-/// the frames between native moving the view and the frame repadding it.
+/// Chrome keeps the sidebar's outer edge anchored to the selected window edge.
+/// Empty tabs use full-window chrome so the frame can render the New Tab page.
 fn sidebar(win: Size, m: Metrics, content_present: bool) -> Layout {
     let p = m.padding;
-    let inner_h = win.height - 2.0 * p;
+    let width = win.width.max(0.0);
+    let height = win.height.max(0.0);
+    let inner_h = (height - 2.0 * p).max(0.0);
 
     if !content_present {
         return Layout {
-            chrome: Rect::new(0.0, 0.0, win.width, win.height),
+            chrome: Rect::new(0.0, 0.0, width, height),
             content: None,
         };
     }
 
     // Hidden, the column keeps its width beneath the page, so it can come
     // over it without laying out again, and the page starts at the gutter.
-    let chrome_width = if m.sidebar_hidden {
-        (p + m.sidebar_width + HIDDEN_SHADOW_REACH).min(win.width)
+    let chrome_width = (if m.sidebar_hidden {
+        p + m.sidebar_width + HIDDEN_SHADOW_REACH
     } else {
         p + m.sidebar_width
+    })
+    .clamp(0.0, width);
+    let chrome_x = match m.sidebar_position {
+        SidebarPosition::Left => 0.0,
+        SidebarPosition::Right => width - chrome_width,
     };
-    let chrome = Rect::new(0.0, 0.0, chrome_width, win.height);
-    let content_x = if m.sidebar_hidden {
+    let chrome = Rect::new(chrome_x, 0.0, chrome_width, height);
+    let content_edge = (if m.sidebar_hidden {
         p
     } else {
         p + m.sidebar_width + m.gap
+    })
+    .clamp(0.0, width);
+    let content_width = (width - content_edge - p).max(0.0);
+    let content_x = match m.sidebar_position {
+        SidebarPosition::Left => content_edge,
+        SidebarPosition::Right => width - content_edge - content_width,
     };
     let content = Rect::new(
         content_x,
-        p + m.caption,
-        win.width - content_x - p,
-        inner_h - m.caption,
+        (p + m.caption).clamp(0.0, height),
+        content_width,
+        (inner_h - m.caption).max(0.0),
     );
     Layout {
         chrome,
@@ -179,6 +215,7 @@ mod tests {
 
     const M: Metrics = Metrics {
         sidebar_width: 240.0,
+        sidebar_position: SidebarPosition::Left,
         padding: 8.0,
         gap: 8.0,
         caption: 0.0,
@@ -266,11 +303,84 @@ mod tests {
     }
 
     #[test]
-    fn the_chrome_origin_is_the_same_in_every_shape() {
+    fn left_chrome_keeps_its_origin_in_every_shape() {
         let window = Size::new(1200.0, 800.0);
         let with_page = compute(window, Mode::Sidebar, M, true).chrome;
         let without = compute(window, Mode::Sidebar, M, false).chrome;
         assert_eq!((with_page.x, with_page.y), (without.x, without.y));
+    }
+
+    #[test]
+    fn right_sidebar_mirrors_page_and_card_geometry_in_every_shape() {
+        let window = Size::new(1200.0, 800.0);
+        assert_eq!(Metrics::default().sidebar_position, SidebarPosition::Left);
+        for sidebar_width in [MIN_SIDEBAR_WIDTH, 240.0, MAX_SIDEBAR_WIDTH] {
+            for sidebar_hidden in [false, true] {
+                let left = Metrics {
+                    sidebar_width,
+                    sidebar_hidden,
+                    caption: 32.0,
+                    ..M
+                };
+                let right = Metrics {
+                    sidebar_position: SidebarPosition::Right,
+                    ..left
+                };
+                let l = compute(window, Mode::Sidebar, left, true);
+                let r = compute(window, Mode::Sidebar, right, true);
+                let mirror = |rect: Rect| {
+                    Rect::new(
+                        window.width - rect.x - rect.width,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                    )
+                };
+                assert_eq!(r.chrome, mirror(l.chrome));
+                assert_eq!(r.content, l.content.map(mirror));
+                assert_eq!(
+                    hidden_card(window, right),
+                    mirror(hidden_card(window, left))
+                );
+                if !sidebar_hidden {
+                    let content = r.content.unwrap();
+                    assert_eq!(content.x + content.width + right.gap, r.chrome.x);
+                }
+                let empty = compute(window, Mode::Sidebar, right, false);
+                assert_eq!(empty.chrome, Rect::new(0.0, 0.0, 1200.0, 800.0));
+                assert_eq!(empty.content, None);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_rectangles_stay_bounded_in_narrow_and_degenerate_windows() {
+        for position in [SidebarPosition::Left, SidebarPosition::Right] {
+            for window in [
+                Size::new(200.0, 100.0),
+                Size::new(4.0, 4.0),
+                Size::default(),
+            ] {
+                for sidebar_hidden in [false, true] {
+                    let metrics = Metrics {
+                        sidebar_position: position,
+                        sidebar_hidden,
+                        ..M
+                    };
+                    let layout = compute(window, Mode::Sidebar, metrics, true);
+                    for rect in [
+                        layout.chrome,
+                        layout.content.unwrap(),
+                        hidden_card(window, metrics),
+                    ] {
+                        assert!(rect.x >= 0.0 && rect.y >= 0.0);
+                        assert!(rect.width >= 0.0 && rect.height >= 0.0);
+                        assert!(rect.x + rect.width <= window.width);
+                        assert!(rect.y + rect.height <= window.height);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

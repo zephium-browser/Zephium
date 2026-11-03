@@ -28,6 +28,23 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 describe("preference observation lifecycle", () => {
+  it.each([null, "left", "right"])(
+    "restores the sidebar edge %s with Left as the default",
+    async (choice) => {
+      native.get.mockImplementation(async (key: string) =>
+        key === "sidebar.position" ? choice : null,
+      );
+      const preferences = await import("../preferences.svelte");
+      await preferences.init();
+      expect(preferences.sidebarPosition()).toBe(choice ?? "left");
+      native.listener?.({ payload: "preference.sidebar.position=right" });
+      expect(preferences.sidebarPosition()).toBe("right");
+      native.listener?.({ payload: "preference.sidebar.position=left" });
+      expect(preferences.sidebarPosition()).toBe("left");
+      expect(native.set).not.toHaveBeenCalled();
+      preferences.dispose();
+    },
+  );
   it.each([null, "continue", "pages", "new-tab"])(
     "defaults startup to a new tab while preserving the stored choice %s",
     async (choice) => {

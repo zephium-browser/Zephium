@@ -172,6 +172,23 @@
       onchange={(v) => void preferences.set("sidebar.mode", v)}
     />
   </SettingsRow>
+  <SettingsRow
+    settingId="appearance.sidebar-position"
+    title={m.settings_sidebar_position()}
+    description={m.settings_sidebar_position_desc()}
+  >
+    <Select
+      label={m.settings_sidebar_position()}
+      labelHidden
+      value={preferences.value("sidebar.position")}
+      disabled={preferences.saving()}
+      options={[
+        { value: "left", label: m.settings_sidebar_left() },
+        { value: "right", label: m.settings_sidebar_right() },
+      ]}
+      onchange={(v) => void preferences.set("sidebar.position", v)}
+    />
+  </SettingsRow>
 </SettingsGroup>
 
 <SettingsGroup title={m.look_typography()}>

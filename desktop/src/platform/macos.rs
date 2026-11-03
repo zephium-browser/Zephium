@@ -30,6 +30,7 @@ use zephium_app::{
     SharedChrome,
 };
 use zephium_core::geometry::Size;
+use zephium_core::layout::SidebarPosition;
 use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_engine::MainThreadDispatch;
 
@@ -42,6 +43,7 @@ const MAX_PRIVILEGED_UI_DELEGATES: usize = 2;
 struct ChromeViewState {
     generation: u64,
     webview: Retained<WKWebView>,
+    window: WebviewWindow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -281,6 +283,7 @@ pub fn init(window: &WebviewWindow) -> bool {
     }
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();
+    let owner = window.clone();
     let scheduled = window.with_webview(move |webview| {
         if MainThreadMarker::new().is_none() {
             return;
@@ -302,6 +305,7 @@ pub fn init(window: &WebviewWindow) -> bool {
             *slot.borrow_mut() = Some(ChromeViewState {
                 generation,
                 webview,
+                window: owner,
             });
         });
         CHROME_GENERATION.store(generation, Ordering::Release);
@@ -475,14 +479,6 @@ impl Chrome for ChromeAdapter {
         if generation == 0 || CHROME_GENERATION.load(Ordering::Acquire) != generation {
             return false;
         }
-        let published = CHROME_GENERATION.load(Ordering::Acquire);
-        if !CHROME_ORIGIN
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .publish_if_current(published, generation, frame.rect.x, frame.rect.y)
-        {
-            return false;
-        }
         let schedule = {
             let mut layout = self
                 .layout
@@ -646,29 +642,30 @@ pub fn window_controls_lift() -> f64 {
 }
 
 thread_local! {
-    /// The windows whose sidebar is hidden. Their controls show only with
-    /// the sidebar's card.
+    /// Hidden sidebars whose native controls accompany their left-side card.
     static HIDDEN_SIDEBARS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
-/// The sidebar is hidden or back: its left edge is watched while it is away,
-/// and the window controls go with it.
-pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
-    let owner = window.clone();
-    let _ = window.run_on_main_thread(move || {
-        HIDDEN_SIDEBARS.with(|windows| {
-            let mut windows = windows.borrow_mut();
-            if hidden {
-                windows.insert(owner.label().to_owned());
-            } else {
-                windows.remove(owner.label());
+fn sidebar_layout(window: &WebviewWindow, position: SidebarPosition, hidden: bool) {
+    let was_left_hidden = HIDDEN_SIDEBARS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        let previous = windows.contains(window.label());
+        if hidden && position == SidebarPosition::Left {
+            if !previous {
+                windows.insert(window.label().to_owned());
             }
-        });
-        sidebar_edge::watch(&owner, hidden);
-        popover_close::watch(&owner, hidden);
-        super::window_controls::set_in_card(&owner, false);
-        super::window_controls::set_tucked(&owner, hidden);
+        } else if previous {
+            windows.remove(window.label());
+        }
+        previous
     });
+    sidebar_edge::watch(window, hidden, position);
+    popover_close::watch(window, hidden);
+    let left_hidden = hidden && position == SidebarPosition::Left;
+    if left_hidden != was_left_hidden {
+        super::window_controls::set_in_card(window, false);
+        super::window_controls::set_tucked(window, left_hidden);
+    }
 }
 
 /// The hidden sidebar's card shows its window controls, or has begun to
@@ -844,29 +841,41 @@ fn settle_held_chrome(generation: u64, layout: Arc<Mutex<ChromeLayoutState>>, fr
 fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) -> bool {
     use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
+    let generation = CHROME_GENERATION.load(Ordering::Acquire);
 
     let Some(sv) = (unsafe { view.superview() }) else {
         return false;
     };
     let h = sv.bounds().size.height;
+    let window = CHROME_VIEW.with(|slot| slot.borrow().as_ref().map(|state| state.window.clone()));
+    if let Some(window) = window {
+        sidebar_layout(&window, frame.sidebar_position, frame.sidebar_hidden);
+    }
     let r = frame.rect;
-    // Height follows the window; width either follows (fill) or stays fixed
-    // and pinned left. AppKit applies this in the window's own layout pass.
+    // Height follows the window; a fixed-width chrome stays on its selected side.
     let mask = if frame.fill_width {
         Mask::ViewWidthSizable | Mask::ViewHeightSizable
+    } else if frame.sidebar_position == SidebarPosition::Right {
+        Mask::ViewMinXMargin | Mask::ViewHeightSizable
     } else {
         Mask::ViewMaxXMargin | Mask::ViewHeightSizable
     };
     let current = view.frame();
     // Narrowing on a journey keeps the old width: the page slides over what
     // the chrome draws there, and cutting it away first shows a cropped frame.
-    let hold = frame.travel
-        && !frame.fill_width
-        && current.origin.x == r.x
-        && current.size.width > r.width;
+    let anchored = match frame.sidebar_position {
+        SidebarPosition::Left => current.origin.x == r.x,
+        SidebarPosition::Right => current.origin.x + current.size.width == r.x + r.width,
+    };
+    let hold = frame.travel && !frame.fill_width && anchored && current.size.width > r.width;
     let width = if hold { current.size.width } else { r.width };
+    let x = if hold && frame.sidebar_position == SidebarPosition::Right {
+        r.x + r.width - width
+    } else {
+        r.x
+    };
     let f = NSRect::new(
-        NSPoint::new(r.x, h - r.y - r.height),
+        NSPoint::new(x, h - r.y - r.height),
         NSSize::new(width, r.height),
     );
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
@@ -878,7 +887,14 @@ fn set_chrome_frame(view: &WKWebView, frame: ChromeFrame) -> bool {
     {
         view.setFrame(f);
     }
-    sidebar_resize::refresh();
+    let published = CHROME_GENERATION.load(Ordering::Acquire);
+    let current = CHROME_ORIGIN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .publish_if_current(published, generation, x, r.y);
+    if current {
+        sidebar_resize::refresh(frame.sidebar_position);
+    }
     hold
 }
 
@@ -902,6 +918,8 @@ mod tests {
             rect: zephium_core::geometry::Rect::new(8.0, 8.0, 240.0, 700.0),
             fill_width: false,
             travel: false,
+            sidebar_position: SidebarPosition::Left,
+            sidebar_hidden: false,
         };
         let layout = Arc::new(Mutex::new(ChromeLayoutState {
             pending: Some(frame),
