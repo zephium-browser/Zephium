@@ -7273,6 +7273,10 @@ pub fn run() {
             navigation_probe::install(app.handle())?;
             #[cfg(feature = "macos-work-public-inspection")]
             work_development::install(app.handle())?;
+            // Before admission: the shell's one profile projection can come
+            // right after it, and the driver waits on that projection.
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::start(app.handle(), &engine)?;
             if !startup_engine.transfer_to(&engine) {
                 return Err(std::io::Error::other(
                     "startup engine ownership did not transfer to the shell",
@@ -7314,9 +7318,6 @@ pub fn run() {
             if pending_runtime_update.swap(false, Ordering::AcqRel) {
                 engine.notify_runtime_restart_required();
             }
-
-            #[cfg(feature = "adblock-qa")]
-            blocker_bench::start(app.handle(), &engine)?;
 
             let initial =
                 platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
