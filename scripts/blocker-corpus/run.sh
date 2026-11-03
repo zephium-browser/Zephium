@@ -23,21 +23,26 @@ done
 } > "$out/consent.js"
 
 cd "$repo"
+rm -f "$out/rules.json"
 cargo xtask blocker-prune materialize --output "$out/rules.json"
 cargo xtask blocker-prune notify --rules "$out/rules.json" --output "$out/notify.json"
 cargo xtask blocker-prune hosts --rules "$out/rules.json" --output "$out/rulehosts.txt"
 
 pages=0
+corpora=() visits=()
 for list in "$here"/pages/*.txt "$out/rulehosts.txt"; do
   name=${list:t:r}
   echo "recording $name ($(wc -l < "$list" | tr -d ' ') pages)"
-  "$out/record" "$list" "$out/corpus-$name.jsonl" 5 "$out/consent.js" 2> "$out/record-$name.log"
+  "$out/record" "$list" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 "$out/consent.js" \
+    2> "$out/record-$name.log"
+  corpora+=("$out/corpus-$name.jsonl") visits+=("$out/visits-$name.jsonl")
   pages=$(( pages + $(grep -c . "$list") ))
 done
-cat "$out"/corpus-*.jsonl > "$out/corpus.jsonl"
+cat "${corpora[@]}" > "$out/corpus.jsonl"
 echo "replaying $(wc -l < "$out/corpus.jsonl" | tr -d ' ') loads"
 "$out/replay" "$out/corpus.jsonl" "$out/matches.jsonl" "$out/rules.json" "$out/notify.json" \
   2> "$out/replay.log"
 cargo xtask blocker-prune build --rules "$out/rules.json" --matches "$out/matches.jsonl" \
+  --visits "${visits[@]}" \
   --corpus "recorded $(date +%F) on $pages pages" \
   --output crates/zephium-blocker/src/webkit_pruned.txt

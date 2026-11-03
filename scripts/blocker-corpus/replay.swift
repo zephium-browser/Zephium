@@ -3,7 +3,8 @@
 // and the rule notifications WebKit reports for it are written out. Every load goes to a local
 // listener that closes the connection unanswered, so no request leaves the machine.
 // usage: replay <rows.jsonl> <out.jsonl> <rules.json>...
-// Loads of one page go in mixed-type batches; a URL repeats only across batches.
+// Loads of one page go in mixed-type batches; a URL repeats only across batches. A batch whose
+// script never reports back may not have issued its loads, so any such batch fails the replay.
 import AppKit
 import Network
 import WebKit
@@ -103,7 +104,7 @@ func request(_ type: String) -> String {
         }
         let goers = ["image", "script", "style-sheet", "font", "media", "ping", "other", "fetch", "websocket", "child-document", "svg-document", "none"]
             .map { "\"\($0)\": \(request($0))" }.joined(separator: ", ")
-        var done = 0
+        var done = 0, stalled = 0
         for key in order {
             let group = groups[key]!
             let type = group[0]["type"]!, top = group[0]["top"]!
@@ -130,6 +131,7 @@ func request(_ type: String) -> String {
                 let v = view(); probe.blocked = []; probe.seen = [:]; probe.done = false
                 v.loadHTMLString(html, baseURL: URL(string: top))
                 spin(20) { probe.done }
+                if !probe.done { stalled += 1 }
                 spin(0.2) { false }
                 for row in part { write(row, probe.blocked.contains(row["url"]!)) }
                 v.removeFromSuperview()
@@ -138,5 +140,9 @@ func request(_ type: String) -> String {
             if done % 5000 < group.count { FileHandle.standardError.write("\(done)/\(rows.count)\n".data(using: .utf8)!) }
         }
         out.closeFile()
+        if stalled > 0 {
+            FileHandle.standardError.write("\(stalled) batches never reported back\n".data(using: .utf8)!)
+            exit(1)
+        }
     }
 }

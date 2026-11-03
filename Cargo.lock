@@ -7296,6 +7296,7 @@ dependencies = [
  "flate2",
  "libc",
  "minisign",
+ "regex",
  "ring",
  "semver",
  "serde",

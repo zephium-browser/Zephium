@@ -260,6 +260,12 @@ unsupported.
   sites, the top sites, pages where exceptions apply
   (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.
   Adult sites are left out of every list.
+- A rule is listed only when the replay could test it and nothing matched. A
+  load WebKit did not check as its recorded type keeps every rule of that type
+  whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
+  late; a rule that applies only on sites whose page did not load (an
+  `if-domain` rule, or a first-party rule for the host it names) is kept. A
+  replay batch that never reports back fails the pass.
 
 Refreshing the list is a release step, not CI: it loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
@@ -270,8 +276,8 @@ After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:
 scripts/blocker-corpus/run.sh target/blocker-corpus
 ```
 
-Review the diff of `webkit_pruned.txt` (its header records the corpus and the
-replay), then run `cargo xtask update-blocker-seed` again with the same lists
+Review the diff of `webkit_pruned.txt` (its header records the corpus, the
+replay, the visits that loaded and the rules kept for untested loads), then run `cargo xtask update-blocker-seed` again with the same lists
 so `compile-report.json` records the pruned count, and
 `cargo xtask check-blocker-seed`.
 

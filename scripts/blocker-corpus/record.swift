@@ -1,7 +1,8 @@
 // Records a request corpus: visits pages in a bare WKWebView with no blocking and writes every
 // resource load WebKit checks against content rules (all frames) with its resource type, through
-// one notify rule per type. Each page loads, settles, then scrolls four times.
-// usage: record <pages.txt> <out.jsonl> [settle-seconds] [consent.js]
+// one notify rule per type. Each page loads, settles, then scrolls four times, and its visit is
+// written with a status: ok, failed, timeout (never finished) or late (finished after the wait).
+// usage: record <pages.txt> <out.jsonl> <visits.jsonl> [settle-seconds] [consent.js]
 import AppKit
 import WebKit
 
@@ -11,12 +12,19 @@ let types = ["top-document", "child-document", "image", "style-sheet", "script",
 final class Recorder: NSObject, WKNavigationDelegate {
     var page = ""
     var finished = false
+    var finishedAt: Date?
+    var failed = false
     var out: FileHandle
     var count = 0
     init(out: FileHandle) { self.out = out }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finished = true }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finished = true }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true; finishedAt = Date(); failed = false }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { fail(error) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { fail(error) }
+    // A navigation the page replaces (a redirect by script) is cancelled, not failed.
+    func fail(_ error: Error) {
+        finished = true
+        if (error as NSError).code != NSURLErrorCancelled { failed = true }
+    }
     @objc(_webView:contentRuleListWithIdentifier:performedAction:forURL:)
     func contentRuleAction(_ webView: WKWebView, identifier: NSString, action: NSObject, url: NSURL?) {
         guard let url = url?.absoluteString, let notes = action.value(forKey: "notifications") as? [String] else { return }
@@ -42,8 +50,10 @@ final class Recorder: NSObject, WKNavigationDelegate {
         FileManager.default.createFile(atPath: args[2], contents: nil)
         let out = FileHandle(forWritingAtPath: args[2])!
         out.seekToEndOfFile()
-        let settle = args.count > 3 ? Double(args[3])! : 6
-        let consent = args.count > 4 ? try? String(contentsOfFile: args[4], encoding: .utf8) : nil
+        FileManager.default.createFile(atPath: args[3], contents: nil)
+        let visits = FileHandle(forWritingAtPath: args[3])!
+        let settle = args.count > 4 ? Double(args[4])! : 6
+        let consent = args.count > 5 ? try? String(contentsOfFile: args[5], encoding: .utf8) : nil
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
         NSApp.finishLaunching()
@@ -72,7 +82,7 @@ final class Recorder: NSObject, WKNavigationDelegate {
             view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
             window.contentView!.addSubview(view)
             view.navigationDelegate = recorder
-            recorder.page = page; recorder.finished = false
+            recorder.page = page; recorder.finished = false; recorder.finishedAt = nil; recorder.failed = false
             let before = recorder.count
             let start = Date()
             view.load(URLRequest(url: URL(string: page)!))
@@ -82,10 +92,15 @@ final class Recorder: NSObject, WKNavigationDelegate {
                 view.evaluateJavaScript("window.scrollBy(0, innerHeight * 0.9)") { _, _ in }
                 spin(settle / 6) { false }
             }
-            FileHandle.standardError.write("\(n + 1)/\(pages.count) \(page) \(recorder.count - before) loads \(Int(Date().timeIntervalSince(start)))s\n".data(using: .utf8)!)
+            let status = recorder.failed ? "failed"
+                : recorder.finishedAt.map { $0.timeIntervalSince(start) <= 25 ? "ok" : "late" } ?? "timeout"
+            let visit = ["page": page, "status": status, "loads": String(recorder.count - before)]
+            visits.write(try! JSONSerialization.data(withJSONObject: visit)); visits.write(Data("\n".utf8))
+            FileHandle.standardError.write("\(n + 1)/\(pages.count) \(page) \(status) \(recorder.count - before) loads \(Int(Date().timeIntervalSince(start)))s\n".data(using: .utf8)!)
             view.navigationDelegate = nil
             view.removeFromSuperview()
         }
         out.closeFile()
+        visits.closeFile()
     }
 }
