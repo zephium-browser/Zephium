@@ -42,7 +42,7 @@ cat "${corpora[@]}" > "$out/corpus.jsonl"
 echo "replaying $(wc -l < "$out/corpus.jsonl" | tr -d ' ') loads"
 "$out/replay" "$out/corpus.jsonl" "$out/matches.jsonl" "$out/rules.json" "$out/notify.json" \
   2> "$out/replay.log"
-cargo xtask blocker-prune build --rules "$out/rules.json" --matches "$out/matches.jsonl" \
-  --visits "${visits[@]}" \
+cargo xtask blocker-prune build --rules "$out/rules.json" --loads "$out/corpus.jsonl" \
+  --matches "$out/matches.jsonl" --visits "${visits[@]}" \
   --corpus "recorded $(date +%F) on $pages pages" \
   --output crates/zephium-blocker/src/webkit_pruned.txt

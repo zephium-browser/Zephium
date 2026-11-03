@@ -41,6 +41,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
         "hosts" => hosts(&options.path("rules")?, &options.path("output")?),
         "build" => build(
             &options.path("rules")?,
+            &options.paths("loads")?,
             &options.paths("matches")?,
             &options.paths("visits")?,
             &options.text("corpus")?,
@@ -54,7 +55,8 @@ fn usage() -> String {
     "usage: cargo xtask blocker-prune <materialize --output PATH \
      | notify --rules ARTIFACT --output PATH \
      | hosts --rules ARTIFACT --output PATH \
-     | build --rules ARTIFACT --matches PATH... --visits PATH... --corpus TEXT --output PATH>"
+     | build --rules ARTIFACT --loads PATH... --matches PATH... --visits PATH... --corpus TEXT \
+       --output PATH>"
         .into()
 }
 
@@ -173,6 +175,14 @@ fn hosts(rules_path: &Path, output: &Path) -> Result<(), String> {
 /// A replayed load: its top page, URL and resource type.
 type LoadKey = (String, String, String);
 
+fn load_key(row: &Value) -> LoadKey {
+    (
+        row["top"].to_string(),
+        row["url"].as_str().unwrap_or_default().to_owned(),
+        row["type"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
 /// The host a wildcard rule names, when its url-filter starts with a whole
 /// host.
 fn rule_host(rule: &Value) -> Option<String> {
@@ -202,8 +212,10 @@ fn rule_host(rule: &Value) -> Option<String> {
 /// could not test a rule, it is kept: a load WebKit did not check as its
 /// recorded type counts for every rule of that type whose url-filter matches
 /// it, and a rule that applies only on sites whose pages did not load is kept.
+/// Every recorded load in `loads` must have a replay row.
 fn build(
     rules_path: &Path,
+    recorded: &[PathBuf],
     matches: &[PathBuf],
     visits: &[PathBuf],
     corpus: &str,
@@ -219,13 +231,7 @@ fn build(
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let row: Value =
                 serde_json::from_str(line).map_err(|e| format!("{}: {e}", path.display()))?;
-            let load = loads
-                .entry((
-                    row["top"].to_string(),
-                    row["url"].as_str().unwrap_or_default().to_owned(),
-                    row["type"].as_str().unwrap_or_default().to_owned(),
-                ))
-                .or_default();
+            let load = loads.entry(load_key(&row)).or_default();
             if let Some(page) = row["page"].as_str() {
                 load.0 = Some(page.to_owned());
             }
@@ -238,6 +244,22 @@ fn build(
                     .map(str::to_owned),
             );
         }
+    }
+    let mut unreplayed = 0usize;
+    for path in recorded {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let row: Value =
+                serde_json::from_str(line).map_err(|e| format!("{}: {e}", path.display()))?;
+            if !loads.contains_key(&load_key(&row)) {
+                unreplayed += 1;
+            }
+        }
+    }
+    if unreplayed > 0 {
+        return Err(format!(
+            "{unreplayed} recorded loads have no replay row; rerun the replay"
+        ));
     }
     let (mut exercised, mut untested, mut pages) = (0usize, Vec::new(), BTreeSet::new());
     for ((_, url, kind), (page, notes)) in &loads {
@@ -444,7 +466,7 @@ mod tests {
                 path
             })
             .collect();
-        build(&rules, &matches, &[visits_path], "test", &output).unwrap();
+        build(&rules, &matches, &matches, &[visits_path], "test", &output).unwrap();
         let written = std::fs::read_to_string(&output).unwrap();
         let raw: Vec<Box<RawValue>> = serde_json::from_str(artifact).unwrap();
         let digests: Vec<String> = raw
@@ -535,6 +557,38 @@ mod tests {
         );
         assert_eq!(listed, [2, 3]);
         assert!(written.contains("# Visits: 1 of 2 loaded; 2 rules kept"));
+    }
+
+    #[test]
+    fn a_recorded_load_without_a_replay_row_fails_the_build() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = |name: &str| directory.path().join(name);
+        std::fs::write(path("rules.json"), ARTIFACT).unwrap();
+        std::fs::write(path("visits.jsonl"), LOADED).unwrap();
+        let replayed = r#"{"page":"p","top":"t","url":"u1","type":"image","seen":"image"}"#;
+        std::fs::write(path("matches.jsonl"), replayed).unwrap();
+        std::fs::write(
+            path("corpus.jsonl"),
+            format!(
+                "{replayed}\n{}\n",
+                r#"{"page":"p","top":"t","url":"u2","type":"image"}"#
+            ),
+        )
+        .unwrap();
+        let error = build(
+            &path("rules.json"),
+            &[path("corpus.jsonl")],
+            &[path("matches.jsonl")],
+            &[path("visits.jsonl")],
+            "test",
+            &path("pruned.txt"),
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("1 recorded loads have no replay row"),
+            "{error}"
+        );
+        assert!(!path("pruned.txt").exists());
     }
 
     #[test]

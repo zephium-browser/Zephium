@@ -265,7 +265,8 @@ unsupported.
   whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
   late; a rule that applies only on sites whose page did not load (an
   `if-domain` rule, or a first-party rule for the host it names) is kept. A
-  replay batch that never reports back fails the pass.
+  replay batch that never reports back, or a recorded load with no replay row,
+  fails the pass.
 
 Refreshing the list is a release step, not CI: it loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
