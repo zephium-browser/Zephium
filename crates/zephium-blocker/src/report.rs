@@ -105,6 +105,9 @@ pub enum InputDropReason {
     /// A `$domain` or `$from` condition contains a value that is not a
     /// canonicalizable DNS hostname.
     InvalidDomainPredicate,
+    /// A regular-expression rule uses syntax the runtime matcher's regex
+    /// engine cannot compile within its bounds, such as backreferences.
+    UnsupportedRegularExpression,
 }
 
 /// A counted input-drop reason.

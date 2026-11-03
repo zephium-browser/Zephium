@@ -1602,6 +1602,7 @@ const fn input_drop_name(reason: zephium_blocker::InputDropReason) -> &'static s
         InputDropReason::ForbiddenGenericHide => "forbidden_generic_hide",
         InputDropReason::UnsupportedMethodPredicate => "unsupported_method_predicate",
         InputDropReason::InvalidDomainPredicate => "invalid_domain_predicate",
+        InputDropReason::UnsupportedRegularExpression => "unsupported_regular_expression",
     }
 }
 
