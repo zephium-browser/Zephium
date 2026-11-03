@@ -9,7 +9,6 @@ const facts = (overrides: Partial<NoticeFacts> = {}): NoticeFacts => ({
   securityDismissed: "",
   advisories: [],
   sessionSetAside: false,
-  cleanupDismissed: false,
   ...overrides,
 });
 const behind = [{ kind: "update_recommended", update_target: "operating_system" }] as const;
@@ -102,19 +101,5 @@ describe("update notices", () => {
     expect(
       selectNotices(facts({ status: { state: "unavailable" }, sessionSetAside: true })).card,
     ).toEqual({ kind: "session" });
-  });
-
-  it("says, in any build, that old data waits for a restart, until dismissed this launch", () => {
-    const cleanup = [{ kind: "cleanup_overdue", update_target: "operating_system" }] as const;
-    expect(
-      selectNotices(facts({ seen: "1.0.0", advisories: [...behind, ...cleanup] })).card,
-    ).toEqual({ kind: "cleanup" });
-    expect(
-      selectNotices(facts({ status: { state: "unavailable" }, advisories: cleanup })).card,
-    ).toEqual({ kind: "cleanup" });
-    expect(selectNotices(facts({ sessionSetAside: true, advisories: cleanup })).card).toEqual({
-      kind: "session",
-    });
-    expect(selectNotices(facts({ advisories: cleanup, cleanupDismissed: true })).card).toBeNull();
   });
 });

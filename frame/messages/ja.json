@@ -289,8 +289,6 @@
   "update_report_problem": "問題が発生しましたか？ お知らせください",
   "session_set_aside_title": "前回のタブを開き直せませんでした",
   "session_set_aside_detail": "Zephiumは保存されたセッションを読み取れなかったため、新しいタブで開始しました。履歴、ブックマーク、設定は変更されていません。古いセッションのコピーはZephiumのデータフォルダにあります。",
-  "runtime_cleanup_title": "古いデータの削除を完了するには再起動してください",
-  "runtime_cleanup_detail": "正しく終了しなかった以前のセッションのデータがこのコンピューターに残っています。コンピューターを再起動すると、次回の起動時にZephiumが削除します。",
   "update_dismiss": "閉じる",
   "update_security_mac_title": "macOSにセキュリティアップデートがあります",
   "update_security_system_title": "システムにセキュリティアップデートがあります",

@@ -435,9 +435,6 @@ pub fn harden_privileged(
                 &environment,
                 on_runtime_update,
             )?;
-            let mut browser = 0_u32;
-            core.BrowserProcessId(&mut browser)?;
-            crate::privileged_runtime_windows::record_browser_process(browser);
             Ok(())
         })();
         if let Err(error) = result {

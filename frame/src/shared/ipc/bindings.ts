@@ -2926,7 +2926,7 @@ export type RuntimeSecurityAdvisory = {
  *  Non-fatal, process-local classification produced before native WebView
  *  construction. Hard admission failures never reach privileged chrome.
  */
-export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime" | "cleanup_overdue";
+export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime";
 
 /**
  *  Fixed destination of the recommended maintenance action. No page or
@@ -2955,7 +2955,7 @@ export type RuntimeStatus = {
 	 */
 	user_content_degraded_scope_count: number,
 	/**
-	 *  Canonically ordered closed-vocabulary set. Rust emits at most six
+	 *  Canonically ordered closed-vocabulary set. Rust emits at most five
 	 *  entries and privileged chrome must replace, never append, projections.
 	 */
 	security_advisories: RuntimeSecurityAdvisory[],

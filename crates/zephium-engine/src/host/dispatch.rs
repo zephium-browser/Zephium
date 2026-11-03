@@ -330,7 +330,7 @@ pub(crate) fn install(
     >,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
-) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
+) -> Result<(), String> {
     let _install_claim = HostInstallClaim::acquire()?;
     let user_content = super::scripts::UserContentRegistry::with_initial_global(
         initial_user_content_generation,
@@ -350,21 +350,8 @@ pub(crate) fn install(
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
         &data_root.join("private-runtime"),
         zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
-        &crate::platform::imp::WindowsLeftoverProcesses,
     )
     .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
-    #[cfg(target_os = "windows")]
-    for line in crate::platform::imp::generation_report_lines("private", private_runtime.report()) {
-        eprintln!("{line}");
-    }
-    #[cfg(target_os = "windows")]
-    let cleanup_advisory = private_runtime
-        .report()
-        .overdue
-        .is_some()
-        .then(zephium_core::runtime_security::RuntimeSecurityAdvisory::cleanup_overdue);
-    #[cfg(not(target_os = "windows"))]
-    let cleanup_advisory = None;
     HOST_SEALED.with(|sealed| sealed.set(false));
     PENDING.with(|pending| {
         pending
@@ -560,9 +547,8 @@ pub(crate) fn install(
             erasure_attempts: HashMap::new(),
             sink: Sink::new(sink),
         });
-        Ok::<(), String>(())
-    })?;
-    Ok(cleanup_advisory)
+        Ok(())
+    })
 }
 
 // WebView2 construction pumps the Windows message loop. A nested main-thread

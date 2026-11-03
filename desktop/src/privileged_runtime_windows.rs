@@ -5,7 +5,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use zephium_core::runtime_security::RuntimeSecurityAdvisory;
 use zephium_core::webview2::{RuntimeGeneration, RuntimeGenerationKind};
 
 static RUNTIME_STATE: OnceLock<RuntimeGeneration> = OnceLock::new();
@@ -30,11 +29,7 @@ pub fn prepare(
     let runtime = RuntimeGeneration::prepare(
         &data_dir.join("privileged-runtime"),
         RuntimeGenerationKind::Privileged,
-        &zephium_engine::WindowsLeftoverProcesses,
     )?;
-    for line in zephium_engine::generation_report_lines("privileged", runtime.report()) {
-        crate::write_diagnostic(format_args!("{line}"));
-    }
     let main = runtime.root().join(main_label);
     let panel = runtime.root().join(panel_label);
     fs::create_dir(&main)?;
@@ -50,33 +45,6 @@ pub fn prepare(
         .set(runtime)
         .map_err(|_| io::Error::other("privileged WebView2 runtime initialized twice"))?;
     Ok(PreparedDirectories { main, panel })
-}
-
-/// Records a privileged browser process in this run's generation, so the
-/// next launch can clear it even if this run never proves the process gone.
-pub fn record_browser_process(process_id: u32) {
-    let Some(runtime) = RUNTIME_STATE.get() else {
-        return;
-    };
-    let recorded = zephium_engine::browser_process_record(process_id)
-        .ok_or_else(|| io::Error::other("the browser process could not be read"))
-        .and_then(|record| runtime.record_browser_process(record));
-    if let Err(error) = recorded {
-        crate::write_diagnostic(format_args!(
-            "privacy: a privileged WebView2 browser process was not recorded for cleanup after an unclean quit: {error}"
-        ));
-    }
-}
-
-/// Chrome's advisory when preparing this run's generation left earlier
-/// runtime data waiting for a reboot; the reason is already in the log.
-pub fn cleanup_advisory() -> Option<RuntimeSecurityAdvisory> {
-    RUNTIME_STATE
-        .get()?
-        .report()
-        .overdue
-        .is_some()
-        .then(RuntimeSecurityAdvisory::cleanup_overdue)
 }
 
 /// Delete this run's generation only after the composition root has proven

@@ -289,8 +289,6 @@
   "update_report_problem": "出了問題嗎？告訴我們",
   "session_set_aside_title": "無法重新開啟你上次的分頁",
   "session_set_aside_detail": "Zephium 無法讀取已儲存的工作階段，因此以全新的分頁啟動。瀏覽記錄、書籤與設定都未受影響，舊工作階段的副本已保存在 Zephium 的資料夾中。",
-  "runtime_cleanup_title": "重新啟動以完成清除舊資料",
-  "runtime_cleanup_detail": "未正常關閉的舊工作階段資料仍在這台電腦上。重新啟動電腦後，Zephium 會在下次啟動時清除它們。",
   "update_dismiss": "關閉",
   "update_security_mac_title": "macOS 有安全性更新",
   "update_security_system_title": "你的系統有安全性更新",

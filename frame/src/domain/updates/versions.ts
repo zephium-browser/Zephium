@@ -54,7 +54,7 @@ export type SystemUpdateTarget = "operating_system" | "browser_runtime";
 export function systemUpdateTarget(
   advisories: readonly RuntimeSecurityAdvisory[],
 ): SystemUpdateTarget | null {
-  for (const advisory of advisories.slice(0, 6)) {
+  for (const advisory of advisories.slice(0, 5)) {
     if (advisory.kind !== "update_recommended") continue;
     if (advisory.update_target === "operating_system") return "operating_system";
     if (advisory.update_target === "browser_runtime") return "browser_runtime";

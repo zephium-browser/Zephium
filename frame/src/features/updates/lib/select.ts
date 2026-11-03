@@ -7,7 +7,6 @@ export type UpdatePill =
 /** A notice to read once. */
 export type UpdateCard =
   | { kind: "session" }
-  | { kind: "cleanup" }
   | { kind: "security"; target: SystemUpdateTarget }
   | { kind: "updated"; version: string };
 
@@ -22,8 +21,6 @@ export type NoticeFacts = {
   advisories: readonly RuntimeSecurityAdvisory[];
   /** The saved session could not be restored this launch, and was not yet dismissed. */
   sessionSetAside: boolean;
-  /** Earlier runtime data waits for a reboot, and was not yet dismissed this launch. */
-  cleanupDismissed: boolean;
 };
 
 export type Notices = { pill: UpdatePill | null; card: UpdateCard | null };
@@ -46,16 +43,10 @@ function securityDue(dismissed: string, version: string) {
 export function selectNotices(facts: NoticeFacts): Notices {
   // Lost tabs matter more than any update, and in every build.
   const session: UpdateCard | null = facts.sessionSetAside ? { kind: "session" } : null;
-  // Data a failed quit left behind is a privacy fact, also in every build.
-  const cleanup: UpdateCard | null =
-    !facts.cleanupDismissed && facts.advisories.some(({ kind }) => kind === "cleanup_overdue")
-      ? { kind: "cleanup" }
-      : null;
-  const first = session ?? cleanup;
   // A build that cannot update (development, unsupported) shows none of the rest.
-  if (facts.status.state === "unavailable") return { pill: null, card: first };
+  if (facts.status.state === "unavailable") return { pill: null, card: session };
   const pill = pillFor(facts.status, facts.relaunching);
-  if (first) return { pill, card: first };
+  if (session) return { pill, card: session };
   const { version, seen, securityDismissed } = facts;
   if (version === null) return { pill, card: null };
   const target = systemUpdateTarget(facts.advisories);

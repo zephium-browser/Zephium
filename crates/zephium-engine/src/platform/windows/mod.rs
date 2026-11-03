@@ -29,10 +29,6 @@ mod cdp;
 mod certificates;
 mod content_filter;
 mod find;
-mod leftover_processes;
-pub use leftover_processes::{
-    browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
-};
 mod http_auth;
 pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
@@ -546,16 +542,6 @@ impl Drop for SecurityPolicy {
             let _ = unsafe { self.core14.remove_ServerCertificateErrorDetected(token) };
         }
     }
-}
-
-pub(crate) fn environment_user_data_folder(
-    environment: &ICoreWebView2Environment,
-) -> Option<std::path::PathBuf> {
-    let environment7 = environment.cast::<ICoreWebView2Environment7>().ok()?;
-    let mut folder = PWSTR::null();
-    unsafe { environment7.UserDataFolder(&mut folder) }.ok()?;
-    take_pwstr_bounded(folder, WINDOWS_PATH_UTF16_LIMIT, WINDOWS_PATH_UTF8_LIMIT)
-        .map(std::path::PathBuf::from)
 }
 
 /// Verify properties of the environment WebView2 actually created. Loader

@@ -549,9 +549,8 @@ pub fn run_windows_agentic_semantic_probe(
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
-    browser_process_record, detach_privileged_environment_update,
-    finalize_privileged_environment_registrations, generation_report_lines,
-    install_privileged_environment_registration, WindowsLeftoverProcesses,
+    detach_privileged_environment_update, finalize_privileged_environment_registrations,
+    install_privileged_environment_registration,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -1695,7 +1694,7 @@ pub fn install(
         dispatch.clone(),
         fatal_security_failure.clone(),
     );
-    let cleanup_advisory = host::install(
+    host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
@@ -1717,7 +1716,7 @@ pub fn install(
         retirement,
         event_delivery,
         fatal_security_failure,
-        runtime_security_advisories: runtime_security_advisories.with_optional(cleanup_advisory),
+        runtime_security_advisories,
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
