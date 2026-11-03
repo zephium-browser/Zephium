@@ -209,6 +209,22 @@ oldest first. Only the focused profile is queryable. New Tab queries on show,
 tab changes, calendar-day changes and visibility restoration; statistics add no polling timer or event
 stream. Unavailable statistics produce an error, never an invented zero.
 
+## Zephium's own rules
+
+`crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
+own, reviewed and shipped with the app, compiled after every catalog's lists on
+both platforms; its digest is part of every compiled-artifact cache key. It
+holds fixes the downloaded lists do not have yet, each with its reason, and is
+reported upstream when it applies there.
+
+- Ad recovery: some sites (allrecipes, simplyrecipes, people, bild, mirror,
+  tomsguide) probe AdSense's loader and, when it is blocked, re-serve the same
+  ads through rotating proxy hosts: 300 to 900 extra requests a page, more
+  than with protection off. Blocking the recovery instead replaces the page
+  with an "allow ads" wall. Allowing that one file there keeps the recovery
+  idle while the ads stay blocked: allrecipes went from 970 requests to 220
+  in a minute (1,395 with protection off).
+
 ## Budgets and evidence
 
 | Resource | Ceiling |

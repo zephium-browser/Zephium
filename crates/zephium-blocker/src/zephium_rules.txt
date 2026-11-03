@@ -1,0 +1,10 @@
+! Zephium's own filter rules, reviewed and shipped with the app and compiled
+! after the downloaded lists; see docs/adblock.md.
+
+! Ad recovery. These sites probe AdSense's loader, as a script and with fetch;
+! when it is blocked they start a recovery that re-serves the same ads through
+! rotating proxy hosts, hundreds of requests a page, and blocking the recovery
+! replaces the page with an "allow ads" wall. Letting this one file load keeps
+! the recovery idle, while the ads it would request stay blocked. EasyList
+! carries the same exception for other sites.
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=allrecipes.com|bild.de|mirror.co.uk|people.com|simplyrecipes.com|tomsguide.com

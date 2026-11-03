@@ -1227,7 +1227,9 @@ impl ArtifactCache {
         let failure = if catalog.is_empty() {
             BlockerCompileFailure::SourceUnavailable
         } else {
-            match compiler.compile(target, catalog.instantiate()) {
+            let mut sources = catalog.instantiate();
+            sources.push(crate::builtin::source());
+            match compiler.compile(target, sources) {
                 Ok(compiled) => {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {

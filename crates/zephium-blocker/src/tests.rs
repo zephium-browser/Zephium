@@ -1120,3 +1120,56 @@ proptest! {
         prop_assert_ne!(left.digest(), right.digest());
     }
 }
+
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                source("||pagead2.googlesyndication.com^"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let action = |url: &str, page: &str| rules.evaluate(request(url, page)).unwrap().action();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    assert_ne!(
+        action(loader, "https://www.allrecipes.com/recipe/1/"),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action(loader, "https://news.example/"),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action(
+            "https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m1/show_ads_impl.js",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn the_built_in_rules_compile_for_webkit_after_the_lists() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![
+                source("||pagead2.googlesyndication.com^"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.omitted_input_rules(), 0);
+    let json = rules.webkit().unwrap().json();
+    let exception = json.find("ignore-previous-rules").unwrap();
+    assert!(json.find("\"block\"").unwrap() < exception);
+    assert!(
+        json[exception..].contains("adsbygoogle") && json[exception..].contains("*allrecipes.com")
+    );
+}
