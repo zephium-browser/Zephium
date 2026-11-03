@@ -148,8 +148,9 @@ impl Results {
 
     pub(super) fn save(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        // A run stopped mid-write keeps the previous checkpoint.
-        let partial = path.with_extension("json.partial");
+        // A run stopped mid-write keeps the previous checkpoint, and two runs
+        // saving to the same file never share a partial one.
+        let partial = path.with_extension(format!("json.{}.partial", std::process::id()));
         std::fs::write(&partial, json).map_err(|e| e.to_string())?;
         std::fs::rename(&partial, path).map_err(|e| e.to_string())
     }
@@ -191,7 +192,11 @@ mod tests {
         let path = directory.path().join("results.json");
         results.save(&path).unwrap();
         results.save(&path).unwrap();
-        assert!(!directory.path().join("results.json.partial").exists());
+        let names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["results.json"]);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"navMs\": 1234.5"));
         let old: Visit = serde_json::from_str(r#"{"loadMs": 99.5}"#).unwrap();
