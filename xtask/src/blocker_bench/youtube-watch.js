@@ -16,7 +16,7 @@ const visible = (selector) => [...document.querySelectorAll(selector)].some((ele
 const ENFORCEMENT = 'ytd-enforcement-message-view-model, #enforcement-message, tp-yt-paper-dialog ytd-enforcement-message-view-model';
 const AD_UI = '.ytp-ad-player-overlay, .ytp-ad-player-overlay-layout, .ytp-ad-text, .ytp-ad-preview-container, .ytp-skip-ad-button, .ytp-ad-skip-button-modern';
 const COMPANION = '#player-ads, ytd-companion-slot-renderer, ytd-action-companion-ad-renderer, ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"]';
-let adMs = 0, adSeen = false, adUi = false, companion = false, enforcement = false, stalledMs = 0;
+let adMs = 0, adSeen = false, adUi = false, companion = false, enforcement = false, stalledMs = 0, started = false;
 let last = video?.currentTime ?? 0;
 const step = 250;
 for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
@@ -27,9 +27,13 @@ for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
   companion ||= visible(COMPANION);
   enforcement ||= visible(ENFORCEMENT);
   const now = video?.currentTime ?? 0;
+  started ||= now > 0;
   if (!showing && video && !video.paused && now === last) stalledMs += step;
   last = now;
 }
+// A video that never played, ad or not, observed nothing, unless the player
+// was stopped by a blocker warning, which is the finding.
+if (!started && !enforcement) throw new Error('playback never started');
 return {
   url: location.href,
   adPlacements: response?.adPlacements?.length ?? 0,
