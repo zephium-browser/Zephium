@@ -741,11 +741,19 @@ fn validate_generation_progression(
 }
 
 /// A source dated ahead of the clock (beyond five minutes of skew) is a bad
-/// header or a bad clock.
+/// header or a bad clock. A dated list is judged by its exact time.
 fn reject_future_sources(sources: &[SourceInput], now: u64) -> Result<(), String> {
+    let modified = |header: &SourceHeader| {
+        header
+            .modified
+            .as_deref()
+            .and_then(dated_seconds)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .unwrap_or(header.modified_unix)
+    };
     match sources
         .iter()
-        .find(|source| source.header.modified_unix > now.saturating_add(300))
+        .find(|source| modified(&source.header) > now.saturating_add(300))
     {
         Some(source) => Err(format!("{} is dated in the future", source.header.title)),
         None => Ok(()),
@@ -2323,6 +2331,13 @@ mod tests {
         assert!(reject_future_sources(&input, modified).is_ok());
         assert!(reject_future_sources(&input, modified - 300).is_ok());
         assert!(reject_future_sources(&input, modified - 301).is_err());
+
+        let mut exact = dated_input(3, "202611021200", b"q");
+        exact.header.modified = Some("Mon, 02 Nov 2026 12:00:59 +0000".into());
+        let input = [exact];
+        // The minute is within the skew; its 59th second is not.
+        assert!(reject_future_sources(&input, modified - 290).is_err());
+        assert!(reject_future_sources(&input, modified - 241).is_ok());
     }
 
     #[test]
