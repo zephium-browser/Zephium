@@ -7,6 +7,8 @@
 
 const TRUE_TOKENS: [&str; 2] = ["env_chromium", "cap_user_stylesheet"];
 const MAX_DEPTH: usize = 64;
+/// Nesting of `(` and `!` within one condition; deeper is false.
+const MAX_NESTING: usize = 64;
 
 /// Tracks the open `!#if` blocks of one list, line by line.
 #[derive(Debug, Default)]
@@ -49,6 +51,7 @@ fn evaluate(condition: &str) -> bool {
     let mut parser = Parser {
         tokens: &tokens,
         at: 0,
+        nesting: 0,
     };
     match parser.or() {
         Some(value) if parser.at == tokens.len() => value,
@@ -106,6 +109,7 @@ fn tokenize(condition: &str) -> Vec<Token<'_>> {
 struct Parser<'t, 'a> {
     tokens: &'t [Token<'a>],
     at: usize,
+    nesting: usize,
 }
 
 impl Parser<'_, '_> {
@@ -126,6 +130,16 @@ impl Parser<'_, '_> {
     }
 
     fn unary(&mut self) -> Option<bool> {
+        self.nesting += 1;
+        if self.nesting > MAX_NESTING {
+            return None;
+        }
+        let value = self.operand();
+        self.nesting -= 1;
+        value
+    }
+
+    fn operand(&mut self) -> Option<bool> {
         match self.tokens.get(self.at)? {
             Token::Not => {
                 self.at += 1;
@@ -229,6 +243,20 @@ mod tests {
             assert!(!evaluate(condition), "{condition}");
         }
         assert_eq!(kept("!#if env_chromium && é\na\n!#endif\nb"), ["b"]);
+    }
+
+    #[test]
+    fn deep_nesting_is_false_without_exhausting_the_stack() {
+        let depth = 100_000;
+        let parentheses = format!("{}env_chromium{}", "(".repeat(depth), ")".repeat(depth));
+        assert!(!evaluate(&parentheses));
+        assert!(!evaluate(&format!("{}env_chromium", "!".repeat(depth))));
+        let shallow = format!(
+            "{}env_chromium{}",
+            "(".repeat(MAX_NESTING - 1),
+            ")".repeat(MAX_NESTING - 1)
+        );
+        assert!(evaluate(&shallow));
     }
 
     proptest::proptest! {
