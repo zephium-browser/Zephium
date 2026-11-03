@@ -290,7 +290,7 @@
   "session_set_aside_title": "Vos derniers onglets n’ont pas pu être rouverts",
   "session_set_aside_detail": "Zephium n’a pas pu lire sa session enregistrée et a donc démarré avec des onglets neufs. L’historique, les signets et les réglages sont intacts, et une copie de l’ancienne session se trouve dans le dossier de données de Zephium.",
   "runtime_cleanup_title": "D’anciennes données de navigation sont encore sur cet ordinateur",
-  "runtime_cleanup_detail": "Zephium n’a pas encore pu effacer les données de sessions mal fermées. Redémarrer l’ordinateur le permet généralement. Si cet avis revient après un redémarrage, quittez Zephium et déplacez les dossiers privileged-runtime et private-runtime hors de son dossier de données.",
+  "runtime_cleanup_detail": "Zephium n’a pas encore pu effacer les données de sessions mal fermées. Redémarrer l’ordinateur le permet généralement. Si cet avis revient après un redémarrage, quittez Zephium et déplacez les dossiers privileged-runtime et web-content\\private-runtime hors de son dossier de données.",
   "update_dismiss": "Ignorer",
   "update_security_mac_title": "macOS dispose de mises à jour de sécurité",
   "update_security_system_title": "Votre système dispose de mises à jour de sécurité",
