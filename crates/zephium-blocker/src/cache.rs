@@ -670,17 +670,28 @@ fn load_webkit_record(
         };
         Some(prepared)
     };
+    let cached = CachedWebKitRules {
+        file: Mutex::new(file),
+        len: header.payload_len,
+        rule_count: header.rule_count,
+        blocking_entries: header.coverage.blocking_rule_entries,
+        artifact_digest,
+    };
+    // Only the macOS engine reads deferred text off its UI thread; elsewhere
+    // it is read here, on the blocker's own thread.
+    let encoded: Arc<dyn DeclarativeRuleText> = if cfg!(target_os = "macos") {
+        Arc::new(cached)
+    } else {
+        let Some(text) = cached.load() else {
+            return Ok(None);
+        };
+        Arc::new(text)
+    };
     Ok(Some(LoadedArtifact::WebKit {
         digest: ContentRuleDigest::from_bytes(header.policy_digest),
         coverage: header.coverage,
         artifact_digest,
-        encoded: Arc::new(CachedWebKitRules {
-            file: Mutex::new(file),
-            len: header.payload_len,
-            rule_count: header.rule_count,
-            blocking_entries: header.coverage.blocking_rule_entries,
-            artifact_digest,
-        }),
+        encoded,
         cosmetics,
     }))
 }
