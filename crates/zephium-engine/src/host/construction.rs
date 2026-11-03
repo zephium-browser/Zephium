@@ -1034,6 +1034,7 @@ impl EngineHost {
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     use wry::WebViewBuilderExtMacos;
                     let configuration = self.webext.configuration(profile, &self.sink);
+                    self.refresh_profile_scriptlets(profile);
                     if crate::platform::imp::proxy::apply(
                         &configuration,
                         crate::network::current().as_ref(),

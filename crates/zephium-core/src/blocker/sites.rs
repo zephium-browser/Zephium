@@ -80,6 +80,12 @@ impl PreparedBlockerSites {
     pub fn get(&self, site: &BlockerSite) -> Option<&PreparedBlockerSite> {
         self.entries.get(site)
     }
+    pub fn paused_sites(&self) -> impl Iterator<Item = &BlockerSite> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.paused)
+            .map(|(site, _)| site)
+    }
     pub fn same_content(&self, other: &Self) -> bool {
         self.entries.len() == other.entries.len()
             && self.entries.iter().all(|(site, value)| {

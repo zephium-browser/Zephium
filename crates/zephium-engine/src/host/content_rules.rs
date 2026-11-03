@@ -1101,6 +1101,8 @@ impl EngineHost {
                 digest: native_digest,
             });
             self.refresh_profile_document_styles(profile);
+            #[cfg(target_os = "macos")]
+            self.refresh_profile_scriptlets(profile);
             self.emit_content_policy_settlement(
                 profile,
                 generation,
@@ -1338,6 +1340,8 @@ impl EngineHost {
             digest: native_digest,
         });
         self.refresh_profile_document_styles(profile);
+        #[cfg(target_os = "macos")]
+        self.refresh_profile_scriptlets(profile);
         self.emit_content_policy_settlement(
             profile,
             generation,
@@ -1433,6 +1437,8 @@ impl EngineHost {
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
+        #[cfg(target_os = "macos")]
+        self.refresh_profile_scriptlets(profile);
     }
 
     pub(super) fn begin_content_policy_shutdown(&mut self) {

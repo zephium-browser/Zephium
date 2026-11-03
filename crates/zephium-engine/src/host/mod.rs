@@ -57,6 +57,8 @@ mod permits;
 mod popup_sites;
 mod profiles;
 mod resources;
+#[cfg(target_os = "macos")]
+mod scriptlets;
 mod scripts;
 mod site_permissions;
 mod stages;
@@ -684,6 +686,8 @@ pub(crate) struct EngineHost {
     work_site_loads: HashMap<(ProfileId, String), u64>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
+    #[cfg(target_os = "macos")]
+    scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
     // Off-screen views, and the subset the shell's idle policy asked WebView2

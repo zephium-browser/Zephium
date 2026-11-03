@@ -350,6 +350,9 @@ pub(crate) fn install(
     #[cfg(not(target_os = "windows"))]
     let content_rule_cache = crate::erasure::canonical_owned_root(&data_root.join("content-rules"))
         .map_err(|error| format!("cannot secure content-rule cache: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let scriptlet_root = crate::erasure::canonical_owned_root(&data_root.join("scriptlets"))
+        .map_err(|error| format!("cannot secure scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
         &data_root.join("private-runtime"),
@@ -504,6 +507,8 @@ pub(crate) fn install(
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             webext: Default::default(),
+            #[cfg(target_os = "macos")]
+            scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
