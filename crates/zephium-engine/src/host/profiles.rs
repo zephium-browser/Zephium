@@ -1370,3 +1370,22 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests;
+
+/// Before anything that may start a browser process in `folder`: one in the
+/// private generation is expected there first, so a run that ends before
+/// recording it leaves the generation for a reboot. It takes the runtime
+/// alone, for callers that hold other parts of the host mutably.
+#[cfg(target_os = "windows")]
+pub(super) fn expect_private_browser(
+    private_runtime: &zephium_core::webview2::RuntimeGeneration,
+    folder: &std::path::Path,
+) {
+    if !folder.starts_with(private_runtime.root()) {
+        return;
+    }
+    if let Err(error) = private_runtime.expect_browser() {
+        eprintln!(
+            "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+        );
+    }
+}

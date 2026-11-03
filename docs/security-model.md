@@ -666,24 +666,34 @@ same-boot; they cannot be reclaimed until a later reboot. Malformed or unowned o
 are never adopted or deleted. Successful exact cleanup removes its volatile subkey, so
 clean relaunches do not grow HKCU for the rest of the boot.
 
-Each generation also keeps a versioned process record: the id and creation time of every
-WebView2 browser process its data belongs to. The privileged root records both browser
-processes; the private root records each private window's. A same-boot generation whose
-run never proved its exit is reclaimed by the next launch, before any environment or
-view exists, when that record proves it safe. If every recorded process is gone, meaning
-no process has that id with that creation time, the data is deleted. A recorded process
-that still runs is an orphan of a dead run, because the exclusive root lease means no
-live Zephium instance owns anything in that root. If it is an `msedgewebview2.exe`, it
-is ended together with its direct child processes created after it, and its data is
-deleted once every one of their exits is proven within two seconds. If it, or any such
-child, cannot be ended, nothing is ended and the generation stays quarantined until
-reboot. A generation holding nothing but its own marker and record is deleted outright,
-since a running browser always holds files in its folder. A generation without a complete
-record keeps the reboot-only rule: one from a build that predates the record, or one whose
-run could not record a browser. Any failure to record a browser, or to confirm it is
-outside the private root, invalidates the record first, and an entry without its line
-ending reads as no record, so a partial record never looks complete. Each outcome is
-logged as one line.
+Each generation also keeps a versioned, append-only process record of every WebView2
+browser process its data belongs to. Before anything that may start a browser there, the
+record gains a `pending` entry; once that browser is recorded, its id and creation time
+and a `resolved` entry follow. The privileged root expects both of its browsers when it is
+prepared; the private root expects one each time a private environment is created. A
+same-boot generation whose run never proved its exit is reclaimed by the next launch,
+before any environment or view exists, only when that record proves it safe. A recorded
+process is gone only when its id names no process at all, or names one created at another
+time; a process that cannot be opened or queried for any other reason is never taken for
+gone, and keeps the generation. If every recorded process is gone, the data is deleted. A
+recorded process that still runs is an orphan of a dead run, because the exclusive root
+lease means no live Zephium instance owns anything in that root. If it is an
+`msedgewebview2.exe`, every one of its direct child processes created after it is checked
+first: if the children cannot be listed, or one is not WebView2 or cannot be opened to be
+ended, nothing is ended and the generation stays until reboot. Otherwise all of them are
+ended and the data is deleted once every exit is proven within two seconds. Ending is not
+all or nothing once it starts: a process that does not exit in time keeps the generation
+until reboot, though the others may already be gone. A generation holding nothing but its
+own marker and record is deleted outright, since a running browser always holds files in
+its folder, unless a browser was expected and never recorded, or the record was
+invalidated: such a browser may still be starting.
+Every other generation keeps the reboot-only rule: one from a build that predates the
+record, one whose record still has a `pending` entry or is malformed in any way, including
+a torn last line, and one whose record was invalidated. Any failure to expect or record a
+browser, or to confirm it is outside the private root, invalidates the record: it is marked
+on the generation's volatile boot registry key first, where a record file that cannot be
+changed cannot contradict it, and the file is then removed or made unreadable. Each
+outcome is logged as one line.
 
 Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
 file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,

@@ -12,7 +12,8 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use winreg::enums::{
-    HKEY_CURRENT_USER, KEY_CREATE_SUB_KEY, KEY_READ, REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
+    HKEY_CURRENT_USER, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_CREATED_NEW_KEY,
+    REG_OPTION_VOLATILE,
 };
 use winreg::RegKey;
 
@@ -86,6 +87,8 @@ pub enum RecordedProcessState {
     /// No process with this id and creation time exists.
     Gone,
     Running,
+    /// The process could not be checked, which never proves it gone.
+    Indeterminate,
 }
 
 /// Native checks on the exact browser processes an earlier run recorded.
@@ -108,6 +111,8 @@ pub struct GenerationReport {
     pub reclaimed_empty: Vec<String>,
     /// An orphan could not be ended, so its data stays until a reboot.
     pub kept_running: Vec<String>,
+    /// A recorded browser could not be checked, so its data stays.
+    pub kept_unchecked: Vec<String>,
     /// Leftovers this launch could not clear: over a startup budget, kept
     /// for a reboot, or not Zephium's to judge. The launch went ahead and
     /// this says why.
@@ -495,7 +500,9 @@ fn maintain_generation(
             reclaim_generation(path, kind, generation)
         }
         MarkerStatus::Matches => {
-            if let Some(reclaimed) = reclaim_same_boot(path, kind, generation, leftovers, report)? {
+            if let Some(reclaimed) =
+                reclaim_same_boot(path, boot, kind, generation, leftovers, report)?
+            {
                 forget_current_boot(boot, generation)?;
                 match reclaimed {
                     SameBootReclaim::AfterExit => &mut report.reclaimed_after_exit,
@@ -519,23 +526,52 @@ enum SameBootReclaim {
 }
 
 /// A same-boot leftover is a run that ended without proving its browser
-/// processes gone. Its own record now proves it: every recorded process has
-/// exited, or is an orphan this launch may end. The caller holds the root's
-/// exclusive lease, so no other Zephium instance can own any process recorded
-/// here. Without a record, only a generation holding no browsing data at all
-/// is cleared, since a running browser always keeps files open in its folder.
+/// processes gone. Its own record now proves it: every browser it expected
+/// was recorded, and every recorded process has exited or is an orphan this
+/// launch may end. The caller holds the root's exclusive lease, so no other
+/// Zephium instance can own any process recorded here. A record that is
+/// incomplete, invalidated, or names a process that cannot be checked proves
+/// nothing. Without one, only a generation holding no browsing data at all is
+/// cleared, since a running browser always keeps files open in its folder.
 fn reclaim_same_boot(
     path: &Path,
+    boot: &RegKey,
     kind: RuntimeGenerationKind,
     generation: &str,
     leftovers: &dyn LeftoverProcesses,
     report: &mut GenerationReport,
 ) -> io::Result<Option<SameBootReclaim>> {
-    let reclaimed = match read_process_record(path)? {
-        Some(processes) if !processes.is_empty() => {
-            let running = processes
+    let unrecorded = is_unrecorded(boot, generation)?;
+    let record = if unrecorded {
+        None
+    } else {
+        read_process_record(path)?
+    };
+    // A browser expected and never recorded may still be starting, with no
+    // files of its own yet.
+    let quiet = !unrecorded && record.as_ref().is_none_or(|record| record.pending == 0);
+    let reclaimed = match record {
+        Some(record) if record.pending == 0 && !record.processes.is_empty() => {
+            let states = record
+                .processes
+                .iter()
+                .map(|process| (*process, leftovers.state(*process)))
+                .collect::<Vec<_>>();
+            if states
+                .iter()
+                .any(|(_, state)| *state == RecordedProcessState::Indeterminate)
+            {
+                report.kept_unchecked.push(generation.to_owned());
+                note_overdue(
+                    report,
+                    "a browser left by an earlier run could not be checked",
+                );
+                return Ok(None);
+            }
+            let running = states
                 .into_iter()
-                .filter(|process| leftovers.state(*process) == RecordedProcessState::Running)
+                .filter(|(_, state)| *state == RecordedProcessState::Running)
+                .map(|(process, _)| process)
                 .collect::<Vec<_>>();
             if running.is_empty() {
                 SameBootReclaim::AfterExit
@@ -550,7 +586,7 @@ fn reclaim_same_boot(
                 return Ok(None);
             }
         }
-        _ if holds_only_bookkeeping(path)? => SameBootReclaim::Empty,
+        _ if quiet && holds_only_bookkeeping(path)? => SameBootReclaim::Empty,
         _ => {
             note_overdue(
                 report,
@@ -577,6 +613,26 @@ fn forget_current_boot(boot: &RegKey, generation: &str) -> io::Result<()> {
     }
 }
 
+/// The value an invalidated record leaves on its generation's boot key.
+const UNRECORDED: &str = "unrecorded";
+
+fn mark_unrecorded(kind: RuntimeGenerationKind, generation: &str) -> io::Result<()> {
+    let (key, _) = open_boot_registry(kind)?.create_subkey_with_options_flags(
+        generation,
+        REG_OPTION_VOLATILE,
+        KEY_SET_VALUE,
+    )?;
+    key.set_value(UNRECORDED, &1_u32)
+}
+
+fn is_unrecorded(boot: &RegKey, generation: &str) -> io::Result<bool> {
+    match boot.open_subkey_with_flags(generation, KEY_READ) {
+        Ok(key) => Ok(key.get_raw_value(UNRECORDED).is_ok()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn create_process_record(root: &Path) -> io::Result<()> {
     OpenOptions::new()
         .write(true)
@@ -585,9 +641,9 @@ fn create_process_record(root: &Path) -> io::Result<()> {
         .sync_all()
 }
 
-/// The recorded processes, or None when the record is missing or malformed,
-/// which leaves the generation to the reboot-only rule.
-fn read_process_record(root: &Path) -> io::Result<Option<Vec<BrowserProcessRecord>>> {
+/// The record, or None when it is missing or malformed, which leaves the
+/// generation to the reboot-only rule.
+fn read_process_record(root: &Path) -> io::Result<Option<ProcessRecord>> {
     let path = root.join(PROCESS_RECORD);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -612,22 +668,43 @@ fn read_process_record(root: &Path) -> io::Result<Option<Vec<BrowserProcessRecor
     Ok(parse_process_record(&text))
 }
 
-fn parse_process_record(text: &str) -> Option<Vec<BrowserProcessRecord>> {
-    // Every entry ends its line, so a torn last write reads as malformed.
+/// A generation's browsers: those recorded, and how many were expected and
+/// are not yet. A record with any still pending is incomplete.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ProcessRecord {
+    processes: Vec<BrowserProcessRecord>,
+    pending: usize,
+}
+
+/// `pending` is written before a browser can exist; its id and creation time,
+/// then `resolved`, once it is recorded. Anything else, an id without its
+/// `pending` or its `resolved`, or a torn last line, reads as no record.
+fn parse_process_record(text: &str) -> Option<ProcessRecord> {
     if !text.is_empty() && !text.ends_with('\n') {
         return None;
     }
-    let processes = text
-        .lines()
-        .map(|line| {
-            let (id, created) = line.split_once(' ')?;
-            Some(BrowserProcessRecord {
-                id: id.parse().ok().filter(|id| *id != 0)?,
-                created: created.parse().ok().filter(|created| *created != 0)?,
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    (processes.len() <= MAX_RECORDED_PROCESSES).then_some(processes)
+    let mut record = ProcessRecord::default();
+    let mut unresolved = false;
+    for line in text.lines() {
+        match line {
+            "pending" if !unresolved => record.pending += 1,
+            "resolved" if unresolved => {
+                unresolved = false;
+                record.pending -= 1;
+            }
+            _ if !unresolved && record.pending > 0 => {
+                let (id, created) = line.split_once(' ')?;
+                record.processes.push(BrowserProcessRecord {
+                    id: id.parse().ok().filter(|id| *id != 0)?,
+                    created: created.parse().ok().filter(|created| *created != 0)?,
+                });
+                unresolved = true;
+            }
+            _ => return None,
+        }
+    }
+    (!unresolved && record.processes.len() + record.pending <= MAX_RECORDED_PROCESSES)
+        .then_some(record)
 }
 
 fn holds_only_bookkeeping(root: &Path) -> io::Result<bool> {
@@ -713,22 +790,57 @@ impl RuntimeGeneration {
         &self.report
     }
 
+    /// Called before anything that may start a browser process in this
+    /// generation: until that browser is recorded the record is incomplete,
+    /// so a run that ends first, or never records it, keeps the generation
+    /// for a reboot. On failure the record is invalidated.
+    pub fn expect_browser(&self) -> io::Result<()> {
+        let expected = self.append_to_record(|record| {
+            if record.processes.len() + record.pending >= MAX_RECORDED_PROCESSES {
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "WebView2 generation process record is full",
+                ));
+            }
+            Ok(Some("pending\n".to_owned()))
+        });
+        if expected.is_err() {
+            self.invalidate_process_record();
+        }
+        expected
+    }
+
     /// Records a browser process this generation's data belongs to, so a
     /// later launch can prove it gone, or end it, if this run never does.
-    /// On failure the record is invalidated: a record missing one browser
-    /// would let a later launch wipe that browser's live data.
+    /// It resolves one expected browser; one nobody expected, or a failure,
+    /// invalidates the record.
     pub fn record_browser_process(&self, process: BrowserProcessRecord) -> io::Result<()> {
-        let recorded = self.append_browser_process(process);
+        let recorded = self.append_to_record(|record| {
+            if record.processes.contains(&process) {
+                return Ok(None);
+            }
+            if record.pending == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a WebView2 browser started that this generation did not expect",
+                ));
+            }
+            Ok(Some(format!(
+                "{} {}\nresolved\n",
+                process.id, process.created
+            )))
+        });
         if recorded.is_err() {
             self.invalidate_process_record();
         }
         recorded
     }
 
-    /// A browser this generation's data belongs to could not be recorded,
-    /// so the record no longer covers every process and the generation
-    /// keeps the reboot-only rule.
+    /// The record no longer covers every browser, so the generation keeps
+    /// the reboot-only rule. The boot registry says so first, where a record
+    /// file that cannot be changed cannot contradict it.
     pub fn invalidate_process_record(&self) {
+        let _ = mark_unrecorded(self.kind, &self.generation);
         let path = self.root.join(PROCESS_RECORD);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -744,27 +856,24 @@ impl RuntimeGeneration {
         }
     }
 
-    fn append_browser_process(&self, process: BrowserProcessRecord) -> io::Result<()> {
-        let recorded = read_process_record(&self.root)?.ok_or_else(|| {
+    fn append_to_record(
+        &self,
+        entry: impl FnOnce(&ProcessRecord) -> io::Result<Option<String>>,
+    ) -> io::Result<()> {
+        let record = read_process_record(&self.root)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "WebView2 generation process record is missing or malformed",
             )
         })?;
-        if recorded.contains(&process) {
+        let Some(entry) = entry(&record)? else {
             return Ok(());
-        }
-        if recorded.len() >= MAX_RECORDED_PROCESSES {
-            return Err(io::Error::new(
-                io::ErrorKind::StorageFull,
-                "WebView2 generation process record is full",
-            ));
-        }
-        let mut record = OpenOptions::new()
+        };
+        let mut file = OpenOptions::new()
             .append(true)
             .open(self.root.join(PROCESS_RECORD))?;
-        writeln!(record, "{} {}", process.id, process.created)?;
-        record.sync_all()
+        file.write_all(entry.as_bytes())?;
+        file.sync_all()
     }
 
     pub fn cleanup_ticket(&self) -> RuntimeCleanupTicket {
@@ -858,6 +967,7 @@ mod tests {
         let run = RuntimeGeneration::prepare(root, kind, &NoLeftovers).unwrap();
         fs::write(run.root().join("private-data"), b"private").unwrap();
         if let Some(process) = record {
+            run.expect_browser().unwrap();
             run.record_browser_process(process).unwrap();
         }
         run.cleanup_ticket()
@@ -974,18 +1084,14 @@ mod tests {
         let kind = RuntimeGenerationKind::RawPrivate;
         let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
         fs::write(run.root().join("private-data"), b"private").unwrap();
+        run.expect_browser().unwrap();
         run.record_browser_process(BROWSER).unwrap();
-        for id in 1..MAX_RECORDED_PROCESSES as u32 {
-            run.record_browser_process(BrowserProcessRecord { id, ..BROWSER })
-                .unwrap();
-        }
-        // A ninth browser, still alive, that the full record cannot take.
-        let unrecorded = BrowserProcessRecord { id: 99, ..BROWSER };
-        run.record_browser_process(unrecorded).unwrap_err();
-        assert!(run.record_browser_process(BROWSER).is_err());
+        // A second browser, still alive, that nothing expected.
+        let unexpected = BrowserProcessRecord { id: 99, ..BROWSER };
+        run.record_browser_process(unexpected).unwrap_err();
         let left = run.cleanup_ticket();
         drop(run);
-        let running = Running::new(&[unrecorded], false);
+        let running = Running::new(&[unexpected], false);
         let next = RuntimeGeneration::prepare(temp.path(), kind, &running).unwrap();
         assert_eq!(
             fs::read(left.root().join("private-data")).unwrap(),
@@ -999,40 +1105,129 @@ mod tests {
     }
 
     #[test]
-    fn a_torn_record_write_reads_as_no_record() {
-        assert_eq!(parse_process_record(""), Some(Vec::new()));
+    fn a_browser_expected_and_never_recorded_keeps_the_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::RawPrivate;
+        let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        run.expect_browser().unwrap();
+        run.record_browser_process(BROWSER).unwrap();
+        // The run ends between starting a second browser and recording it,
+        // before that browser has written anything.
+        run.expect_browser().unwrap();
+        let left = run.cleanup_ticket();
+        drop(run);
+        let next = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        assert!(left.root().exists());
+        assert!(boot_knows(kind, &left.generation));
+        assert!(next.report().reclaimed_after_exit.is_empty());
+        assert!(next.report().reclaimed_empty.is_empty());
+        assert!(next.report().overdue.is_some());
+        left.cleanup_after_proven_exit().unwrap();
+        next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    /// Every recorded process can be checked but these.
+    struct Unchecked(Vec<BrowserProcessRecord>);
+
+    impl LeftoverProcesses for Unchecked {
+        fn state(&self, process: BrowserProcessRecord) -> RecordedProcessState {
+            if self.0.contains(&process) {
+                RecordedProcessState::Indeterminate
+            } else {
+                RecordedProcessState::Gone
+            }
+        }
+        fn terminate(&self, _: BrowserProcessRecord) -> bool {
+            panic!("nothing unchecked is ended")
+        }
+    }
+
+    #[test]
+    fn a_browser_that_cannot_be_checked_keeps_the_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::RawPrivate;
+        let left = unclean_run(temp.path(), kind, Some(BROWSER));
+        let next =
+            RuntimeGeneration::prepare(temp.path(), kind, &Unchecked(vec![BROWSER])).unwrap();
         assert_eq!(
-            parse_process_record(
-                "4242 5
-"
-            ),
-            Some(vec![BrowserProcessRecord {
+            fs::read(left.root().join("private-data")).unwrap(),
+            b"private"
+        );
+        assert_eq!(
+            next.report().kept_unchecked,
+            std::slice::from_ref(&left.generation)
+        );
+        assert!(next
+            .report()
+            .overdue
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be checked")));
+        left.cleanup_after_proven_exit().unwrap();
+        next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn an_invalidated_record_holds_even_where_its_file_cannot_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let kind = RuntimeGenerationKind::RawPrivate;
+        let run = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        fs::write(run.root().join("private-data"), b"private").unwrap();
+        run.expect_browser().unwrap();
+        run.record_browser_process(BROWSER).unwrap();
+        // The record reads as complete and, held open without write or delete
+        // sharing, can be neither removed nor added to.
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(run.root().join(PROCESS_RECORD))
+            .unwrap();
+        run.invalidate_process_record();
+        assert!(read_process_record(run.root()).unwrap().is_some());
+        let left = run.cleanup_ticket();
+        drop(run);
+        let next = RuntimeGeneration::prepare(temp.path(), kind, &NoLeftovers).unwrap();
+        assert!(left.root().join("private-data").exists());
+        assert!(next.report().reclaimed_after_exit.is_empty());
+        drop(held);
+        left.cleanup_after_proven_exit().unwrap();
+        next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn only_a_whole_record_parses() {
+        let one = ProcessRecord {
+            processes: vec![BrowserProcessRecord {
                 id: 4242,
-                created: 5
-            }])
+                created: 5,
+            }],
+            pending: 0,
+        };
+        assert_eq!(parse_process_record(""), Some(ProcessRecord::default()));
+        assert_eq!(
+            parse_process_record("pending\n4242 5\nresolved\n"),
+            Some(one)
         );
         assert_eq!(
-            parse_process_record(
-                "4242 5
-77"
-            ),
-            None
+            parse_process_record("pending\n"),
+            Some(ProcessRecord {
+                processes: Vec::new(),
+                pending: 1
+            })
         );
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-77 1"
-            ),
-            None
-        );
-        assert_eq!(
-            parse_process_record(
-                "4242 5
-incomplete
-"
-            ),
-            None
-        );
+        for malformed in [
+            "pending\n4242 5\n",
+            "pending\n4242 5\nresolved",
+            "pending\n4242 5\nresol",
+            "4242 5\nresolved\n",
+            "resolved\n",
+            "pending\n4242 5\nresolved\nincomplete\n",
+            "pending\n0 5\nresolved\n",
+            "pending\n4242 x\nresolved\n",
+            "pending\n-1 5\nresolved\n",
+            "pending\n\n",
+        ] {
+            assert_eq!(parse_process_record(malformed), None, "{malformed:?}");
+        }
     }
 
     #[test]
@@ -1078,24 +1273,27 @@ incomplete
             &NoLeftovers,
         )
         .unwrap();
-        assert_eq!(read_process_record(run.root()).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            read_process_record(run.root()).unwrap(),
+            Some(ProcessRecord::default())
+        );
+        run.expect_browser().unwrap();
         run.record_browser_process(BROWSER).unwrap();
         run.record_browser_process(BROWSER).unwrap();
         assert_eq!(
             read_process_record(run.root()).unwrap(),
-            Some(vec![BROWSER])
+            Some(ProcessRecord {
+                processes: vec![BROWSER],
+                pending: 0
+            })
         );
         for id in 1..MAX_RECORDED_PROCESSES as u32 {
+            run.expect_browser().unwrap();
             run.record_browser_process(BrowserProcessRecord { id, ..BROWSER })
                 .unwrap();
         }
-        let full = run
-            .record_browser_process(BrowserProcessRecord { id: 99, ..BROWSER })
-            .unwrap_err();
+        let full = run.expect_browser().unwrap_err();
         assert_eq!(full.kind(), io::ErrorKind::StorageFull);
-        for malformed in ["4242", "0 5", "4242 x", "4242 5\n\n", "-1 5"] {
-            assert_eq!(parse_process_record(malformed), None, "{malformed:?}");
-        }
         run.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
 

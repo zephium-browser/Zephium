@@ -7,7 +7,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{FILETIME, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -33,41 +33,47 @@ impl LeftoverProcesses for WindowsLeftoverProcesses {
             process,
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
         ) {
-            Some(handle) if !exited(&handle, 0) => RecordedProcessState::Running,
-            _ => RecordedProcessState::Gone,
+            Opened::Live(handle, _) if !exited(&handle, 0) => RecordedProcessState::Running,
+            Opened::Live(..) | Opened::Gone => RecordedProcessState::Gone,
+            Opened::Unknown => RecordedProcessState::Indeterminate,
         }
     }
 
     fn terminate(&self, process: BrowserProcessRecord) -> bool {
         let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE;
-        let Some(browser) = open_exact(process, access) else {
-            return !still_running(process);
+        let browser = match open_exact(process, access) {
+            Opened::Live(handle, _) => handle,
+            Opened::Gone => return true,
+            Opened::Unknown => return false,
         };
         // A record names a WebView2 browser; anything else is left running.
         if !image_is(&browser, BROWSER_IMAGE) {
             return false;
         }
         // Renderers, the GPU process and utilities are the browser's direct
-        // children. A child is only one created after the browser, so an id
-        // the browser's parent slot once pointed at is never taken for it.
-        // Every child is checked before anything is ended: one this launch
-        // may not end could still hold the generation's files open.
+        // children. Every child is checked before anything is ended: one this
+        // launch may not end could still hold the generation's files open.
+        let Some(children) = children_of(process, access) else {
+            return false;
+        };
         let mut ended = Vec::new();
         let mut checks = Vec::new();
-        for child in children_of(process) {
-            checks.push(match open_exact(child, access) {
-                Some(handle) if image_is(&handle, BROWSER_IMAGE) => {
+        for child in children {
+            checks.push(match child {
+                Opened::Live(handle, _) if image_is(&handle, BROWSER_IMAGE) => {
                     ended.push(handle);
                     Child::Endable
                 }
-                Some(_) => Child::Foreign,
-                None if still_running(child) => Child::Unopenable,
-                None => Child::Gone,
+                Opened::Live(..) => Child::Foreign,
+                Opened::Gone => Child::Gone,
+                Opened::Unknown => Child::Unopenable,
             });
         }
         if !children_may_end(&checks) {
             return false;
         }
+        // From here ending is not all or nothing: a process that will not
+        // exit in time keeps the generation, though others may be gone.
         ended.push(browser);
         for handle in &ended {
             // SAFETY: a live handle opened with PROCESS_TERMINATE.
@@ -84,6 +90,41 @@ impl LeftoverProcesses for WindowsLeftoverProcesses {
     }
 }
 
+/// What opening a process found. Only an id that names no process at all,
+/// or names one created at another time, proves the process gone.
+enum Opened {
+    Live(OwnedHandle, u64),
+    Gone,
+    Unknown,
+}
+
+fn open(id: u32, access: PROCESS_ACCESS_RIGHTS) -> Opened {
+    // SAFETY: OpenProcess returns an owned handle or an error.
+    match unsafe { OpenProcess(access, false, id) } {
+        // SAFETY: the handle was just returned to this owner.
+        Ok(handle) => {
+            let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+            match created(&handle) {
+                Some(created) => Opened::Live(handle, created),
+                None => Opened::Unknown,
+            }
+        }
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => Opened::Gone,
+        Err(_) => Opened::Unknown,
+    }
+}
+
+fn open_exact(process: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> Opened {
+    match open(process.id, access) {
+        Opened::Live(handle, created) if created == process.created => {
+            Opened::Live(handle, created)
+        }
+        // The id now names a later process.
+        Opened::Live(..) => Opened::Gone,
+        other => other,
+    }
+}
+
 /// What checking one of an orphan's children found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Child {
@@ -91,7 +132,7 @@ enum Child {
     Gone,
     /// Running, but not a WebView2 process.
     Foreign,
-    /// Running, and could not be opened to be ended.
+    /// Running, or not known not to be, and could not be opened to be ended.
     Unopenable,
 }
 
@@ -99,14 +140,6 @@ fn children_may_end(children: &[Child]) -> bool {
     children
         .iter()
         .all(|child| matches!(child, Child::Endable | Child::Gone))
-}
-
-fn still_running(process: BrowserProcessRecord) -> bool {
-    open_exact(
-        process,
-        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-    )
-    .is_some_and(|handle| !exited(&handle, 0))
 }
 
 /// The record for a running browser process, read from the process itself.
@@ -124,15 +157,6 @@ pub fn browser_process_record(process_id: u32) -> Option<BrowserProcessRecord> {
 
 fn raw(handle: &OwnedHandle) -> HANDLE {
     HANDLE(handle.as_raw_handle())
-}
-
-fn open_exact(process: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> Option<OwnedHandle> {
-    // SAFETY: OpenProcess returns an owned handle or an error.
-    let handle = unsafe { OpenProcess(access, false, process.id) }
-        .ok()
-        // SAFETY: the handle was just returned to this owner.
-        .map(|handle| unsafe { OwnedHandle::from_raw_handle(handle.0) })?;
-    (created(&handle)? == process.created).then_some(handle)
 }
 
 fn created(handle: &OwnedHandle) -> Option<u64> {
@@ -173,11 +197,12 @@ fn image_is(handle: &OwnedHandle, image: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(image))
 }
 
-fn children_of(parent: BrowserProcessRecord) -> Vec<BrowserProcessRecord> {
+/// The browser's children, each opened for `access`, or None when they cannot
+/// be listed. A child is only one created after the browser, so an id the
+/// browser's parent slot once pointed at is never taken for it.
+fn children_of(parent: BrowserProcessRecord, access: PROCESS_ACCESS_RIGHTS) -> Option<Vec<Opened>> {
     // SAFETY: a process snapshot; the handle is owned below.
-    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-        return Vec::new();
-    };
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
     // SAFETY: the snapshot handle was just returned to this owner.
     let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.0) };
     let mut entry = PROCESSENTRY32W {
@@ -185,20 +210,23 @@ fn children_of(parent: BrowserProcessRecord) -> Vec<BrowserProcessRecord> {
         ..Default::default()
     };
     let mut children = Vec::new();
-    // SAFETY: entry carries its size; the snapshot is live.
-    let mut more = unsafe { Process32FirstW(raw(&snapshot), &mut entry) }.is_ok();
-    while more {
+    // SAFETY: entry carries its size; the snapshot is live. A snapshot always
+    // holds at least the system's own processes, so a first entry that cannot
+    // be read means the listing failed.
+    unsafe { Process32FirstW(raw(&snapshot), &mut entry) }.ok()?;
+    loop {
         if entry.th32ParentProcessID == parent.id && entry.th32ProcessID != parent.id {
-            if let Some(child) = browser_process_record(entry.th32ProcessID)
-                .filter(|child| child.created >= parent.created)
-            {
-                children.push(child);
+            match open(entry.th32ProcessID, access) {
+                Opened::Live(_, created) if created < parent.created => {}
+                Opened::Gone => {}
+                opened => children.push(opened),
             }
         }
         // SAFETY: as above.
-        more = unsafe { Process32NextW(raw(&snapshot), &mut entry) }.is_ok();
+        if unsafe { Process32NextW(raw(&snapshot), &mut entry) }.is_err() {
+            return Some(children);
+        }
     }
-    children
 }
 
 /// One plain line for each thing preparing a runtime root did with what
@@ -221,6 +249,10 @@ pub fn generation_report_lines(root: &str, report: &GenerationReport) -> Vec<Str
         (
             report.kept_running.len(),
             "generation(s) stay until a reboot; their orphaned browsers could not be ended",
+        ),
+        (
+            report.kept_unchecked.len(),
+            "generation(s) stay until a reboot; a browser they recorded could not be checked",
         ),
     ] {
         if count > 0 {
@@ -245,6 +277,19 @@ mod tests {
         assert!(children_may_end(&[Child::Endable, Child::Gone]));
         assert!(!children_may_end(&[Child::Endable, Child::Foreign]));
         assert!(!children_may_end(&[Child::Gone, Child::Unopenable]));
+    }
+
+    #[test]
+    fn only_an_id_naming_no_process_proves_it_gone() {
+        let query = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+        assert!(matches!(open(0, query), Opened::Gone));
+        // The system process exists and is never ours to end.
+        assert!(matches!(open(4, PROCESS_TERMINATE), Opened::Unknown));
+        let system = BrowserProcessRecord { id: 4, created: 1 };
+        assert!(matches!(
+            open_exact(system, query),
+            Opened::Gone | Opened::Unknown
+        ));
     }
 
     #[test]

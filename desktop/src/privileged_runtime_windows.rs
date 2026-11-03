@@ -35,6 +35,14 @@ pub fn prepare(
     for line in zephium_engine::generation_report_lines("privileged", runtime.report()) {
         crate::write_diagnostic(format_args!("{line}"));
     }
+    // Main and the panel each start one browser, before either is recorded.
+    for _ in [main_label, panel_label] {
+        if let Err(error) = runtime.expect_browser() {
+            crate::write_diagnostic(format_args!(
+                "privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+            ));
+        }
+    }
     let main = runtime.root().join(main_label);
     let panel = runtime.root().join(panel_label);
     fs::create_dir(&main)?;
