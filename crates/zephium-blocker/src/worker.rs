@@ -42,6 +42,7 @@ pub struct PolicySource {
     id: SourceId,
     format: SourceFormat,
     contents: Arc<str>,
+    trusted: bool,
 }
 
 impl PolicySource {
@@ -52,7 +53,15 @@ impl PolicySource {
             id,
             format,
             contents,
+            trusted: false,
         }
+    }
+
+    /// Lets this source's `trusted-*` scriptlet rules run.
+    #[must_use]
+    pub const fn trusting_scriptlets(mut self) -> Self {
+        self.trusted = true;
+        self
     }
 
     /// Returns the immutable source byte length without copying it.
@@ -61,11 +70,16 @@ impl PolicySource {
     }
 
     fn instantiate(&self) -> FilterSource {
-        FilterSource::new(
+        let source = FilterSource::new(
             self.id.clone(),
             self.format,
             self.contents.as_ref().to_owned(),
-        )
+        );
+        if self.trusted {
+            source.trusting_scriptlets()
+        } else {
+            source
+        }
     }
 }
 
@@ -266,7 +280,9 @@ impl StaticPolicyCatalog {
                     SourceFormat::Standard => 0,
                     SourceFormat::Hosts => 1,
                 };
-                (source.id.as_str(), format, source.contents.as_ref())
+                // Trust changes what compiles, so it is part of the key.
+                let trust = if source.trusted { 2 } else { 0 };
+                (source.id.as_str(), format | trust, source.contents.as_ref())
             }),
         )
     }

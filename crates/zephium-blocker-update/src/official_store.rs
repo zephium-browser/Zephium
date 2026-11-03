@@ -332,11 +332,14 @@ impl OfficialStore {
                         if version != source.version || rules != source.rules {
                             return Err(zephium_blocker::BlockerCompileFailure::SourceUnavailable);
                         }
-                        sources.push(PolicySource::new(
-                            SourceId::new(filter.id()).expect("fixed source id"),
-                            SourceFormat::Standard,
-                            Arc::from(text),
-                        ));
+                        let id = SourceId::new(filter.id()).expect("fixed source id");
+                        let trusted = zephium_blocker::official_source_trusts_scriptlets(&id);
+                        let source = PolicySource::new(id, SourceFormat::Standard, Arc::from(text));
+                        sources.push(if trusted {
+                            source.trusting_scriptlets()
+                        } else {
+                            source
+                        });
                     }
                     StaticPolicyCatalog::new(sources)
                         .map_err(|_| zephium_blocker::BlockerCompileFailure::InvalidSource)

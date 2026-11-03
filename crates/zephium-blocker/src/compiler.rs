@@ -172,12 +172,20 @@ impl SourceFormat {
     }
 }
 
+/// Whether an official list may run `trusted-*` scriptlets: only uBlock
+/// Origin's own lists, which are written for them. User filters and every
+/// other list never may.
+pub fn official_source_trusts_scriptlets(id: &SourceId) -> bool {
+    matches!(id.as_str(), "ublock-filters" | "ublock-quick-fixes")
+}
+
 /// Owned input list consumed by [`Compiler::compile`].
 #[derive(Debug)]
 pub struct FilterSource {
     id: SourceId,
     format: SourceFormat,
     contents: String,
+    trusted: bool,
 }
 
 impl FilterSource {
@@ -187,7 +195,20 @@ impl FilterSource {
             id,
             format,
             contents,
+            trusted: false,
         }
+    }
+
+    /// Lets this source's `trusted-*` scriptlet rules run.
+    #[must_use]
+    pub const fn trusting_scriptlets(mut self) -> Self {
+        self.trusted = true;
+        self
+    }
+
+    /// Whether this source's `trusted-*` scriptlet rules may run.
+    pub const fn trusts_scriptlets(&self) -> bool {
+        self.trusted
     }
 
     /// Returns the source identifier.
@@ -317,9 +338,12 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let cosmetic_policy =
-            crate::CosmeticPolicy::compile(prepared.iter().map(|source| source.cosmetics.as_str()))
-                .map_err(CompileError::Cosmetics)?;
+        let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
+            prepared
+                .iter()
+                .map(|source| (source.cosmetics.as_str(), source.trusted)),
+        )
+        .map_err(CompileError::Cosmetics)?;
         let cosmetics = if cosmetic_policy.report().accepted == 0 {
             None
         } else {
@@ -413,6 +437,7 @@ struct AcceptedRule {
 struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
+    trusted: bool,
     rules: String,
     cosmetics: String,
     #[cfg(feature = "webkit")]
@@ -602,6 +627,7 @@ fn prepare_source(
     Ok(PreparedSource {
         id: source.id,
         format: source.format,
+        trusted: source.trusted,
         rules,
         cosmetics,
         #[cfg(feature = "webkit")]
