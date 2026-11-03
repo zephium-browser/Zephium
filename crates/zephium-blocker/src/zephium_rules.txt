@@ -12,14 +12,14 @@
 ! bundled lists, without and with the exception (protection off: 2 or 3).
 
 ! allrecipes.com, 2026-11-03: 710 recovery requests, 2 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=allrecipes.com
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=allrecipes.com
 ! bild.de, 2026-11-03: 47 recovery requests, 2 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=bild.de
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=bild.de
 ! mirror.co.uk, 2026-11-03: 40 recovery requests, 2 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=mirror.co.uk
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=mirror.co.uk
 ! people.com, 2026-11-03: 305 recovery requests, 2 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=people.com
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=people.com
 ! simplyrecipes.com, 2026-11-03: 391 recovery requests, 3 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=simplyrecipes.com
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=simplyrecipes.com
 ! tomsguide.com, 2026-11-03: 59 recovery requests, 2 with the exception.
-@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js$domain=tomsguide.com
+@@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=tomsguide.com

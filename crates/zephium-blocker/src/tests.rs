@@ -1147,6 +1147,13 @@ fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
     }
     assert_eq!(
         action(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.jsx",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action(
             "https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m1/show_ads_impl.js",
             "https://www.allrecipes.com/recipe/1/"
         ),
@@ -1179,6 +1186,22 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
         .map(|domain| domain.as_str().unwrap())
         .collect();
     domains.sort_unstable();
+    let filters: Vec<regex::Regex> = emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+        .map(|rule| {
+            regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
+                .case_insensitive(true)
+                .build()
+                .unwrap()
+        })
+        .collect();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    for filter in &filters {
+        assert!(filter.is_match(loader));
+        assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
+        assert!(!filter.is_match(&format!("{loader}x")));
+    }
     // A leading `*` makes WebKit apply the exception on every subdomain too.
     assert_eq!(
         domains,
