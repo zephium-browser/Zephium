@@ -170,6 +170,9 @@ fn hosts(rules_path: &Path, output: &Path) -> Result<(), String> {
     write(output, &text)
 }
 
+/// A replayed load: its top page, URL and resource type.
+type LoadKey = (String, String, String);
+
 /// The host a wildcard rule names, when its url-filter starts with a whole
 /// host.
 fn rule_host(rule: &Value) -> Option<String> {
@@ -210,8 +213,7 @@ fn build(
     let (visited, visits_loaded, loaded) = loaded_hosts(visits)?;
     let mut hits = vec![0usize; rules.len()];
     // Replays may overlap: one load's reports are merged across them.
-    let mut loads: BTreeMap<(String, String, String), (Option<String>, BTreeSet<String>)> =
-        BTreeMap::new();
+    let mut loads: BTreeMap<LoadKey, (Option<String>, BTreeSet<String>)> = BTreeMap::new();
     for path in matches {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -383,7 +385,11 @@ fn applies_on_a_loaded_site(rule: &Value, loaded: &BTreeSet<String>) -> bool {
             None => (domain, false),
         };
         loaded.iter().any(|host| {
-            host == name || subdomains && host.strip_suffix(name).is_some_and(|rest| rest.ends_with('.'))
+            host == name
+                || subdomains
+                    && host
+                        .strip_suffix(name)
+                        .is_some_and(|rest| rest.ends_with('.'))
         })
     };
     if let Some(domains) = trigger["if-domain"].as_array() {
