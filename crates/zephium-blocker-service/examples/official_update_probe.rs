@@ -39,9 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "easyprivacy.txt",
                 include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
             ),
+            EmbeddedReleaseAsset::new(
+                "ublock-filters.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-filters.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-quick-fixes.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"),
+            ),
         ],
         UpdateLimits::default(),
-        LicensePolicy::new(["CC-BY-SA-3.0"])?,
+        LicensePolicy::new(["CC-BY-SA-3.0", "GPL-3.0-only"])?,
     )?;
     let artifacts = root.clone();
     let validator: zephium_blocker_service::NativeRuleValidator =

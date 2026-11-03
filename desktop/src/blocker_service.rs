@@ -9,10 +9,10 @@ use zephium_blocker_service::{
 };
 
 const COMPILED_CACHE_DIRECTORY: &str = "blocker-compiled-v1";
-const RELEASE_SEED_LICENSE: &str = "CC-BY-SA-3.0";
+const RELEASE_SEED_LICENSES: [&str; 2] = ["CC-BY-SA-3.0", "GPL-3.0-only"];
 const RELEASE_SEED_MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const RELEASE_SEED_MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
-const RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 
 const RELEASE_SEED_CATALOG: &[u8] = include_bytes!("../../assets/blocker-seed/v1/catalog.json");
 const RELEASE_SEED_ENVELOPE: &[u8] =
@@ -20,6 +20,10 @@ const RELEASE_SEED_ENVELOPE: &[u8] =
 const RELEASE_SEED_EASYLIST: &[u8] = include_bytes!("../../assets/blocker-seed/v1/easylist.txt.gz");
 const RELEASE_SEED_EASYPRIVACY: &[u8] =
     include_bytes!("../../assets/blocker-seed/v1/easyprivacy.txt.gz");
+const RELEASE_SEED_UBLOCK_FILTERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-filters.txt.gz");
+const RELEASE_SEED_UBLOCK_QUICK_FIXES: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz");
 
 pub(crate) fn start_with_updates(
     data_dir: &Path,
@@ -66,12 +70,12 @@ fn release_seed_from_embedded(
 ) -> std::io::Result<ReleaseCatalogSeed> {
     let limits = UpdateLimits {
         max_manifest_bytes: RELEASE_SEED_MAX_MANIFEST_BYTES,
-        max_sources: 2,
+        max_sources: 4,
         max_source_bytes: RELEASE_SEED_MAX_SOURCE_BYTES,
         max_total_source_bytes: RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES,
         ..UpdateLimits::default()
     };
-    let licenses = LicensePolicy::new([RELEASE_SEED_LICENSE])
+    let licenses = LicensePolicy::new(RELEASE_SEED_LICENSES)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     ReleaseCatalogSeed::from_embedded_gzip(catalog, envelope, assets, limits, licenses)
         .map_err(|error| std::io::Error::other(format!("invalid embedded blocker seed: {error}")))
@@ -81,6 +85,8 @@ fn embedded_release_assets() -> Vec<EmbeddedReleaseAsset> {
     vec![
         EmbeddedReleaseAsset::new("easylist.txt", RELEASE_SEED_EASYLIST),
         EmbeddedReleaseAsset::new("easyprivacy.txt", RELEASE_SEED_EASYPRIVACY),
+        EmbeddedReleaseAsset::new("ublock-filters.txt", RELEASE_SEED_UBLOCK_FILTERS),
+        EmbeddedReleaseAsset::new("ublock-quick-fixes.txt", RELEASE_SEED_UBLOCK_QUICK_FIXES),
     ]
 }
 
@@ -101,15 +107,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_610_281_352);
-        assert_eq!(identity.source_count, 2);
-        assert_eq!(identity.source_bytes, 3_515_852);
+        assert_eq!(identity.revision, 202_611_021_408);
+        assert_eq!(identity.source_count, 4);
+        assert_eq!(identity.source_bytes, 4_073_004);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0x8b, 0xea, 0xb1, 0x10, 0x5e, 0x15, 0xd0, 0xb1, 0xd0, 0x74, 0xc6, 0xb1, 0xcd, 0x78,
-                0x69, 0x40, 0xcf, 0x76, 0xa4, 0xb9, 0xc4, 0xaf, 0x32, 0xe0, 0x07, 0xd8, 0x42, 0xb2,
-                0x82, 0x2e, 0xc0, 0xa9
+                0x7f, 0xd2, 0x89, 0x64, 0x9a, 0x92, 0xac, 0xdc, 0xed, 0x9d, 0xf8, 0xdf, 0xc3, 0x1d,
+                0x06, 0x4a, 0xe7, 0xc7, 0xb5, 0xeb, 0x87, 0xdc, 0x56, 0x8d, 0x21, 0xaa, 0x2a, 0x72,
+                0xff, 0x5e, 0x2a, 0xba
             ]
         );
     }
@@ -137,7 +143,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_610_281_352));
+        assert_eq!(snapshot.package_revision, Some(202_611_021_408));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -181,8 +187,14 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        assert_eq!(rules.coverage().source_rules, 131_724);
-        assert_eq!(rules.coverage().accepted_rules, 103_789);
+        assert_eq!(rules.coverage().source_rules, 138_127);
+        // The Windows matcher drops one regex rule its regex engine cannot compile.
+        let accepted = if cfg!(target_os = "windows") {
+            104_783
+        } else {
+            104_784
+        };
+        assert_eq!(rules.coverage().accepted_rules, accepted);
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
             BlockerShutdownOutcome::Clean

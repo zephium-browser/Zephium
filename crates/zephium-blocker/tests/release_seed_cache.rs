@@ -23,7 +23,7 @@ use zephium_core::ports::blocker::{
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/blocker-seed/v1/catalog.json");
-const SOURCES: [(&str, &[u8]); 2] = [
+const SOURCES: [(&str, &[u8]); 4] = [
     (
         "easylist",
         include_bytes!("../../../assets/blocker-seed/v1/easylist.txt.gz"),
@@ -31,6 +31,14 @@ const SOURCES: [(&str, &[u8]); 2] = [
     (
         "easyprivacy",
         include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
+    ),
+    (
+        "ublock-filters",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-filters.txt.gz"),
+    ),
+    (
+        "ublock-quick-fixes",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"),
     ),
 ];
 

@@ -968,8 +968,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; Fedora CI materializes and compiles the exact bundled EasyList + EasyPrivacy artifact"]
-    fn exact_bundled_easylist_and_easyprivacy_compile_and_reload_natively() {
+    #[ignore = "requires Xvfb and WebKitGTK at the supported security floor; Fedora CI materializes and compiles the exact bundled filter list artifact"]
+    fn exact_bundled_filter_lists_compile_and_reload_natively() {
         crate::platform::linux::enforce_runtime_security_floor()
             .expect("test runner must use supported WebKitGTK");
         gtk::init().expect("GTK requires an Xvfb/Wayland display for native WebKit tests");

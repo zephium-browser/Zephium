@@ -351,15 +351,24 @@ pub(super) fn seeded_blocker(
                 "easyprivacy.txt",
                 include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
             ),
+            EmbeddedReleaseAsset::new(
+                "ublock-filters.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-filters.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-quick-fixes.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"),
+            ),
         ],
         UpdateLimits {
             max_manifest_bytes: 16 * 1024,
-            max_sources: 2,
+            max_sources: 4,
             max_source_bytes: 4 * 1024 * 1024,
-            max_total_source_bytes: 4 * 1024 * 1024,
+            max_total_source_bytes: 8 * 1024 * 1024,
             ..UpdateLimits::default()
         },
-        LicensePolicy::new(["CC-BY-SA-3.0"]).map_err(|_| super::ProbeFailure::Authority)?,
+        LicensePolicy::new(["CC-BY-SA-3.0", "GPL-3.0-only"])
+            .map_err(|_| super::ProbeFailure::Authority)?,
     )
     .map_err(|_| super::ProbeFailure::Authority)?;
     zephium_blocker_service::ManagedBlocker::with_release_seed(

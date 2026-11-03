@@ -287,7 +287,12 @@ fn policy() -> (Arc<WorkerBlocker>, Arc<ContentRules>) {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocker-seed/v1");
     let mut sources = Vec::new();
-    for name in ["easylist", "easyprivacy"] {
+    for name in [
+        "easylist",
+        "easyprivacy",
+        "ublock-filters",
+        "ublock-quick-fixes",
+    ] {
         let mut text = String::new();
         flate2::read::GzDecoder::new(
             std::fs::File::open(root.join(format!("{name}.txt.gz"))).unwrap(),

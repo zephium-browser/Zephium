@@ -12,16 +12,20 @@ const LINUX_APP_ID: &str = "app.zephium";
 const DEVELOPMENT_IDENTIFIER: &str = "app.zephium.dev";
 const PROTECTION_QA_PROFILE: &str = "protection-qa";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
-const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
-const LEGAL_RESOURCES: [(&str, &str); 3] = [
+const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0 AND GPL-3.0-only";
+const LEGAL_RESOURCES: [(&str, &str); 4] = [
     ("../LICENSE", "licenses/Zephium-MPL-2.0.txt"),
     (
         "../assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt",
         "licenses/blocker/CC-BY-SA-3.0.txt",
     ),
     (
+        "../assets/blocker-seed/v1/LICENSE-GPL-3.0.txt",
+        "licenses/blocker/GPL-3.0.txt",
+    ),
+    (
         "../assets/blocker-seed/v1/NOTICE",
-        "licenses/blocker/EasyList-EasyPrivacy-NOTICE.txt",
+        "licenses/blocker/NOTICE.txt",
     ),
 ];
 

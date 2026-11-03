@@ -13,38 +13,143 @@ const ASSET_DIRECTORY: &str = "assets/blocker-seed/v1";
 const CATALOG_FILE: &str = "catalog.json";
 const SEED_FILE: &str = "release-seed.json";
 const QUALITY_FILE: &str = "compile-report.json";
-const EASYLIST_ASSET: &str = "easylist.txt.gz";
-const EASYPRIVACY_ASSET: &str = "easyprivacy.txt.gz";
-const LICENSE_FILE: &str = "LICENSE-CC-BY-SA-3.0.txt";
 const NOTICE_FILE: &str = "NOTICE";
-const EXPECTED_FILES: [&str; 7] = [
-    CATALOG_FILE,
-    EASYLIST_ASSET,
-    EASYPRIVACY_ASSET,
-    LICENSE_FILE,
-    NOTICE_FILE,
-    QUALITY_FILE,
-    SEED_FILE,
-];
-const LICENSE_SHA256: &str = "3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f";
-const LICENSE_EXPRESSION: &str = "CC-BY-SA-3.0";
-const ATTRIBUTION: &str = "The EasyList authors (https://easylist.to/)";
+const METADATA_FILES: [&str; 4] = [CATALOG_FILE, NOTICE_FILE, QUALITY_FILE, SEED_FILE];
+const SEED_SCHEMA_VERSION: u32 = 2;
+const QUALITY_SCHEMA_VERSION: u32 = 3;
 const REDISTRIBUTION: &str = "Unmodified upstream subscription; deterministic gzip packaging only";
-const LICENSE_URL: &str = "https://easylist.to/pages/licence.html";
-const SOURCE_EXPIRY_SECONDS: u64 = 4 * 24 * 60 * 60;
+const HOUR: u64 = 60 * 60;
+const DAY: u64 = 24 * HOUR;
 /// The seed only protects the first hours, until the app fetches current lists
-/// on its own; a release may ship one up to a month old, so a hotfix never
-/// waits on a list refresh. The sources' own expiry still drives the app.
-const RELEASE_SEED_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// on its own; a release may ship one whose oldest list is up to a month old,
+/// so a hotfix never waits on a list refresh. The sources' own expiry still
+/// drives the app.
+const RELEASE_SEED_MAX_AGE_SECONDS: u64 = 30 * DAY;
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SOURCE_RULES: usize = 500_000;
 const MAX_LICENSE_BYTES: u64 = 64 * 1024;
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0x02, 0xff];
 
-#[derive(Clone, Debug)]
-struct SourceInput {
+#[derive(Debug)]
+struct LicenseSpec {
+    file: &'static str,
+    sha256: &'static str,
+    expression: &'static str,
+    notice: &'static str,
+    attribution: &'static str,
+    /// The list header that names the upstream terms.
+    terms_header: &'static str,
+    terms_url: &'static str,
+    legal_code: [&'static str; 2],
+}
+
+const CC_BY_SA: LicenseSpec = LicenseSpec {
+    file: "LICENSE-CC-BY-SA-3.0.txt",
+    sha256: "3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f",
+    expression: "CC-BY-SA-3.0",
+    notice: "Selected license: CC BY-SA 3.0 Unported (CC-BY-SA-3.0)\n",
+    attribution: "The EasyList authors (https://easylist.to/)",
+    terms_header: "Licence",
+    terms_url: "https://easylist.to/pages/licence.html",
+    legal_code: [
+        "Attribution-ShareAlike 3.0 Unported",
+        "CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM",
+    ],
+};
+
+const GPL_3: LicenseSpec = LicenseSpec {
+    file: "LICENSE-GPL-3.0.txt",
+    sha256: "589ed823e9a84c56feb95ac58e7cf384626b9cbf4fda2a907bc36e103de1bad2",
+    expression: "GPL-3.0-only",
+    notice: "License: GNU General Public License, version 3 (GPL-3.0-only)\n\
+             These lists are conveyed in source form, unmodified, without additional\n\
+             terms and without warranty.\n",
+    attribution: "uBlock Origin's uAssets authors (https://github.com/uBlockOrigin/uAssets)",
+    terms_header: "License",
+    terms_url: "https://github.com/uBlockOrigin/uAssets/blob/master/LICENSE",
+    legal_code: ["GNU GENERAL PUBLIC LICENSE", "Version 3, 29 June 2007"],
+};
+
+const LICENSES: [&LicenseSpec; 2] = [&CC_BY_SA, &GPL_3];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HeaderFormat {
+    /// `[Adblock Plus]` first line, numeric `Version` and upstream `Commit`.
+    Adblock,
+    /// Versioned by `Last modified`, with no commit.
+    Dated,
+}
+
+/// One bundled list, with the same header rules and bounds the app applies to
+/// its official downloads.
+#[derive(Debug)]
+struct SourceSpec {
     id: &'static str,
     target: &'static str,
+    title: &'static str,
     source_url: &'static str,
+    homepage: &'static str,
+    license: &'static LicenseSpec,
+    header: HeaderFormat,
+    min_bytes: usize,
+    min_rules: usize,
+    follows_expires: bool,
+}
+
+const SOURCES: [SourceSpec; 4] = [
+    SourceSpec {
+        id: "easylist",
+        target: "easylist.txt",
+        title: "EasyList",
+        source_url: "https://easylist.to/easylist/easylist.txt",
+        homepage: "https://easylist.to/",
+        license: &CC_BY_SA,
+        header: HeaderFormat::Adblock,
+        min_bytes: 256 * 1024,
+        min_rules: 1000,
+        follows_expires: false,
+    },
+    SourceSpec {
+        id: "easyprivacy",
+        target: "easyprivacy.txt",
+        title: "EasyPrivacy",
+        source_url: "https://easylist.to/easylist/easyprivacy.txt",
+        homepage: "https://easylist.to/",
+        license: &CC_BY_SA,
+        header: HeaderFormat::Adblock,
+        min_bytes: 256 * 1024,
+        min_rules: 1000,
+        follows_expires: false,
+    },
+    SourceSpec {
+        id: "ublock-filters",
+        target: "ublock-filters.txt",
+        title: "uBlock filters",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/filters.txt",
+        homepage: "https://github.com/uBlockOrigin/uAssets",
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 128 * 1024,
+        min_rules: 1000,
+        follows_expires: false,
+    },
+    SourceSpec {
+        id: "ublock-quick-fixes",
+        target: "ublock-quick-fixes.txt",
+        title: "uBlock\u{2080} filters \u{2013} Quick fixes",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt",
+        homepage: "https://github.com/uBlockOrigin/uAssets",
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 8 * 1024,
+        min_rules: 50,
+        follows_expires: true,
+    },
+];
+
+#[derive(Clone, Debug)]
+struct SourceInput {
+    spec: &'static SourceSpec,
     raw: Vec<u8>,
     header: SourceHeader,
 }
@@ -53,8 +158,9 @@ struct SourceInput {
 struct SourceHeader {
     title: String,
     version: String,
-    commit: String,
+    commit: Option<String>,
     modified_unix: u64,
+    expiry_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -110,7 +216,7 @@ struct ReleaseSeedAsset {
     compressed_sha256: String,
     upstream_title: String,
     upstream_version: String,
-    upstream_commit: String,
+    upstream_commit: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -126,9 +232,15 @@ struct QualityManifest {
     package_revision: u64,
     catalog_manifest_sha256: String,
     release_seed_manifest_sha256: String,
-    license_file: String,
-    license_sha256: String,
+    licenses: Vec<LicenseRecord>,
     compilers: Vec<CompileGolden>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LicenseRecord {
+    file: String,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,7 +381,7 @@ pub(crate) fn materialize_webkit(repository: &Path, output: &Path) -> Result<(),
 /// rule list is measured against. Its compile report is not a golden.
 pub(crate) fn materialize_webkit_unpruned(repository: &Path, output: &Path) -> Result<(), String> {
     let directory = repository.join(ASSET_DIRECTORY);
-    validate_closed_file_set(&directory)?;
+    validate_closed_file_set(&directory, &expected_files())?;
     let catalog_bytes = read_regular_file(&directory.join(CATALOG_FILE), 128 * 1024)?;
     let seed_bytes = read_regular_file(&directory.join(SEED_FILE), 128 * 1024)?;
     let catalog: CatalogManifest = parse_canonical_json(&catalog_bytes, CATALOG_FILE)?;
@@ -293,7 +405,7 @@ pub(crate) fn materialize_webkit_unpruned(repository: &Path, output: &Path) -> R
 
 pub(crate) fn check_release_freshness(repository: &Path, now: u64) -> Result<(), String> {
     let directory = repository.join(ASSET_DIRECTORY);
-    validate_closed_file_set(&directory)?;
+    validate_closed_file_set(&directory, &expected_files())?;
     let catalog_bytes = read_regular_file(&directory.join(CATALOG_FILE), 128 * 1024)?;
     let seed_bytes = read_regular_file(&directory.join(SEED_FILE), 128 * 1024)?;
     let quality_bytes = read_regular_file(&directory.join(QUALITY_FILE), 256 * 1024)?;
@@ -312,7 +424,7 @@ pub(crate) fn check_release_freshness(repository: &Path, now: u64) -> Result<(),
 }
 
 fn validate_release_freshness(catalog: &CatalogManifest, now: u64) -> Result<(), String> {
-    if catalog.schema_version != 1 || catalog.sources.len() != 2 {
+    if catalog.schema_version != 1 || catalog.sources.len() != SOURCES.len() {
         return Err("blocker seed catalog schema or source count is invalid".into());
     }
     if catalog.created_unix > now {
@@ -333,10 +445,14 @@ fn validate_release_freshness(catalog: &CatalogManifest, now: u64) -> Result<(),
 
 fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), String> {
     let directory = repository.join(ASSET_DIRECTORY);
-    validate_closed_file_set(&directory)?;
+    validate_closed_file_set(&directory, &expected_files())?;
 
-    let license = read_regular_file(&directory.join(LICENSE_FILE), MAX_LICENSE_BYTES)?;
-    validate_license(&license)?;
+    for license in LICENSES {
+        validate_license(
+            license,
+            &read_regular_file(&directory.join(license.file), MAX_LICENSE_BYTES)?,
+        )?;
+    }
     let catalog_bytes = read_regular_file(&directory.join(CATALOG_FILE), 128 * 1024)?;
     let seed_bytes = read_regular_file(&directory.join(SEED_FILE), 128 * 1024)?;
     let quality_bytes = read_regular_file(&directory.join(QUALITY_FILE), 256 * 1024)?;
@@ -351,10 +467,9 @@ fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), St
     {
         return Err("blocker seed manifest identities do not match exact bytes".into());
     }
-    if quality.schema_version != 2
+    if quality.schema_version != QUALITY_SCHEMA_VERSION
         || quality.package_revision != catalog.revision
-        || quality.license_file != LICENSE_FILE
-        || quality.license_sha256 != LICENSE_SHA256
+        || quality.licenses != license_records()
     {
         return Err("blocker seed quality manifest metadata is invalid".into());
     }
@@ -394,27 +509,27 @@ fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), St
 
 pub(crate) fn update(
     repository: &Path,
-    easylist: &Path,
-    easyprivacy: &Path,
-    license_path: &Path,
+    source_paths: [&Path; SOURCES.len()],
+    license_paths: [&Path; LICENSES.len()],
 ) -> Result<(), String> {
-    let easylist = read_source(
-        "easylist",
-        "easylist.txt",
-        "EasyList",
-        "https://easylist.to/easylist/easylist.txt",
-        easylist,
-    )?;
-    let easyprivacy = read_source(
-        "easyprivacy",
-        "easyprivacy.txt",
-        "EasyPrivacy",
-        "https://easylist.to/easylist/easyprivacy.txt",
-        easyprivacy,
-    )?;
-    let sources = vec![easylist, easyprivacy];
-    let license = read_regular_file(license_path, MAX_LICENSE_BYTES)?;
-    validate_license(&license)?;
+    let sources = SOURCES
+        .iter()
+        .zip(source_paths)
+        .map(|(spec, path)| {
+            let raw = read_regular_file(path, MAX_SOURCE_BYTES)?;
+            let header = parse_source_header(&raw, spec)?;
+            Ok(SourceInput { spec, raw, header })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let licenses = LICENSES
+        .iter()
+        .zip(license_paths)
+        .map(|(license, path)| {
+            let bytes = read_regular_file(path, MAX_LICENSE_BYTES)?;
+            validate_license(license, &bytes)?;
+            Ok(bytes)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let catalog = build_catalog(&sources)?;
     let catalog_bytes = canonical_json(&catalog)?;
@@ -436,23 +551,25 @@ pub(crate) fn update(
     let source_paths = write_compile_inputs(compile_directory.path(), &sources)?;
     let compilers = compile_all(repository, &source_paths, None)?;
     let quality = QualityManifest {
-        schema_version: 2,
+        schema_version: QUALITY_SCHEMA_VERSION,
         package_revision: catalog.revision,
         catalog_manifest_sha256: hex_sha256(&catalog_bytes),
         release_seed_manifest_sha256: hex_sha256(&seed_bytes),
-        license_file: LICENSE_FILE.into(),
-        license_sha256: LICENSE_SHA256.into(),
+        licenses: license_records(),
         compilers,
     };
 
-    let mut files = BTreeMap::<&str, Vec<u8>>::new();
-    files.insert(CATALOG_FILE, catalog_bytes);
-    files.insert(SEED_FILE, seed_bytes);
-    files.insert(QUALITY_FILE, canonical_json(&quality)?);
-    files.insert(EASYLIST_ASSET, compressed[0].clone());
-    files.insert(EASYPRIVACY_ASSET, compressed[1].clone());
-    files.insert(LICENSE_FILE, license);
-    files.insert(NOTICE_FILE, build_notice(&sources).into_bytes());
+    let mut files = BTreeMap::<String, Vec<u8>>::new();
+    files.insert(CATALOG_FILE.into(), catalog_bytes);
+    files.insert(SEED_FILE.into(), seed_bytes);
+    files.insert(QUALITY_FILE.into(), canonical_json(&quality)?);
+    files.insert(NOTICE_FILE.into(), build_notice(&sources).into_bytes());
+    for (source, bytes) in sources.iter().zip(compressed) {
+        files.insert(asset_file(source.spec.target), bytes);
+    }
+    for (license, bytes) in LICENSES.iter().zip(licenses) {
+        files.insert(license.file.into(), bytes);
+    }
     let publication = replace_asset_directory(repository, &files)?;
     if let Err(error) = check(repository) {
         publication.rollback()?;
@@ -461,6 +578,37 @@ pub(crate) fn update(
         ));
     }
     publication.commit()
+}
+
+fn license_records() -> Vec<LicenseRecord> {
+    LICENSES
+        .iter()
+        .map(|license| LicenseRecord {
+            file: license.file.into(),
+            sha256: license.sha256.into(),
+        })
+        .collect()
+}
+
+fn asset_file(target: &str) -> String {
+    format!("{target}.gz")
+}
+
+/// The closed file set of a seed holding these `(target, license)` sources.
+fn file_set<'a>(sources: impl IntoIterator<Item = (&'a str, &'a LicenseSpec)>) -> BTreeSet<String> {
+    let mut files = METADATA_FILES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    for (target, license) in sources {
+        files.insert(asset_file(target));
+        files.insert(license.file.into());
+    }
+    files
+}
+
+fn expected_files() -> BTreeSet<String> {
+    file_set(SOURCES.iter().map(|spec| (spec.target, spec.license)))
 }
 
 fn validate_generation_progression(
@@ -472,15 +620,29 @@ fn validate_generation_progression(
     if !directory.exists() {
         return Ok(());
     }
-    validate_closed_file_set(directory)?;
     let previous_catalog_bytes = read_regular_file(&directory.join(CATALOG_FILE), 128 * 1024)?;
     let previous_seed_bytes = read_regular_file(&directory.join(SEED_FILE), 128 * 1024)?;
     let previous_catalog: CatalogManifest =
         parse_canonical_json(&previous_catalog_bytes, CATALOG_FILE)?;
     let previous_seed: ReleaseSeedManifest = parse_canonical_json(&previous_seed_bytes, SEED_FILE)?;
+    let previous_files = previous_catalog
+        .sources
+        .iter()
+        .map(|source| {
+            LICENSES
+                .into_iter()
+                .find(|license| license.expression == source.license.license_expression)
+                .map(|license| (source.target.as_str(), license))
+                .ok_or_else(|| "existing blocker seed names an unknown license".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_closed_file_set(directory, &file_set(previous_files))?;
+    // A seed may gain lists, which have no baseline; those it already held keep
+    // their order and must not roll back.
     if previous_seed.catalog_manifest_sha256 != hex_sha256(&previous_catalog_bytes)
-        || previous_catalog.sources.len() != catalog.sources.len()
-        || previous_seed.assets.len() != seed.assets.len()
+        || previous_seed.assets.len() != previous_catalog.sources.len()
+        || previous_catalog.sources.len() > catalog.sources.len()
+        || seed.assets.len() != catalog.sources.len()
     {
         return Err("existing blocker seed cannot be trusted as an update baseline".into());
     }
@@ -550,14 +712,16 @@ fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
         .into_iter()
         .max()
         .ok_or_else(|| "blocker seed has no sources".to_owned())?;
+    // The oldest list dates the seed, so the release gate measures the
+    // stalest list rather than the most recently refreshed one.
     let created_unix = sources
         .iter()
         .map(|source| source.header.modified_unix)
-        .max()
+        .min()
         .ok_or_else(|| "blocker seed has no creation time".to_owned())?;
     let expires_unix = sources
         .iter()
-        .map(|source| source.header.modified_unix + SOURCE_EXPIRY_SECONDS)
+        .map(|source| source.header.modified_unix + source.header.expiry_seconds)
         .min()
         .ok_or_else(|| "blocker seed has no expiry time".to_owned())?;
     if created_unix >= expires_unix {
@@ -572,17 +736,12 @@ fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
         sources: sources
             .iter()
             .map(|source| CatalogSource {
-                id: source.id.into(),
+                id: source.spec.id.into(),
                 format: SourceFormat::Standard,
-                target: source.target.into(),
+                target: source.spec.target.into(),
                 length: source.raw.len() as u64,
                 sha256: hex_sha256(&source.raw),
-                license: LicenseMetadata {
-                    license_expression: LICENSE_EXPRESSION.into(),
-                    attribution: ATTRIBUTION.into(),
-                    redistribution: REDISTRIBUTION.into(),
-                    source_url: source.source_url.into(),
-                },
+                license: license_metadata(source.spec),
             })
             .collect(),
     })
@@ -594,13 +753,13 @@ fn build_release_seed(
     catalog_bytes: &[u8],
 ) -> ReleaseSeedManifest {
     ReleaseSeedManifest {
-        schema_version: 1,
+        schema_version: SEED_SCHEMA_VERSION,
         catalog_manifest_sha256: hex_sha256(catalog_bytes),
         assets: sources
             .iter()
             .zip(compressed)
             .map(|(source, bytes)| ReleaseSeedAsset {
-                target: source.target.into(),
+                target: source.spec.target.into(),
                 compression: CompressionFormat::Gzip,
                 compressed_length: bytes.len() as u64,
                 compressed_sha256: hex_sha256(bytes),
@@ -625,40 +784,24 @@ fn verify_and_inflate_sources(
     seed: &ReleaseSeedManifest,
 ) -> Result<Vec<SourceInput>, String> {
     if catalog.schema_version != 1
-        || seed.schema_version != 1
-        || catalog.sources.len() != 2
-        || seed.assets.len() != 2
+        || seed.schema_version != SEED_SCHEMA_VERSION
+        || catalog.sources.len() != SOURCES.len()
+        || seed.assets.len() != SOURCES.len()
     {
         return Err("blocker seed manifest schema or source count is invalid".into());
     }
-    let expected = [
-        (
-            "easylist",
-            "easylist.txt",
-            EASYLIST_ASSET,
-            "EasyList",
-            "https://easylist.to/easylist/easylist.txt",
-        ),
-        (
-            "easyprivacy",
-            "easyprivacy.txt",
-            EASYPRIVACY_ASSET,
-            "EasyPrivacy",
-            "https://easylist.to/easylist/easyprivacy.txt",
-        ),
-    ];
-    let mut sources = Vec::with_capacity(expected.len());
-    for ((catalog_source, asset), (id, target, file, title, source_url)) in
-        catalog.sources.iter().zip(&seed.assets).zip(expected)
-    {
-        validate_catalog_source(catalog_source, id, target, source_url)?;
-        if asset.target != target
+    let mut sources = Vec::with_capacity(SOURCES.len());
+    for ((catalog_source, asset), spec) in catalog.sources.iter().zip(&seed.assets).zip(&SOURCES) {
+        let title = spec.title;
+        validate_catalog_source(catalog_source, spec)?;
+        if asset.target != spec.target
             || asset.compression != CompressionFormat::Gzip
             || asset.upstream_title != title
         {
             return Err(format!("{title} release asset metadata is invalid"));
         }
-        let compressed = read_regular_file(&directory.join(file), 16 * 1024 * 1024)?;
+        let compressed =
+            read_regular_file(&directory.join(asset_file(spec.target)), 16 * 1024 * 1024)?;
         if compressed.len() as u64 != asset.compressed_length
             || hex_sha256(&compressed) != asset.compressed_sha256
         {
@@ -673,67 +816,42 @@ fn verify_and_inflate_sources(
                 "{title} is not the exact deterministic gzip representation"
             ));
         }
-        let header = parse_source_header(&raw, title)?;
+        let header = parse_source_header(&raw, spec)?;
         if header.version != asset.upstream_version || header.commit != asset.upstream_commit {
             return Err(format!(
                 "{title} header provenance does not match its envelope"
             ));
         }
-        sources.push(SourceInput {
-            id,
-            target,
-            source_url,
-            raw,
-            header,
-        });
+        sources.push(SourceInput { spec, raw, header });
     }
     Ok(sources)
 }
 
-fn validate_catalog_source(
-    source: &CatalogSource,
-    id: &str,
-    target: &str,
-    source_url: &str,
-) -> Result<(), String> {
-    let expected_license = LicenseMetadata {
-        license_expression: LICENSE_EXPRESSION.into(),
-        attribution: ATTRIBUTION.into(),
+fn license_metadata(spec: &SourceSpec) -> LicenseMetadata {
+    LicenseMetadata {
+        license_expression: spec.license.expression.into(),
+        attribution: spec.license.attribution.into(),
         redistribution: REDISTRIBUTION.into(),
-        source_url: source_url.into(),
-    };
-    if source.id != id
-        || source.target != target
+        source_url: spec.source_url.into(),
+    }
+}
+
+fn validate_catalog_source(source: &CatalogSource, spec: &SourceSpec) -> Result<(), String> {
+    if source.id != spec.id
+        || source.target != spec.target
         || source.format != SourceFormat::Standard
         || source.length == 0
         || source.length > MAX_SOURCE_BYTES
         || !valid_sha256(&source.sha256)
-        || source.license != expected_license
+        || source.license != license_metadata(spec)
     {
-        return Err(format!("{id} catalog descriptor is invalid"));
+        return Err(format!("{} catalog descriptor is invalid", spec.id));
     }
     Ok(())
 }
 
-fn read_source(
-    id: &'static str,
-    target: &'static str,
-    title: &str,
-    source_url: &'static str,
-    path: &Path,
-) -> Result<SourceInput, String> {
-    let raw = read_regular_file(path, MAX_SOURCE_BYTES)?;
-    let header = parse_source_header(&raw, title)?;
-    Ok(SourceInput {
-        id,
-        target,
-        source_url,
-        raw,
-        header,
-    })
-}
-
-fn parse_source_header(raw: &[u8], expected_title: &str) -> Result<SourceHeader, String> {
+fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, String> {
+    let expected_title = spec.title;
     if raw.is_empty() || raw.last() != Some(&b'\n') || raw.contains(&0) || raw.contains(&b'\r') {
         return Err(format!(
             "{expected_title} must be nonempty NUL-free UTF-8 with canonical LF endings"
@@ -741,12 +859,22 @@ fn parse_source_header(raw: &[u8], expected_title: &str) -> Result<SourceHeader,
     }
     let text = std::str::from_utf8(raw)
         .map_err(|_| format!("{expected_title} source is not valid UTF-8"))?;
-    let mut lines = text.lines().take(32);
-    let first = lines
-        .next()
-        .ok_or_else(|| format!("{expected_title} has no ABP header"))?;
-    if !matches!(first, "[Adblock Plus 1.1]" | "[Adblock Plus 2.0]") {
-        return Err(format!("{expected_title} has an unsupported ABP header"));
+    let rules = text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('!') && !line.starts_with('['))
+        .count();
+    if text.len() < spec.min_bytes || !(spec.min_rules..=MAX_SOURCE_RULES).contains(&rules) {
+        return Err(format!(
+            "{expected_title} has {} bytes and {rules} rules, outside its accepted bounds",
+            text.len()
+        ));
+    }
+    let mut lines = text.lines().take(32).peekable();
+    let adblock = lines
+        .next_if(|line| matches!(*line, "[Adblock Plus 1.1]" | "[Adblock Plus 2.0]"))
+        .is_some();
+    if adblock != (spec.header == HeaderFormat::Adblock) {
+        return Err(format!("{expected_title} has an unexpected ABP header"));
     }
     let mut fields = BTreeMap::new();
     for line in lines {
@@ -757,7 +885,7 @@ fn parse_source_header(raw: &[u8], expected_title: &str) -> Result<SourceHeader,
             "Expires",
             "Commit",
             "Homepage",
-            "Licence",
+            spec.license.terms_header,
         ] {
             if let Some(value) = line.strip_prefix(&format!("! {name}: ")) {
                 if fields.insert(name, value).is_some() {
@@ -772,33 +900,114 @@ fn parse_source_header(raw: &[u8], expected_title: &str) -> Result<SourceHeader,
             .copied()
             .ok_or_else(|| format!("{expected_title} has no {name} header"))
     };
-    let title = field("Title")?;
-    let version = field("Version")?;
-    let commit = field("Commit")?;
-    if title != expected_title
-        || version.len() != 12
-        || !version.bytes().all(|byte| byte.is_ascii_digit())
-        || commit.len() != 40
-        || !commit
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || field("Expires")? != "4 days (update frequency)"
-        || field("Homepage")? != "https://easylist.to/"
-        || field("Licence")? != LICENSE_URL
+    if field("Title")? != expected_title
+        || field("Homepage")? != spec.homepage
+        || field(spec.license.terms_header)? != spec.license.terms_url
     {
         return Err(format!("{expected_title} header provenance is invalid"));
     }
-    let (modified_unix, formatted) = timestamp_from_version(version)?;
-    if field("Last modified")? != formatted {
+    let (version, commit, expiry_seconds) = match spec.header {
+        HeaderFormat::Adblock => {
+            let version = field("Version")?;
+            let commit = field("Commit")?;
+            if version.len() != 12
+                || !version.bytes().all(|byte| byte.is_ascii_digit())
+                || commit.len() != 40
+                || !commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || field("Expires")? != "4 days (update frequency)"
+            {
+                return Err(format!("{expected_title} header provenance is invalid"));
+            }
+            (version.to_owned(), Some(commit.to_owned()), 4 * DAY)
+        }
+        HeaderFormat::Dated => {
+            let version = dated_version(field("Last modified")?)
+                .ok_or_else(|| format!("{expected_title} has an invalid Last modified header"))?;
+            let expires = expires_seconds(field("Expires")?)
+                .ok_or_else(|| format!("{expected_title} has an invalid Expires header"))?;
+            let ceiling = if spec.follows_expires { DAY } else { 7 * DAY };
+            (version, None, expires.clamp(4 * HOUR, ceiling))
+        }
+    };
+    let (modified_unix, formatted) = timestamp_from_version(&version)?;
+    if spec.header == HeaderFormat::Adblock && field("Last modified")? != formatted {
         return Err(format!(
             "{expected_title} version and Last modified headers disagree"
         ));
     }
     Ok(SourceHeader {
-        title: title.into(),
-        version: version.into(),
-        commit: commit.into(),
+        title: expected_title.into(),
+        version,
+        commit,
         modified_unix,
+        expiry_seconds,
+    })
+}
+
+/// `8 hours`, `5 days` or `4 days (update frequency)` in seconds.
+fn expires_seconds(value: &str) -> Option<u64> {
+    let mut words = value.split_whitespace();
+    let count: u64 = words.next()?.parse().ok()?;
+    let unit = match words.next()?.trim_end_matches('s') {
+        "hour" => HOUR,
+        "day" => DAY,
+        _ => return None,
+    };
+    count.checked_mul(unit)
+}
+
+/// An RFC 2822 date such as `Mon, 02 Nov 2026 12:27:09 +0000` as the UTC
+/// `YYYYMMDDHHMM` version the app's list updater assigns it.
+fn dated_version(value: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let date = value.split_once(", ").map_or(value, |(_, date)| date);
+    let [day, month, year, time, zone] =
+        <[&str; 5]>::try_from(date.split(' ').collect::<Vec<_>>()).ok()?;
+    let number = |text: &str, digits: std::ops::RangeInclusive<usize>| {
+        (digits.contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<i64>().ok())
+            .flatten()
+    };
+    let month = MONTHS.iter().position(|name| *name == month)? as i64 + 1;
+    let (day, year) = (number(day, 1..=2)?, number(year, 4..=4)?);
+    let mut clock = time.split(':');
+    let hour = number(clock.next()?, 2..=2)?;
+    let minute = number(clock.next()?, 2..=2)?;
+    let second = clock
+        .next()
+        .map_or(Some(0), |second| number(second, 2..=2))?;
+    let (sign, offset) = zone.split_at_checked(1)?;
+    let sign = match sign {
+        "+" => 1,
+        "-" => -1,
+        _ => return None,
+    };
+    let offset = number(offset, 4..=4)?;
+    if clock.next().is_some()
+        || day == 0
+        || day > i64::from(days_in_month(year as u32, month as u32))
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || offset / 100 > 23
+        || offset % 100 > 59
+    {
+        return None;
+    }
+    let minutes = days_from_civil(year, month, day) * 1440 + hour * 60 + minute
+        - sign * (offset / 100 * 60 + offset % 100);
+    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
+    let minute_of_day = minutes.rem_euclid(1440);
+    (1970..=9999).contains(&year).then(|| {
+        format!(
+            "{year:04}{month:02}{day:02}{:02}{:02}",
+            minute_of_day / 60,
+            minute_of_day % 60
+        )
     })
 }
 
@@ -851,6 +1060,24 @@ const fn days_in_month(year: u32, month: u32) -> u32 {
         2 => 28,
         _ => 0,
     }
+}
+
+const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let adjusted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * adjusted_month + 2) / 5 + 1;
+    let month = if adjusted_month < 10 {
+        adjusted_month + 3
+    } else {
+        adjusted_month - 9
+    };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
 }
 
 const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -913,20 +1140,21 @@ fn bounded_inflate(
     Ok(raw)
 }
 
-fn validate_license(bytes: &[u8]) -> Result<(), String> {
-    if hex_sha256(bytes) != LICENSE_SHA256 {
+fn validate_license(license: &LicenseSpec, bytes: &[u8]) -> Result<(), String> {
+    let file = license.file;
+    if hex_sha256(bytes) != license.sha256 {
         return Err(format!(
-            "{LICENSE_FILE} differs from the reviewed CC BY-SA 3.0 legal code"
+            "{file} differs from the reviewed {} legal code",
+            license.expression
         ));
     }
-    let text =
-        std::str::from_utf8(bytes).map_err(|_| format!("{LICENSE_FILE} is not valid UTF-8"))?;
-    if !text.contains("Attribution-ShareAlike 3.0 Unported")
-        || !text.contains("CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM")
+    let text = std::str::from_utf8(bytes).map_err(|_| format!("{file} is not valid UTF-8"))?;
+    if !license
+        .legal_code
+        .iter()
+        .all(|marker| text.contains(marker))
     {
-        return Err(format!(
-            "{LICENSE_FILE} does not contain the expected legal code"
-        ));
+        return Err(format!("{file} does not contain the expected legal code"));
     }
     Ok(())
 }
@@ -934,33 +1162,44 @@ fn validate_license(bytes: &[u8]) -> Result<(), String> {
 fn build_notice(sources: &[SourceInput]) -> String {
     let mut notice = String::from(
         "Zephium bundled blocker seed v1\n\n\
-         This directory contains unmodified EasyList and EasyPrivacy subscription text.\n\
-         Zephium changes only the storage representation by applying deterministic gzip\n\
-         compression; the decompressed source bytes are unchanged.\n\n\
-         Attribution: The EasyList authors (https://easylist.to/)\n\
-         Selected license: CC BY-SA 3.0 Unported (CC-BY-SA-3.0)\n\
-         License text: LICENSE-CC-BY-SA-3.0.txt\n\
-         Upstream terms: https://easylist.to/pages/licence.html\n\n",
+         This directory contains unmodified filter list subscription text. Zephium\n\
+         changes only the storage representation by applying deterministic gzip\n\
+         compression; the decompressed source bytes are unchanged.\n\n",
     );
+    for license in LICENSES {
+        let titles = sources
+            .iter()
+            .filter(|source| source.spec.license.expression == license.expression)
+            .map(|source| source.spec.title)
+            .collect::<Vec<_>>();
+        notice.push_str(&format!(
+            "{}\nAttribution: {}\n{}License text: {}\nUpstream terms: {}\n\n",
+            titles.join(", "),
+            license.attribution,
+            license.notice,
+            license.file,
+            license.terms_url
+        ));
+    }
     for source in sources {
         notice.push_str(&format!(
-            "{}\nSource: {}\nVersion: {}\nCommit: {}\nRaw SHA-256: {}\n\n",
-            source.header.title,
-            source.source_url,
-            source.header.version,
-            source.header.commit,
-            hex_sha256(&source.raw)
+            "{}\nSource: {}\nVersion: {}\n",
+            source.header.title, source.spec.source_url, source.header.version
         ));
+        if let Some(commit) = &source.header.commit {
+            notice.push_str(&format!("Commit: {commit}\n"));
+        }
+        notice.push_str(&format!("Raw SHA-256: {}\n\n", hex_sha256(&source.raw)));
     }
     notice.push_str(
         "The upstream authors do not endorse Zephium. Release engineering must regenerate\n\
-         and verify this record with `cargo xtask update-blocker-seed` whenever either\n\
+         and verify this record with `cargo xtask update-blocker-seed` whenever a\n\
          subscription changes.\n",
     );
     notice
 }
 
-fn validate_closed_file_set(directory: &Path) -> Result<(), String> {
+fn validate_closed_file_set(directory: &Path, expected: &BTreeSet<String>) -> Result<(), String> {
     let metadata = std::fs::symlink_metadata(directory)
         .map_err(|error| format!("cannot inspect {}: {error}", directory.display()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -987,11 +1226,7 @@ fn validate_closed_file_set(directory: &Path) -> Result<(), String> {
         }
         actual.insert(name);
     }
-    let expected = EXPECTED_FILES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<BTreeSet<_>>();
-    if actual != expected {
+    if &actual != expected {
         return Err(format!(
             "blocker seed file set is not closed; expected {expected:?}, found {actual:?}"
         ));
@@ -1102,11 +1337,9 @@ fn write_new_file(path: &Path, bytes: &[u8], description: &str) -> Result<(), St
 
 fn replace_asset_directory(
     repository: &Path,
-    files: &BTreeMap<&str, Vec<u8>>,
+    files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<PublishedDirectory, String> {
-    if files.keys().copied().collect::<BTreeSet<_>>()
-        != EXPECTED_FILES.into_iter().collect::<BTreeSet<_>>()
-    {
+    if files.keys().cloned().collect::<BTreeSet<_>>() != expected_files() {
         return Err("generator attempted to publish a noncanonical blocker seed file set".into());
     }
     let parent = repository.join("assets/blocker-seed");
@@ -1270,13 +1503,13 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_compile_inputs(directory: &Path, sources: &[SourceInput]) -> Result<[PathBuf; 2], String> {
-    if sources.len() != 2 {
-        return Err("blocker seed compiler requires exactly two sources".into());
+fn write_compile_inputs(directory: &Path, sources: &[SourceInput]) -> Result<Vec<PathBuf>, String> {
+    if sources.len() != SOURCES.len() {
+        return Err("blocker seed compiler requires every bundled source".into());
     }
-    let mut paths = Vec::with_capacity(2);
+    let mut paths = Vec::with_capacity(sources.len());
     for source in sources {
-        let path = directory.join(source.target);
+        let path = directory.join(source.spec.target);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1287,14 +1520,12 @@ fn write_compile_inputs(directory: &Path, sources: &[SourceInput]) -> Result<[Pa
             .map_err(|error| format!("cannot write compiler input {}: {error}", path.display()))?;
         paths.push(path);
     }
-    paths
-        .try_into()
-        .map_err(|_| "blocker seed compiler input count changed".to_owned())
+    Ok(paths)
 }
 
 fn compile_all(
     repository: &Path,
-    paths: &[PathBuf; 2],
+    paths: &[PathBuf],
     webkit_output: Option<&Path>,
 ) -> Result<Vec<CompileGolden>, String> {
     [CompileTarget::Runtime, CompileTarget::Webkit]
@@ -1316,7 +1547,7 @@ fn compile_all(
 fn compile_one(
     repository: &Path,
     target: CompileTarget,
-    paths: &[PathBuf; 2],
+    paths: &[PathBuf],
     artifact_output: Option<&Path>,
     unpruned: bool,
 ) -> Result<CompileGolden, String> {
@@ -1336,7 +1567,7 @@ fn compile_one(
         "__compile-blocker-seed",
         target.argument(),
     ]);
-    command.arg(&paths[0]).arg(&paths[1]);
+    command.args(paths);
     if let Some(output) = artifact_output {
         command.arg("--artifact").arg(output);
     }
@@ -1370,8 +1601,7 @@ fn compile_one(
 #[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
 pub(crate) fn compile_hidden(
     target: &str,
-    easylist: &Path,
-    easyprivacy: &Path,
+    paths: &[PathBuf],
     artifact_output: Option<&Path>,
     unpruned: bool,
 ) -> Result<(), String> {
@@ -1394,8 +1624,16 @@ pub(crate) fn compile_hidden(
     if artifact_output.is_some() && expected_target != CompileTarget::Webkit {
         return Err("only the WebKit compiler may materialize a native artifact".into());
     }
-    let sources = [("easylist", easylist), ("easyprivacy", easyprivacy)]
-        .into_iter()
+    if paths.len() != SOURCES.len() {
+        return Err(format!(
+            "the blocker seed compiler takes exactly {} sources",
+            SOURCES.len()
+        ));
+    }
+    let sources = SOURCES
+        .iter()
+        .map(|spec| spec.id)
+        .zip(paths)
         .map(|(id, path)| {
             let bytes = read_regular_file(path, MAX_SOURCE_BYTES)?;
             let text =
@@ -1672,6 +1910,49 @@ mod tests {
     }
 
     #[test]
+    fn dated_lists_are_versioned_by_their_utc_modification_minute() {
+        assert_eq!(
+            dated_version("Mon, 02 Nov 2026 12:27:09 +0000").as_deref(),
+            Some("202611021227")
+        );
+        assert_eq!(
+            dated_version("Mon, 02 Nov 2026 23:30:00 -0100").as_deref(),
+            Some("202611030030")
+        );
+        assert_eq!(
+            dated_version("01 Mar 2028 00:15 +0130").as_deref(),
+            Some("202802292245")
+        );
+        assert_eq!(dated_version("yesterday"), None);
+        assert_eq!(dated_version("Mon, 31 Nov 2026 12:27:09 +0000"), None);
+        assert_eq!(expires_seconds("8 hours"), Some(8 * HOUR));
+        assert_eq!(expires_seconds("4 days (update frequency)"), Some(4 * DAY));
+    }
+
+    #[test]
+    fn source_headers_follow_each_lists_own_format() {
+        let quick_fixes = &SOURCES[3];
+        let mut list = format!(
+            "! Title: {}\n! Last modified: Mon, 02 Nov 2026 14:08:18 +0000\n! Expires: 8 hours\n! License: {}\n! Homepage: {}\n",
+            quick_fixes.title, GPL_3.terms_url, quick_fixes.homepage
+        );
+        for rule in 0..600 {
+            list.push_str(&format!("example{rule}.invalid##.advertisement\n"));
+        }
+        let header = parse_source_header(list.as_bytes(), quick_fixes).unwrap();
+        assert_eq!(header.version, "202611021408");
+        assert_eq!(header.commit, None);
+        assert_eq!(header.expiry_seconds, 8 * HOUR);
+        assert!(parse_source_header(
+            format!("[Adblock Plus 2.0]\n{list}").as_bytes(),
+            quick_fixes
+        )
+        .unwrap_err()
+        .contains("unexpected ABP header"));
+        assert!(parse_source_header(list.as_bytes(), &SOURCES[2]).is_err());
+    }
+
+    #[test]
     fn deterministic_gzip_rejects_trailing_data_and_round_trips() {
         let raw = b"[Adblock Plus 2.0]\n||ads.example^\n";
         let compressed = deterministic_gzip(raw).unwrap();
@@ -1695,8 +1976,7 @@ mod tests {
             package_revision: 1,
             catalog_manifest_sha256: "0".repeat(64),
             release_seed_manifest_sha256: "1".repeat(64),
-            license_file: LICENSE_FILE.into(),
-            license_sha256: LICENSE_SHA256.into(),
+            licenses: license_records(),
             compilers: Vec::new(),
         };
         let canonical = canonical_json(&value).unwrap();
@@ -1729,19 +2009,14 @@ mod tests {
             target: "fixture.txt".into(),
             length: 1,
             sha256: "0".repeat(64),
-            license: LicenseMetadata {
-                license_expression: LICENSE_EXPRESSION.into(),
-                attribution: ATTRIBUTION.into(),
-                redistribution: REDISTRIBUTION.into(),
-                source_url: "https://example.invalid/fixture.txt".into(),
-            },
+            license: license_metadata(&SOURCES[0]),
         };
         let mut catalog = CatalogManifest {
             schema_version: 1,
             revision: 1,
             created_unix: now,
             expires_unix: now + 1,
-            sources: vec![source.clone(), source],
+            sources: vec![source; SOURCES.len()],
         };
         assert!(validate_release_freshness(&catalog, now).is_ok());
 
@@ -1768,9 +2043,9 @@ mod tests {
     }
 
     #[test]
-    fn generation_rejects_revision_rollback_and_equivocation() {
+    fn generation_rejects_rollback_and_equivocation_but_accepts_new_lists() {
         let directory = tempfile::tempdir().unwrap();
-        for name in EXPECTED_FILES {
+        for name in file_set([("easylist.txt", &CC_BY_SA)]) {
             std::fs::write(directory.path().join(name), b"fixture").unwrap();
         }
         let source = CatalogSource {
@@ -1779,12 +2054,7 @@ mod tests {
             target: "easylist.txt".into(),
             length: 7,
             sha256: "0".repeat(64),
-            license: LicenseMetadata {
-                license_expression: LICENSE_EXPRESSION.into(),
-                attribution: ATTRIBUTION.into(),
-                redistribution: REDISTRIBUTION.into(),
-                source_url: "https://easylist.to/easylist/easylist.txt".into(),
-            },
+            license: license_metadata(&SOURCES[0]),
         };
         let previous_catalog = CatalogManifest {
             schema_version: 1,
@@ -1794,18 +2064,19 @@ mod tests {
             sources: vec![source.clone()],
         };
         let previous_catalog_bytes = canonical_json(&previous_catalog).unwrap();
+        let asset = ReleaseSeedAsset {
+            target: "easylist.txt".into(),
+            compression: CompressionFormat::Gzip,
+            compressed_length: 7,
+            compressed_sha256: "1".repeat(64),
+            upstream_title: "EasyList".into(),
+            upstream_version: "202607240002".into(),
+            upstream_commit: Some("2".repeat(40)),
+        };
         let previous_seed = ReleaseSeedManifest {
             schema_version: 1,
             catalog_manifest_sha256: hex_sha256(&previous_catalog_bytes),
-            assets: vec![ReleaseSeedAsset {
-                target: "easylist.txt".into(),
-                compression: CompressionFormat::Gzip,
-                compressed_length: 7,
-                compressed_sha256: "1".repeat(64),
-                upstream_title: "EasyList".into(),
-                upstream_version: "202607240002".into(),
-                upstream_commit: "2".repeat(40),
-            }],
+            assets: vec![asset.clone()],
         };
         std::fs::write(directory.path().join(CATALOG_FILE), &previous_catalog_bytes).unwrap();
         std::fs::write(
@@ -1835,5 +2106,50 @@ mod tests {
             &previous_seed,
         )
         .is_err());
+
+        let added = CatalogSource {
+            id: "ublock-filters".into(),
+            target: "ublock-filters.txt".into(),
+            license: license_metadata(&SOURCES[2]),
+            ..source.clone()
+        };
+        let added_asset = ReleaseSeedAsset {
+            target: "ublock-filters.txt".into(),
+            upstream_title: "uBlock filters".into(),
+            upstream_version: "202611021227".into(),
+            upstream_commit: None,
+            ..asset.clone()
+        };
+        let mut grown_catalog = previous_catalog.clone();
+        grown_catalog.revision = 202_611_021_227;
+        grown_catalog.sources.push(added.clone());
+        let grown_seed = ReleaseSeedManifest {
+            schema_version: SEED_SCHEMA_VERSION,
+            catalog_manifest_sha256: "3".repeat(64),
+            assets: vec![asset.clone(), added_asset.clone()],
+        };
+        let grown_bytes = canonical_json(&grown_catalog).unwrap();
+        validate_generation_progression(
+            directory.path(),
+            &grown_catalog,
+            &grown_bytes,
+            &grown_seed,
+        )
+        .unwrap();
+
+        grown_catalog.sources.swap(0, 1);
+        let reordered_seed = ReleaseSeedManifest {
+            assets: vec![added_asset, asset],
+            ..grown_seed
+        };
+        let reordered_bytes = canonical_json(&grown_catalog).unwrap();
+        assert!(validate_generation_progression(
+            directory.path(),
+            &grown_catalog,
+            &reordered_bytes,
+            &reordered_seed,
+        )
+        .unwrap_err()
+        .contains("identity changed"));
     }
 }

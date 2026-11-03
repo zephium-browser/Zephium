@@ -1,13 +1,22 @@
 Zephium bundled blocker seed v1
 
-This directory contains unmodified EasyList and EasyPrivacy subscription text.
-Zephium changes only the storage representation by applying deterministic gzip
+This directory contains unmodified filter list subscription text. Zephium
+changes only the storage representation by applying deterministic gzip
 compression; the decompressed source bytes are unchanged.
 
+EasyList, EasyPrivacy
 Attribution: The EasyList authors (https://easylist.to/)
 Selected license: CC BY-SA 3.0 Unported (CC-BY-SA-3.0)
 License text: LICENSE-CC-BY-SA-3.0.txt
 Upstream terms: https://easylist.to/pages/licence.html
+
+uBlock filters, uBlock₀ filters – Quick fixes
+Attribution: uBlock Origin's uAssets authors (https://github.com/uBlockOrigin/uAssets)
+License: GNU General Public License, version 3 (GPL-3.0-only)
+These lists are conveyed in source form, unmodified, without additional
+terms and without warranty.
+License text: LICENSE-GPL-3.0.txt
+Upstream terms: https://github.com/uBlockOrigin/uAssets/blob/master/LICENSE
 
 EasyList
 Source: https://easylist.to/easylist/easylist.txt
@@ -21,6 +30,16 @@ Version: 202610281345
 Commit: ad903d7529f40e9fb4aff4d4c6070a812c6b0f73
 Raw SHA-256: 54bfdef988fe9af20df6916456d88b268700da7b2a5cee462687f9536de5ae38
 
+uBlock filters
+Source: https://ublockorigin.github.io/uAssets/filters/filters.txt
+Version: 202611021227
+Raw SHA-256: 045bad41ac20c055306352e56eaec1f7160737de61492dd53e2ff03302d698b1
+
+uBlock₀ filters – Quick fixes
+Source: https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt
+Version: 202611021408
+Raw SHA-256: 78b7c01c4e1d1e6b25f6f875cc681fdc37420dc73da36465e4e9b55b4e7e3e20
+
 The upstream authors do not endorse Zephium. Release engineering must regenerate
-and verify this record with `cargo xtask update-blocker-seed` whenever either
+and verify this record with `cargo xtask update-blocker-seed` whenever a
 subscription changes.
