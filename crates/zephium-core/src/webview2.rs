@@ -21,7 +21,10 @@ use crate::runtime_security::{
 #[path = "webview2_runtime.rs"]
 mod runtime;
 #[cfg(target_os = "windows")]
-pub use runtime::{RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind};
+pub use runtime::{
+    BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
+    RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind,
+};
 
 /// Windows Stable security release published by Microsoft on 2026-10-29.
 pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(156, 0, 4314, 56);

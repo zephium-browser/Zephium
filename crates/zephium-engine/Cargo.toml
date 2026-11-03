@@ -142,6 +142,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_Common",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",

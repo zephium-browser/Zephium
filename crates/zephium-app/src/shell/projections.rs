@@ -644,6 +644,9 @@ fn runtime_security_advisory_view(
             zephium_core::runtime_security::RuntimeSecurityAdvisoryKind::UnreviewedRuntime => {
                 RuntimeSecurityAdvisoryKind::UnreviewedRuntime
             }
+            zephium_core::runtime_security::RuntimeSecurityAdvisoryKind::CleanupOverdue => {
+                RuntimeSecurityAdvisoryKind::CleanupOverdue
+            }
         },
         update_target: match advisory.update_target() {
             zephium_core::runtime_security::RuntimeSecurityUpdateTarget::Zephium => {

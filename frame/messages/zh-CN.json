@@ -289,6 +289,8 @@
   "update_report_problem": "出现问题？告诉我们",
   "session_set_aside_title": "无法重新打开你上次的标签页",
   "session_set_aside_detail": "Zephium 无法读取已保存的会话，因此以新标签页启动。历史记录、书签和设置均未受影响，旧会话的副本已保存在 Zephium 的数据文件夹中。",
+  "runtime_cleanup_title": "重启以完成清除旧数据",
+  "runtime_cleanup_detail": "未正常关闭的旧会话数据仍在这台电脑上。重启电脑后，Zephium 会在下次启动时清除它们。",
   "update_dismiss": "关闭",
   "update_security_mac_title": "macOS 有可用的安全更新",
   "update_security_system_title": "你的系统有可用的安全更新",

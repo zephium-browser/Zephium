@@ -586,11 +586,37 @@ impl EngineHost {
             };
         self.browser_version_observers
             .insert(profile, version_observer);
+        self.record_private_browser_process(&environment, process_id);
         self.environments.insert(profile, environment);
         self.browser_processes.insert(profile, process);
         self.browser_process_exit_observers
             .insert(profile, observer);
         Ok((process_id, generation))
+    }
+
+    /// A private window's browser process goes into this run's private
+    /// generation, so the next launch can wipe that data even if this run
+    /// never proves the process gone.
+    #[cfg(target_os = "windows")]
+    fn record_private_browser_process(
+        &self,
+        environment: &ICoreWebView2Environment,
+        process_id: u32,
+    ) {
+        let private = crate::platform::imp::environment_user_data_folder(environment)
+            .and_then(|folder| zephium_core::webview2::canonical_user_data_directory(&folder).ok())
+            .is_some_and(|folder| folder.starts_with(self.private_runtime.root()));
+        if !private {
+            return;
+        }
+        let recorded = crate::platform::imp::browser_process_record(process_id)
+            .ok_or_else(|| std::io::Error::other("the browser process could not be read"))
+            .and_then(|record| self.private_runtime.record_browser_process(record));
+        if let Err(error) = recorded {
+            eprintln!(
+                "privacy: a private WebView2 browser process was not recorded for cleanup after an unclean quit: {error}"
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
