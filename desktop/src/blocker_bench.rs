@@ -314,15 +314,23 @@ fn drive(
     };
     match await_ready(app, bench, options.protection) {
         Ok((bootstrap, policy)) => {
-            let (sources, phase) = await_sources(app);
+            let startup = uptime();
+            let Ok((sources, phase)) = await_sources(app) else {
+                emit(&json!({
+                    "event": "error",
+                    "message": "list sources were still updating at the deadline",
+                }));
+                app.exit(0);
+                return;
+            };
             emit(&json!({
                 "event": "ready",
                 "pid": std::process::id(),
-                "startupMs": millis(uptime()),
+                "startupMs": millis(startup),
                 "windowMs": WINDOW_SHOWN.get().copied().map(millis),
                 "bootstrapMs": millis(bootstrap),
                 "policyReadyMs": millis(policy),
-                "sourcesSettledMs": sources.map(millis),
+                "sourcesSettledMs": millis(sources),
                 "sourcePhase": format!("{phase:?}"),
             }));
         }
@@ -399,29 +407,31 @@ fn await_ready(
 }
 
 /// A fresh profile downloads and compiles the lists in the background, and that
-/// work would land in whatever the harness measures next. Ready waits for it;
-/// `None` when it was still running at the deadline.
-fn await_sources(app: &tauri::AppHandle) -> (Option<Duration>, BlockerSourcePhase) {
+/// work would land in whatever the harness measures next. Ready waits for it,
+/// and the launch fails when it is still running at the deadline.
+fn await_sources(app: &tauri::AppHandle) -> Result<(Duration, BlockerSourcePhase), ()> {
     let deadline = Instant::now() + SOURCES_TIMEOUT;
     loop {
         let Some(shell) = app.try_state::<Handle>() else {
-            return (None, BlockerSourcePhase::Shutdown);
+            return Err(());
         };
         let status = shell
             .focused_content_policy_status()
             .recv_timeout(Duration::from_secs(2));
         let phase = status.source_phase;
-        // An unanswered query reads as unavailable, which says nothing yet.
-        if status.phase != BlockerPhase::Unavailable
-            && !matches!(
-                phase,
-                BlockerSourcePhase::Stale | BlockerSourcePhase::Refreshing
-            )
-        {
-            return (Some(uptime()), phase);
+        // An unanswered query reads as unavailable, which says nothing yet; a
+        // settled source can start a compile in the same turn.
+        if !matches!(
+            status.phase,
+            BlockerPhase::Unavailable | BlockerPhase::Compiling | BlockerPhase::Installing
+        ) && !matches!(
+            phase,
+            BlockerSourcePhase::Stale | BlockerSourcePhase::Refreshing
+        ) {
+            return Ok((uptime(), phase));
         }
         if Instant::now() >= deadline {
-            return (None, phase);
+            return Err(());
         }
         std::thread::sleep(READY_POLL);
     }
