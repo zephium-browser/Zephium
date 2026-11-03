@@ -11,14 +11,15 @@ use zephium_core::ports::engine::MemoryPressure;
 // budget; it is a backstop for kept-awake and protected pages, while OS
 // memory pressure is the real budget. Pages are never force-discarded: the
 // engine probe still vetoes anything a reload would lose.
-pub(super) const WARM_VIEW_LIMIT: usize = 4;
+pub(super) const WARM_VIEW_LIMIT: usize = 2;
 pub(super) const LIVE_VIEW_PRESSURE_LIMIT: usize = 24;
 pub(super) const LIVE_VIEW_ABSOLUTE_LIMIT: usize = 64;
 const _: () = assert!(LIVE_VIEW_ABSOLUTE_LIMIT >= LIVE_VIEW_PRESSURE_LIMIT + MAX_VISIBLE_PANES);
 pub(super) const MAX_CONCURRENT_DISCARD_PROBES: usize = 4;
-pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-// Suspension keeps page state, so it can start well before a discard.
-const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+// Suspension keeps page state and resumes in an instant, so a hidden page
+// stops running soon after the person leaves it.
+const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 // A system memory warning can last for hours on small machines; a short
 // grace keeps tabs the user is actively switching between from reloading.
 const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
@@ -139,7 +140,7 @@ impl ResidencyState {
         match key {
             "performance.sleep" => self.sleeping = value == "true",
             "performance.after" => {
-                let minutes = value.parse::<u64>().unwrap_or(15);
+                let minutes = value.parse::<u64>().unwrap_or(30);
                 self.discard_idle_min = std::time::Duration::from_secs(minutes * 60);
                 self.dormant_min = self.discard_idle_min.min(DORMANT_GRACE);
             }
@@ -241,6 +242,26 @@ impl Shell {
                     .iter()
                     .any(|site| zephium_core::time::site_covers(site, host.trim_end_matches('.')))
             })
+    }
+
+    /// Suspending or discarding would cut off what the person hears, watches
+    /// in picture in picture, or sends from a camera or microphone.
+    pub(super) fn keeps_running(&self, id: ItemId) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.audio.shown()
+                || tab
+                    .capture
+                    .as_ref()
+                    .is_some_and(|(_, state)| state.is_capturing())
+        }) || self.media.get(id).is_some_and(|media| media.in_pip)
+    }
+
+    /// A page that starts sound, capture or picture in picture wakes now, and
+    /// one that stops sleeps on this pass instead of the next.
+    pub(super) fn follow_running(&mut self, id: ItemId, was_running: bool) {
+        if self.keeps_running(id) != was_running {
+            self.maintain_views();
+        }
     }
 
     /// Only a foreground intent may wait for an acknowledged safe close. The
@@ -389,7 +410,7 @@ impl Shell {
         }
     }
 
-    // Sleeping-tabs model: hidden views carry a low-memory hint, then a
+    // Sleeping-tabs model: hidden idle views are suspended, then a
     // bounded set of exact-generation/epoch probes may authorize full native
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
@@ -548,6 +569,7 @@ impl Shell {
             .filter(|id| {
                 self.residency.sleeping
                     && !self.site_kept_awake(*id)
+                    && !self.keeps_running(*id)
                     && !shown.contains(id)
                     && !self.residency.discard_probes.contains_key(id)
                     && self
@@ -561,6 +583,31 @@ impl Shell {
         if dormant != self.residency.dormant_sent {
             self.residency.dormant_sent = dormant.clone();
             self.engine.set_dormant(dormant);
+        }
+        // The grace is short next to the maintenance tick: wake when the next
+        // hidden page is due rather than up to a tick late.
+        if let Some(queue) = &self.self_queue {
+            let now = std::time::Instant::now();
+            let next = self
+                .items
+                .view_ids()
+                .into_iter()
+                .filter(|id| {
+                    self.residency.sleeping
+                        && !shown.contains(id)
+                        && !self.residency.dormant_sent.contains(id)
+                        && !self.site_kept_awake(*id)
+                        && !self.keeps_running(*id)
+                })
+                .filter_map(|id| {
+                    self.last_view_activity(id)
+                        .map(|at| *at + self.residency.dormant_min)
+                })
+                .filter(|due| *due > now)
+                .min();
+            if let Some(next) = next {
+                queue.schedule_dormancy(next);
+            }
         }
 
         let urgent = self.discard_is_urgent(live_count);
@@ -702,9 +749,10 @@ impl Shell {
     /// Policy intent only; the engine probe still vetoes unsafe pages. The
     /// user's choices are honored: kept-awake sites never sleep, and with
     /// sleeping off only critical OS pressure, where the alternative is the
-    /// OS killing renderers outright, may still discard.
+    /// OS killing renderers outright, may still discard. A page that keeps
+    /// running is not asked: the probe would refuse it, and over and over.
     fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
-        if self.site_kept_awake(id) {
+        if self.site_kept_awake(id) || self.keeps_running(id) {
             return false;
         }
         if self.discard_is_urgent(live_count) {
@@ -754,11 +802,16 @@ impl Shell {
         {
             return;
         }
+        // A sleeping page does not grow: once measured, it is not asked again.
         let hidden: Vec<ItemId> = self
             .items
             .view_ids()
             .into_iter()
-            .filter(|id| !shown.contains(id))
+            .filter(|id| {
+                !shown.contains(id)
+                    && (!self.residency.dormant_sent.contains(id)
+                        || !self.residency.page_bytes.contains_key(id))
+            })
             .collect();
         if !hidden.is_empty() {
             self.residency.memory_sampled = Some(now);

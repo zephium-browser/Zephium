@@ -6,14 +6,16 @@ const IDLE_MS = 4000;
 /**
  * WebKit on macOS fades its text caret, and every step of the fade redraws
  * the interface: an empty field left focused on an idle page keeps the
- * window drawing at the display's rate. After a quiet spell the field lets
- * go of focus and shows a caret drawn here instead, an opacity animation
- * the system compositor runs without waking the page. The next key the
- * window receives gives the field its focus back before the text arrives.
+ * window drawing at the display's rate. WebView2 blinks its caret instead,
+ * but each blink keeps it drawing for a stretch of frames, about twenty a
+ * second. After a quiet spell the field lets go of focus and shows a caret
+ * drawn here instead. On macOS it blinks through an opacity animation the
+ * system compositor runs without waking the page; elsewhere it stands still,
+ * since any animation, even a compositor one, keeps Chromium drawing every
+ * frame. The next key the window receives gives the field its focus back
+ * before the text arrives.
  */
 export function parkCaret(input: HTMLInputElement): () => void {
-  // The fading caret is WebKit on macOS; elsewhere the field keeps its own.
-  if (!IS_MAC) return () => {};
   let timer: ReturnType<typeof setTimeout> | undefined;
   let caret: HTMLElement | null = null;
 
@@ -49,7 +51,7 @@ export function parkCaret(input: HTMLInputElement): () => void {
       willChange: "opacity",
     });
     field.append(caret);
-    if (!reducedMotion()) {
+    if (IS_MAC && !reducedMotion()) {
       caret.animate(
         [
           { opacity: 1, offset: 0 },

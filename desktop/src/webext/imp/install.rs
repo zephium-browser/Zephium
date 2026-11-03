@@ -301,6 +301,11 @@ pub(super) fn stage(
             sideloaded: from_file,
             pinned: existing.is_some_and(|entry| entry.pinned),
         };
+        #[cfg(target_os = "windows")]
+        zephium_webext::windows::path_budget(
+            &root.join("packages").join(id.as_str()).join(&entry.package),
+            zephium_webext::windows::longest_relative_path(&dir).map_err(|e| e.to_string())?,
+        )?;
         Ok(Staged {
             review: WebExtensionReview {
                 review_id: review_id.clone(),
