@@ -1110,7 +1110,9 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
-                // WebKit asks here for every frame; WebView2 only for the top.
+                // WebKitGTK asks here for every frame, WebView2 only for the
+                // top (its frames count in FrameNavigationStarting); macOS
+                // asks the Apple handler below instead.
                 zephium_core::blocker::PageActivity::shared().note_navigation();
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
@@ -1192,6 +1194,8 @@ impl EngineHost {
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
+                // Wry calls only this handler when it is set, for every frame.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 // A page's own srcdoc, data: and blob: frames (challenge and
                 // payment widgets, editors) load under WebKit's origin rules;
                 // browser policy governs what a tab itself may show.
