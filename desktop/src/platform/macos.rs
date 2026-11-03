@@ -342,23 +342,28 @@ pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
 /// Moves the chrome WebView to a new content process with an empty history.
 /// What a document left in its process (decoded images, graphics buffers,
 /// collected-but-unreturned heap) goes with the old one.
-pub fn restart_content_process(window: &WebviewWindow) -> bool {
-    window
-        .with_webview(|webview| {
-            // SAFETY: Tauri supplies a live WKWebView pointer for the duration
-            // of this main-thread callback.
-            let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
-            let restarts: bool = unsafe {
-                msg_send![
-                    webkit,
-                    respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)
-                ]
-            };
-            if restarts {
-                let _: () = unsafe { msg_send![webkit, _killWebContentProcessAndResetState] };
-            }
-        })
-        .is_ok()
+pub fn restart_content_process(window: &WebviewWindow) {
+    let app = window.app_handle().clone();
+    let _ = window.with_webview(move |webview| {
+        // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+        // of this main-thread callback.
+        let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+        // SAFETY: NSObject's `respondsToSelector:` takes a selector and
+        // returns BOOL.
+        let restarts: bool = unsafe {
+            msg_send![
+                webkit,
+                respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)
+            ]
+        };
+        if restarts {
+            // Only a restart that happens may stand in for a crash.
+            crate::renderer_recovery::expect_restart(&app);
+            // SAFETY: checked above; WebKit declares it with no arguments
+            // and no result.
+            let _: () = unsafe { msg_send![webkit, _killWebContentProcessAndResetState] };
+        }
+    });
 }
 
 pub fn harden_privileged(window: &WebviewWindow) -> bool {

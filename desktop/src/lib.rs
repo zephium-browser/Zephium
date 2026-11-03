@@ -575,12 +575,7 @@ impl UiStartupGate {
         // Onboarding leaves tens of MB in its content process for as long as
         // it lives; the browser starts in a new one.
         #[cfg(target_os = "macos")]
-        {
-            renderer_recovery::expect_restart(window.app_handle());
-            if !platform::imp::restart_content_process(window) {
-                renderer_recovery::restart_settled(window.app_handle());
-            }
-        }
+        platform::imp::restart_content_process(window);
         if let Err(error) = window.navigate(handover.browser.clone()) {
             request_startup_failure(
                 window.app_handle(),
