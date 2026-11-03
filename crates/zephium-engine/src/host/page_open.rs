@@ -35,6 +35,7 @@ impl EngineHost {
                 &view.view,
                 &policy,
                 &view.site_scope.pause,
+                &view.site_scope.protection,
             ) else {
                 return false;
             };

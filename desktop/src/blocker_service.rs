@@ -187,14 +187,17 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        assert_eq!(rules.coverage().source_rules, 138_127);
-        // The Windows matcher drops one regex rule its regex engine cannot compile.
+        // Zephium's own six exceptions compile with the lists where requests
+        // carry their page, which Windows requests do not, and the Windows
+        // matcher drops one regex rule its regex engine cannot compile.
+        let own = if cfg!(target_os = "windows") { 0 } else { 6 };
         let accepted = if cfg!(target_os = "windows") {
             104_783
         } else {
             104_784
         };
-        assert_eq!(rules.coverage().accepted_rules, accepted);
+        assert_eq!(rules.coverage().source_rules, 138_127 + own);
+        assert_eq!(rules.coverage().accepted_rules, accepted + own);
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
             BlockerShutdownOutcome::Clean

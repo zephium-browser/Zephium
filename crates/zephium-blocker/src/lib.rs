@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+mod builtin;
 mod cache;
 mod compiler;
 mod conditions;
@@ -80,6 +81,9 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
+    if cfg!(feature = "webkit") {
+        digest.update(builtin::fingerprint());
+    }
     #[cfg(feature = "webkit")]
     digest.update(webkit_prune::PrunedRules::shipped().fingerprint());
     for value in [

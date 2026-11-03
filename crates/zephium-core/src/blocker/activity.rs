@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 static SHARED: LazyLock<Arc<PageActivity>> = LazyLock::new(|| Arc::new(PageActivity::new()));
 
-/// Main-frame loads in flight across every page, background tabs included, so
-/// list-update work can wait until browsing is quiet.
+/// Main-frame loads in flight across every page, background tabs included, and
+/// the last navigation in any frame, so list-update work can wait until
+/// browsing is quiet.
 #[derive(Debug)]
 pub struct PageActivity {
     loading: AtomicUsize,
@@ -38,6 +39,13 @@ impl PageActivity {
         self.loading.fetch_add(1, Ordering::AcqRel);
         self.touch();
         ActivePageLoad(self.clone())
+    }
+
+    /// A navigation in any frame. Subframe loads report no end, so this only
+    /// restarts the quiet clock: a page that keeps creating frames, such as a
+    /// benchmark, is not quiet.
+    pub fn note_navigation(&self) {
+        self.touch();
     }
 
     /// How long no main-frame load has been in flight, or `None` while one is.
@@ -95,5 +103,16 @@ mod tests {
         assert!(activity
             .quiet_for(Instant::now())
             .is_some_and(|q| q < Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_frame_navigation_restarts_quiet_without_holding_it() {
+        let activity = Arc::new(PageActivity::new());
+        activity.note_navigation();
+        let quiet = activity.quiet_for(Instant::now());
+        assert!(quiet.is_some_and(|q| q < Duration::from_secs(1)));
+        assert!(activity
+            .quiet_for(Instant::now() + Duration::from_secs(3))
+            .is_some_and(|q| q >= Duration::from_secs(2)));
     }
 }

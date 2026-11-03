@@ -1324,7 +1324,7 @@ pub struct RuntimeStatus {
     /// extension, profile, or native failure identity crosses this privileged
     /// projection.
     pub user_content_degraded_scope_count: u16,
-    /// Canonically ordered closed-vocabulary set. Rust emits at most five
+    /// Canonically ordered closed-vocabulary set. Rust emits at most six
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,
 }
@@ -1337,6 +1337,7 @@ pub enum RuntimeSecurityAdvisoryKind {
     ReviewOverdue,
     UpdateRecommended,
     UnreviewedRuntime,
+    CleanupOverdue,
 }
 
 /// Fixed destination of the recommended maintenance action. No page or

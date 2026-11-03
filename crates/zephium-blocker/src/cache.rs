@@ -172,6 +172,9 @@ fn cache_key_prefix(target: CompileTarget, limits: CompileLimits) -> Sha256 {
     for value in limit_values(limits) {
         digest.update((value as u64).to_be_bytes());
     }
+    if crate::builtin::applies_to(target) {
+        digest.update(crate::builtin::fingerprint());
+    }
     // A new pruned-rule set changes the artifact without changing its inputs.
     #[cfg(feature = "webkit")]
     if matches!(target, CompileTarget::WebKit) {

@@ -289,6 +289,8 @@
   "update_report_problem": "Bir şey mi bozuldu? Bize bildirin",
   "session_set_aside_title": "Son sekmeleriniz yeniden açılamadı",
   "session_set_aside_detail": "Zephium kayıtlı oturumunu okuyamadı, bu yüzden yeni sekmelerle başladı. Geçmiş, yer işaretleri ve ayarlar değişmedi; eski oturumun bir kopyası Zephium'un veri klasöründe.",
+  "runtime_cleanup_title": "Bu bilgisayarda hâlâ eski tarama verileri var",
+  "runtime_cleanup_detail": "Zephium, düzgün kapanmayan oturumların verilerini henüz silemedi. Bilgisayarı yeniden başlatmak genellikle bunu sağlar. Bu bildirim yeniden başlattıktan sonra da görünürse Zephium'dan çıkın ve privileged-runtime ile web-content\\private-runtime klasörlerini veri klasörünün dışına taşıyın.",
   "update_dismiss": "Kapat",
   "update_security_mac_title": "macOS için güvenlik güncellemeleri var",
   "update_security_system_title": "Sisteminizde güvenlik güncellemeleri var",

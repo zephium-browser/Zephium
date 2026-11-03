@@ -41,6 +41,16 @@ export function cardView(card: UpdateCard): CardView {
       dismiss: notices.dismissSession,
     };
   }
+  if (card.kind === "cleanup") {
+    return {
+      key: "cleanup",
+      title: m.runtime_cleanup_title(),
+      detail: m.runtime_cleanup_detail(),
+      icon: Shield01Icon,
+      actions: [],
+      dismiss: notices.dismissCleanup,
+    };
+  }
   if (card.kind === "updated") {
     return {
       key: `updated:${card.version}`,
