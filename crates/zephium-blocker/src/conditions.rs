@@ -90,7 +90,12 @@ fn tokenize(condition: &str) -> Vec<Token<'_>> {
                     .count();
                 (Token::Name(&rest[..length]), length)
             }
-            _ => (Token::Invalid, 1),
+            // The whole condition is false anyway; stopping here also never
+            // splits a multi-byte character.
+            _ => {
+                tokens.push(Token::Invalid);
+                break;
+            }
         };
         tokens.push(token);
         at += length;
@@ -211,5 +216,28 @@ mod tests {
         let open = "!#if env_chromium\n".repeat(MAX_DEPTH + 1);
         let list = format!("{open}a\n!#else\nb\n{}c", "!#endif\n".repeat(MAX_DEPTH + 1));
         assert_eq!(kept(&list), ["c"]);
+    }
+
+    #[test]
+    fn non_ascii_conditions_are_false_without_panicking() {
+        for condition in [
+            "é",
+            "env_chromium && ü",
+            "€env_chromium",
+            "env_chromium ||  \u{2028}",
+        ] {
+            assert!(!evaluate(condition), "{condition}");
+        }
+        assert_eq!(kept("!#if env_chromium && é\na\n!#endif\nb"), ["b"]);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn any_line_is_handled_without_panicking(line in "\\PC{0,256}") {
+            let mut conditions = ListConditions::default();
+            conditions.keep(&format!("!#if {line}"));
+            conditions.keep(&line);
+            evaluate(&line);
+        }
     }
 }
