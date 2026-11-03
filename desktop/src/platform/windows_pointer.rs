@@ -31,8 +31,9 @@ const SETTLE: usize = 1;
 const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
 const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
 /// A sink or registration that failed is tried again a second later, this many
-/// times in a row, then every half minute until it works, so the watch
-/// recovers without waiting for another listen.
+/// times in a row, then every half minute until it works. Only if that timer
+/// cannot be set does recovery wait: for the next listen, or for a change of
+/// the window in front once the sink and its hooks exist.
 const RETRY_MS: u32 = 1_000;
 const FAST_RETRIES: u8 = 8;
 const SLOW_RETRY_MS: u32 = 30_000;

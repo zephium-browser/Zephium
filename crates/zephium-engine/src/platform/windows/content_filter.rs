@@ -433,18 +433,13 @@ fn follow_pause(cohort: &impl FilterCohort, follow: &Follow<'_>, busy: &Cell<boo
             return;
         }
     }
-    let paused = (follow.paused)();
+    // A whole cohort is right whichever way the pause ends up, since the
+    // callback reads the pause first; an empty one would fail open on a view
+    // left resumed by a change this pass finds busy.
     eprintln!(
-        "content blocker: pause kept changing during a filter change; {} of {FILTER_REGISTRATION_COUNT} filters for a {} view",
-        follow.installed.get(),
-        if paused { "paused" } else { "resumed" }
+        "content blocker: pause kept changing during a filter change; keeping all {FILTER_REGISTRATION_COUNT} filters until the pause settles"
     );
-    let live = || !follow.retired.get();
-    if paused {
-        let _ = remove_filters(cohort, follow, &live);
-    } else {
-        resume(cohort, follow, &live);
-    }
+    resume(cohort, follow, &|| !follow.retired.get());
 }
 
 fn resume(cohort: &impl FilterCohort, follow: &Follow<'_>, settled: &dyn Fn() -> bool) {
@@ -767,17 +762,14 @@ mod tests {
     }
 
     #[test]
-    fn a_pause_that_never_settles_still_leaves_the_cohort_whole_or_empty() {
+    fn a_pause_that_never_settles_keeps_the_whole_cohort() {
         let cohort = Reentrant {
             flip_every: true,
             ..reentrant(false, 0)
         };
         cohort.follow();
-        assert!(matches!(
-            cohort.installed.get(),
-            0 | FILTER_REGISTRATION_COUNT
-        ));
-        assert_eq!(cohort.filters.get(), cohort.installed.get() as isize);
+        assert_eq!(cohort.installed.get(), FILTER_REGISTRATION_COUNT);
+        assert_eq!(cohort.filters.get(), FILTER_REGISTRATION_COUNT as isize);
         assert!(!cohort.busy.get());
     }
 
