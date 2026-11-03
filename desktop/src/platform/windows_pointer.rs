@@ -30,6 +30,10 @@ const SUBCLASS: usize = 0x5a50_4e54;
 const SETTLE: usize = 1;
 const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
 const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
+/// A sink or registration that failed is tried again this often, this many
+/// times in a row, so the watch recovers without waiting for another listen.
+const RETRY_MS: u32 = 1_000;
+const MAX_RETRIES: u8 = 8;
 
 /// Told that the pointer moved, or that a window came to the front or left
 /// it. Receives the window it listens for; it reads the pointer itself.
@@ -45,6 +49,8 @@ thread_local! {
     static SINK: Cell<Option<Sink>> = const { Cell::new(None) };
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
     static SETTLING: Cell<bool> = const { Cell::new(false) };
+    static RETRY: Cell<usize> = const { Cell::new(0) };
+    static RETRIES: Cell<u8> = const { Cell::new(0) };
 }
 
 /// Calls `listener` with `window` on pointer moves while it is in front.
@@ -58,6 +64,8 @@ pub fn listen(window: HWND, listener: Listener) {
     });
     if ensure_sink() {
         follow_front();
+    } else {
+        retry_later();
     }
 }
 
@@ -176,7 +184,36 @@ fn register(on: bool) {
     let done = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) };
     if done.is_ok() {
         REGISTERED.set(on);
+        RETRIES.set(0);
+    } else if on {
+        retry_later();
     }
+}
+
+/// Arms one retry of the sink and the registration, unless one is armed or
+/// the retries in a row ran out.
+fn retry_later() {
+    if RETRY.get() != 0 || RETRIES.get() >= MAX_RETRIES {
+        return;
+    }
+    RETRIES.set(RETRIES.get() + 1);
+    // SAFETY: a thread timer whose callback runs on this thread's loop.
+    RETRY.set(unsafe { SetTimer(None, 0, RETRY_MS, Some(retry)) });
+}
+
+unsafe extern "system" fn retry(_: HWND, _: u32, id: usize, _: u32) {
+    let _ = KillTimer(None, id);
+    RETRY.set(0);
+    let _ = std::panic::catch_unwind(|| {
+        if LISTENERS.with(|listeners| listeners.borrow().is_empty()) {
+            return;
+        }
+        if ensure_sink() {
+            follow_front();
+        } else {
+            retry_later();
+        }
+    });
 }
 
 fn notify() {

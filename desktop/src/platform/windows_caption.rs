@@ -1282,6 +1282,11 @@ unsafe extern "system" fn owner_proc(
     if matches!(msg, WM_THEMECHANGED | WM_SETTINGCHANGE) {
         let _ = render(p);
     }
+    // A window moved under a resting pointer, as by a snap, makes no input:
+    // read where the pointer now is over it.
+    if msg == WM_WINDOWPOSCHANGED {
+        pointer_moved(hwnd);
+    }
     result
 }
 unsafe extern "system" fn strip_proc(
