@@ -604,7 +604,12 @@ impl Downloads {
         }
         // The timer armed above saw neither this transfer nor the work it
         // just started, so it may be the slow one; its replies wait on a tick.
+        // Without one, nothing would ever answer them: the transfer ends, as
+        // the gate above refuses one it could not time.
         self.ensure_timer();
+        if self.timer.borrow().is_none() {
+            self.cancel(id, Some(DownloadError::Unavailable));
+        }
     }
 
     pub(super) fn choose_destination(
