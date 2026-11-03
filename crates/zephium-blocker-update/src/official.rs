@@ -1,5 +1,5 @@
 //! Single bounded worker for official HTTPS sources; idle workers block on IPC.
-use crate::official_store::{OfficialStore, Package, Source};
+use crate::official_store::{OfficialStore, Package, Record, Schedule, Source};
 use crate::types::*;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
@@ -12,6 +12,9 @@ use zephium_update_transport::official_filters::{
 
 const DAY: u64 = 86400;
 const BACKOFF: [u64; 4] = [900, 3600, 21600, 86400];
+/// The first check after a new bundle, so a list that changes several times a
+/// day is not left at the bundle's copy for a whole day.
+const FIRST_CHECK: u64 = 6 * 3600;
 
 pub(crate) struct OfficialWorker {
     sender: Option<mpsc::SyncSender<Command>>,
@@ -127,7 +130,7 @@ impl OfficialWorker {
         }
 
         if next.current.is_none() && (next.attempted.is_none() || newer_bundle) {
-            next.due = seed.identity.created_unix.saturating_add(DAY + next.jitter);
+            next.due = seed.identity.created_unix.saturating_add(FIRST_CHECK);
         }
         store.persist(next).map_err(std::io::Error::other)?;
         let initial = chosen_current(&store, &seed);
@@ -190,12 +193,12 @@ impl OfficialWorker {
                                     ))
                                 });
                             match result {
-                                Ok(sources) => finish_refresh(
+                                Ok(fetched) => finish_refresh(
                                     &mut store,
                                     &seed,
                                     &worker_shared,
                                     operation,
-                                    sources,
+                                    fetched,
                                 ),
                                 Err((failure, retry)) => failed_refresh(
                                     &mut store,
@@ -248,7 +251,7 @@ impl OfficialWorker {
                                 next.checked = Some(now());
                                 next.verification = next.verification.saturating_add(1);
                                 next.failure_streak = 0;
-                                next.due = now().saturating_add(DAY + next.jitter);
+                                next.due = next_due(&next);
                                 next.rejected = None;
                                 match store.persist(next) {
                                     Ok(()) => {
@@ -346,10 +349,12 @@ impl OfficialWorker {
                                         &mut cancelled,
                                         true,
                                     )) {
-                                        Ok(sources) if same_sources(&original, &sources) => {
+                                        Ok(fetched)
+                                            if same_sources(&original, &fetched.sources) =>
+                                        {
                                             CandidateRepairOutcome::Repaired
                                         }
-                                        Ok(sources) => match stage(&mut store, sources) {
+                                        Ok(fetched) => match stage(&mut store, fetched) {
                                             Ok(package) => CandidateRepairOutcome::Superseded(
                                                 store.catalog(&package),
                                             ),
@@ -616,12 +621,53 @@ fn availability_from_status(status: &UpdateStatus) -> Option<CatalogAvailability
         _ => None,
     }
 }
-fn same_sources(package: &Package, sources: &[Source; 2]) -> bool {
-    package
-        .sources
+fn same_sources(package: &Package, sources: &[Source]) -> bool {
+    package.sources.len() == sources.len()
+        && package
+            .sources
+            .iter()
+            .zip(sources)
+            .all(|(a, b)| a.id == b.id && a.sha256 == b.sha256 && a.bytes == b.bytes)
+}
+
+/// One refresh: a descriptor for every list, which of them were checked now,
+/// and which failed and kept their last verified copy.
+struct Fetched {
+    sources: Vec<Source>,
+    checked: Vec<usize>,
+    failed: Vec<(usize, (FailureKind, Option<u64>))>,
+}
+
+/// The worker's next wake-up: the earliest list due.
+fn next_due(record: &Record) -> u64 {
+    record
+        .schedule
         .iter()
-        .zip(sources)
-        .all(|(a, b)| a.sha256 == b.sha256 && a.bytes == b.bytes)
+        .map(|schedule| schedule.due)
+        .min()
+        .unwrap_or(record.due)
+}
+
+/// Moves each list's schedule on: a checked list is due after its own
+/// interval (daily lists with the record's jitter), a failed one backs off.
+fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
+    for &index in &fetched.checked {
+        let interval = fetched.sources[index].interval;
+        let jitter = if interval >= DAY { next.jitter } else { 0 };
+        next.schedule[index] = Schedule {
+            due: now.saturating_add(interval + jitter),
+            failure_streak: 0,
+        };
+    }
+    for &(index, (_, retry)) in &fetched.failed {
+        let schedule = &mut next.schedule[index];
+        schedule.failure_streak = schedule.failure_streak.saturating_add(1).min(8);
+        schedule.due = now.saturating_add(
+            BACKOFF[usize::from(schedule.failure_streak.saturating_sub(1).min(3))]
+                .max(retry.unwrap_or(0)),
+        );
+    }
+    next.due = next_due(next);
 }
 
 async fn fetch_official_sources(
@@ -629,7 +675,7 @@ async fn fetch_official_sources(
     client: &OfficialFilterClient,
     cancelled: &mut watch::Receiver<bool>,
     force: bool,
-) -> Result<[Source; 2], (FailureKind, Option<u64>)> {
+) -> Result<Fetched, (FailureKind, Option<u64>)> {
     let mut fetch =
         |source,
          validators: Option<zephium_update_transport::official_filters::FilterValidators>| {
@@ -639,12 +685,15 @@ async fn fetch_official_sources(
     fetch_sources(store, &mut fetch, cancelled, force).await
 }
 
+/// Checks every list that is due (all of them when none is, as for a manual
+/// refresh, or with `force`). A list that is not due, or whose check fails,
+/// keeps its last verified copy; one with no such copy fails the refresh.
 async fn fetch_sources<F, Fut>(
     store: &OfficialStore,
     fetch: &mut F,
     cancelled: &mut watch::Receiver<bool>,
     force: bool,
-) -> Result<[Source; 2], (FailureKind, Option<u64>)>
+) -> Result<Fetched, (FailureKind, Option<u64>)>
 where
     F: FnMut(
         OfficialFilter,
@@ -658,79 +707,122 @@ where
     >,
 {
     store.collect().map_err(|_| (FailureKind::Storage, None))?;
-    let prior = store
+    let checked_at = now();
+    let any_due = store
         .record
-        .candidate
-        .as_ref()
-        .or(store.record.rejected.as_ref())
-        .or(store.record.current.as_ref());
-    let mut output = Vec::with_capacity(2);
-    for (index, source) in [OfficialFilter::EasyList, OfficialFilter::EasyPrivacy]
-        .into_iter()
-        .enumerate()
-    {
-        let old = prior.map(|p| &p.sources[index]);
+        .schedule
+        .iter()
+        .any(|schedule| schedule.due <= checked_at);
+    let mut fetched = Fetched {
+        sources: Vec::with_capacity(OfficialFilter::ALL.len()),
+        checked: Vec::new(),
+        failed: Vec::new(),
+    };
+    for (index, filter) in OfficialFilter::ALL.into_iter().enumerate() {
+        let old = store.record.prior(filter);
         let cached = if force {
             None
         } else {
             old.and_then(|source| store.cached_bytes(source).ok())
         };
-        let validators = old.filter(|_| cached.is_some()).map(Source::validators);
-        let mut attempt = 0;
-        loop {
-            if *cancelled.borrow() {
-                return Err((FailureKind::Internal, None));
+        let due = !any_due || store.record.schedule[index].due <= checked_at;
+        if let (Some(old), Some(_), false) = (old, &cached, due) {
+            fetched.sources.push(old.clone());
+            continue;
+        }
+        match fetch_one(store, fetch, cancelled, filter, old, cached.is_some()).await {
+            Ok(source) => {
+                fetched.sources.push(source);
+                fetched.checked.push(index);
             }
-            let response = tokio::select! {
-                result=fetch(source,if attempt==0 {validators.clone()}else{None})=>result.map_err(|e|(FailureKind::Transport,e.retry_after_seconds))?,
-                _=cancelled.changed()=>return Err((FailureKind::Internal,None)),
-            };
-            match response {
-                FilterResponse::NotModified
-                    if cached.is_some()
-                        && attempt == 0
-                        && validators
-                            .as_ref()
-                            .is_some_and(|v| v.etag.is_some() || v.last_modified.is_some()) =>
-                {
-                    output.push(old.expect("cached source descriptor").clone());
-                    break;
-                }
-                FilterResponse::NotModified if attempt == 0 => {
-                    attempt = 1;
-                }
-                FilterResponse::NotModified => return Err((FailureKind::Target, None)),
-                FilterResponse::Modified { bytes, validators } => {
-                    output.push(
-                        store
-                            .put_source(index, &bytes, validators, old)
-                            .map_err(|e| {
-                                (
-                                    if e == crate::storage_io::StoreError::InvalidPackage {
-                                        FailureKind::Target
-                                    } else {
-                                        e.kind()
-                                    },
-                                    None,
-                                )
-                            })?,
-                    );
-                    break;
-                }
+            Err((FailureKind::Internal, retry)) => return Err((FailureKind::Internal, retry)),
+            Err(failure) if cached.is_some() => {
+                fetched
+                    .sources
+                    .push(old.expect("cached source descriptor").clone());
+                fetched.failed.push((index, failure));
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    match fetched.failed.first() {
+        // No list could be checked: the refresh failed.
+        Some(&(_, failure)) if fetched.checked.is_empty() => Err(failure),
+        _ => Ok(fetched),
+    }
+}
+
+async fn fetch_one<F, Fut>(
+    store: &OfficialStore,
+    fetch: &mut F,
+    cancelled: &mut watch::Receiver<bool>,
+    filter: OfficialFilter,
+    old: Option<&Source>,
+    cached: bool,
+) -> Result<Source, (FailureKind, Option<u64>)>
+where
+    F: FnMut(
+        OfficialFilter,
+        Option<zephium_update_transport::official_filters::FilterValidators>,
+    ) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<
+            FilterResponse,
+            zephium_update_transport::official_filters::FilterFetchFailure,
+        >,
+    >,
+{
+    let validators = old.filter(|_| cached).map(Source::validators);
+    let mut attempt = 0;
+    loop {
+        if *cancelled.borrow() {
+            return Err((FailureKind::Internal, None));
+        }
+        let response = tokio::select! {
+            result=fetch(filter,if attempt==0 {validators.clone()}else{None})=>result.map_err(|e|(FailureKind::Transport,e.retry_after_seconds))?,
+            _=cancelled.changed()=>return Err((FailureKind::Internal,None)),
+        };
+        match response {
+            FilterResponse::NotModified
+                if cached
+                    && attempt == 0
+                    && validators
+                        .as_ref()
+                        .is_some_and(|v| v.etag.is_some() || v.last_modified.is_some()) =>
+            {
+                return Ok(old.expect("cached source descriptor").clone());
+            }
+            FilterResponse::NotModified if attempt == 0 => {
+                attempt = 1;
+            }
+            FilterResponse::NotModified => return Err((FailureKind::Target, None)),
+            FilterResponse::Modified { bytes, validators } => {
+                return store
+                    .put_source(filter, &bytes, validators, old)
+                    .map_err(|e| {
+                        (
+                            if e == crate::storage_io::StoreError::InvalidPackage {
+                                FailureKind::Target
+                            } else {
+                                e.kind()
+                            },
+                            None,
+                        )
+                    });
             }
         }
     }
-    output.try_into().map_err(|_| (FailureKind::Internal, None))
 }
 fn stage(
     store: &mut OfficialStore,
-    sources: [Source; 2],
+    fetched: Fetched,
 ) -> Result<Package, crate::storage_io::StoreError> {
-    let package = store.new_package(sources, now())?;
+    let now = now();
     let mut next = store.record.clone();
+    reschedule(&mut next, &fetched, now);
+    let package = store.new_package(fetched.sources, now)?;
     next.highest_revision = package.identity.revision;
     next.candidate = Some(package.clone());
-    next.due = now().saturating_add(DAY + next.jitter);
     store.persist(next)?;
     Ok(package)
 }
@@ -739,21 +831,23 @@ fn finish_refresh(
     seed: &ActivatedCatalog,
     shared: &Shared,
     operation: u64,
-    sources: [Source; 2],
+    fetched: Fetched,
 ) {
     if store
         .record
         .current
         .as_ref()
-        .is_some_and(|p| same_sources(p, &sources))
+        .is_some_and(|p| same_sources(p, &fetched.sources))
     {
         let mut next = store.record.clone();
-        next.checked = Some(now());
-        next.verification = next.verification.saturating_add(1);
-        next.failure_streak = 0;
-        next.due = now().saturating_add(DAY + next.jitter);
+        if fetched.failed.is_empty() {
+            next.checked = Some(now());
+            next.verification = next.verification.saturating_add(1);
+            next.failure_streak = 0;
+        }
+        reschedule(&mut next, &fetched, now());
         if let Some(current) = next.current.as_mut() {
-            current.sources = sources;
+            current.sources = fetched.sources;
         }
         next.rejected = None;
         if store.persist(next).is_err() {
@@ -766,7 +860,7 @@ fn finish_refresh(
         );
         return;
     }
-    match stage(store, sources) {
+    match stage(store, fetched) {
         Ok(package) => {
             let candidate = store.catalog(&package);
             {
@@ -828,21 +922,10 @@ fn freshness_deadline(record: &crate::official_store::Record, status: &UpdateSta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::official_store::{test_list, test_sources};
     use std::collections::VecDeque;
     use zephium_update_transport::official_filters::{FilterFetchFailure, FilterValidators};
-    fn source(index: usize) -> Vec<u8> {
-        let title = if index == 0 {
-            "EasyList"
-        } else {
-            "EasyPrivacy"
-        };
-        let header = if index == 0 { "2.0" } else { "1.1" };
-        let mut text=format!("[Adblock Plus {header}]\n! Version: 202609300001\n! Title: {title}\n! Homepage: https://easylist.to/\n");
-        for n in 0..12000 {
-            text.push_str(&format!("||ads{n}.example.invalid^\n"));
-        }
-        text.into_bytes()
-    }
+
     fn seed(created: u64) -> ActivatedCatalog {
         ActivatedCatalog {
             identity: CatalogIdentity {
@@ -850,8 +933,8 @@ mod tests {
                 manifest_sha256: [1; 32],
                 created_unix: created,
                 expires_unix: created + 7 * DAY,
-                source_count: 2,
-                source_bytes: 600000,
+                source_count: 4,
+                source_bytes: 1200000,
             },
             catalog: zephium_blocker::PolicyCatalog::eager(
                 zephium_blocker::StaticPolicyCatalog::empty(),
@@ -865,12 +948,7 @@ mod tests {
             etag: Some("\"stable\"".into()),
             last_modified: None,
         };
-        let sources = [
-            store
-                .put_source(0, &source(0), validators.clone(), None)
-                .unwrap(),
-            store.put_source(1, &source(1), validators, None).unwrap(),
-        ];
+        let sources = test_sources(&store, &validators);
         let package = store.new_package(sources, now()).unwrap();
         let mut record = store.record.clone();
         record.highest_revision = package.identity.revision;
@@ -894,10 +972,7 @@ mod tests {
         let seed = seed(now());
         let worker = OfficialWorker::start(root.clone(), seed.clone()).unwrap();
         let due = worker.next_refresh_unix();
-        assert!(
-            (seed.identity.created_unix + DAY..=seed.identity.created_unix + DAY + 21600)
-                .contains(&due)
-        );
+        assert_eq!(due, seed.identity.created_unix + FIRST_CHECK);
         assert!(matches!(worker.status().status, UpdateStatus::Ready(_)));
         assert_eq!(worker.status().last_refresh_attempt_unix, None);
         assert!(worker.observe_and_take_catalogs().1.is_some());
@@ -927,8 +1002,9 @@ mod tests {
         let result = runtime()
             .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
             .unwrap();
-        assert!(same_sources(&package, &result));
-        assert_eq!(calls, vec![Some("\"stable\"".into()); 2]);
+        assert!(same_sources(&package, &result.sources));
+        assert_eq!(result.checked, [0, 1, 2, 3]);
+        assert_eq!(calls, vec![Some("\"stable\"".into()); 4]);
     }
 
     #[test]
@@ -943,9 +1019,11 @@ mod tests {
         let mut responses = VecDeque::from([
             FilterResponse::NotModified,
             FilterResponse::Modified {
-                bytes: source(0),
+                bytes: test_list(OfficialFilter::EasyList),
                 validators: FilterValidators::default(),
             },
+            FilterResponse::NotModified,
+            FilterResponse::NotModified,
             FilterResponse::NotModified,
         ]);
         let mut calls = Vec::new();
@@ -957,8 +1035,8 @@ mod tests {
         let result = runtime()
             .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
             .unwrap();
-        assert!(same_sources(&package, &result));
-        assert_eq!(calls, vec![false, false, true]);
+        assert!(same_sources(&package, &result.sources));
+        assert_eq!(calls, vec![false, false, true, true, true]);
         assert!(store.cached_bytes(&package.sources[0]).is_ok());
     }
 
@@ -980,7 +1058,8 @@ mod tests {
             runtime().block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false)),
             Err((FailureKind::Target, None))
         ));
-        assert_eq!(calls, 2);
+        // Each list keeps its copy and fails; none was checked, so the refresh fails.
+        assert_eq!(calls, 8);
     }
 
     #[test]
@@ -1007,20 +1086,23 @@ mod tests {
     #[test]
     fn exact_candidate_commit_waits_for_explicit_authorization_and_preserves_previous() {
         let (dir, mut store, original) = fixture();
-        let mut bytes = source(0);
+        let mut bytes = test_list(OfficialFilter::EasyList);
         bytes.extend_from_slice(b"||new-ad.example.invalid^\n");
-        let sources = [
-            store
-                .put_source(
-                    0,
-                    &bytes,
-                    FilterValidators::default(),
-                    Some(&original.sources[0]),
-                )
-                .unwrap(),
-            original.sources[1].clone(),
-        ];
-        let candidate = stage(&mut store, sources).unwrap();
+        let mut sources = original.sources.clone();
+        sources[0] = store
+            .put_source(
+                OfficialFilter::EasyList,
+                &bytes,
+                FilterValidators::default(),
+                Some(&original.sources[0]),
+            )
+            .unwrap();
+        let fetched = Fetched {
+            sources,
+            checked: vec![0],
+            failed: Vec::new(),
+        };
+        let candidate = stage(&mut store, fetched).unwrap();
         drop(store);
         let worker = OfficialWorker::start(dir.path().join("official"), seed(1)).unwrap();
         let (status, initial, prepared) = worker.observe_and_take_catalogs();
@@ -1056,5 +1138,120 @@ mod tests {
             store.record.previous.as_ref().unwrap().identity,
             original.identity
         );
+    }
+
+    fn due_only(store: &mut OfficialStore, filter: OfficialFilter) {
+        let mut next = store.record.clone();
+        for (index, other) in OfficialFilter::ALL.into_iter().enumerate() {
+            next.schedule[index].due = if other == filter { now() } else { now() + DAY };
+        }
+        store.persist(next).unwrap();
+    }
+
+    #[test]
+    fn only_lists_that_are_due_are_checked() {
+        let (_dir, mut store, package) = fixture();
+        due_only(&mut store, OfficialFilter::UblockQuickFixes);
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut calls = Vec::new();
+        let mut fetch = |filter, _: Option<FilterValidators>| {
+            calls.push(filter);
+            std::future::ready(Ok(FilterResponse::NotModified))
+        };
+        let result = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(calls, [OfficialFilter::UblockQuickFixes]);
+        assert_eq!(result.checked, [3]);
+        assert!(same_sources(&package, &result.sources));
+    }
+
+    #[test]
+    fn a_failing_list_keeps_its_copy_while_the_others_update() {
+        let (_dir, store, package) = fixture();
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = |filter, _: Option<FilterValidators>| {
+            std::future::ready(if filter == OfficialFilter::UblockFilters {
+                Err(FilterFetchFailure {
+                    retry_after_seconds: Some(7200),
+                })
+            } else {
+                Ok(FilterResponse::NotModified)
+            })
+        };
+        let result = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert!(same_sources(&package, &result.sources));
+        assert_eq!(result.checked, [0, 1, 3]);
+        assert_eq!(result.failed, [(2, (FailureKind::Transport, Some(7200)))]);
+        let mut next = store.record.clone();
+        let at = now();
+        reschedule(&mut next, &result, at);
+        assert_eq!(next.schedule[2].failure_streak, 1);
+        assert_eq!(next.schedule[2].due, at + 7200);
+        assert_eq!(next.schedule[3].due, at + 8 * 3600);
+        assert_eq!(next.schedule[0].due, at + DAY + next.jitter);
+        assert_eq!(next.due, at + 7200);
+    }
+
+    #[test]
+    fn a_list_without_a_verified_copy_fails_the_refresh() {
+        let (_dir, store, package) = fixture();
+        let path = store
+            .root_for_test()
+            .join(crate::official_store::object_name_for_test(
+                &package.sources[2].sha256,
+            ));
+        crate::storage_io::atomic_write(&path, b"corrupt").unwrap();
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = |filter, _: Option<FilterValidators>| {
+            std::future::ready(if filter == OfficialFilter::UblockFilters {
+                Err(FilterFetchFailure {
+                    retry_after_seconds: None,
+                })
+            } else {
+                Ok(FilterResponse::NotModified)
+            })
+        };
+        assert!(matches!(
+            runtime().block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false)),
+            Err((FailureKind::Transport, None))
+        ));
+    }
+
+    #[test]
+    fn migrated_lists_are_revalidated_instead_of_downloaded_again() {
+        let (_dir, mut store, package) = fixture();
+        let mut next = store.record.clone();
+        next.retained = package.sources[..2].to_vec();
+        next.current = None;
+        store.persist(next).unwrap();
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut calls = Vec::new();
+        let mut fetch = |filter: OfficialFilter, validators: Option<FilterValidators>| {
+            calls.push((filter, validators.is_some()));
+            std::future::ready(Ok(if validators.is_some() {
+                FilterResponse::NotModified
+            } else {
+                FilterResponse::Modified {
+                    bytes: test_list(filter),
+                    validators: FilterValidators::default(),
+                }
+            }))
+        };
+        let result = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(
+            calls,
+            [
+                (OfficialFilter::EasyList, true),
+                (OfficialFilter::EasyPrivacy, true),
+                (OfficialFilter::UblockFilters, false),
+                (OfficialFilter::UblockQuickFixes, false),
+            ]
+        );
+        assert_eq!(result.sources[..2], package.sources[..2]);
     }
 }
