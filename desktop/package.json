@@ -2,8 +2,8 @@
   "name": "@zephium/desktop",
   "private": true,
   "scripts": {
-    "dev": "node ../scripts/require-supported-platform.mjs && tauri dev --config tauri.dev.conf.json",
-    "build": "node ../scripts/require-supported-platform.mjs && tauri build"
+    "dev": "tauri dev --config tauri.dev.conf.json",
+    "build": "tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.4"

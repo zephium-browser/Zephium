@@ -941,21 +941,26 @@ pub(crate) async fn media_admit_remote(
     let started = std::time::Instant::now();
     let mut trace = MediaAdmitTrace::default();
     let result = admit_remote(&app, &shell, profile, environment, element, url, &mut trace).await;
-    let outcome = match &result {
-        Ok(MediaAdmitV1::Admitted { .. }) => "admitted",
-        Ok(MediaAdmitV1::Refused { .. }) => "refused",
-        Err(()) => "unknown",
-    };
-    let error = match &result {
-        Ok(MediaAdmitV1::Refused { error }) => Some(*error),
-        _ => None,
-    };
-    super::work_provider::record_diagnostic(format_args!(
-        "work: phase=media_admit outcome={outcome} error={error:?} fetch={:?} bytes={} elapsed_ms={}",
-        trace.fetch,
-        trace.bytes,
-        started.elapsed().as_millis()
-    ));
+    #[cfg(feature = "work-product")]
+    {
+        let outcome = match &result {
+            Ok(MediaAdmitV1::Admitted { .. }) => "admitted",
+            Ok(MediaAdmitV1::Refused { .. }) => "refused",
+            Err(()) => "unknown",
+        };
+        let error = match &result {
+            Ok(MediaAdmitV1::Refused { error }) => Some(*error),
+            _ => None,
+        };
+        super::work_provider::record_diagnostic(format_args!(
+            "work: phase=media_admit outcome={outcome} error={error:?} fetch={:?} bytes={} elapsed_ms={}",
+            trace.fetch,
+            trace.bytes,
+            started.elapsed().as_millis()
+        ));
+    }
+    #[cfg(not(feature = "work-product"))]
+    let _ = (started, &trace);
     result
 }
 

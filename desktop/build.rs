@@ -8,7 +8,6 @@ mod foreground_probe_config;
 mod navigation_probe_config;
 
 const MAIN_LABEL: &str = "main";
-const LINUX_APP_ID: &str = "app.zephium";
 const DEVELOPMENT_IDENTIFIER: &str = "app.zephium.dev";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
@@ -24,7 +23,18 @@ const LEGAL_RESOURCES: [(&str, &str); 3] = [
     ),
 ];
 
+// A sandboxed package (Flatpak) must use its own application ID, so the
+// effective Linux ID can be set at build time; desktop/src reads it back. The
+// repository configuration keeps the default.
+const LINUX_APP_ID: &str = "app.zephium";
+
+fn linux_app_id() -> String {
+    env::var("ZEPHIUM_LINUX_APP_ID").unwrap_or_else(|_| LINUX_APP_ID.into())
+}
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=ZEPHIUM_LINUX_APP_ID");
+    println!("cargo:rustc-env=ZEPHIUM_LINUX_APP_ID={}", linux_app_id());
     record_source_revision();
     if let Err(error) = validate_privileged_window_ownership() {
         eprintln!("Tauri privileged-window ownership check failed: {error}");
@@ -245,7 +255,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         validate_target_window(target, "repository", &config)?;
         validate_legal_resources("repository", &config, &root)?;
         if matches!(target, Target::Linux) {
-            validate_linux_identity("repository", &config, &root)?;
+            validate_linux_identity("repository", LINUX_APP_ID, &config, &root)?;
         }
         if let Some(config_override) = &config_override {
             // Keep this identical to tauri-build's TAURI_CONFIG merge order.
@@ -264,7 +274,7 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
                 && !adblock_qa
                 && !development_identity
             {
-                validate_linux_identity("effective", &config, &root)?;
+                validate_linux_identity("effective", &linux_app_id(), &config, &root)?;
             }
         }
     }
@@ -301,18 +311,23 @@ fn validate_legal_resources(source: &str, config: &Value, root: &Path) -> io::Re
     Ok(())
 }
 
-fn validate_linux_identity(source: &str, config: &Value, root: &Path) -> io::Result<()> {
+fn validate_linux_identity(
+    source: &str,
+    linux_app_id: &str,
+    config: &Value,
+    root: &Path,
+) -> io::Result<()> {
     // tauri-bundler 2.9.4 derives the installed desktop basename from
     // productName. Keep basename, GTK application id, and portal Registry id
     // on one canonical value while the template retains the visible name.
-    if config.get("productName").and_then(Value::as_str) != Some(LINUX_APP_ID) {
+    if config.get("productName").and_then(Value::as_str) != Some(linux_app_id) {
         return Err(io::Error::other(format!(
-            "Linux {source} productName must remain `{LINUX_APP_ID}` so the installed desktop entry is exactly {LINUX_APP_ID}.desktop"
+            "Linux {source} productName must remain `{linux_app_id}` so the installed desktop entry is exactly {linux_app_id}.desktop"
         )));
     }
-    if config.get("identifier").and_then(Value::as_str) != Some(LINUX_APP_ID) {
+    if config.get("identifier").and_then(Value::as_str) != Some(linux_app_id) {
         return Err(io::Error::other(format!(
-            "Linux {source} identifier must remain `{LINUX_APP_ID}`"
+            "Linux {source} identifier must remain `{linux_app_id}`"
         )));
     }
     if config
