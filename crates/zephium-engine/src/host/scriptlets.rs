@@ -20,7 +20,7 @@ use objc2_web_kit::{
     WKWebsiteDataStore,
 };
 use sha2::{Digest, Sha256};
-use zephium_core::blocker::{scriptlet_program_with_pauses, ContentPolicyGeneration};
+use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::{BlockerSiteCompletion, Partition};
 use zephium_webext_macos::PageScript;
@@ -266,31 +266,13 @@ impl EngineHost {
 
     /// Brings the profile's scriptlet context in line with its applied
     /// policy and paused sites; true while WebKit reads a new package.
-    /// Without site preferences every view counts as paused, so nothing runs.
     pub(super) fn refresh_profile_scriptlets(&mut self, profile: ProfileId) -> bool {
         if !self.scriptlets.private.contains_key(&profile)
             && self.webext.page_script(profile).is_none()
         {
             return false;
         }
-        let sites = self
-            .blocker_sites
-            .get(&profile)
-            .and_then(|slot| slot.borrow().clone());
-        let program = sites.as_ref().and_then(|sites| {
-            let program = self
-                .content_policies
-                .get(&profile)?
-                .applied
-                .as_ref()?
-                .cosmetics
-                .as_ref()?
-                .scriptlet_program()?;
-            Some(scriptlet_program_with_pauses(
-                &program,
-                sites.paused_sites(),
-            ))
-        });
+        let program = self.scriptlet_source(profile);
         let before = self.scriptlets.packages.get(&profile).cloned();
         let private = self.scriptlets.private.contains_key(&profile);
         let dir = match &program {
@@ -425,7 +407,8 @@ mod tests {
         let private = ProfileId::generate();
         let site =
             zephium_core::blocker::BlockerSite::try_from("paused.example".to_owned()).unwrap();
-        let program = scriptlet_program_with_pauses("globalThis.a = 1;", [&site]);
+        let program =
+            zephium_core::blocker::scriptlet_program_with_pauses("globalThis.a = 1;", [&site]);
         let dir = scriptlets.package(private, true, &program).unwrap();
         assert!(dir.starts_with(temp.path().join("private")));
         use std::os::unix::fs::PermissionsExt;

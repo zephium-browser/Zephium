@@ -214,6 +214,18 @@ impl EngineHost {
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }
+            #[cfg(target_os = "windows")]
+            {
+                // The spare took the program current when it was built.
+                self.ensure_view_scriptlets(
+                    partition.profile(),
+                    &spare.view.view,
+                    &spare.view.scriptlet,
+                );
+                if !spare.view.event_permit.allows_navigation(url) {
+                    return;
+                }
+            }
             #[cfg(target_os = "macos")]
             {
                 // Prepare the real viewport while still hidden, before the first
@@ -2536,6 +2548,10 @@ impl EngineHost {
         // why an unstaged Linux warm spare remains disabled.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
+        #[cfg(target_os = "windows")]
+        let scriptlet = super::scriptlets::ViewScriptlet::default();
+        #[cfg(target_os = "windows")]
+        self.ensure_view_scriptlets(partition.profile(), &view, &scriptlet);
         if !event_permit.allows_navigation(url) {
             // WebView construction can pump WebView2 messages. Do not perform
             // the first content load after the outer generation was retired.
@@ -2611,6 +2627,8 @@ impl EngineHost {
             discard_settle_timer: std::cell::RefCell::new(None),
             #[cfg(target_os = "windows")]
             request_witness,
+            #[cfg(target_os = "windows")]
+            scriptlet,
             #[cfg(target_os = "windows")]
             extension_window: Cell::new(None),
             #[cfg(target_os = "windows")]

@@ -516,6 +516,8 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
             #[cfg(target_os = "windows")]
+            scriptlets: Default::default(),
+            #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
@@ -1203,6 +1205,15 @@ where
         Some(HostTaskKey::Scriptlets(profile)),
         f,
     );
+}
+
+/// A view took, or failed to take, a replaced scriptlet program.
+#[cfg(target_os = "windows")]
+pub(super) fn with_scriptlets<F>(f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(HostTaskPriority::Lifecycle, None, f);
 }
 
 #[cfg(target_os = "windows")]

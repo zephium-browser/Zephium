@@ -1101,7 +1101,7 @@ impl EngineHost {
                 digest: native_digest,
             });
             self.refresh_profile_document_styles(profile);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if self.wait_for_scriptlets(profile, generation) {
                 return;
             }
@@ -1337,7 +1337,7 @@ impl EngineHost {
             digest: native_digest,
         });
         self.refresh_profile_document_styles(profile);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if self.wait_for_scriptlets(profile, generation) {
             return;
         }
@@ -1447,7 +1447,7 @@ impl EngineHost {
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.refresh_profile_scriptlets(profile);
             self.scriptlets.forget(profile);
