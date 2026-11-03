@@ -3242,6 +3242,19 @@ fn a_view_its_filters_left_unprotected_shows_degraded_until_they_are_back() {
         BlockerProtection::Active
     );
 
+    // A replacement view reports afresh; the retired view's report goes with it.
+    shell.handle(changed(true));
+    shell.handle(Command::Engine(EngineEvent::Crashed { id: tab }));
+    shell.handle(Command::Navigate {
+        id: tab,
+        input: "https://news.example/".into(),
+    });
+    assert!(shell.items.tab(tab).unwrap().has_view());
+    assert_eq!(
+        shell.focused_blocker_status_view().protection,
+        BlockerProtection::Active
+    );
+
     // A report for a view the shell does not know changes nothing.
     shell.handle(Command::Engine(EngineEvent::ContentProtectionChanged {
         id: ItemId::generate(),

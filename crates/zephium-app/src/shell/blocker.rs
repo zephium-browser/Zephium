@@ -1141,6 +1141,13 @@ impl Shell {
             })
     }
 
+    /// A retired view's report ends with it; its replacement reports afresh.
+    pub(super) fn forget_view_protection(&mut self, id: ItemId) {
+        if self.blocker.degraded_views.remove(&id) {
+            self.project_blocker_status();
+        }
+    }
+
     pub(super) fn on_content_protection_changed(
         &mut self,
         id: ItemId,
