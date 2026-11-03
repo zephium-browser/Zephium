@@ -677,9 +677,9 @@ fn load_webkit_record(
         blocking_entries: header.coverage.blocking_rule_entries,
         artifact_digest,
     };
-    // Only the macOS engine reads deferred text off its UI thread; elsewhere
-    // it is read here, on the blocker's own thread.
-    let encoded: Arc<dyn DeclarativeRuleText> = if cfg!(target_os = "macos") {
+    // WebKitGTK would read deferred text on its UI context, so it is read
+    // here, on the blocker's own thread; macOS reads it on a background queue.
+    let encoded: Arc<dyn DeclarativeRuleText> = if !cfg!(target_os = "linux") {
         Arc::new(cached)
     } else {
         let Some(text) = cached.load() else {
@@ -1915,7 +1915,7 @@ mod tests {
         (root, loaded)
     }
 
-    #[cfg(feature = "webkit")]
+    #[cfg(all(feature = "webkit", not(target_os = "linux")))]
     #[test]
     fn webkit_text_is_validated_only_when_read() {
         let payload = br#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}}]"#;
@@ -1941,7 +1941,7 @@ mod tests {
         assert!(encoded.load().is_none());
     }
 
-    #[cfg(feature = "webkit")]
+    #[cfg(all(feature = "webkit", not(target_os = "linux")))]
     #[test]
     fn webkit_text_changed_on_disk_after_loading_is_refused() {
         let record = webkit_record(key(6), 6);
