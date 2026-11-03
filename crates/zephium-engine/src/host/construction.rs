@@ -1096,6 +1096,8 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
+                // WebKit asks here for every frame; WebView2 only for the top.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 may ask here before LaunchingExternalUriScheme; the
