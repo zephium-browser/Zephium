@@ -122,6 +122,9 @@ pub(crate) struct Schedule {
     /// Checks that returned an older copy than the one kept.
     #[serde(default)]
     pub rollbacks: u32,
+    /// When this list was last checked successfully.
+    #[serde(default)]
+    pub checked: Option<u64>,
 }
 
 /// An older copy returned this many checks in a row is upstream's own revert,
@@ -587,6 +590,7 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
                 || s.failure_streak > 8
                 || s.stale
                     .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
+                || s.checked.is_some_and(|t| t > now.saturating_add(31 * DAY))
         })
         || record.retained.len() > OfficialFilter::ALL.len()
         || record

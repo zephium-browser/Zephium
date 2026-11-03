@@ -248,7 +248,7 @@ impl OfficialWorker {
                                 let mut next = store.record.clone();
                                 next.previous = next.current.take();
                                 next.current = next.candidate.take();
-                                next.checked = Some(now());
+                                next.checked = catalog_checked(&next);
                                 next.verification = next.verification.saturating_add(1);
                                 next.failure_streak = 0;
                                 next.due = next_due(&next);
@@ -661,6 +661,7 @@ fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
         next.schedule[index] = Schedule {
             due: now.saturating_add(interval + jitter),
             rollbacks,
+            checked: Some(now),
             ..Schedule::default()
         };
     }
@@ -678,6 +679,19 @@ fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
         );
     }
     next.due = next_due(next);
+    next.checked = catalog_checked(next);
+}
+
+/// The catalog is as fresh as its least recently checked list; until every
+/// list has been checked once, the last value stands.
+fn catalog_checked(record: &Record) -> Option<u64> {
+    record
+        .schedule
+        .iter()
+        .map(|schedule| schedule.checked)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|checked| checked.into_iter().min())
+        .or(record.checked)
 }
 
 async fn fetch_official_sources(
@@ -888,7 +902,6 @@ fn finish_refresh(
     {
         let mut next = store.record.clone();
         if fetched.failed.is_empty() {
-            next.checked = Some(now());
             next.verification = next.verification.saturating_add(1);
             next.failure_streak = 0;
         }
@@ -1426,5 +1439,31 @@ mod tests {
         assert_eq!(fetched.failed, [(0, (FailureKind::Target, None))]);
         assert_ne!(fetched.sources[2].sha256, package.sources[2].sha256);
         assert!(!same_sources(&package, &fetched.sources));
+    }
+
+    #[test]
+    fn the_catalog_is_as_fresh_as_its_least_recently_checked_list() {
+        let (_dir, store, package) = fixture();
+        let mut next = store.record.clone();
+        for (index, schedule) in next.schedule.iter_mut().enumerate() {
+            schedule.checked = Some(1_000 + index as u64);
+        }
+        let failed_list = Fetched {
+            sources: package.sources.clone(),
+            checked: vec![0, 1, 3],
+            failed: vec![(2, (FailureKind::Transport, None))],
+            stale: Vec::new(),
+        };
+        reschedule(&mut next, &failed_list, 5_000);
+        // The failed list's last good check, not this round, dates the catalog.
+        assert_eq!(next.checked, Some(1_002));
+        let rest = Fetched {
+            sources: package.sources.clone(),
+            checked: vec![2],
+            failed: Vec::new(),
+            stale: Vec::new(),
+        };
+        reschedule(&mut next, &rest, 6_000);
+        assert_eq!(next.checked, Some(5_000));
     }
 }
