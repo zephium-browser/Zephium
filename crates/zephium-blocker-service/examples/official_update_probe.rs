@@ -53,8 +53,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ContentRulesPayload::Declarative { encoded, .. } = rules.payload() else {
                         return Ok(false);
                     };
+                    let Some(encoded) = encoded.load() else {
+                        return Ok(false);
+                    };
                     let path = root.join("native-network.json");
-                    std::fs::write(&path, encoded.as_ref())?;
+                    std::fs::write(&path, encoded.as_bytes())?;
                     if !std::process::Command::new(&verifier)
                         .arg(&path)
                         .status()?

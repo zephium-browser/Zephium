@@ -4,6 +4,11 @@ mod agent_context;
 mod agent_cookie_source;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod automatic_pip;
+#[cfg(all(
+    feature = "blocker-bench",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
@@ -459,7 +464,7 @@ struct QueuedContentPolicy {
 #[cfg(not(target_os = "windows"))]
 struct DeclarativeContentPolicyJob {
     digest: [u8; 32],
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     encoded_bytes: usize,
 }
 
@@ -573,6 +578,10 @@ pub(crate) struct EngineHost {
     )>,
     #[cfg(not(target_os = "windows"))]
     preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    /// Compiled lists the blocker's own cache still names, such as a list
+    /// update checked in an earlier run, kept through cache collection.
+    #[cfg(not(target_os = "windows"))]
+    retained_cache_digests: Vec<[u8; 32]>,
     blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
     /// Read by every view's navigation policy, so a focus change reaches
     /// views already open without touching them.

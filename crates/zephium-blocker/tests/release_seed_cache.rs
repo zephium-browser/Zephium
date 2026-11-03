@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use zephium_core::blocker::DocumentStyleProvider;
 
-use sha2::{Digest, Sha256};
+use zephium_blocker::Sha256;
 use zephium_blocker::{
     BlockerCompileFailure, CompiledArtifactCacheConfig, PolicyCatalog, PolicySource, SourceFormat,
     SourceId, StaticPolicyCatalog, WorkerBlocker,
@@ -111,7 +111,7 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let identity: [u8; 32] = Sha256::digest(MANIFEST).into();
+    let identity: [u8; 32] = Sha256::digest(MANIFEST);
     let loads = Arc::new(AtomicUsize::new(0));
     let observed = loads.clone();
     let cold_catalog = PolicyCatalog::deferred_reloadable(identity, move || {

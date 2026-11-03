@@ -97,3 +97,11 @@ overflow-checks = true
 # ("mis-aligned LINKEDIT string pool"); build-time code never ships.
 [profile.release.build-override]
 strip = false
+
+# Release code generation for the protection QA app only, so its benchmark
+# numbers compare with shipped browsers. Symbols stay for sampling; the desktop
+# and engine build scripts refuse this profile for anything but that app.
+[profile.protection-qa]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"

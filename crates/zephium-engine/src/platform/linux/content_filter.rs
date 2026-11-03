@@ -457,7 +457,7 @@ struct CompileContext<F> {
     _cancellable: webkit2gtk::gio::Cancellable,
     owner_context: glib::MainContext,
     identifier: CString,
-    encoded: Option<Arc<str>>,
+    encoded: Option<Arc<dyn zephium_core::blocker::DeclarativeRuleText>>,
     _bytes: Option<glib::Bytes>,
     artifact_digest: [u8; 32],
     done: Option<F>,
@@ -494,7 +494,7 @@ where
 
 pub(crate) fn compile<F>(
     cache: &Path,
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     artifact_digest: [u8; 32],
     done: F,
 ) -> ContentPolicyCompilationCancellation
@@ -627,7 +627,9 @@ where
         let encoded = context
             .encoded
             .take()
-            .ok_or(ContentRuleApplyFailure::NativeCompilation)?;
+            .ok_or(ContentRuleApplyFailure::NativeCompilation)?
+            .load()
+            .ok_or(ContentRuleApplyFailure::InvalidArtifact)?;
         context._bytes = Some(glib::Bytes::from_owned(EncodedRules(encoded)));
         let bytes = context
             ._bytes
