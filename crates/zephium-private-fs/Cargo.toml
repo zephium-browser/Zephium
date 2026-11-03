@@ -12,7 +12,7 @@ windows-work-test-fixtures = []
 
 [dependencies]
 thiserror.workspace = true
-unicode-normalization = "=0.1.25"
+unicode-normalization = "=0.1.26"
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -21,7 +21,7 @@ tempfile.workspace = true
 rustix = { version = "=1.1.4", features = ["fs", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "=0.2.186"
+libc = "=0.2.191"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "=0.61.3", features = [
