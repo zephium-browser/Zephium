@@ -47,17 +47,19 @@ for (const entry of resources) {
 
 const counted = new Set();
 let adArea = 0;
+// A slot inside or around a counted one is the same ad.
+const sameAd = (element) => {
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) if (counted.has(parent)) return true;
+  for (const other of counted) if (element.contains(other)) return true;
+  return false;
+};
 const count = (selectors) => {
   let found = 0;
   for (const selector of selectors) {
     let elements;
     try { elements = document.querySelectorAll(selector); } catch { continue; }
     for (const element of elements) {
-      if (counted.has(element) || !shown(element)) continue;
-      // An ad slot inside another counted slot is the same ad.
-      let parent = element.parentElement, nested = false;
-      while (parent) { if (counted.has(parent)) { nested = true; break; } parent = parent.parentElement; }
-      if (nested) continue;
+      if (counted.has(element) || !shown(element) || sameAd(element)) continue;
       counted.add(element);
       const box = element.getBoundingClientRect();
       adArea += box.width * box.height;
@@ -72,7 +74,7 @@ const adFrames = count([...document.querySelectorAll('iframe')]
   .filter(Boolean));
 let unnamedAdFrames = 0;
 for (const frame of document.querySelectorAll('iframe')) {
-  if (!frame.id && AD_HOSTS.test(hostOf(frame.src)) && !counted.has(frame) && shown(frame)) {
+  if (!frame.id && AD_HOSTS.test(hostOf(frame.src)) && !counted.has(frame) && shown(frame) && !sameAd(frame)) {
     counted.add(frame); unnamedAdFrames += 1;
     const box = frame.getBoundingClientRect(); adArea += box.width * box.height;
   }
