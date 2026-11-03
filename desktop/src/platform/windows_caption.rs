@@ -219,20 +219,33 @@ unsafe fn installed_state(owner: HWND) -> Option<*mut State> {
         .then_some(data as *mut State)
 }
 
+/// The causes left after one holder sets or clears its own, and whether that
+/// cleared the last of them.
+fn apply_suppression(causes: u8, cause: u8, suppressed: bool) -> (u8, bool) {
+    let next = if suppressed {
+        causes | cause
+    } else {
+        causes & !cause
+    };
+    (next, causes != 0 && next == 0)
+}
+
 /// Hides the caption and its reveal edge while page content fills the
 /// screen. Runs on the window's UI thread.
 pub fn set_suppressed(window: &WebviewWindow, cause: Suppression, suppressed: bool) {
     // SAFETY: see `state_of`.
     unsafe {
         if let Some(state) = state_of(window) {
-            let causes = (*state).suppressions;
-            (*state).suppressions = if suppressed {
-                causes | cause as u8
-            } else {
-                causes & !(cause as u8)
-            };
-            (*state).suppressed = (*state).suppressions != 0;
+            let (causes, lifted) =
+                apply_suppression((*state).suppressions, cause as u8, suppressed);
+            (*state).suppressions = causes;
+            (*state).suppressed = causes != 0;
             layout(state);
+            // A pointer already resting at a page's top asks for the caption
+            // now, not at its next move.
+            if lifted {
+                pointer_moved((*state).owner);
+            }
         }
     }
 }
@@ -1739,6 +1752,23 @@ mod tests {
         assert!(!button_enabled(0, 0, false));
         assert!(!button_enabled(1, 0, false));
         assert!(button_enabled(1, 0, true));
+    }
+    #[test]
+    fn the_caption_is_suppressed_until_every_holder_lets_go() {
+        let (content, window) = (Suppression::Content as u8, Suppression::Window as u8);
+        assert_eq!(apply_suppression(0, content, true), (content, false));
+        assert_eq!(
+            apply_suppression(content, window, true),
+            (content | window, false)
+        );
+        // One holder letting go while the other still holds lifts nothing.
+        assert_eq!(
+            apply_suppression(content | window, content, false),
+            (window, false)
+        );
+        assert_eq!(apply_suppression(window, window, false), (0, true));
+        assert_eq!(apply_suppression(0, window, false), (0, false));
+        assert_eq!(apply_suppression(content, content, true), (content, false));
     }
     #[test]
     fn a_held_reveal_waits_for_the_pointer_to_leave_the_drag_rectangle() {

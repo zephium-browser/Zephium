@@ -18,9 +18,10 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetAncestor, GetForegroundWindow, IsIconic, IsWindow, KillTimer, SetTimer,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER,
-    HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
+    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, IsIconic, IsWindow,
+    KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
 };
 
 /// About a display frame, as often as the pointer was read while it moved.
@@ -95,6 +96,7 @@ fn ensure_sink() -> bool {
             return false;
         };
         if !SetWindowSubclass(hwnd, Some(sink_proc), SUBCLASS, 0).as_bool() {
+            let _ = DestroyWindow(hwnd);
             return false;
         }
         let hooks = [
@@ -112,7 +114,14 @@ fn ensure_sink() -> bool {
                 WINEVENT_OUTOFCONTEXT,
             )
         });
-        SINK.set(Some(Sink { hwnd, hooks }));
+        let sink = Sink { hwnd, hooks };
+        // A hook that failed is not kept as done: the next listen starts over.
+        if sink.hooks.iter().any(HWINEVENTHOOK::is_invalid) {
+            drop(sink);
+            let _ = DestroyWindow(hwnd);
+            return false;
+        }
+        SINK.set(Some(sink));
     }
     true
 }
@@ -204,9 +213,12 @@ unsafe extern "system" fn sink_proc(
         // Moves queued before the registration lapsed still arrive; the
         // frame they fall in has already been read.
         WM_INPUT if !SETTLING.get() => {
-            SETTLING.set(true);
-            register(false);
-            SetTimer(Some(hwnd), SETTLE, FRAME_MS, None);
+            // Input is held back only while a timer will end the frame;
+            // without one it keeps arriving unthrottled rather than never.
+            if SetTimer(Some(hwnd), SETTLE, FRAME_MS, None) != 0 {
+                SETTLING.set(true);
+                register(false);
+            }
             let _ = std::panic::catch_unwind(notify);
         }
         // The frame is over: read where the pointer came to rest, and listen
