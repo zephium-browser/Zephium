@@ -420,14 +420,17 @@ fn await_sources(app: &tauri::AppHandle) -> Result<(Duration, BlockerSourcePhase
             .recv_timeout(Duration::from_secs(2));
         let phase = status.source_phase;
         // An unanswered query reads as unavailable, which says nothing yet; a
-        // settled source can start a compile in the same turn.
+        // settled source can start a compile in the same turn, and a fresh one
+        // can still hold a candidate to activate or material to repair.
         if !matches!(
             status.phase,
             BlockerPhase::Unavailable | BlockerPhase::Compiling | BlockerPhase::Installing
         ) && !matches!(
             phase,
             BlockerSourcePhase::Stale | BlockerSourcePhase::Refreshing
-        ) {
+        ) && !status.source_activation_pending
+            && !status.source_material_repair_pending
+        {
             return Ok((uptime(), phase));
         }
         if Instant::now() >= deadline {
