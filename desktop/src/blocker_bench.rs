@@ -39,6 +39,7 @@ struct State {
     profile: Option<String>,
     active: Option<String>,
     known: HashSet<String>,
+    loading: HashSet<String>,
     // The two below only fill while a command waits on a load.
     watching: bool,
     fresh: Vec<String>,
@@ -115,6 +116,39 @@ impl Bench {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .0;
         }
+    }
+
+    /// Whether the tab stopped loading by `deadline`.
+    fn wait_idle(&self, tab: &str, deadline: Instant) -> bool {
+        let mut state = self.lock();
+        loop {
+            if !state.loading.contains(tab) {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+
+    fn loading_changed(&self, tab: String, loading: bool, at: Instant) {
+        let mut state = self.lock();
+        if loading {
+            state.loading.insert(tab);
+        } else {
+            state.loading.remove(&tab);
+            if state.watching {
+                state.finished.insert(tab, at);
+            }
+        }
+        drop(state);
+        self.changed.notify_all();
     }
 
     /// When the tab's load finished, once it has; `None` at `deadline`.
@@ -199,16 +233,8 @@ fn uptime() -> Duration {
 }
 
 pub(crate) fn engine_event(event: &EngineEvent) {
-    let (Some(bench), EngineEvent::LoadingChanged { id, loading: false }) = (BENCH.get(), event)
-    else {
-        return;
-    };
-    let at = Instant::now();
-    let mut state = bench.lock();
-    if state.watching {
-        state.finished.insert(id.to_string(), at);
-        drop(state);
-        bench.changed.notify_all();
+    if let (Some(bench), EngineEvent::LoadingChanged { id, loading }) = (BENCH.get(), event) {
+        bench.loading_changed(id.to_string(), *loading, Instant::now());
     }
 }
 
@@ -321,6 +347,13 @@ fn await_ready(
     let bootstrap = bench
         .wait_bootstrap(deadline)
         .ok_or("the browser did not finish starting")?;
+    // Raising the window earlier would show the blank bootstrap page.
+    while WINDOW_SHOWN.get().is_none() {
+        if Instant::now() >= deadline {
+            return Err("the window was never shown".into());
+        }
+        std::thread::sleep(READY_POLL);
+    }
     raise(app);
     loop {
         let shell = app
@@ -459,8 +492,16 @@ fn navigate(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Va
     raise(app);
     let tab = id.to_string();
     select(&shell, bench, &tab);
-    bench.watch(true);
+    // A load still in flight would end after the watch starts and pass for
+    // this one, and its end event cannot be told apart.
     let started = Instant::now();
+    if !bench.wait_idle(&tab, started + timeout) {
+        return Err(format!(
+            "the tab was still loading after {} ms",
+            timeout.as_millis()
+        ));
+    }
+    bench.watch(true);
     let command = Command::Navigate {
         id,
         input: url.to_owned(),
@@ -626,6 +667,22 @@ fn close(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_load_ends_only_for_a_watch_and_idleness_follows_the_last_event() {
+        let bench = Bench::default();
+        let soon = || Instant::now() + Duration::from_millis(20);
+        bench.loading_changed("t".into(), true, Instant::now());
+        assert!(!bench.wait_idle("t", soon()));
+        bench.loading_changed("t".into(), false, Instant::now());
+        assert!(bench.wait_idle("t", soon()));
+        assert!(bench.wait_finished("t", soon()).is_none());
+        bench.watch(true);
+        bench.loading_changed("t".into(), true, Instant::now());
+        assert!(bench.wait_finished("t", soon()).is_none());
+        bench.loading_changed("t".into(), false, Instant::now());
+        assert!(bench.wait_finished("t", soon()).is_some());
+    }
 
     #[test]
     fn a_body_cannot_swallow_the_closing_of_its_function() {
