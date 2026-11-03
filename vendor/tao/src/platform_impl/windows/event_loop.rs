@@ -30,6 +30,7 @@ use windows::{
     System::{
       LibraryLoader::GetModuleHandleW,
       Ole::{IDropTarget, RevokeDragDrop},
+      SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_XBUTTON1, MK_XBUTTON2},
       Threading::{GetCurrentThreadId, INFINITE},
     },
     UI::{
@@ -741,6 +742,43 @@ unsafe fn release_mouse(mut window_state: parking_lot::MutexGuard<'_, WindowStat
   }
 }
 
+/// The mouse buttons a `MK_*` button state holds down.
+const HELD_BUTTONS: u32 =
+  MK_LBUTTON.0 | MK_RBUTTON.0 | MK_MBUTTON.0 | MK_XBUTTON1.0 | MK_XBUTTON2.0;
+
+/// A capture is stale once no button holds it: its button-up went to another window, so the count
+/// never came back to zero. Windows sends no `WM_SETCURSOR` while a window holds the capture, which
+/// leaves the pointer frozen in whatever shape it had, a blank one included.
+fn stale_capture(capture_count: u32, buttons: u32) -> bool {
+  capture_count > 0 && buttons & HELD_BUTTONS == 0
+}
+
+/// The logical buttons held now, as `MK_*` flags. `GetAsyncKeyState` would read the physical
+/// buttons, which differ from the logical ones when the user has swapped them.
+unsafe fn held_buttons() -> u32 {
+  [
+    (VK_LBUTTON, MK_LBUTTON),
+    (VK_RBUTTON, MK_RBUTTON),
+    (VK_MBUTTON, MK_MBUTTON),
+    (VK_XBUTTON1, MK_XBUTTON1),
+    (VK_XBUTTON2, MK_XBUTTON2),
+  ]
+  .into_iter()
+  .filter(|(key, _)| GetKeyState(i32::from(key.0)) < 0)
+  .fold(0, |held, (_, flag)| held | flag.0)
+}
+
+/// Gives up the capture whatever its count, when the system cancels modes or the press it was
+/// taken for has already ended.
+unsafe fn drop_capture(window: HWND, mut window_state: parking_lot::MutexGuard<'_, WindowState>) {
+  window_state.mouse.capture_count = 0;
+  // ReleaseCapture() causes a WM_CAPTURECHANGED where we lock the window_state.
+  drop(window_state);
+  if GetCapture() == window {
+    let _ = ReleaseCapture();
+  }
+}
+
 const WINDOW_SUBCLASS_ID: usize = 0;
 const THREAD_EVENT_TARGET_SUBCLASS_ID: usize = 1;
 pub(crate) fn subclass_window<T>(window: HWND, subclass_input: SubclassInput<T>) {
@@ -1276,6 +1314,12 @@ unsafe fn public_window_callback_inner<T: 'static>(
 
     win32wm::WM_MOUSEMOVE => {
       use crate::event::WindowEvent::{CursorEntered, CursorMoved};
+      {
+        let w = subclass_input.window_state.lock();
+        if stale_capture(w.mouse.capture_count, wparam.0 as u32) {
+          drop_capture(window, w);
+        }
+      }
       let mouse_was_outside_window = {
         let mut w = subclass_input.window_state.lock();
 
@@ -1797,7 +1841,23 @@ unsafe fn public_window_callback_inner<T: 'static>(
       result = ProcResult::Value(LRESULT(0));
     }
 
+    win32wm::WM_CANCELMODE => {
+      drop_capture(window, subclass_input.window_state.lock());
+    }
+
+    win32wm::WM_ACTIVATEAPP => {
+      if wparam.0 == 0 {
+        drop_capture(window, subclass_input.window_state.lock());
+      }
+    }
+
     win32wm::WM_KILLFOCUS => {
+      {
+        let w = subclass_input.window_state.lock();
+        if stale_capture(w.mouse.capture_count, held_buttons()) {
+          drop_capture(window, w);
+        }
+      }
       let active_focus_changed = subclass_input.window_state.lock().set_focused(false);
       if active_focus_changed {
         lose_active_focus(window, subclass_input);
@@ -2635,5 +2695,31 @@ unsafe fn handle_raw_input<T: 'static>(
         state,
       }),
     });
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT};
+
+  #[test]
+  fn a_capture_no_button_holds_is_stale() {
+    assert!(stale_capture(1, 0));
+    assert!(stale_capture(3, MK_SHIFT.0 | MK_CONTROL.0));
+  }
+
+  #[test]
+  fn a_held_button_keeps_its_capture() {
+    for held in [MK_LBUTTON, MK_RBUTTON, MK_MBUTTON, MK_XBUTTON1, MK_XBUTTON2] {
+      assert!(!stale_capture(1, held.0));
+      assert!(!stale_capture(1, held.0 | MK_SHIFT.0));
+    }
+  }
+
+  #[test]
+  fn no_capture_is_never_stale() {
+    assert!(!stale_capture(0, 0));
+    assert!(!stale_capture(0, MK_LBUTTON.0));
   }
 }
