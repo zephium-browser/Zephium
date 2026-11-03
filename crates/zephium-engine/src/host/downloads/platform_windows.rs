@@ -602,6 +602,9 @@ impl Downloads {
                 ));
             }
         }
+        // The timer armed above saw neither this transfer nor the work it
+        // just started, so it may be the slow one; its replies wait on a tick.
+        self.ensure_timer();
     }
 
     pub(super) fn choose_destination(
