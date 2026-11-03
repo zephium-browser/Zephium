@@ -914,7 +914,10 @@ fn verify_and_inflate_sources(
             ));
         }
         let header = parse_source_header(&raw, spec)?;
-        if header.version != asset.upstream_version || header.commit != asset.upstream_commit {
+        if header.version != asset.upstream_version
+            || header.commit != asset.upstream_commit
+            || header.modified != asset.upstream_modified
+        {
             return Err(format!(
                 "{title} header provenance does not match its envelope"
             ));
