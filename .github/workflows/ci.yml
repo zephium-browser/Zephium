@@ -209,9 +209,10 @@ jobs:
           "${probe}" --self-test
           "${probe}" "${artifact}"
       # The scriptlet program rides in a built-in WebExtension (macOS 15.4+): it
-      # must run before page scripts in every frame and honour a paused host.
+      # must run before page scripts in every frame, honour a paused host and
+      # swap programs without overlap.
       - name: Check the built-in scriptlet extension in WebKit
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: scripts/blocker-scriptlets/run.sh
 
   windows:
