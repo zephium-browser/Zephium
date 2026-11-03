@@ -1316,7 +1316,9 @@ unsafe fn public_window_callback_inner<T: 'static>(
       use crate::event::WindowEvent::{CursorEntered, CursorMoved};
       {
         let w = subclass_input.window_state.lock();
-        if stale_capture(w.mouse.capture_count, wparam.0 as u32) {
+        // A caption press posts this message with no buttons in wParam, so
+        // the buttons come from the input state.
+        if w.mouse.capture_count > 0 && stale_capture(w.mouse.capture_count, held_buttons()) {
           drop_capture(window, w);
         }
       }
