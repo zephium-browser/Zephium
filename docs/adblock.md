@@ -240,6 +240,40 @@ fixed stale site controls after navigation: site identity/readiness now particip
 in status deduplication and focused tab updates publish that status.
 No test result claims Windows runtime, installer, battery or broad-web coverage.
 
+## Rules WebKit never needed
+
+WebKit turns a content rule list into automata and runs every one of them on
+every resource load. Rules without `.*` share a few large automata; each rule
+with `.*` gets one of its own, so the list's ~860 wildcard block rules carry
+most of its per-load cost. `crates/zephium-blocker/src/webkit_pruned.txt` lists
+the wildcard block rules a recorded page corpus never matched, and the WebKit
+compiler leaves them out. The compile report counts them as pruned, not as
+unsupported.
+
+- Only block rules with `.*` are pruned; exceptions never are. Each entry is the
+  SHA-256 of one rule exactly as emitted for WebKit, one per line, sorted, with
+  no rule text. An edited or new upstream rule emits a different rule and is
+  kept until the next refresh.
+- The Windows runtime matcher has no such per-rule cost and compiles every rule.
+- The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
+  sites, the top sites, pages where exceptions apply
+  (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.
+  Adult sites are left out of every list.
+
+Refreshing the list is a release step, not CI: it loads hundreds of real pages
+in WebKit with the network on (about five hours), then replays every recorded
+load against the bundled lists through a local listener that answers nothing.
+After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:
+
+```bash
+scripts/blocker-corpus/run.sh target/blocker-corpus
+```
+
+Review the diff of `webkit_pruned.txt` (its header records the corpus and the
+replay), then run `cargo xtask update-blocker-seed` again with the same lists
+so `compile-report.json` records the pruned count, and
+`cargo xtask check-blocker-seed`.
+
 Use `cargo xtask check-blocker-seed` for exact bundled artifacts; blocker
 property/fuzz/fork-contract tests for compiler boundaries; and
 `synthetic_blocker_lab` for bounded matcher measurements. The native child-frame probe was removed with that delivery path. The `adblock-qa` desktop feature builds a separate,

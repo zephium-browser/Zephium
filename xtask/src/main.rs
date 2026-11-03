@@ -8,6 +8,7 @@ mod agentic_evidence;
 mod agentic_probe_boundary;
 mod blocker_bench;
 mod blocker_bench_boundary;
+mod blocker_prune;
 mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_process_family;
@@ -117,15 +118,26 @@ fn main() {
             }
         }
         Some("update-blocker-seed") => update_blocker_seed(&arguments[1..]),
+        Some("blocker-prune") => {
+            if let Err(error) = blocker_prune::run(&arguments[1..]) {
+                eprintln!("blocker prune: {error}");
+                exit(1);
+            }
+        }
         #[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
         Some("__compile-blocker-seed")
-            if arguments.len() == 4 || (arguments.len() == 6 && arguments[4] == "--artifact") =>
+            if arguments.len() == 4
+                || (arguments.len() >= 6
+                    && arguments.len() <= 7
+                    && arguments[4] == "--artifact"
+                    && arguments.get(6).is_none_or(|flag| flag == "--unpruned")) =>
         {
             if let Err(error) = blocker_seed::compile_hidden(
                 &arguments[1],
                 std::path::Path::new(&arguments[2]),
                 std::path::Path::new(&arguments[3]),
                 arguments.get(5).map(std::path::Path::new),
+                arguments.len() == 7,
             ) {
                 eprintln!("bundled blocker seed compilation failed: {error}");
                 exit(1);
@@ -138,7 +150,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|blocker-prune <notify|hosts|build> ...|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
