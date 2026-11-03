@@ -263,42 +263,74 @@ fn read(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("benchmark gate cannot read {}: {error}", path.display()))
 }
 
-/// Every file with this name or extension under `directory`, skipping trees
-/// that hold none of ours.
+/// Every file with this name or extension under `directory` that the
+/// repository tracks or would track. Ignored trees, such as other checkouts
+/// under `.claude/worktrees`, and the skipped ones hold none of ours.
 fn files(directory: &Path, name_or_extension: &str) -> Result<Vec<PathBuf>, String> {
-    let mut found = Vec::new();
-    let mut entries: Vec<_> = std::fs::read_dir(directory)
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()
         .map_err(|error| {
             format!(
-                "benchmark gate cannot read {}: {error}",
+                "benchmark gate cannot run git in {}: {error}",
                 directory.display()
             )
-        })?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    entries.sort();
-    for path in entries {
-        let name = path
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "benchmark gate cannot list the files in {}: {}",
+            directory.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let listing = String::from_utf8(output.stdout).map_err(|_| {
+        format!(
+            "benchmark gate got a non-UTF-8 path under {}",
+            directory.display()
+        )
+    })?;
+    let mut found = Vec::new();
+    for relative in listing.split('\0').filter(|path| !path.is_empty()) {
+        let relative = Path::new(relative);
+        let name = relative
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-            format!("benchmark gate cannot inspect {}: {error}", path.display())
-        })?;
-        if metadata.file_type().is_symlink() || SKIPPED.contains(&name) {
+        let wanted = name == name_or_extension
+            || relative
+                .extension()
+                .is_some_and(|extension| extension == name_or_extension);
+        let skipped = relative
+            .components()
+            .any(|part| SKIPPED.iter().any(|skip| part.as_os_str() == *skip));
+        if !wanted || skipped {
             continue;
         }
-        if metadata.is_dir() {
-            found.extend(files(&path, name_or_extension)?);
-        } else if name == name_or_extension
-            || path
-                .extension()
-                .is_some_and(|extension| extension == name_or_extension)
-        {
+        let path = directory.join(relative);
+        // A tracked file deleted from the working tree is listed but gone.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "benchmark gate cannot inspect {}: {error}",
+                    path.display()
+                ))
+            }
+        };
+        if metadata.file_type().is_file() {
             found.push(path);
         }
     }
+    found.sort();
     Ok(found)
 }
 
@@ -310,9 +342,43 @@ mod tests {
     const ENGINE: &str = "[features]\nagentic-browser-qa = []\nblocker-bench = []\n";
 
     #[test]
+    fn only_files_the_repository_tracks_or_would_track_are_checked() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        for (path, text) in [
+            (".gitignore", ".claude/\n"),
+            ("tracked/Cargo.toml", ""),
+            ("new/Cargo.toml", ""),
+            (".claude/worktrees/agent-1/Cargo.toml", ""),
+            ("vendor/Cargo.toml", ""),
+        ] {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        git(&["add", "tracked/Cargo.toml"]);
+        let found: Vec<String> = files(root.path(), "Cargo.toml")
+            .unwrap()
+            .iter()
+            .map(|path| relative(root.path(), path))
+            .collect();
+        assert_eq!(found, ["new/Cargo.toml", "tracked/Cargo.toml"]);
+    }
+
+    #[test]
     fn repository_passes() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         check(&repository).expect("benchmark driver boundary");
+        assert!(files(&repository.join("crates"), "rs").unwrap().len() > 100);
     }
 
     #[test]

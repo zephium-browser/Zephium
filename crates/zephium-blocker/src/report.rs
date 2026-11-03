@@ -274,6 +274,7 @@ impl SourceReport {
 pub struct WebKitCoverage {
     pub(crate) accepted_input_rules: usize,
     pub(crate) converted_input_rules: usize,
+    pub(crate) pruned_input_rules: usize,
     pub(crate) approximated_input_rules: usize,
     pub(crate) attribution_approximated_input_rules: usize,
     pub(crate) resource_approximated_input_rules: usize,
@@ -317,9 +318,15 @@ impl WebKitCoverage {
         self.blocking_rule_entries
     }
 
-    /// Returns runtime-admitted rules omitted from the WebKit artifact.
+    /// Returns wildcard block rules left out because the recorded page
+    /// corpus never matched them. They are supported, not omitted.
+    pub const fn pruned_input_rules(&self) -> usize {
+        self.pruned_input_rules
+    }
+
+    /// Returns runtime-admitted rules WebKit syntax could not represent.
     pub const fn omitted_input_rules(&self) -> usize {
-        self.accepted_input_rules - self.converted_input_rules
+        self.accepted_input_rules - self.converted_input_rules - self.pruned_input_rules
     }
 
     /// Returns the number of emitted WebKit rules, including synthetic rules.

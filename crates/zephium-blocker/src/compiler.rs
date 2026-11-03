@@ -210,12 +210,39 @@ impl FilterSource {
 #[derive(Clone, Copy, Debug)]
 pub struct Compiler {
     limits: CompileLimits,
+    #[cfg(feature = "webkit")]
+    webkit_pruned: Option<&'static crate::webkit_prune::PrunedRules>,
+    #[cfg(feature = "webkit")]
+    webkit_pruning: bool,
 }
 
 impl Compiler {
     /// Creates a compiler using validated limits.
     pub const fn new(limits: CompileLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            #[cfg(feature = "webkit")]
+            webkit_pruned: None,
+            #[cfg(feature = "webkit")]
+            webkit_pruning: true,
+        }
+    }
+
+    /// Keeps every WebKit rule, for release tooling that measures which
+    /// rules the page corpus matches.
+    #[cfg(feature = "webkit")]
+    pub const fn without_webkit_pruning(mut self) -> Self {
+        self.webkit_pruning = false;
+        self
+    }
+
+    #[cfg(all(test, feature = "webkit"))]
+    pub(crate) fn with_webkit_pruned(
+        mut self,
+        pruned: &'static crate::webkit_prune::PrunedRules,
+    ) -> Self {
+        self.webkit_pruned = Some(pruned);
+        self
     }
 
     /// Returns the active resource limits.
@@ -327,8 +354,14 @@ impl Compiler {
                 CompileTarget::WebKit => {
                     #[cfg(feature = "webkit")]
                     {
+                        let pruned = if self.webkit_pruning {
+                            self.webkit_pruned
+                                .unwrap_or_else(crate::webkit_prune::PrunedRules::shipped)
+                        } else {
+                            crate::webkit_prune::PrunedRules::none()
+                        };
                         let (rules, coverage) =
-                            compile_webkit(&mut prepared, accepted_rules, self.limits)?;
+                            compile_webkit(&mut prepared, accepted_rules, self.limits, pruned)?;
                         let blocking_entries = coverage.blocking_rule_entries;
                         (None, None, Some(rules), Some(coverage), blocking_entries)
                     }
@@ -977,6 +1010,7 @@ fn compile_webkit(
     prepared: &mut [PreparedSource],
     accepted_rules: usize,
     limits: CompileLimits,
+    pruned: &crate::webkit_prune::PrunedRules,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     let mut bad_filter_ids = HashSet::new();
     for source in &*prepared {
@@ -994,6 +1028,7 @@ fn compile_webkit(
     }
 
     let mut drops = BTreeMap::new();
+    let mut pruned_rules = 0usize;
     let mut converted = 0usize;
     let mut converted_approximated = 0usize;
     let mut converted_attribution_approximated = 0usize;
@@ -1045,10 +1080,33 @@ fn compile_webkit(
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;
             }
+            let mut kept = Vec::with_capacity(native_rules.len());
+            for native in native_rules {
+                let converted_rule = ConvertedRule {
+                    native,
+                    resource_types: resource_types.clone(),
+                };
+                if matches!(converted_rule.native.action.typ, CbType::Block)
+                    && converted_rule.native.trigger.url_filter.contains(".*")
+                    && pruned.contains(
+                        &serde_json::to_vec(&canonical(&converted_rule))
+                            .map_err(CompileError::SerializeWebKit)?,
+                    )
+                {
+                    continue;
+                }
+                kept.push(converted_rule);
+            }
+            if kept.is_empty() {
+                pruned_rules = pruned_rules
+                    .checked_add(1)
+                    .ok_or(CompileError::RuleCountOverflow)?;
+                continue;
+            }
             let emitted = blocking_rules
                 .len()
                 .checked_add(exception_rules.len())
-                .and_then(|emitted| emitted.checked_add(native_rules.len()))
+                .and_then(|emitted| emitted.checked_add(kept.len()))
                 .ok_or(CompileError::RuleCountOverflow)?;
             if emitted > limits.max_webkit_rules() {
                 return Err(CompileError::TooManyWebKitRules {
@@ -1056,11 +1114,7 @@ fn compile_webkit(
                     limit: limits.max_webkit_rules(),
                 });
             }
-            for native in native_rules {
-                let converted_rule = ConvertedRule {
-                    native,
-                    resource_types: resource_types.clone(),
-                };
+            for converted_rule in kept {
                 let destination = match converted_rule.native.action.typ {
                     CbType::Block => &mut blocking_rules,
                     CbType::IgnorePreviousRules => &mut exception_rules,
@@ -1109,6 +1163,7 @@ fn compile_webkit(
     let coverage = WebKitCoverage {
         accepted_input_rules: accepted_rules,
         converted_input_rules: converted,
+        pruned_input_rules: pruned_rules,
         approximated_input_rules: converted_approximated,
         attribution_approximated_input_rules: converted_attribution_approximated,
         resource_approximated_input_rules: converted_resource_approximated,
@@ -1190,6 +1245,34 @@ struct CanonicalTrigger<'a> {
     unless_top_url: Option<&'a [String]>,
 }
 
+/// One rule as the WebKit artifact holds it; pruned-rule digests are taken
+/// over exactly these bytes.
+#[cfg(feature = "webkit")]
+fn canonical(rule: &ConvertedRule) -> CanonicalRule<'_> {
+    CanonicalRule {
+        action: CanonicalAction {
+            kind: webkit_action_name(&rule.native.action.typ),
+            selector: rule.native.action.selector.as_deref(),
+        },
+        trigger: CanonicalTrigger {
+            url_filter: &rule.native.trigger.url_filter,
+            url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
+            if_domain: rule.native.trigger.if_domain.as_deref(),
+            unless_domain: rule.native.trigger.unless_domain.as_deref(),
+            resource_type: Some(&rule.resource_types),
+            load_type: rule
+                .native
+                .trigger
+                .load_type
+                .iter()
+                .map(webkit_load_name)
+                .collect(),
+            if_top_url: rule.native.trigger.if_top_url.as_deref(),
+            unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
+        },
+    }
+}
+
 #[cfg(feature = "webkit")]
 fn canonical_webkit_json(
     rules: &[ConvertedRule],
@@ -1201,29 +1284,7 @@ fn canonical_webkit_json(
         let mut serializer = serde_json::Serializer::new(&mut output);
         let mut sequence = serializer.serialize_seq(Some(rules.len()))?;
         for rule in rules {
-            let canonical = CanonicalRule {
-                action: CanonicalAction {
-                    kind: webkit_action_name(&rule.native.action.typ),
-                    selector: rule.native.action.selector.as_deref(),
-                },
-                trigger: CanonicalTrigger {
-                    url_filter: &rule.native.trigger.url_filter,
-                    url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
-                    if_domain: rule.native.trigger.if_domain.as_deref(),
-                    unless_domain: rule.native.trigger.unless_domain.as_deref(),
-                    resource_type: Some(&rule.resource_types),
-                    load_type: rule
-                        .native
-                        .trigger
-                        .load_type
-                        .iter()
-                        .map(webkit_load_name)
-                        .collect(),
-                    if_top_url: rule.native.trigger.if_top_url.as_deref(),
-                    unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
-                },
-            };
-            sequence.serialize_element(&canonical)?;
+            sequence.serialize_element(&canonical(rule))?;
         }
         sequence.end()
     })();
