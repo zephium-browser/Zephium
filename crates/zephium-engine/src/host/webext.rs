@@ -146,6 +146,11 @@ impl WebextHost {
             .filter_map(|entry| entry.page_script.as_ref())
     }
 
+    /// Makes the profile's runtime ahead of its first view.
+    pub(super) fn prepare(&mut self, profile: ProfileId, sink: &Sink) {
+        self.profile(profile, sink);
+    }
+
     fn profile(&mut self, profile: ProfileId, sink: &Sink) -> &mut ProfileRuntime {
         self.profiles.entry(profile).or_insert_with(|| {
             let mtm = MainThreadMarker::new().expect("engine host runs on the main thread");

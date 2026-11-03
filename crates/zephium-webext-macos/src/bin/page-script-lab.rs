@@ -1,12 +1,13 @@
-//! Checks the built-in page script in real WebKit: it runs once per document,
-//! skips paused hosts, swaps programs without overlap and unloads.
+//! Checks the built-in page script in real WebKit: it runs once per document
+//! in the page and its frames, skips every frame of a page on a paused site
+//! but runs in a paused site's frame elsewhere, swaps programs without
+//! overlap and unloads.
 //!
 //! ```text
 //! page-script-lab <scratch dir>
 //! ```
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -23,44 +24,66 @@ use objc2_web_kit::{
     WKContentWorld, WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebView,
     WKWebViewConfiguration,
 };
+use zephium_core::blocker::{scriptlet_program_with_pauses, BlockerSite};
 use zephium_webext_macos::PageScript;
 
+const PAUSED: &str = "127.0.0.1";
+const OTHER: &str = "localhost";
+const NOTHING: &str = "undefined:undefined|undefined:undefined";
+
 enum Step {
-    Set(Option<&'static str>),
+    /// A program and the sites paused in it, or nothing.
+    Set(Option<(&'static str, &'static [&'static str])>),
     SetTwice(&'static str, &'static str),
-    Pause(&'static [&'static str]),
-    Expect(&'static str),
+    /// Opens a page on the first host framing a page on the second, and
+    /// wants `top|frame`, each as `program:runs`.
+    Expect(&'static str, &'static str, &'static str),
 }
 
 const STEPS: &[Step] = &[
-    Step::Set(Some("A")),
-    Step::Expect("A:1"),
-    Step::Pause(&["127.0.0.1"]),
-    Step::Expect("undefined:undefined"),
-    Step::Pause(&[]),
-    Step::Expect("A:1"),
-    Step::Set(Some("B")),
-    Step::Expect("B:1"),
-    Step::Set(Some("B")),
-    Step::Expect("B:1"),
-    Step::Pause(&["127.0.0.1"]),
-    Step::Set(Some("A")),
-    Step::Expect("undefined:undefined"),
-    Step::Pause(&[]),
+    Step::Set(Some(("A", &[]))),
+    Step::Expect(PAUSED, OTHER, "A:1|A:1"),
+    Step::Set(Some(("A", &[PAUSED]))),
+    Step::Expect(PAUSED, OTHER, NOTHING),
+    Step::Expect(OTHER, PAUSED, "A:1|A:1"),
+    Step::Set(Some(("A", &[]))),
+    Step::Expect(PAUSED, OTHER, "A:1|A:1"),
+    Step::Set(Some(("B", &[]))),
+    Step::Expect(PAUSED, OTHER, "B:1|B:1"),
+    Step::Set(Some(("B", &[]))),
+    Step::Expect(OTHER, PAUSED, "B:1|B:1"),
     Step::Set(None),
-    Step::Expect("undefined:undefined"),
+    Step::Expect(PAUSED, OTHER, NOTHING),
     Step::SetTwice("A", "B"),
-    Step::Expect("B:1"),
+    Step::Expect(PAUSED, OTHER, "B:1|B:1"),
 ];
 
 struct Lab {
     mtm: MainThreadMarker,
     script: PageScript,
     view: Retained<WKWebView>,
-    url: String,
+    port: u16,
     packages: PathBuf,
     failures: RefCell<usize>,
     _controller: Retained<WKWebExtensionController>,
+}
+
+impl Lab {
+    fn package(&self, name: &str, paused: &[&str]) -> PathBuf {
+        let dir = self.packages.join(format!("{name}-{}", paused.join("+")));
+        if !dir.exists() {
+            let program = format!(
+                "(() => {{ globalThis.__ps = '{name}'; globalThis.__runs = (globalThis.__runs || 0) + 1; }})();\n"
+            );
+            let sites: Vec<BlockerSite> = paused
+                .iter()
+                .map(|host| BlockerSite::try_from(host.to_string()).expect("a site"))
+                .collect();
+            let program = scriptlet_program_with_pauses(&program, &sites);
+            PageScript::write(&dir, &program).expect("package written");
+        }
+        dir
+    }
 }
 
 fn main() {
@@ -76,34 +99,14 @@ fn main() {
     }
     let packages = scratch.join("packages");
     std::fs::create_dir_all(&packages).expect("scratch directory");
-    for name in ["A", "B"] {
-        let dir = packages.join(name);
-        if !dir.exists() {
-            let program = format!(
-                "globalThis.__ps = '{name}'; globalThis.__runs = (globalThis.__runs || 0) + 1;"
-            );
-            PageScript::write(&dir, &program).expect("package written");
-        }
-    }
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let url = format!(
-        "http://127.0.0.1:{}/",
-        listener.local_addr().unwrap().port()
-    );
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let mut buffer = [0u8; 4096];
-            let _ = stream.read(&mut buffer);
-            let body = "<!doctype html><title>lab</title><p>page</p>";
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        }
-    });
+    let port = listener.local_addr().unwrap().port();
+    // `localhost` resolves to ::1 first; without a listener there, loads stall.
+    if let Ok(v6) = TcpListener::bind(("::1", port)) {
+        std::thread::spawn(move || serve(v6));
+    }
+    std::thread::spawn(move || serve(listener));
 
     let controller = unsafe {
         WKWebExtensionController::initWithConfiguration(
@@ -124,7 +127,7 @@ fn main() {
         mtm,
         script: PageScript::new(&controller, false),
         view,
-        url,
+        port,
         packages,
         failures: RefCell::new(0),
         _controller: controller,
@@ -132,6 +135,32 @@ fn main() {
     let app = NSApplication::sharedApplication(mtm);
     run(lab, 0);
     app.run();
+}
+
+// WebKit opens connections it may never use, so each gets its own thread.
+fn serve(listener: TcpListener) {
+    for stream in listener.incoming().flatten() {
+        std::thread::spawn(move || answer(stream));
+    }
+}
+
+fn answer(mut stream: std::net::TcpStream) {
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let mut buffer = [0u8; 4096];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let path = request.split_whitespace().nth(1).unwrap_or("/");
+    let body = match path.strip_prefix("/top?frame=") {
+        Some(frame) => format!(
+            "<!doctype html><script>addEventListener('message', (e) => {{ window.__frame = e.data; }});</script><iframe src=\"{frame}\"></iframe>"
+        ),
+        None => "<!doctype html><script>parent.postMessage(String(globalThis.__ps) + ':' + String(globalThis.__runs), '*');</script>".to_owned(),
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
 }
 
 fn run(lab: Rc<Lab>, index: usize) {
@@ -145,9 +174,9 @@ fn run(lab: Rc<Lab>, index: usize) {
         move || run(lab, index + 1)
     };
     match step {
-        Step::Set(name) => {
-            let dir = name.map(|name| lab.packages.join(name));
-            println!("set {name:?}");
+        Step::Set(program) => {
+            let dir = program.map(|(name, paused)| lab.package(name, paused));
+            println!("set {program:?}");
             lab.script.set(dir.as_deref(), move |result| {
                 if let Err(error) = result {
                     println!("  load failed: {error}");
@@ -157,32 +186,25 @@ fn run(lab: Rc<Lab>, index: usize) {
         }
         Step::SetTwice(first, second) => {
             println!("set {first} then {second} at once");
-            lab.script.set(Some(&lab.packages.join(first)), |_| {});
+            lab.script.set(Some(&lab.package(first, &[])), |_| {});
             lab.script
-                .set(Some(&lab.packages.join(second)), move |_| next());
+                .set(Some(&lab.package(second, &[])), move |_| next());
         }
-        Step::Pause(hosts) => {
-            println!("pause {hosts:?}");
-            lab.script.set_paused(
-                hosts
-                    .iter()
-                    .map(|host| host.to_string())
-                    .collect::<BTreeSet<_>>(),
-            );
-            next();
-        }
-        Step::Expect(expected) => {
-            let url = NSURL::URLWithString(&NSString::from_str(&lab.url)).unwrap();
+        Step::Expect(top, frame, expected) => {
+            let port = lab.port;
+            let url = format!("http://{top}:{port}/top?frame=http://{frame}:{port}/leaf");
+            let url = NSURL::URLWithString(&NSString::from_str(&url)).unwrap();
             unsafe { lab.view.loadRequest(&NSURLRequest::requestWithURL(&url)) };
             let view = lab.view.clone();
             let lab = lab.clone();
             when_loaded(view, move || {
-                let probe = "return String(globalThis.__ps) + ':' + String(globalThis.__runs)";
+                let probe = "for (let i = 0; i < 40 && window.__frame === undefined; i++) await new Promise((r) => setTimeout(r, 50));\n\
+                             return String(globalThis.__ps) + ':' + String(globalThis.__runs) + '|' + String(window.__frame);";
                 let checked = lab.clone();
                 evaluate(lab.mtm, &lab.view, probe, move |value| {
                     let ok = value == *expected;
                     println!(
-                        "  {} {value} (want {expected})",
+                        "  {top} framing {frame}: {} {value} (want {expected})",
                         if ok { "ok" } else { "FAIL" }
                     );
                     if !ok {

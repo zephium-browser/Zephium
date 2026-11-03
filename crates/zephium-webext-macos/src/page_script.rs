@@ -1,16 +1,17 @@
 //! A program the browser runs in every page's main world, from an extension
 //! context of its own. The host never lists it with installed extensions, so
-//! it has no toolbar action, storage or background.
+//! it has no toolbar action, storage or background. Whatever must vary by
+//! site, such as a paused site, the program decides itself: a match pattern
+//! sees each frame's own address, never the page it is embedded in.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly, Message};
+use objc2::{MainThreadMarker, Message};
 use objc2_foundation::{NSError, NSOperatingSystemVersion, NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
@@ -48,12 +49,10 @@ struct State {
     generation: u64,
     root: Option<PathBuf>,
     context: Option<Retained<WKWebExtensionContext>>,
-    paused: BTreeSet<String>,
-    denied: BTreeMap<String, Retained<WKWebExtensionMatchPattern>>,
 }
 
 impl PageScript {
-    /// Main-world content scripts and per-pattern denial need macOS 15.4.
+    /// Main-world content scripts need macOS 15.4.
     pub fn supported() -> bool {
         NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
             majorVersion: 15,
@@ -95,13 +94,19 @@ impl PageScript {
 
     /// Runs the package in `root` from the next document on, or nothing with
     /// `None`. A replacement takes over in one main-thread turn, so no page
-    /// starts with both programs or with neither.
-    pub fn set(&self, root: Option<&Path>, done: impl FnOnce(Result<(), String>) + 'static) {
+    /// starts with both programs or with neither. True when WebKit is still
+    /// reading the package; `done` runs once it is in place.
+    pub fn set(
+        &self,
+        root: Option<&Path>,
+        done: impl FnOnce(Result<(), String>) + 'static,
+    ) -> bool {
         let generation = {
             let mut state = self.state.borrow_mut();
             if state.root.as_deref() == root && (root.is_none() || state.context.is_some()) {
                 drop(state);
-                return done(Ok(()));
+                done(Ok(()));
+                return false;
             }
             state.generation += 1;
             state.root = root.map(Path::to_path_buf);
@@ -109,14 +114,15 @@ impl PageScript {
         };
         let Some(root) = root else {
             let old = self.state.borrow_mut().context.take();
-            self.state.borrow_mut().denied.clear();
             if let Some(old) = old {
                 let _ = unsafe { self.controller.unloadExtensionContext_error(&old) };
             }
-            return done(Ok(()));
+            done(Ok(()));
+            return false;
         };
         if !root.is_dir() {
-            return done(Err(format!("{} is not a directory", root.display())));
+            done(Err(format!("{} is not a directory", root.display())));
+            return false;
         }
         let url =
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&root.to_string_lossy()), true);
@@ -147,17 +153,7 @@ impl PageScript {
                 MainThreadMarker::from(&*self.controller),
             )
         };
-    }
-
-    /// Hosts the program skips, each exactly as named and on any scheme or
-    /// port. WebKit checks this as each document starts.
-    pub fn set_paused(&self, hosts: BTreeSet<String>) {
-        let mut state = self.state.borrow_mut();
-        state.paused = hosts;
-        let context = state.context.clone();
-        if let Some(context) = context {
-            apply_paused(&mut state, &context);
-        }
+        true
     }
 }
 
@@ -187,8 +183,6 @@ fn activate(
         );
     }
     let mut state = state.borrow_mut();
-    state.denied.clear();
-    apply_paused(&mut state, &context);
     if let Some(old) = state.context.take() {
         let _ = unsafe { controller.unloadExtensionContext_error(&old) };
     }
@@ -196,52 +190,4 @@ fn activate(
         .map_err(|error| describe(Some(&error)))?;
     state.context = Some(context);
     Ok(())
-}
-
-fn apply_paused(state: &mut State, context: &WKWebExtensionContext) {
-    let lifted: Vec<String> = state
-        .denied
-        .keys()
-        .filter(|host| !state.paused.contains(*host))
-        .cloned()
-        .collect();
-    for host in lifted {
-        if let Some(pattern) = state.denied.remove(&host) {
-            unsafe {
-                context.setPermissionStatus_forMatchPattern(
-                    WKWebExtensionContextPermissionStatus::Unknown,
-                    &pattern,
-                )
-            };
-        }
-    }
-    let mtm = MainThreadMarker::from(context);
-    for host in &state.paused {
-        if state.denied.contains_key(host) {
-            continue;
-        }
-        let Some(pattern) = host_pattern(host, mtm) else {
-            continue;
-        };
-        unsafe {
-            context.setPermissionStatus_forMatchPattern(
-                WKWebExtensionContextPermissionStatus::DeniedExplicitly,
-                &pattern,
-            )
-        };
-        state.denied.insert(host.clone(), pattern);
-    }
-}
-
-fn host_pattern(host: &str, mtm: MainThreadMarker) -> Option<Retained<WKWebExtensionMatchPattern>> {
-    if host.is_empty() || (host.contains(['/', '*', ':']) && !host.starts_with('[')) {
-        return None;
-    }
-    unsafe {
-        WKWebExtensionMatchPattern::initWithString_error(
-            WKWebExtensionMatchPattern::alloc(mtm),
-            &NSString::from_str(&format!("*://{host}/*")),
-        )
-    }
-    .ok()
 }

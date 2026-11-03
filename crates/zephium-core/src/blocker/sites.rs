@@ -353,9 +353,40 @@ impl From<BlockerSitePreferences> for SitePreferencesWire {
     }
 }
 
+/// `program` for a profile with paused sites. A frame whose top-level
+/// document is on a paused site runs nothing, embeds included, as the paused
+/// site's network rules are off for the whole view. Hosts match as
+/// [`BlockerSite::from_url`] reads them.
+pub fn scriptlet_program_with_pauses<'a>(
+    program: &str,
+    paused: impl IntoIterator<Item = &'a BlockerSite>,
+) -> String {
+    let paused: Vec<&str> = paused.into_iter().map(BlockerSite::as_str).collect();
+    if paused.is_empty() {
+        return program.to_owned();
+    }
+    let hosts = serde_json::to_string(&paused).unwrap_or_else(|_| "[]".into());
+    format!(
+        "(() => {{\nconst origins = location.ancestorOrigins;\nlet top = location.hostname;\nif (origins && origins.length > 0) {{ try {{ top = new URL(origins[origins.length - 1]).hostname; }} catch (e) {{ return; }} }}\nif (new Set({hosts}).has(top.replace(/\\.$/, ''))) {{ return; }}\n{program}}})();\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_program_without_pauses_is_unchanged_and_pauses_are_data() {
+        assert_eq!(scriptlet_program_with_pauses("run();", []), "run();");
+        let sites = [
+            BlockerSite::try_from("b.example".to_owned()).unwrap(),
+            BlockerSite::try_from("[::1]".to_owned()).unwrap(),
+        ];
+        let wrapped = scriptlet_program_with_pauses("run();", &sites);
+        assert!(wrapped.contains(r#"new Set(["b.example","[::1]"])"#));
+        assert!(wrapped.contains("location.ancestorOrigins"));
+        assert!(wrapped.ends_with("run();})();\n"));
+    }
 
     #[test]
     fn site_scope_is_exact_canonical_host_not_domain_suffix() {

@@ -2356,6 +2356,12 @@ impl Engine for WebviewEngine {
             });
         });
     }
+    #[cfg(target_os = "macos")]
+    fn prepare_profile(&self, partition: Partition) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.prepare_profile(partition));
+        });
+    }
     fn set_popup_sites(
         &self,
         profile: ProfileId,

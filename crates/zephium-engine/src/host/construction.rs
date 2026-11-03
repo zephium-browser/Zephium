@@ -1025,6 +1025,8 @@ impl EngineHost {
                                 return None;
                             }
                         };
+                    self.scriptlets.attach_private(profile, &configuration);
+                    self.refresh_profile_scriptlets(profile);
                     use wry::WebViewBuilderExtMacos;
                     (
                         builder.with_webview_configuration(configuration),
