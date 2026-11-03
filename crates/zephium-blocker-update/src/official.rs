@@ -761,6 +761,23 @@ where
                 }
                 fetched.checked.push(index);
             }
+            // The exact copy a rejected package held fails again: keeping the
+            // current one lets the other lists' updates through.
+            Ok(source)
+                if cached.is_some()
+                    && old.is_some_and(|old| old.sha256 != source.sha256)
+                    && store.record.rejected.as_ref().is_some_and(|rejected| {
+                        rejected
+                            .sources
+                            .iter()
+                            .any(|s| s.id == source.id && s.sha256 == source.sha256)
+                    }) =>
+            {
+                fetched
+                    .sources
+                    .push(old.expect("cached source descriptor").clone());
+                fetched.failed.push((index, (FailureKind::Target, None)));
+            }
             Ok(source) => {
                 fetched.sources.push(source);
                 fetched.checked.push(index);
@@ -1360,5 +1377,54 @@ mod tests {
         assert_eq!(fetched.sources[3].version, package.sources[3].version);
         assert_ne!(fetched.sources[3].sha256, package.sources[3].sha256);
         assert_eq!(store.record.schedule[3].rollbacks, 0);
+    }
+
+    #[test]
+    fn a_rejected_list_keeps_its_current_copy_while_the_others_update() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        let mut rejected = package.sources.clone();
+        rejected[0] = store
+            .put_source(
+                OfficialFilter::EasyList,
+                &bad,
+                FilterValidators::default(),
+                Some(&package.sources[0]),
+            )
+            .unwrap();
+        let rejected = store.new_package(rejected, now()).unwrap();
+        let mut next = store.record.clone();
+        next.highest_revision = rejected.identity.revision;
+        next.rejected = Some(rejected);
+        store.persist(next).unwrap();
+        // The rejected copy is not what the next check revalidates against.
+        assert_eq!(
+            store.record.prior(OfficialFilter::EasyList),
+            Some(&package.sources[0])
+        );
+        let mut newer = test_list(OfficialFilter::UblockFilters);
+        newer.extend_from_slice(b"||newer.example.invalid^\n");
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = |filter: OfficialFilter, _: Option<FilterValidators>| {
+            std::future::ready(Ok(match filter {
+                OfficialFilter::EasyList => FilterResponse::Modified {
+                    bytes: bad.clone(),
+                    validators: FilterValidators::default(),
+                },
+                OfficialFilter::UblockFilters => FilterResponse::Modified {
+                    bytes: newer.clone(),
+                    validators: FilterValidators::default(),
+                },
+                _ => FilterResponse::NotModified,
+            }))
+        };
+        let fetched = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(fetched.sources[0], package.sources[0]);
+        assert_eq!(fetched.failed, [(0, (FailureKind::Target, None))]);
+        assert_ne!(fetched.sources[2].sha256, package.sources[2].sha256);
+        assert!(!same_sources(&package, &fetched.sources));
     }
 }

@@ -177,8 +177,10 @@ impl Record {
     }
 
     /// The newest descriptor of `filter` this record holds.
+    /// A rejected package is never a list's prior copy: reusing it would stage
+    /// the same rejected bytes again.
     pub fn prior(&self, filter: OfficialFilter) -> Option<&Source> {
-        [&self.candidate, &self.rejected, &self.current]
+        [&self.candidate, &self.current]
             .into_iter()
             .flatten()
             .next()
