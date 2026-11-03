@@ -24,6 +24,7 @@ thiserror.workspace = true
 regex = "=1.12.4"
 flate2 = "=1.1.9"
 proptest.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
