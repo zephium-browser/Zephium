@@ -81,7 +81,7 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
-    if cfg!(feature = "webkit") {
+    if cfg!(feature = "webkit") || cfg!(feature = "runtime-exact") {
         digest.update(builtin::fingerprint());
     }
     #[cfg(feature = "webkit")]

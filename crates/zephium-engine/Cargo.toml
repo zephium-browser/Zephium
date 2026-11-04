@@ -118,7 +118,7 @@ tempfile.workspace = true
 wry = { workspace = true, features = ["windows-cleanup-qualification"] }
 windows = { version = "0.61", features = ["Win32_Graphics_DirectComposition", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Dxgi_Common"] }
 base64 = "0.22"
-zephium-blocker = { workspace = true, features = ["runtime"] }
+zephium-blocker = { workspace = true, features = ["runtime", "runtime-exact"] }
 flate2 = "=1.1.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]

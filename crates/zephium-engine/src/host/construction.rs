@@ -1788,6 +1788,7 @@ impl EngineHost {
                         watch.committed();
                     }
                     load_site_scope.navigating(&event.url);
+                    load_site_scope.committed(&event.url);
                     load_site_scope.protection.retry();
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
@@ -2264,6 +2265,7 @@ impl EngineHost {
                 &content_policy,
                 &site_scope.pause,
                 &site_scope.protection,
+                &site_scope.top_document,
             ) {
                 Ok(registration) => registration,
                 Err(error) => {

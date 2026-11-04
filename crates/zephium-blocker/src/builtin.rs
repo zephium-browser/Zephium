@@ -18,10 +18,14 @@ pub(crate) fn source() -> FilterSource {
 }
 
 /// Whether these rules compile for `target`. They are per-site exceptions,
-/// and the runtime matcher sees requests without their page on Windows, where
-/// a site-scoped exception would apply on every site.
+/// so they need requests that carry their page: WebKit's always do, and the
+/// runtime matcher's do when it judges them against the view's main document.
+/// A runtime matcher without that would apply them on every site.
 pub(crate) const fn applies_to(target: CompileTarget) -> bool {
-    matches!(target, CompileTarget::WebKit)
+    match target {
+        CompileTarget::WebKit => true,
+        CompileTarget::Runtime => cfg!(feature = "runtime-exact"),
+    }
 }
 
 /// Physical lines and candidate rules, as the compiler counts them.

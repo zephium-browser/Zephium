@@ -391,12 +391,19 @@ fn native_protection_qualification() {
     for _ in 0..tabs {
         let loaded = Rc::new(Cell::new(None::<Instant>));
         let event = loaded.clone();
+        let top = crate::platform::top_document::TopDocument::default();
+        let committed = top.clone();
         let mut builder = WebViewBuilder::new_with_web_context(&mut context)
             .with_visible(true)
             .with_focused(false)
             .with_devtools(false)
             .with_on_page_load_handler(move |phase, _| {
                 event.set(matches!(phase, wry::PageLoadEvent::Finished).then(Instant::now));
+            })
+            .with_navigation_event_handler(move |event| {
+                if event.phase == wry::NavigationEventPhase::Committed {
+                    committed.committed(&event.url);
+                }
             });
         if site == "csp" {
             // Exercise the exact fixed production bootstrap in a native CSP
@@ -479,8 +486,9 @@ fn native_protection_qualification() {
         } else {
             &policy
         };
-        registrations
-            .push(install_scoped_on_view(&view, selected, &pause, &Default::default()).unwrap());
+        registrations.push(
+            install_scoped_on_view(&view, selected, &pause, &Default::default(), &top).unwrap(),
+        );
         loaded.set(None);
         let started = Instant::now();
         view.load_url(&url).unwrap();

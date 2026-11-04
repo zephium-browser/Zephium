@@ -146,6 +146,8 @@ pub(crate) fn install_scoped_on_view(
     policy: &NativeContentPolicy,
     pause: &crate::platform::content_pause::ContentPause,
     protection: &crate::platform::content_protection::ViewProtection,
+    // WebKit attributes each request to its own frame.
+    _top_document: &crate::platform::top_document::TopDocument,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
     // A content rule list is on the view whole, or the install fails with it.
     protection.settle(false);

@@ -2,6 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use adblock::request::Request;
+#[cfg(feature = "runtime-exact")]
+use adblock::url_parser;
 use adblock::Engine;
 use thiserror::Error;
 
@@ -196,6 +198,55 @@ impl CompiledRules {
             .ok_or(MatchError::WrongArtifactTarget)?;
         evaluate_runtime_engine(engine, self.0.limits, request, source_independent_only)
     }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.0.limits)
+    }
+
+    /// Evaluates a request from a document parsed by [`Self::source_document`],
+    /// with the same result as [`Self::evaluate`] given that document's URL.
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
+        &self,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
+    ) -> Result<NetworkDecision, MatchError> {
+        let engine = self
+            .0
+            .engine
+            .as_ref()
+            .ok_or(MatchError::WrongArtifactTarget)?;
+        evaluate_runtime_engine_from(engine, self.0.limits, url, source, resource_type, method)
+    }
+}
+
+/// What matching reads from an initiating document: its hostname and
+/// registrable domain. Parsed once per document rather than once per request,
+/// which keeps a URL parse and a public-suffix lookup off every callback.
+#[cfg(feature = "runtime-exact")]
+pub(crate) struct SourceDocument {
+    hostname: Box<str>,
+    domain: Box<str>,
+}
+
+#[cfg(feature = "runtime-exact")]
+impl SourceDocument {
+    fn parse(url: &str, limits: CompileLimits) -> Result<Self, MatchError> {
+        if url.len() > limits.max_source_url_bytes() {
+            return Err(MatchError::SourceUrlTooLong {
+                actual: url.len(),
+                limit: limits.max_source_url_bytes(),
+            });
+        }
+        let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+        Ok(Self {
+            hostname: parsed.hostname().into(),
+            domain: parsed.domain().into(),
+        })
+    }
 }
 
 #[cfg(feature = "runtime")]
@@ -211,11 +262,26 @@ impl CachedRuntimeRules {
     }
 
     #[cfg(feature = "runtime-exact")]
-    pub(crate) fn evaluate(
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.limits)
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<NetworkDecision, MatchError> {
-        evaluate_runtime_engine(&self.engine, self.limits, request, false)
+        evaluate_runtime_engine_from(
+            &self.engine,
+            self.limits,
+            url,
+            source,
+            resource_type,
+            method,
+        )
     }
 
     pub(crate) fn evaluate_source_independent(
@@ -270,10 +336,47 @@ fn evaluate_runtime_engine(
         }
     }
     .map_err(|_| MatchError::InvalidRequest)?;
+    match_native(engine, &native, source_independent_only)
+}
+
+#[cfg(feature = "runtime-exact")]
+fn evaluate_runtime_engine_from(
+    engine: &Engine,
+    limits: CompileLimits,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+) -> Result<NetworkDecision, MatchError> {
+    if url.len() > limits.max_request_url_bytes() {
+        return Err(MatchError::RequestUrlTooLong {
+            actual: url.len(),
+            limit: limits.max_request_url_bytes(),
+        });
+    }
+    let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+    // Request::new with the source URL would derive the same hostname and
+    // party from a fresh parse of that URL.
+    let native = Request::preparsed(
+        &parsed.url,
+        parsed.hostname(),
+        &source.hostname,
+        resource_type.as_adblock_str(),
+        parsed.domain() != &*source.domain,
+        method.as_adblock_str(),
+    );
+    match_native(engine, &native, false)
+}
+
+fn match_native(
+    engine: &Engine,
+    native: &Request,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
     let result = if source_independent_only {
-        engine.try_check_prepared_source_independent_network_request(&native)
+        engine.try_check_prepared_source_independent_network_request(native)
     } else {
-        engine.try_check_prepared_network_request(&native)
+        engine.try_check_prepared_network_request(native)
     }
     .map_err(map_prepared_match_error)?;
 
