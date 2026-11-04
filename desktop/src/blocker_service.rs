@@ -181,9 +181,9 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        // Zephium's own six exceptions compile with the lists where requests
+        // Zephium's own eight exceptions compile with the lists where requests
         // carry their page; on Windows that is the view's main document.
-        let own = 6;
+        let own = 8;
         assert_eq!(rules.coverage().source_rules, 131_724 + own);
         assert_eq!(rules.coverage().accepted_rules, 103_789 + own);
         assert_eq!(

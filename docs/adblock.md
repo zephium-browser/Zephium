@@ -243,6 +243,11 @@ reported upstream when it applies there.
   the ads stay blocked. In Zephium on macOS with the fix (3 runs each), protection on
   used 4.4 s of CPU and 123 requests on allrecipes against 16.2 s and 301 off,
   and 2.4 s and 89 requests on simplyrecipes against 8.6 s and 299.
+- Ad recovery, second probe: mirror and tomsguide also fetch criteo's prebid
+  tag beside the loader. EasyPrivacy blocks it as third party, which starts the
+  same recovery: 36 to 58 requests to the proxy hosts in 16 seconds of the home
+  page in Zephium on Windows, against 2 or 3 with the exception. The exception
+  allows only that fetch on those two sites; the tag never loads as a script.
 
 ## Budgets and evidence
 
