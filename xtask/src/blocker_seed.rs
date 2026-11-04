@@ -2037,6 +2037,7 @@ mod tests {
     fn source_headers_follow_each_lists_own_format() {
         let quick_fixes = &SOURCES[3];
         let mut list = format!(
+        WebKitDropReason::NavigationChecked => "navigation_checked",
             "! Title: {}\n! Last modified: Mon, 02 Nov 2026 14:08:18 +0000\n! Expires: 8 hours\n! License: {}\n! Homepage: {}\n",
             quick_fixes.title, GPL_3.terms_url, quick_fixes.homepage
         );

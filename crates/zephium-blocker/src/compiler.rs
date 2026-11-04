@@ -46,6 +46,9 @@ const DIGEST_DOMAIN: &[u8] = b"zephium-blocker-policy";
 const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
+/// Its wildcard rules never reach WebKit or its pruning.
+#[cfg(feature = "webkit")]
+const NAVIGATION_CHECKED_SOURCE: &str = "ublock-badware";
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_REGEXES: usize = 4_096;
 #[cfg(feature = "runtime")]
@@ -1164,6 +1167,15 @@ fn compile_webkit(
                 if matches!(converted_rule.native.action.typ, CbType::Block)
                     && converted_rule.native.trigger.url_filter.contains(".*")
                     && pruned.contains(
+            if source.id.as_str() == NAVIGATION_CHECKED_SOURCE
+                && native_rules.iter().any(|native| {
+                    matches!(native.action.typ, CbType::Block)
+                        && native.trigger.url_filter.contains(".*")
+                })
+            {
+                increment(&mut drops, WebKitDropReason::NavigationChecked);
+                continue;
+            }
                         &serde_json::to_vec(&canonical(&converted_rule))
                             .map_err(CompileError::SerializeWebKit)?,
                     )

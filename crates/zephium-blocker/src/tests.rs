@@ -1601,3 +1601,29 @@ fn the_runtime_target_ignores_pruned_rules() {
     assert_eq!(with.digest(), without.digest());
     assert_eq!(with.report(), without.report());
 }
+
+#[cfg(feature = "webkit")]
+#[test]
+fn badware_wildcard_rules_are_left_to_the_navigation_check() {
+    let compile = |id_text: &str| {
+        Compiler::default()
+            .compile(
+                CompileTarget::WebKit,
+                vec![FilterSource::new(
+                    id(id_text),
+                    SourceFormat::Standard,
+                    "||scam.example^$doc\n||cdn.example/*/alarm.mp3\n".to_owned(),
+                )],
+            )
+            .unwrap()
+    };
+    let badware = compile("ublock-badware");
+    let coverage = badware.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 1);
+    assert_eq!(coverage.converted_input_rules(), 1);
+    assert!(!badware.webkit().unwrap().json().contains(".*"));
+    let other = compile("ublock-filters");
+    let coverage = other.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 2);
+}
