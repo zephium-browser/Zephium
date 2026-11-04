@@ -1595,24 +1595,8 @@ fn the_runtime_target_ignores_pruned_rules() {
 #[cfg(feature = "webkit")]
 #[test]
 fn a_rule_stays_unsplit_where_splitting_would_pass_the_webkit_rule_limit() {
-    let compile = |max_webkit_rules| {
-        let limits = CompileLimits::new(CompileLimitValues {
-            max_sources: 1,
-            max_source_bytes: 1_024,
-            max_total_source_bytes: 1_024,
-            max_line_bytes: 1_024,
-            max_rules: 8,
-            max_physical_lines: 8,
-            max_webkit_rules,
-            max_webkit_json_bytes: 64 * 1024,
-            max_request_url_bytes: 4_096,
-            max_source_url_bytes: 4_096,
-        })
-        .unwrap();
-        Compiler::new(limits)
-            .compile(CompileTarget::WebKit, vec![source("/banner.js^$script\n")])
-            .unwrap()
-    };
+    let compile =
+        |max_webkit_rules| compile_within(max_webkit_rules, 64 * 1024, "/banner.js^$script\n");
     let split = compile(2);
     let split = split.webkit().unwrap();
     assert_eq!(split.rule_count(), 2);
@@ -1623,4 +1607,52 @@ fn a_rule_stays_unsplit_where_splitting_would_pass_the_webkit_rule_limit() {
     assert!(unsplit
         .json()
         .contains(r"/banner\\.js([^A-Za-z0-9_.%-].*)?$"));
+}
+
+#[cfg(feature = "webkit")]
+fn compile_within(
+    max_webkit_rules: usize,
+    max_webkit_json_bytes: usize,
+    rules: &str,
+) -> CompiledRules {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules,
+        max_webkit_json_bytes,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    Compiler::new(limits)
+        .compile(CompileTarget::WebKit, vec![source(rules)])
+        .unwrap()
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_list_that_fits_only_unsplit_is_compiled_unsplit_whole() {
+    // Split, the first rule alone would take both places; unsplit, both fit.
+    let rules = "/a.js^$script\n/b.js^$script\n";
+    let whole = compile_within(2, 64 * 1024, rules);
+    let whole = whole.webkit().unwrap();
+    assert_eq!(whole.rule_count(), 2);
+    assert_eq!(whole.json().matches("([^A-Za-z0-9_.%-].*)?$").count(), 2);
+
+    let unsplit_bytes = compile_within(1, 64 * 1024, "/banner.js^$script\n")
+        .webkit()
+        .unwrap()
+        .json()
+        .len();
+    let by_bytes = compile_within(2, unsplit_bytes, "/banner.js^$script\n");
+    let by_bytes = by_bytes.webkit().unwrap();
+    assert_eq!(
+        by_bytes.rule_count(),
+        1,
+        "the split form is past the byte limit"
+    );
 }

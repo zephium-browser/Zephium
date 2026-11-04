@@ -1087,6 +1087,24 @@ fn compile_webkit(
     limits: CompileLimits,
     pruned: &crate::webkit_prune::PrunedRules,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
+    // Splitting separator ends is an optimization: a list that fits WebKit's
+    // limits only unsplit is compiled unsplit, every rule of it.
+    match compile_webkit_with(prepared, accepted_rules, limits, pruned, true) {
+        Err(CompileError::TooManyWebKitRules { .. } | CompileError::WebKitJsonTooLarge { .. }) => {
+            compile_webkit_with(prepared, accepted_rules, limits, pruned, false)
+        }
+        result => result,
+    }
+}
+
+#[cfg(feature = "webkit")]
+fn compile_webkit_with(
+    prepared: &mut [PreparedSource],
+    accepted_rules: usize,
+    limits: CompileLimits,
+    pruned: &crate::webkit_prune::PrunedRules,
+    split_separator_ends: bool,
+) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     let mut bad_filter_ids = HashSet::new();
     for source in &*prepared {
         for line in source.rules.lines() {
@@ -1149,32 +1167,26 @@ fn compile_webkit(
             if unsplit.is_empty() {
                 return Err(CompileError::UpstreamInvariant);
             }
-            let mut split = Vec::with_capacity(unsplit.len());
-            for native in &unsplit {
-                match crate::webkit::split_separator_end(&native.trigger.url_filter) {
-                    Some([at_end, before_separator]) => {
-                        let mut first = native.clone();
-                        let mut second = native.clone();
-                        first.trigger.url_filter = at_end;
-                        second.trigger.url_filter = before_separator;
-                        split.push(first);
-                        split.push(second);
+            let natives = if split_separator_ends {
+                let mut split = Vec::with_capacity(unsplit.len());
+                for native in unsplit {
+                    match crate::webkit::split_separator_end(&native.trigger.url_filter) {
+                        Some([at_end, before_separator]) => {
+                            let mut second = native.clone();
+                            let mut first = native;
+                            first.trigger.url_filter = at_end;
+                            second.trigger.url_filter = before_separator;
+                            split.push(first);
+                            split.push(second);
+                        }
+                        None => split.push(native),
                     }
-                    None => split.push(native.clone()),
                 }
-            }
-            let emitted_before = blocking_rules
-                .len()
-                .checked_add(exception_rules.len())
-                .ok_or(CompileError::RuleCountOverflow)?;
-            let mut kept = retain_for_webkit(split, &resource_types, pruned)?;
-            // Splitting is an optimization: it never decides whether a list fits.
-            if kept.as_ref().is_some_and(|kept| {
-                emitted_before.saturating_add(kept.len()) > limits.max_webkit_rules()
-            }) {
-                kept = retain_for_webkit(unsplit, &resource_types, pruned)?;
-            }
-            let Some(kept) = kept else {
+                split
+            } else {
+                unsplit
+            };
+            let Some(kept) = retain_for_webkit(natives, &resource_types, pruned)? else {
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;
             };
