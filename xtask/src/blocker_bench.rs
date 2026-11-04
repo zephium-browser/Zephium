@@ -115,23 +115,41 @@ const SCROLL: &str = "const sleep = (ms) => new Promise((resolve) => setTimeout(
     return document.visibilityState;";
 
 /// YouTube asks a visitor from the EU either on `consent.youtube.com`, where
-/// the form that saves "Reject all" is the one setting `set_eom`, or in a
-/// dialog on the page, where "Reject all" is the first of its two buttons;
-/// neither depends on the page's language. The dialog is waited for up to
-/// `__WAIT__` milliseconds.
-const YOUTUBE_REJECT: &str = "const wait = __WAIT__;\n\
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n\
-    const dialog = () => [...document.querySelectorAll('ytd-consent-bump-v2-lightbox .eom-buttons button')];\n\
-    for (let waited = 0; waited < wait && !location.hostname.startsWith('consent.') && !dialog().length; waited += 250) await sleep(250);\n\
-    if (location.hostname.startsWith('consent.')) {\n\
-      const form = [...document.querySelectorAll('form')].find((f) => f.querySelector('input[name=set_eom][value=true]'));\n\
-      const button = form?.querySelector('button, input[type=submit]');\n\
-      button?.click();\n\
-      return { page: 'consent', rejected: !!button };\n\
-    }\n\
-    const [reject] = dialog();\n\
-    reject?.click();\n\
-    return { page: reject ? 'dialog' : 'none', rejected: !!reject };";
+/// the form that saves "Reject all" sets `set_eom` to true and the one that
+/// saves "Accept all" sets it to false, or in a dialog on the page, where those
+/// are its first and second buttons; neither depends on the page's language.
+/// The dialog is waited for up to `__WAIT__` milliseconds.
+const YOUTUBE_CONSENT: &str = "const wait = __WAIT__;
+    const accept = __ACCEPT__;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const dialog = () => [...document.querySelectorAll('ytd-consent-bump-v2-lightbox .eom-buttons button')];
+    for (let waited = 0; waited < wait && !location.hostname.startsWith('consent.') && !dialog().length; waited += 250) await sleep(250);
+    if (location.hostname.startsWith('consent.')) {
+      const form = [...document.querySelectorAll('form')].find((f) => f.querySelector(`input[name=set_eom][value=${!accept}]`));
+      const button = form?.querySelector('button, input[type=submit]');
+      button?.click();
+      return { page: 'consent', answered: !!button };
+    }
+    const button = dialog()[accept ? 1 : 0];
+    button?.click();
+    return { page: button ? 'dialog' : 'none', answered: !!button };";
+
+/// The bench's answer to YouTube's consent page or dialog.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum YoutubeConsent {
+    #[default]
+    Reject,
+    Accept,
+}
+
+impl YoutubeConsent {
+    const fn name(self) -> &'static str {
+        match self {
+            YoutubeConsent::Reject => "reject",
+            YoutubeConsent::Accept => "accept",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Config {
@@ -211,6 +229,7 @@ struct Options {
     only: Vec<String>,
     settle: Duration,
     youtube: bool,
+    youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
     speedometer_url: Option<String>,
@@ -298,6 +317,17 @@ impl Options {
                         value()?.split_whitespace().map(str::to_string).collect();
                 }
                 "--youtube" => options.youtube = true,
+                "--youtube-consent" => {
+                    options.youtube_consent = match value()?.as_str() {
+                        "reject" => YoutubeConsent::Reject,
+                        "accept" => YoutubeConsent::Accept,
+                        other => {
+                            return Err(format!(
+                                "--youtube-consent takes accept or reject, not {other:?}"
+                            ));
+                        }
+                    };
+                }
                 "--no-net" => options.no_net = true,
                 "--no-warmup" => options.no_warmup = true,
                 "--allow-builds" => options.allow_builds = true,
@@ -379,6 +409,7 @@ struct Plan {
     zephium: bool,
     net: bool,
     settle: Duration,
+    youtube_consent: YoutubeConsent,
 }
 
 pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
@@ -457,6 +488,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             "startup": context.options.startup,
             "speedometer": context.options.speedometer,
             "speedometerWarm": context.options.speedometer_warm,
+            "youtubeConsent": context.options.youtube_consent.name(),
             "net": !context.options.no_net,
             "warmup": !context.options.no_warmup,
             "buildsRunning": builds,
@@ -969,6 +1001,7 @@ impl Context {
             zephium: config.zephium(),
             net: !self.options.no_net,
             settle: self.options.settle,
+            youtube_consent: self.options.youtube_consent,
         }
     }
 }
@@ -1134,38 +1167,45 @@ fn wall_present(
         .unwrap_or(true))
 }
 
-struct YoutubeConsent {
-    rejected: bool,
+struct YoutubeConsentOutcome {
+    answered: bool,
     /// Set where the answer sent the browser back to the page.
     reloaded: Option<Opened>,
 }
 
-/// Picks "Reject all" on YouTube's consent page or dialog, if there is one;
+/// Gives `answer` on YouTube's consent page or dialog, if there is one;
 /// from the consent page the browser is sent back to `url`.
-fn reject_youtube_consent(
+fn answer_youtube_consent(
     driver: &mut Driver,
     tab: &Value,
     url: &str,
     wait_ms: u64,
-) -> Result<Option<YoutubeConsent>, Failure> {
-    let script = YOUTUBE_REJECT.replacen("__WAIT__", &wait_ms.to_string(), 1);
+    answer: YoutubeConsent,
+) -> Result<Option<YoutubeConsentOutcome>, Failure> {
+    let script = YOUTUBE_CONSENT
+        .replacen("__WAIT__", &wait_ms.to_string(), 1)
+        .replacen(
+            "__ACCEPT__",
+            &(answer == YoutubeConsent::Accept).to_string(),
+            1,
+        );
     let seen = eval(driver, tab, &script, EVAL_TIMEOUT_MS)?;
-    let rejected = seen.get("rejected").and_then(Value::as_bool) == Some(true);
+    let answered = seen.get("answered").and_then(Value::as_bool) == Some(true);
     match seen.get("page").and_then(Value::as_str) {
         Some("consent") => {
-            if rejected {
+            if answered {
                 std::thread::sleep(CONSENT_SETTLE);
             }
             let reloaded = navigate(driver, tab, url)?;
-            Ok(Some(YoutubeConsent {
-                rejected,
+            Ok(Some(YoutubeConsentOutcome {
+                answered,
                 reloaded: Some(reloaded),
             }))
         }
         Some("dialog") => {
             std::thread::sleep(CONSENT_SETTLE);
-            Ok(Some(YoutubeConsent {
-                rejected,
+            Ok(Some(YoutubeConsentOutcome {
+                answered,
                 reloaded: None,
             }))
         }
@@ -1241,14 +1281,20 @@ fn measure_steps(
             if let Some(again) = soft(
                 &mut visit.errors,
                 "consent",
-                reject_youtube_consent(driver, &tab, &site.url, YOUTUBE_DIALOG_WAIT_MS),
+                answer_youtube_consent(
+                    driver,
+                    &tab,
+                    &site.url,
+                    YOUTUBE_DIALOG_WAIT_MS,
+                    plan.youtube_consent,
+                ),
             )?
             .flatten()
             {
                 visit.consent_shown = true;
                 visit.consent_cmp = Some("youtube".into());
-                visit.consent_clicked = Some("reject all".into());
-                visit.consent_cleared = Some(again.rejected);
+                visit.consent_clicked = Some(format!("{} all", plan.youtube_consent.name()));
+                visit.consent_cleared = Some(again.answered);
                 if let Some(reloaded) = again.reloaded {
                     visit.nav_ms = reloaded.load_ms;
                     visit.timed_out |= reloaded.timed_out;
@@ -1348,8 +1394,14 @@ fn warm_up(context: &Context, config: Config, sites: &[Site]) {
             continue;
         };
         let step = if site.url.contains("youtube.com") {
-            reject_youtube_consent(driver, &opened.tab, &site.url, YOUTUBE_DIALOG_WAIT_MS)
-                .map(|_| ())
+            answer_youtube_consent(
+                driver,
+                &opened.tab,
+                &site.url,
+                YOUTUBE_DIALOG_WAIT_MS,
+                context.options.youtube_consent,
+            )
+            .map(|_| ())
         } else {
             accept_consent(
                 driver,
@@ -1563,7 +1615,7 @@ fn youtube_step(
             if let Some(again) = soft(
                 &mut record.errors,
                 "consent",
-                reject_youtube_consent(
+                answer_youtube_consent(
                     driver,
                     &tab,
                     url,
@@ -1572,11 +1624,12 @@ fn youtube_step(
                     } else {
                         0
                     },
+                    plan.youtube_consent,
                 ),
             )?
             .flatten()
             {
-                record.consent_rejected = again.rejected;
+                record.consent_answered = again.answered;
                 if let Some(reloaded) = again.reloaded {
                     record.nav_ms = reloaded.load_ms;
                 }
@@ -2016,6 +2069,7 @@ mod tests {
         assert_eq!(options.settle, Duration::from_millis(6000));
         assert_eq!(options.browsers, Config::DEFAULT);
         assert_eq!(options.mode(), "sites");
+        assert_eq!(options.youtube_consent, YoutubeConsent::Reject);
         assert!(!options.allow_builds);
     }
 
@@ -2047,12 +2101,20 @@ mod tests {
             "--speedometer 2 --youtube",
             "--label ../x",
             "--speedometer-warm",
+            "--youtube-consent maybe",
+            "--youtube-consent",
         ] {
             assert!(Options::parse(&arguments(bad)).is_err(), "{bad}");
         }
         assert_eq!(
             Options::parse(&arguments("--startup 4")).unwrap().startup,
             Some(4)
+        );
+        assert_eq!(
+            Options::parse(&arguments("--youtube --youtube-consent accept"))
+                .unwrap()
+                .youtube_consent,
+            YoutubeConsent::Accept
         );
     }
 

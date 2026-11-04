@@ -88,7 +88,7 @@ pub(super) struct YoutubeStep {
     pub(super) cpu_ms: Option<f64>,
     pub(super) footprint_mb: Option<f64>,
     pub(super) blocked: Option<u64>,
-    pub(super) consent_rejected: bool,
+    pub(super) consent_answered: bool,
     pub(super) result: Option<Value>,
     pub(super) errors: Vec<String>,
 }

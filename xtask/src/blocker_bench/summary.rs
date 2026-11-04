@@ -544,6 +544,16 @@ fn startup_section(results: &Results) -> String {
     )
 }
 
+/// Runs saved before the option existed always rejected.
+fn consent_line(results: &Results) -> String {
+    let answer = results
+        .options
+        .get("youtubeConsent")
+        .and_then(Value::as_str)
+        .unwrap_or("reject");
+    format!("YouTube's consent was answered \"{answer} all\".")
+}
+
 /// Which launches took the document-start script the watch timings come from.
 fn preload_line(results: &Results) -> String {
     let mut taken: BTreeMap<(usize, &str), (usize, usize)> = BTreeMap::new();
@@ -667,7 +677,8 @@ fn youtube_section(results: &Results) -> String {
         })
         .collect();
     format!(
-        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first `playing` or `timeupdate` event past 0 s with no ad showing, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts the seeks that did not play again within 15 s out of the two each completed watch visit made (a failed visit's are not counted; fewer is better), and `player ad data` is what the player response carried for ads. {}\n\n{}\n",
+        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first `playing` or `timeupdate` event past 0 s with no ad showing, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts the seeks that did not play again within 15 s out of the two each completed watch visit made (a failed visit's are not counted; fewer is better), and `player ad data` is what the player response carried for ads. {} {}\n\n{}\n",
+        consent_line(results),
         preload_line(results),
         table(
             &[
