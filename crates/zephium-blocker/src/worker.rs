@@ -1232,10 +1232,6 @@ impl ArtifactCache {
             match cache.load(cache_key, target, compiler.limits()) {
                 Ok(Some(loaded)) => {
                     if let Some(rules) = adapt_loaded_rules(loaded) {
-                        let rules = match self.catalog.as_ref().map(PolicyCatalog::load) {
-                            Some(Ok(catalog)) => with_navigation(rules, &catalog, compiler),
-                            _ => rules,
-                        };
                         #[cfg(test)]
                         {
                             self.persistent_hits += 1;
@@ -1279,10 +1275,18 @@ impl ArtifactCache {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
-                            let rules = with_navigation(rules, &catalog, compiler);
+                            let navigation = compile_navigation(&catalog, compiler);
+                            let rules = with_navigation(rules, navigation.clone());
                             let durably_cached = match persistent.as_ref() {
                                 Some(cache)
-                                    if cache.store(cache_key, &persistent_copy, &rules).is_ok() =>
+                                    if cache
+                                        .store(
+                                            cache_key,
+                                            &persistent_copy,
+                                            &rules,
+                                            navigation.as_ref(),
+                                        )
+                                        .is_ok() =>
                                 {
                                     true
                                 }
@@ -1347,35 +1351,43 @@ fn complete_job(
 #[cfg(feature = "runtime")]
 const NAVIGATION_SOURCE: &str = "ublock-badware";
 
+/// The badware list alone, compiled for the runtime matcher.
 #[cfg(feature = "runtime")]
-fn with_navigation(
-    rules: Arc<ContentRules>,
-    catalog: &StaticPolicyCatalog,
-    compiler: Compiler,
-) -> Arc<ContentRules> {
+fn compile_navigation(catalog: &StaticPolicyCatalog, compiler: Compiler) -> Option<CompiledRules> {
     let sources: Vec<_> = catalog
         .instantiate()
         .into_iter()
         .filter(|source| source.id().as_str() == NAVIGATION_SOURCE)
         .collect();
-    if sources.is_empty() || !rules.enabled() {
-        return rules;
+    if sources.is_empty() {
+        return None;
     }
-    match compiler.compile(CompileTarget::Runtime, sources) {
-        Ok(compiled) => rules.with_navigation(Arc::new(RuntimePolicy::compiled(compiled))),
-        Err(error) => {
-            eprintln!("content blocker: navigation check unavailable: {error}");
-            rules
+    compiler
+        .compile(CompileTarget::Runtime, sources)
+        .map_err(|error| eprintln!("content blocker: navigation check unavailable: {error}"))
+        .ok()
+}
+
+#[cfg(not(feature = "runtime"))]
+fn compile_navigation(_: &StaticPolicyCatalog, _: Compiler) -> Option<CompiledRules> {
+    None
+}
+
+#[cfg(feature = "runtime")]
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<CompiledRules>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) if rules.enabled() => {
+            rules.with_navigation(Arc::new(RuntimePolicy::compiled(navigation)))
         }
+        _ => rules,
     }
 }
 
 #[cfg(not(feature = "runtime"))]
-fn with_navigation(
-    rules: Arc<ContentRules>,
-    _: &StaticPolicyCatalog,
-    _: Compiler,
-) -> Arc<ContentRules> {
+fn with_navigation(rules: Arc<ContentRules>, _: Option<CompiledRules>) -> Arc<ContentRules> {
     rules
 }
 
@@ -1514,8 +1526,9 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             coverage,
             rules,
             cosmetics,
+            navigation,
         } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
-            .map(|rules| attach_cosmetics(rules, cosmetics)),
+            .map(|rules| attach_loaded_navigation(attach_cosmetics(rules, cosmetics), navigation)),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
@@ -1523,6 +1536,8 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             artifact_digest,
             encoded,
             cosmetics,
+            #[cfg(feature = "runtime")]
+            navigation,
         } => {
             let rules = ContentRules::declarative_with_digest(
                 digest,
@@ -1531,8 +1546,22 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
                 artifact_digest,
                 encoded,
             )?;
-            Some(attach_cosmetics(rules, cosmetics))
+            let rules = attach_cosmetics(rules, cosmetics);
+            #[cfg(feature = "runtime")]
+            let rules = attach_loaded_navigation(rules, navigation);
+            Some(rules)
         }
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn attach_loaded_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<Box<CachedRuntimeRules>>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) => rules.with_navigation(Arc::new(RuntimePolicy::persistent(navigation))),
+        None => rules,
     }
 }
 
@@ -1884,7 +1913,10 @@ mod tests {
             let compiled = compiler
                 .compile(CompileTarget::WebKit, catalog.instantiate())
                 .unwrap();
-            with_navigation(adapt_rules(compiled).unwrap(), catalog, compiler)
+            with_navigation(
+                adapt_rules(compiled).unwrap(),
+                compile_navigation(catalog, compiler),
+            )
         };
         let page = |url| {
             CoreRequest::exact(
