@@ -77,17 +77,23 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        if self.blocked_url(id).is_none() {
+        let Some(refused) = self.blocked_url(id) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
-        }
-        let Some((shown, can_go_back)) = self
-            .items
-            .tab(id)
-            .map(|tab| (tab.url.is_some(), tab.can_go_back))
-        else {
+        };
+        // A restored tab's own address can be the refused page, which never
+        // loaded: there is no page behind it to return to.
+        let Some((shown, can_go_back)) = self.items.tab(id).map(|tab| {
+            (
+                tab.url.as_ref().is_some_and(|url| url != &refused),
+                tab.can_go_back,
+            )
+        }) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
         self.items.clear_navigation_failure(id);
+        if !shown && !can_go_back {
+            self.items.forget_unloaded_page(id);
+        }
         let _ = self.relayout();
         self.project_tab(id);
         if !shown && can_go_back {

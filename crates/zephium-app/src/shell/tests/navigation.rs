@@ -859,6 +859,32 @@ fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
 }
 
 #[test]
+fn going_back_from_a_restored_tab_s_refused_page_leaves_no_address_behind() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    // A restored tab holds its last address, and its view is refused it.
+    commit_url(&mut shell, id, "https://scam.example/win");
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+        request: None,
+        can_continue: true,
+    }));
+    shell.handle(Command::LeaveBlockedPage(id));
+    let shown = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert_eq!(shown.failure, None);
+    assert_eq!(shown.url, None);
+    assert_eq!(shown.title, "New Tab");
+}
+
+#[test]
 fn a_refusal_the_engine_itself_enforces_offers_no_way_past() {
     use zephium_core::ports::engine::NavigationBlockReason;
     let (mut shell, engine, screen) = setup();

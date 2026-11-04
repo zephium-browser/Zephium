@@ -710,6 +710,11 @@ impl Items {
     /// which never replaces the explanation.
     pub fn is_refused_stand_in(&self, id: ItemId, url: &Url) -> bool {
         url.as_str() == "about:blank"
+            // A blank page the person asked for is theirs, and commits.
+            && self
+                .pending_navigations
+                .get(&id)
+                .is_none_or(|pending| pending.url.as_ref() != Some(url))
             && self
                 .tab(id)
                 .and_then(|tab| tab.failure.as_deref())
@@ -738,6 +743,17 @@ impl Items {
         } else {
             false
         }
+    }
+
+    /// A tab whose only page was refused before it loaded keeps neither its
+    /// address nor its title, as a new tab would.
+    pub fn forget_unloaded_page(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.url = None;
+        tab.title = TabState::new().title;
+        true
     }
 
     /// Drops the tab's failure, so the page under it, if any, shows again.
@@ -1270,8 +1286,20 @@ mod tests {
             true,
         ));
         assert!(items.is_refused_stand_in(id(1), &blank));
-        assert!(!items.set_committed_url(id(1), blank));
+        assert!(!items.set_committed_url(id(1), blank.clone()));
         assert!(items.tab(id(1)).unwrap().failure.is_some());
+        // A blank page the person asks for themselves commits over it.
+        items.navigate(id(1), "about:blank");
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.set_committed_url(id(1), blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
         // A real page the person then opens commits as usual.
         let page = Url::parse("https://news.example/").unwrap();
         assert!(!items.is_refused_stand_in(id(1), &page));
