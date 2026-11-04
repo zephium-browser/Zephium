@@ -7,7 +7,16 @@ use crate::{CompileTarget, FilterSource, SourceFormat, SourceId};
 
 /// Reserved: no catalog source may use it.
 pub(crate) const ID: &str = "zephium";
+#[cfg(not(feature = "qa-test-hosts"))]
 const RULES: &str = include_str!("zephium_rules.txt");
+#[cfg(feature = "qa-test-hosts")]
+const RULES: &str = concat!(
+    include_str!("zephium_rules.txt"),
+    "||blocked-ads.test^$document\n"
+);
+/// Protection QA builds only: judged as uBlock Origin's badware list is.
+#[cfg(feature = "qa-test-hosts")]
+pub(crate) const QA_BADWARE_RULES: &str = "||blocked-badware.test^$document\n";
 
 pub(crate) fn source() -> FilterSource {
     FilterSource::new(
@@ -44,4 +53,13 @@ pub(crate) fn fingerprint() -> [u8; 32] {
     digest.update(b"zephium-builtin-rules-v1");
     digest.update(RULES);
     digest.finalize()
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(not(feature = "qa-test-hosts"))]
+    #[test]
+    fn shipped_rules_name_no_qa_test_host() {
+        assert!(!super::RULES.contains(".test^"));
+    }
 }

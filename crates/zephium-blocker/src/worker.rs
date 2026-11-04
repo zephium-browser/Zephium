@@ -1354,11 +1354,18 @@ const NAVIGATION_SOURCE: &str = "ublock-badware";
 /// The badware list alone, compiled for the runtime matcher.
 #[cfg(feature = "runtime")]
 fn compile_navigation(catalog: &StaticPolicyCatalog, compiler: Compiler) -> Option<CompiledRules> {
-    let sources: Vec<_> = catalog
+    #[allow(unused_mut)]
+    let mut sources: Vec<_> = catalog
         .instantiate()
         .into_iter()
         .filter(|source| source.id().as_str() == NAVIGATION_SOURCE)
         .collect();
+    #[cfg(feature = "qa-test-hosts")]
+    sources.push(FilterSource::new(
+        crate::SourceId::new("zephium-qa-badware").expect("a valid source ID"),
+        crate::SourceFormat::Standard,
+        crate::builtin::QA_BADWARE_RULES.to_owned(),
+    ));
     if sources.is_empty() {
         return None;
     }

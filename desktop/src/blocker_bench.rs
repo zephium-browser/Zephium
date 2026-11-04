@@ -464,6 +464,8 @@ fn handle(
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
+        "setting" => setting(app, &command),
+        "capture" => capture(app, &command),
         "quit" => Ok(json!({})),
         _ => Err(format!("unknown op {op:?}")),
     };
@@ -741,6 +743,47 @@ fn blocked(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Val
         .flatten()
         .map(|statistics| statistics.today);
     Ok(json!({ "value": today }))
+}
+
+/// An app setting, such as `appearance`, as the settings page would set it.
+fn setting(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    let (key, value) = (text(command, "key")?, text(command, "value")?);
+    if shell(app)?.dispatch(Command::SetAppSetting {
+        key: key.to_owned(),
+        value: value.to_owned(),
+    }) {
+        Ok(json!({}))
+    } else {
+        Err("the command queue refused the request".into())
+    }
+}
+
+/// The main window as a PNG at `path`, for page screenshots.
+#[cfg(target_os = "macos")]
+fn capture(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    let path = std::path::PathBuf::from(text(command, "path")?);
+    let (done, captured) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let png = handle
+            .get_webview_window(crate::MAIN_LABEL)
+            .ok_or_else(|| "no main window".to_owned())
+            .and_then(|window| window.ns_window().map_err(|error| error.to_string()))
+            // SAFETY: Tao's live NSWindow, on the main thread for this call.
+            .and_then(|pointer| unsafe { zephium_engine::capture_window_png(pointer) });
+        let _ = done.send(png);
+    })
+    .map_err(|error| error.to_string())?;
+    let png = captured
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "the capture did not finish".to_owned())??;
+    std::fs::write(&path, png).map_err(|error| error.to_string())?;
+    Ok(json!({ "path": path }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("capture is macOS only".into())
 }
 
 fn close(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
