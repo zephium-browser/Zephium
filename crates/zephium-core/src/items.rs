@@ -758,7 +758,14 @@ impl Items {
             .get(&id)
             .and_then(|pending| pending.url.clone())
             .or_else(|| self.opening.get(&id).cloned());
-        let covers_page = replaced_page && self.tab(id).is_some_and(TabState::has_view);
+        // A refused page requested nothing, and a tab's first one may be
+        // refused before its view is counted; it covers either way.
+        let refused = matches!(
+            reason,
+            crate::ports::engine::NavigationFailureReason::Blocked(_)
+        );
+        let covers_page =
+            replaced_page && (refused || self.tab(id).is_some_and(TabState::has_view));
         if asked.is_none() && !covers_page {
             return false;
         }
