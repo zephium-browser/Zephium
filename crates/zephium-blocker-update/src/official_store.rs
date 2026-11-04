@@ -1076,6 +1076,13 @@ mod tests {
 
     #[test]
     fn a_first_schema_state_keeps_its_previous_lists_when_the_current_ones_are_gone() {
+        // A current object that is missing, or of the right size with other bytes.
+        for tampered in [false, true] {
+            migrates_to_previous_lists(tampered);
+        }
+    }
+
+    fn migrates_to_previous_lists(tampered: bool) {
         let directory = root();
         let path = directory.path().join("official");
         create_private_directory(&path).unwrap();
@@ -1096,9 +1103,14 @@ mod tests {
             previous.push(source(&older, "202609290001"));
             let mut newer = test_list(filter);
             newer.extend_from_slice(b"||newer.example.invalid^\n");
-            // Only the second current list is on disk.
+            // Only the second current list is on disk intact.
+            let object = path.join(object_name(&Sha256::digest(&newer)));
             if filter == OfficialFilter::EasyPrivacy {
-                atomic_write(&path.join(object_name(&Sha256::digest(&newer))), &newer).unwrap();
+                atomic_write(&object, &newer).unwrap();
+            } else if tampered {
+                let mut other = newer.clone();
+                *other.last_mut().unwrap() = b' ';
+                atomic_write(&object, &other).unwrap();
             }
             current.push(source(&newer, "202609300001"));
         }
@@ -1138,7 +1150,11 @@ mod tests {
             .iter()
             .map(|s| s.version.as_str())
             .collect();
-        assert_eq!(versions, ["202609290001", "202609290001"]);
+        assert_eq!(
+            versions,
+            ["202609290001", "202609290001"],
+            "tampered {tampered}"
+        );
         for source in &store.record.retained {
             assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
         }
