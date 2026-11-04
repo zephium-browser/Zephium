@@ -700,8 +700,42 @@ fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
+        #[cfg(target_os = "windows")]
+        fit_to_work_area(window);
         window.show().map_err(|error| error.to_string())
     }
+}
+
+/// The default size is taller than a scaled 1080p screen's work area, which
+/// would leave the window under the taskbar; it shrinks to fit and is centred.
+#[cfg(target_os = "windows")]
+fn fit_to_work_area(window: &WebviewWindow) {
+    let (Ok(Some(monitor)), Ok(outer), Ok(inner)) = (
+        window.current_monitor(),
+        window.outer_size(),
+        window.inner_size(),
+    ) else {
+        return;
+    };
+    let work = monitor.work_area();
+    if outer.width <= work.size.width && outer.height <= work.size.height {
+        return;
+    }
+    let width = outer.width.min(work.size.width);
+    let height = outer.height.min(work.size.height);
+    let frame = (
+        outer.width.saturating_sub(inner.width),
+        outer.height.saturating_sub(inner.height),
+    );
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        width.saturating_sub(frame.0),
+        height.saturating_sub(frame.1),
+    ));
+    let offset = |room: u32, used: u32| i32::try_from(room.saturating_sub(used) / 2).unwrap_or(0);
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        work.position.x + offset(work.size.width, width),
+        work.position.y + offset(work.size.height, height),
+    ));
 }
 
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
