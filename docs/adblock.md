@@ -161,9 +161,10 @@ whenever their host's site differs from the page's.
 
 The source changes at commit (WebView2 `ContentLoading`, which runs before the
 new document's scripts), not when a navigation starts. The old document keeps its
-own source until then, so its late requests and unload beacons are not judged
+own source until then, so its requests during the navigation are not judged
 against the incoming site, and a redirect, failed navigation or download changes
-nothing. A request the new document makes before its commit, such as an Early
+nothing. Requests it sends while unloading, such as beacons, can arrive after
+the commit and are judged against the new document. A request the new document makes before its commit, such as an Early
 Hints preload, is judged against the previous document. Before a view's first
 HTTP(S) commit, and after a commit to any other scheme, matching is
 source-independent: domain- and party-scoped rules are skipped, and a block that

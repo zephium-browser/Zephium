@@ -1115,7 +1115,8 @@ contention, matcher failure, or the per-request filter-evaluation ceiling. WebVi
 not supply the initiating frame URL, so each request is matched against the view's
 last-committed HTTP(S) main document: domain and party options are judged against that
 page, never the frame. The source changes at commit, not at navigation start, so a
-document's late requests keep their own source. Without a committed HTTP(S) document,
+document's requests during a navigation keep their own source; its unload-time
+requests can be judged against the next page. Without a committed HTTP(S) document,
 only source-independent blocks apply and a potentially applicable source-sensitive
 exception makes a normal generic block fail open. macOS and Linux install digest-exact
 native WebKit declarative filters and validate native cache identities. The application
