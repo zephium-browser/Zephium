@@ -132,11 +132,10 @@ impl Shell {
                 }
             }
             EngineEvent::ProfileRestartRequired { profile } => {
-                if !self.runtime_restart_required {
-                    self.runtime_restart_required = true;
-                    self.project_runtime_status();
-                }
+                self.runtime_restart_required = true;
                 if self.restart_profiles.insert(profile) {
+                    // The status now names the profile as the reason.
+                    self.project_runtime_status();
                     self.project_items();
                 }
             }

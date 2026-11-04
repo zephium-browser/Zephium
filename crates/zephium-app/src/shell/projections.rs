@@ -148,6 +148,15 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            // A profile's tabs already say why; the pill names the restart
+            // the person can act on, which then also adopts any new runtime.
+            restart_reason: self.runtime_restart_required.then(|| {
+                if self.restart_profiles.is_empty() {
+                    zephium_ipc::RuntimeRestartReason::RuntimeUpdate
+                } else {
+                    zephium_ipc::RuntimeRestartReason::Profile
+                }
+            }),
             session_set_aside: self.session_set_aside,
             user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
             security_advisories: self

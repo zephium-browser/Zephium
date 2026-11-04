@@ -210,6 +210,7 @@ fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
         statuses.lock().unwrap().as_slice(),
         &[RuntimeStatus {
             restart_required: false,
+            restart_reason: None,
             session_set_aside: false,
             user_content_degraded_scope_count: 0,
             security_advisories: vec![
@@ -324,4 +325,32 @@ fn a_profile_only_a_restart_can_trust_says_so_on_its_tabs() {
     assert!(failure.covers_page);
     assert_eq!(failure.url, "https://news.example/");
     assert!(shell.runtime_restart_required);
+}
+
+#[test]
+fn a_restart_says_whether_it_finishes_an_update_or_recovers_a_profile() {
+    let reasons = Arc::new(Mutex::new(Vec::new()));
+    let sink = reasons.clone();
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock().unwrap().push(status.restart_reason);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Engine(EngineEvent::RuntimeRestartRequired));
+    let profile = shell.spaces.iter().next().unwrap().profile;
+    shell.handle(Command::Engine(EngineEvent::ProfileRestartRequired {
+        profile,
+    }));
+    use zephium_ipc::RuntimeRestartReason::{Profile, RuntimeUpdate};
+    assert_eq!(
+        *reasons.lock().unwrap(),
+        vec![None, Some(RuntimeUpdate), Some(Profile)]
+    );
 }
