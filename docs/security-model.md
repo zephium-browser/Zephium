@@ -1133,22 +1133,22 @@ slot only at the exact GLib callback; macOS has no native cancellation handle an
 slot quarantined until its exact callback.
 
 **Scriptlets.** Filter lists choose functions from a scriptlet library that ships in the
-signed application and run them, with list-supplied arguments, in each page's main world at
-document start. Only uBlock Origin's two lists may call `trusted-*` scriptlets. One
-owner-approved exception runs JavaScript the list itself delivers. YouTube now stitches ads
-into the video stream on its servers, and uBlock Origin's `rpnt` rule rewrites one of
-YouTube's own inline scripts with a few kilobytes of list-supplied code so the player skips
-them, together with `trusted-edit-inbound-object` values that edit YouTube's player
-requests; uBlock Origin and Brave do the same. That code arrives with each list update from
-uBlock Origin's pinned HTTPS origin and carries no Zephium or publisher signature. The
-compiler admits it only from uBlock Origin's two lists, only for a fixed allowlist of
-`youtube.com`, `m.youtube.com`, `music.youtube.com` and `www.youtube-nocookie.com` and
-their subdomains, and at most 16 KiB per rule and 64 KiB per site; any other such rule is
-dropped and counted in the compile report. Only the Windows engine runs it; WebKit is served
-a different ad path that it does not shorten, so macOS withholds and counts it. It runs with
-the YouTube page's own privileges and only where the page's real host, compared as text, is
-one of those sites, never in privileged chrome. Pausing the site or turning protection off
-removes it with the rest of the program.
+signed application and run them, with list-supplied arguments, in each page's main world
+at document start. Only uBlock Origin's two lists may call `trusted-*` scriptlets. One
+owner-approved exception runs JavaScript the list itself delivers. YouTube now stitches
+ads into the video stream on its servers, and uBlock Origin's `rpnt` rule rewrites one
+of YouTube's own inline scripts with a few kilobytes of list-supplied code so the player
+skips them, together with `trusted-edit-inbound-object` values that edit YouTube's
+player requests; uBlock Origin and Brave do the same. That code arrives with each list
+update from uBlock Origin's pinned HTTPS origin and carries no Zephium or publisher
+signature. The compiler admits it only from uBlock Origin's two lists, only for a fixed
+allowlist of `youtube.com`, `m.youtube.com`, `music.youtube.com` and
+`www.youtube-nocookie.com` and their subdomains, and at most 16 KiB per rule and 64 KiB
+per site; any other such rule is dropped and counted in the compile report. Neither
+engine is served the ad path it shortens, so both withhold and count it for now; where
+it runs, it runs with the YouTube page's own privileges and only where the page's real
+host, compared as text, is one of those sites, never in privileged chrome. Pausing the
+site or turning protection off removes it with the rest of the program.
 
 The release-seed loader verifies deterministic gzip identity and performs bounded lazy
 inflation plus exact raw length/digest/header validation after a compiled-cache miss. It

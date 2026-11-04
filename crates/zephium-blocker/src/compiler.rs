@@ -157,10 +157,12 @@ pub enum CompileTarget {
 }
 
 impl CompileTarget {
-    /// Whether YouTube's page-code rules run on this target. WebKit is served
-    /// a different ad path that they do not shorten, so it withholds them.
+    /// Whether YouTube's page-code rules run on this target. Neither engine
+    /// is served the ad path they shorten, so both withhold them for now.
     pub const fn runs_page_code(self) -> bool {
-        matches!(self, Self::Runtime)
+        match self {
+            Self::Runtime | Self::WebKit => false,
+        }
     }
 }
 
