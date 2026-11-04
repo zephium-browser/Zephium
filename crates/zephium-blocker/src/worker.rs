@@ -23,6 +23,8 @@ use crate::cache::{
 };
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
+#[cfg(feature = "runtime-exact")]
+use crate::rules::SourceDocument;
 use crate::{
     CompileError, CompileTarget, CompiledRules, Compiler, FilterSource, NetworkAction,
     NetworkRequest, RequestMethod, ResourceType, SourceFormat, SourceId,
@@ -1538,34 +1540,99 @@ impl RuntimePolicyCounters {
 struct RuntimePolicy {
     artifact: RuntimePolicyArtifact,
     counters: RuntimePolicyCounters,
+    #[cfg(feature = "runtime-exact")]
+    sources: Mutex<RecentSources>,
+}
+
+/// Documents that recently sent requests, newest first. Every view of a
+/// profile shares one policy, so a few entries cover the pages loading at once.
+#[cfg(feature = "runtime-exact")]
+#[derive(Default)]
+struct RecentSources(Vec<(Box<str>, Arc<SourceDocument>)>);
+
+#[cfg(feature = "runtime-exact")]
+impl RecentSources {
+    const CAPACITY: usize = 8;
+    /// Longer document URLs are parsed per request rather than held.
+    const MAX_URL_BYTES: usize = 2048;
+
+    fn get(&mut self, url: &str) -> Option<Arc<SourceDocument>> {
+        let index = self.0.iter().position(|(held, _)| **held == *url)?;
+        let entry = self.0.remove(index);
+        let source = Arc::clone(&entry.1);
+        self.0.insert(0, entry);
+        Some(source)
+    }
+
+    fn insert(&mut self, url: &str, source: &Arc<SourceDocument>) {
+        if url.len() > Self::MAX_URL_BYTES {
+            return;
+        }
+        self.0.truncate(Self::CAPACITY - 1);
+        self.0.insert(0, (url.into(), Arc::clone(source)));
+    }
 }
 
 impl RuntimePolicy {
     fn compiled(rules: CompiledRules) -> Self {
-        Self {
-            artifact: RuntimePolicyArtifact::Compiled(rules),
-            counters: RuntimePolicyCounters::default(),
-        }
+        Self::new(RuntimePolicyArtifact::Compiled(rules))
     }
 
     #[cfg(feature = "runtime")]
     fn persistent(rules: Box<CachedRuntimeRules>) -> Self {
+        Self::new(RuntimePolicyArtifact::Persistent(rules))
+    }
+
+    fn new(artifact: RuntimePolicyArtifact) -> Self {
         Self {
-            artifact: RuntimePolicyArtifact::Persistent(rules),
+            artifact,
             counters: RuntimePolicyCounters::default(),
+            #[cfg(feature = "runtime-exact")]
+            sources: Mutex::default(),
         }
     }
 
     #[cfg(feature = "runtime-exact")]
-    fn evaluate(
+    fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source_url: &str,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
+        let source = self.source_document(source_url)?;
         match &self.artifact {
-            RuntimePolicyArtifact::Compiled(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Compiled(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
             #[cfg(feature = "runtime")]
-            RuntimePolicyArtifact::Persistent(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Persistent(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
         }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    fn source_document(&self, url: &str) -> Result<Arc<SourceDocument>, crate::MatchError> {
+        // Decisions run on the UI thread: a contended cache parses instead of
+        // waiting.
+        let mut recent = match self.sources.try_lock() {
+            Ok(recent) => Some(recent),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(source) = recent.as_mut().and_then(|recent| recent.get(url)) {
+            return Ok(source);
+        }
+        let source = Arc::new(match &self.artifact {
+            RuntimePolicyArtifact::Compiled(rules) => rules.source_document(url),
+            #[cfg(feature = "runtime")]
+            RuntimePolicyArtifact::Persistent(rules) => rules.source_document(url),
+        }?);
+        if let Some(recent) = recent.as_mut() {
+            recent.insert(url, &source);
+        }
+        Ok(source)
     }
 
     fn evaluate_source_independent(
@@ -1594,12 +1661,7 @@ impl NetworkRequestPolicy for RuntimePolicy {
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
                     };
-                    self.evaluate(NetworkRequest::new(
-                        request.url(),
-                        source_url,
-                        resource_type,
-                        method,
-                    ))
+                    self.evaluate_from(request.url(), source_url, resource_type, method)
                 }
                 #[cfg(not(feature = "runtime-exact"))]
                 {
@@ -1619,12 +1681,7 @@ impl NetworkRequestPolicy for RuntimePolicy {
                     self.counters.record_attribution_unavailable();
                     return CoreDecision::Allow;
                 };
-                self.evaluate(NetworkRequest::new(
-                    request.url(),
-                    top_level_url,
-                    resource_type,
-                    method,
-                ))
+                self.evaluate_from(request.url(), top_level_url, resource_type, method)
             }
             #[cfg(not(feature = "runtime-exact"))]
             NetworkAttribution::TopLevelApproximation => self.evaluate_source_independent(
@@ -2851,6 +2908,105 @@ mod tests {
             CoreDecision::Allow
         );
         assert_eq!(unattributed(loader), CoreDecision::Allow);
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_document_parsed_once_decides_like_its_url() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    [
+                        "||cdn.example^$third-party",
+                        "||widget.example^$~third-party",
+                        "||tracker.example^$domain=publisher.example|b.co.uk",
+                        "||ads.example/loader.js",
+                        "@@||ads.example/loader.js$domain=friendly.example",
+                        "||pages.github.io^$third-party",
+                        "||xn--bcher-kva.example^$domain=xn--bcher-kva.example",
+                    ]
+                    .join("\n"),
+                )],
+            )
+            .unwrap();
+        let urls = [
+            "https://cdn.example/lib.js",
+            "https://static.cdn.example/lib.js",
+            "https://widget.example/w.js",
+            "https://tracker.example/t.js",
+            "https://ads.example/loader.js",
+            "https://a.pages.github.io/x.js",
+            "https://xn--bcher-kva.example/i.js",
+        ];
+        let documents = [
+            "https://publisher.example/a?b=c#d",
+            "https://WWW.CDN.EXAMPLE:8443/",
+            "https://widget.example/",
+            "https://friendly.example/",
+            "https://a.b.co.uk/",
+            "https://a.pages.github.io/",
+            "https://b.pages.github.io/",
+            "https://bücher.example/",
+            "http://127.0.0.1:8080/",
+        ];
+        for document in documents {
+            let source = rules.source_document(document).unwrap();
+            for url in urls {
+                assert_eq!(
+                    rules.evaluate_from(url, &source, ResourceType::Script, RequestMethod::Get),
+                    rules.evaluate(NetworkRequest::new(
+                        url,
+                        document,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                    "{url} from {document}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn recent_documents_are_parsed_once_and_bounded() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let first = policy.source_document("https://a.example/").unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        for index in 0..RecentSources::CAPACITY {
+            policy
+                .source_document(&format!("https://{index}.example/"))
+                .unwrap();
+        }
+        assert!(!Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        let long = format!(
+            "https://a.example/{}",
+            "x".repeat(RecentSources::MAX_URL_BYTES)
+        );
+        let once = policy.source_document(&long).unwrap();
+        assert!(!Arc::ptr_eq(&once, &policy.source_document(&long).unwrap()));
+        assert_eq!(
+            policy.sources.lock().unwrap().0.len(),
+            RecentSources::CAPACITY
+        );
     }
 
     #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
