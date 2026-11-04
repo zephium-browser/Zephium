@@ -252,11 +252,15 @@ impl EngineHost {
         }
     }
 
-    /// `load` names the load that finished; `None` is the time limit.
-    fn scriptlets_ready(&mut self, profile: ProfileId, load: Option<u64>) {
-        let newest = self.scriptlets.waits.get(&profile).map(|wait| wait.load);
-        if newest.is_none() || load.is_some_and(|load| Some(load) != newest) {
+    /// `load` names the load that finished or ran out of time; an older
+    /// one's is ignored. Site changes finish applied either way, since their
+    /// network side did; a program that missed them is logged.
+    fn scriptlets_ready(&mut self, profile: ProfileId, load: u64, timed_out: bool) {
+        if self.scriptlets.waits.get(&profile).map(|wait| wait.load) != Some(load) {
             return;
+        }
+        if timed_out {
+            eprintln!("content blocker: the scriptlet program was not in place in time");
         }
         let Some(wait) = self.scriptlets.waits.remove(&profile) else {
             return;
@@ -311,7 +315,7 @@ impl EngineHost {
             }
             if notify.get() {
                 with_scriptlets_ready(profile, move |host| {
-                    host.scriptlets_ready(profile, Some(load))
+                    host.scriptlets_ready(profile, load, false)
                 });
             }
         });
@@ -319,16 +323,12 @@ impl EngineHost {
         if pending {
             let wait = self.scriptlets.waits.entry(profile).or_default();
             wait.load = load;
-            if wait.timeout.is_none() {
-                wait.timeout = crate::platform::imp::schedule_content_policy_timeout(
-                    READY_WITHIN,
-                    move || {
-                        with_scriptlets_ready(profile, move |host| {
-                            host.scriptlets_ready(profile, None)
-                        });
-                    },
-                );
-            }
+            wait.timeout =
+                crate::platform::imp::schedule_content_policy_timeout(READY_WITHIN, move || {
+                    with_scriptlets_ready(profile, move |host| {
+                        host.scriptlets_ready(profile, load, true)
+                    });
+                });
         }
         if before != dir || !self.scriptlets.swept {
             let running: Vec<PathBuf> = self
