@@ -53,6 +53,10 @@ pub struct ReleaseSeedAssetManifest {
     /// Exact upstream commit from the source's ABP header; lists without an
     /// ABP header name none.
     pub upstream_commit: Option<String>,
+    /// Exact `Last modified` header of a list versioned by it, seconds
+    /// included, so a copy changed within the same minute can be ordered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_modified: Option<String>,
 }
 
 /// Compression formats accepted by the release-seed loader.
@@ -166,6 +170,11 @@ impl ReleaseSeedManifest {
             }
             decode_sha256(&asset.compressed_sha256)?;
             validate_provenance_text(&asset.upstream_title)?;
+            match (&asset.upstream_commit, &asset.upstream_modified) {
+                (Some(_), None) => {}
+                (None, Some(modified)) => validate_provenance_text(modified)?,
+                _ => return Err(ReleaseSeedError::Provenance),
+            }
             if !(8..=20).contains(&asset.upstream_version.len())
                 || !asset
                     .upstream_version
@@ -270,6 +279,7 @@ fn validate_source_header(
             .map(|(version, commit)| (version.to_owned(), Some(commit)))
     } else {
         modified
+            .filter(|modified| Some(*modified) == descriptor.upstream_modified.as_deref())
             .and_then(dated_version)
             .map(|version| (version, None))
     };
@@ -503,6 +513,7 @@ mod tests {
                 upstream_title: "EasyList".into(),
                 upstream_version: "202607240001".into(),
                 upstream_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                upstream_modified: None,
             }],
         }
         .encode_canonical()
@@ -538,12 +549,14 @@ mod tests {
             upstream_title: "EasyList".into(),
             upstream_version: "202607240001".into(),
             upstream_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            upstream_modified: None,
         };
         let dated = ReleaseSeedAssetManifest {
             target: "ublock-quick-fixes.txt".into(),
             upstream_title: "uBlock\u{2080} filters \u{2013} Quick fixes".into(),
             upstream_version: "202611030030".into(),
             upstream_commit: None,
+            upstream_modified: Some("Mon, 02 Nov 2026 23:30:00 -0100".into()),
             ..adblock.clone()
         };
         let source = "! Title: uBlock\u{2080} filters \u{2013} Quick fixes\n! Last modified: Mon, 02 Nov 2026 23:30:00 -0100\n! Expires: 8 hours\nexample.invalid##.ad\n";
@@ -560,12 +573,25 @@ mod tests {
             validate_source_header(&source.replace("23:30", "23:31"), &dated),
             Err(ReleaseSeedError::Provenance)
         );
+        assert_eq!(
+            validate_source_header(&source.replace("23:30:00", "23:30:59"), &dated),
+            Err(ReleaseSeedError::Provenance),
+            "the metadata names the exact header, seconds included"
+        );
         let envelope = ReleaseSeedManifest {
             schema_version: RELEASE_SEED_SCHEMA_VERSION,
             catalog_manifest_sha256: "0".repeat(64),
             assets: vec![adblock, dated],
         };
         assert_eq!(envelope.validate(), Ok(()));
+        let unnamed = ReleaseSeedManifest {
+            assets: vec![ReleaseSeedAssetManifest {
+                upstream_modified: None,
+                ..envelope.assets[1].clone()
+            }],
+            ..envelope.clone()
+        };
+        assert_eq!(unnamed.validate(), Err(ReleaseSeedError::Provenance));
         assert_eq!(
             dated_version("01 Mar 2028 00:15 +0130").as_deref(),
             Some("202802292245")

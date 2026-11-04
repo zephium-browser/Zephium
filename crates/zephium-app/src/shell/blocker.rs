@@ -2756,10 +2756,14 @@ impl Shell {
         if self.blocker.native_policy_available(profile) {
             self.release_held_blocker_effects(profile);
         }
-        crate::diagnostic!(
-            "content blocker: startup protection was not ready in time; views_waiting={waiting} opened_unprotected_total={}",
-            self.blocker.startup_unprotected_views
-        );
+        // Nothing waited, so nothing opened unprotected: the deadline only
+        // ends the hold.
+        if waiting > 0 {
+            crate::diagnostic!(
+                "content blocker: startup protection was not ready in time; views_waiting={waiting} opened_unprotected_total={}",
+                self.blocker.startup_unprotected_views
+            );
+        }
     }
 
     /// A shutdown barrier drops every timer; views still held for startup

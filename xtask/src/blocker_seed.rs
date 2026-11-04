@@ -159,6 +159,8 @@ struct SourceHeader {
     title: String,
     version: String,
     commit: Option<String>,
+    /// The exact `Last modified` header of a list versioned by it.
+    modified: Option<String>,
     modified_unix: u64,
     expiry_seconds: u64,
 }
@@ -217,6 +219,8 @@ struct ReleaseSeedAsset {
     upstream_title: String,
     upstream_version: String,
     upstream_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upstream_modified: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -537,7 +541,26 @@ pub(crate) fn update(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    let catalog = build_catalog(&sources)?;
+    reject_future_sources(
+        &sources,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "the system clock is before 1970")?
+            .as_secs(),
+    )?;
+    let previous = repository
+        .join(ASSET_DIRECTORY)
+        .join(CATALOG_FILE)
+        .exists()
+        .then(|| {
+            let bytes = read_regular_file(
+                &repository.join(ASSET_DIRECTORY).join(CATALOG_FILE),
+                128 * 1024,
+            )?;
+            parse_canonical_json::<CatalogManifest>(&bytes, CATALOG_FILE)
+        })
+        .transpose()?;
+    let catalog = build_catalog(&sources, next_revision(&sources, previous.as_ref())?)?;
     let catalog_bytes = canonical_json(&catalog)?;
     let compressed = sources
         .iter()
@@ -691,21 +714,61 @@ fn validate_generation_progression(
                 asset.upstream_title, version, previous_version
             ));
         }
+        // A list versioned by its modification date can change twice in a
+        // minute, but only to a copy modified later within it; one with a
+        // published version cannot change under it.
+        let dated = SOURCES
+            .iter()
+            .any(|spec| spec.id == source.id && spec.header == HeaderFormat::Dated);
+        let seconds =
+            |asset: &ReleaseSeedAsset| asset.upstream_modified.as_deref().and_then(dated_seconds);
+        let later = matches!(
+            (seconds(asset), seconds(previous_asset)),
+            (Some(new), Some(old)) if new > old
+        );
         if version == previous_version
             && (source != previous_source
                 || asset.upstream_commit != previous_asset.upstream_commit)
+            && !(dated && later)
         {
             return Err(format!(
-                "{} version {} is being assigned different source bytes or provenance",
-                asset.upstream_title, version
+                "{} version {} is being assigned different source bytes or provenance{}",
+                asset.upstream_title,
+                version,
+                if dated {
+                    " without a later Last modified"
+                } else {
+                    ""
+                }
             ));
         }
     }
     Ok(())
 }
 
-fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
-    let revision = sources
+/// A source dated ahead of the clock (beyond five minutes of skew) is a bad
+/// header or a bad clock. A dated list is judged by its exact time.
+fn reject_future_sources(sources: &[SourceInput], now: u64) -> Result<(), String> {
+    let modified = |header: &SourceHeader| {
+        header
+            .modified
+            .as_deref()
+            .and_then(dated_seconds)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+            .unwrap_or(header.modified_unix)
+    };
+    match sources
+        .iter()
+        .find(|source| modified(&source.header) > now.saturating_add(300))
+    {
+        Some(source) => Err(format!("{} is dated in the future", source.header.title)),
+        None => Ok(()),
+    }
+}
+
+/// The newest source version, the least revision a catalog of them may carry.
+fn newest_version(sources: &[SourceInput]) -> Result<u64, String> {
+    sources
         .iter()
         .map(|source| {
             source
@@ -717,7 +780,48 @@ fn build_catalog(sources: &[SourceInput]) -> Result<CatalogManifest, String> {
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .max()
-        .ok_or_else(|| "blocker seed has no sources".to_owned())?;
+        .ok_or_else(|| "blocker seed has no sources".to_owned())
+}
+
+/// A new catalog's revision: unchanged sources keep the previous revision;
+/// any change advances it past both the previous revision and the newest
+/// source, in the same `YYYYMMDDHHMM` form, so a list with a lower version
+/// changing still moves the revision.
+fn next_revision(
+    sources: &[SourceInput],
+    previous: Option<&CatalogManifest>,
+) -> Result<u64, String> {
+    let newest = newest_version(sources)?;
+    let Some(previous) = previous else {
+        return Ok(newest);
+    };
+    let unchanged = previous.sources.len() == sources.len()
+        && previous.sources.iter().zip(sources).all(|(old, new)| {
+            old.id == new.spec.id
+                && old.sha256 == hex_sha256(&new.raw)
+                && old.length == new.raw.len() as u64
+        });
+    if unchanged {
+        return Ok(previous.revision.max(newest));
+    }
+    let (unix, _) = timestamp_from_version(&previous.revision.to_string())?;
+    let minutes = i64::try_from(unix / 60 + 1).map_err(|_| "revision overflows")?;
+    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
+    let minute = minutes.rem_euclid(1440);
+    let after: u64 = format!(
+        "{year:04}{month:02}{day:02}{:02}{:02}",
+        minute / 60,
+        minute % 60
+    )
+    .parse()
+    .map_err(|_| "revision overflows")?;
+    Ok(after.max(newest))
+}
+
+fn build_catalog(sources: &[SourceInput], revision: u64) -> Result<CatalogManifest, String> {
+    if revision < newest_version(sources)? {
+        return Err("blocker seed revision is older than its newest source".into());
+    }
     // The oldest list dates the seed, so the release gate measures the
     // stalest list rather than the most recently refreshed one.
     let created_unix = sources
@@ -772,13 +876,14 @@ fn build_release_seed(
                 upstream_title: source.header.title.clone(),
                 upstream_version: source.header.version.clone(),
                 upstream_commit: source.header.commit.clone(),
+                upstream_modified: source.header.modified.clone(),
             })
             .collect(),
     }
 }
 
 fn validate_catalog(catalog: &CatalogManifest, sources: &[SourceInput]) -> Result<(), String> {
-    if catalog != &build_catalog(sources)? {
+    if catalog != &build_catalog(sources, catalog.revision)? {
         return Err("blocker seed catalog differs from exact source metadata".into());
     }
     Ok(())
@@ -823,7 +928,10 @@ fn verify_and_inflate_sources(
             ));
         }
         let header = parse_source_header(&raw, spec)?;
-        if header.version != asset.upstream_version || header.commit != asset.upstream_commit {
+        if header.version != asset.upstream_version
+            || header.commit != asset.upstream_commit
+            || header.modified != asset.upstream_modified
+        {
             return Err(format!(
                 "{title} header provenance does not match its envelope"
             ));
@@ -912,7 +1020,7 @@ fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, St
     {
         return Err(format!("{expected_title} header provenance is invalid"));
     }
-    let (version, commit, expiry_seconds) = match spec.header {
+    let (version, commit, modified, expiry_seconds) = match spec.header {
         HeaderFormat::Adblock => {
             let version = field("Version")?;
             let commit = field("Commit")?;
@@ -926,15 +1034,21 @@ fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, St
             {
                 return Err(format!("{expected_title} header provenance is invalid"));
             }
-            (version.to_owned(), Some(commit.to_owned()), 4 * DAY)
+            (version.to_owned(), Some(commit.to_owned()), None, 4 * DAY)
         }
         HeaderFormat::Dated => {
-            let version = dated_version(field("Last modified")?)
+            let modified = field("Last modified")?;
+            let version = dated_version(modified)
                 .ok_or_else(|| format!("{expected_title} has an invalid Last modified header"))?;
             let expires = expires_seconds(field("Expires")?)
                 .ok_or_else(|| format!("{expected_title} has an invalid Expires header"))?;
             let ceiling = if spec.follows_expires { DAY } else { 7 * DAY };
-            (version, None, expires.clamp(4 * HOUR, ceiling))
+            (
+                version,
+                None,
+                Some(modified.to_owned()),
+                expires.clamp(4 * HOUR, ceiling),
+            )
         }
     };
     let (modified_unix, formatted) = timestamp_from_version(&version)?;
@@ -947,6 +1061,7 @@ fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, St
         title: expected_title.into(),
         version,
         commit,
+        modified,
         modified_unix,
         expiry_seconds,
     })
@@ -967,6 +1082,20 @@ fn expires_seconds(value: &str) -> Option<u64> {
 /// An RFC 2822 date such as `Mon, 02 Nov 2026 12:27:09 +0000` as the UTC
 /// `YYYYMMDDHHMM` version the app's list updater assigns it.
 fn dated_version(value: &str) -> Option<String> {
+    let minutes = dated_seconds(value)?.div_euclid(60);
+    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
+    let minute_of_day = minutes.rem_euclid(1440);
+    (1970..=9999).contains(&year).then(|| {
+        format!(
+            "{year:04}{month:02}{day:02}{:02}{:02}",
+            minute_of_day / 60,
+            minute_of_day % 60
+        )
+    })
+}
+
+/// The same date in seconds since the Unix epoch.
+fn dated_seconds(value: &str) -> Option<i64> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -1006,15 +1135,7 @@ fn dated_version(value: &str) -> Option<String> {
     }
     let minutes = days_from_civil(year, month, day) * 1440 + hour * 60 + minute
         - sign * (offset / 100 * 60 + offset % 100);
-    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
-    let minute_of_day = minutes.rem_euclid(1440);
-    (1970..=9999).contains(&year).then(|| {
-        format!(
-            "{year:04}{month:02}{day:02}{:02}{:02}",
-            minute_of_day / 60,
-            minute_of_day % 60
-        )
-    })
+    Some(minutes * 60 + second)
 }
 
 fn timestamp_from_version(version: &str) -> Result<(u64, String), String> {
@@ -2085,6 +2206,7 @@ mod tests {
             upstream_title: "EasyList".into(),
             upstream_version: "202607240002".into(),
             upstream_commit: Some("2".repeat(40)),
+            upstream_modified: None,
         };
         let previous_seed = ReleaseSeedManifest {
             schema_version: 1,
@@ -2131,6 +2253,7 @@ mod tests {
             upstream_title: "uBlock filters".into(),
             upstream_version: "202611021227".into(),
             upstream_commit: None,
+            upstream_modified: Some("Mon, 02 Nov 2026 12:27:09 +0000".into()),
             ..asset.clone()
         };
         let mut grown_catalog = previous_catalog.clone();
@@ -2164,5 +2287,154 @@ mod tests {
         )
         .unwrap_err()
         .contains("identity changed"));
+    }
+
+    fn dated_input(index: usize, version: &str, raw: &[u8]) -> SourceInput {
+        SourceInput {
+            spec: &SOURCES[index],
+            raw: raw.to_vec(),
+            header: SourceHeader {
+                title: SOURCES[index].id.into(),
+                version: version.into(),
+                commit: None,
+                modified: None,
+                modified_unix: timestamp_from_version(version).unwrap().0,
+                expiry_seconds: 4 * 24 * 60 * 60,
+            },
+        }
+    }
+
+    fn catalog_of(inputs: &[SourceInput], revision: u64) -> CatalogManifest {
+        build_catalog(inputs, revision).unwrap()
+    }
+
+    #[test]
+    fn any_source_change_advances_the_revision_by_at_least_a_minute() {
+        let old = [
+            dated_input(0, "202611021000", b"a"),
+            dated_input(3, "202611021459", b"b"),
+        ];
+        let previous = catalog_of(&old, 202611021459);
+        assert_eq!(next_revision(&old, Some(&previous)).unwrap(), 202611021459);
+        // The lower-versioned list changes; the revision still moves, with the minute carried.
+        let changed = [
+            dated_input(0, "202611021000", b"a2"),
+            dated_input(3, "202611021459", b"b"),
+        ];
+        assert_eq!(
+            next_revision(&changed, Some(&previous)).unwrap(),
+            202611021500
+        );
+        let newer = [
+            dated_input(0, "202611021000", b"a"),
+            dated_input(3, "202611031200", b"b2"),
+        ];
+        assert_eq!(
+            next_revision(&newer, Some(&previous)).unwrap(),
+            202611031200
+        );
+        assert_eq!(next_revision(&old, None).unwrap(), 202611021459);
+        assert!(build_catalog(&newer, 202611021459).is_err());
+    }
+
+    #[test]
+    fn a_source_dated_in_the_future_is_refused() {
+        let input = [dated_input(3, "202611021200", b"q")];
+        let modified = input[0].header.modified_unix;
+        assert!(reject_future_sources(&input, modified).is_ok());
+        assert!(reject_future_sources(&input, modified - 300).is_ok());
+        assert!(reject_future_sources(&input, modified - 301).is_err());
+
+        let mut exact = dated_input(3, "202611021200", b"q");
+        exact.header.modified = Some("Mon, 02 Nov 2026 12:00:59 +0000".into());
+        let input = [exact];
+        // The minute is within the skew; its 59th second is not.
+        assert!(reject_future_sources(&input, modified - 290).is_err());
+        assert!(reject_future_sources(&input, modified - 241).is_ok());
+    }
+
+    #[test]
+    fn a_dated_list_may_change_within_its_minute_only_to_a_later_copy() {
+        const PREVIOUS: &str = "Mon, 02 Nov 2026 14:08:18 +0000";
+        for (index, target, license, dated, modified, accepted) in [
+            (
+                3,
+                "ublock-quick-fixes.txt",
+                &GPL_3,
+                true,
+                "Mon, 02 Nov 2026 14:08:40 +0000",
+                true,
+            ),
+            (3, "ublock-quick-fixes.txt", &GPL_3, true, PREVIOUS, false),
+            (
+                3,
+                "ublock-quick-fixes.txt",
+                &GPL_3,
+                true,
+                "Mon, 02 Nov 2026 14:08:02 +0000",
+                false,
+            ),
+            (0, "easylist.txt", &CC_BY_SA, false, "", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            for name in file_set([(target, license)]) {
+                std::fs::write(directory.path().join(name), b"fixture").unwrap();
+            }
+            let source = CatalogSource {
+                id: SOURCES[index].id.into(),
+                format: SourceFormat::Standard,
+                target: target.into(),
+                length: 7,
+                sha256: "0".repeat(64),
+                license: license_metadata(&SOURCES[index]),
+            };
+            let previous = CatalogManifest {
+                schema_version: 1,
+                revision: 202_611_021_408,
+                created_unix: 2,
+                expires_unix: 3,
+                sources: vec![source.clone()],
+            };
+            let previous_bytes = canonical_json(&previous).unwrap();
+            let asset = ReleaseSeedAsset {
+                target: target.into(),
+                compression: CompressionFormat::Gzip,
+                compressed_length: 7,
+                compressed_sha256: "1".repeat(64),
+                upstream_title: SOURCES[index].id.into(),
+                upstream_version: "202611021408".into(),
+                upstream_commit: (!dated).then(|| "2".repeat(40)),
+                upstream_modified: dated.then(|| PREVIOUS.into()),
+            };
+            let seed = ReleaseSeedManifest {
+                schema_version: SEED_SCHEMA_VERSION,
+                catalog_manifest_sha256: hex_sha256(&previous_bytes),
+                assets: vec![asset.clone()],
+            };
+            std::fs::write(directory.path().join(CATALOG_FILE), &previous_bytes).unwrap();
+            std::fs::write(
+                directory.path().join(SEED_FILE),
+                canonical_json(&seed).unwrap(),
+            )
+            .unwrap();
+            let mut changed = previous.clone();
+            changed.revision = 202_611_021_409;
+            changed.sources[0].sha256 = "f".repeat(64);
+            let changed_bytes = canonical_json(&changed).unwrap();
+            let changed_seed = ReleaseSeedManifest {
+                assets: vec![ReleaseSeedAsset {
+                    upstream_modified: dated.then(|| modified.into()),
+                    ..asset
+                }],
+                ..seed
+            };
+            let result = validate_generation_progression(
+                directory.path(),
+                &changed,
+                &changed_bytes,
+                &changed_seed,
+            );
+            assert_eq!(result.is_ok(), accepted, "{target} {modified}");
+        }
     }
 }

@@ -1906,8 +1906,9 @@ The following are roadmap items or disabled backends, not current security guara
   guaranteed malware detection, and automatic transfer resumption;
 - Chrome/Firefox extension compatibility beyond the subset in
   `docs/extension-release-scope.md`;
-- continuously maintained online blocker sources or full filter-list semantics: the usable
-  network-only release seed is bundled, but production TUF trust is unprovisioned and
+- signed blocker-list publication or full filter-list semantics: the release seed is
+  bundled and the official lists update over HTTPS from their publishers, but TUF
+  publication is unprovisioned, so no list update carries a Zephium signature, and
   packaged enforcement/endurance proof is still a release gate;
 - an anti-phishing service, or any way past a certificate error for a public site;
 - rollback-resistant update metadata: the updater (`desktop/src/updates.rs`) verifies a

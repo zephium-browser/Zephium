@@ -109,13 +109,31 @@ pub(crate) struct Package {
     pub sources: Vec<Source>,
 }
 
-/// When one list is next due, and how many checks of it failed in a row.
+/// When one list is next due, how many checks of it failed in a row, and an
+/// older copy than the one kept that recent checks returned.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Schedule {
     pub due: u64,
     pub failure_streak: u8,
+    /// The older copy, and how many checks in a row returned exactly it.
+    #[serde(default)]
+    pub stale: Option<([u8; 32], u8)>,
+    /// Checks that returned an older copy than the one kept.
+    #[serde(default)]
+    pub rollbacks: u32,
+    /// When this list was last checked successfully.
+    #[serde(default)]
+    pub checked: Option<u64>,
+    /// A rejected copy of this list that the list has not been checked past
+    /// since.
+    #[serde(default)]
+    pub rejected: Option<[u8; 32]>,
 }
+
+/// An older copy returned this many checks in a row is upstream's own revert,
+/// not a stale cache, and is accepted.
+pub(crate) const REVERT_AFTER: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,7 +149,6 @@ pub(crate) struct Record {
     pub current: Option<Package>,
     pub previous: Option<Package>,
     pub candidate: Option<Package>,
-    pub rejected: Option<Package>,
     /// One per official list, in `OfficialFilter::ALL` order.
     pub schedule: Vec<Schedule>,
     /// Downloaded lists kept from an older schema, reused while their bytes
@@ -153,11 +170,10 @@ impl Record {
             current: None,
             previous: None,
             candidate: None,
-            rejected: None,
             schedule: vec![
                 Schedule {
                     due: now,
-                    failure_streak: 0
+                    ..Schedule::default()
                 };
                 OfficialFilter::ALL.len()
             ],
@@ -165,9 +181,29 @@ impl Record {
         }
     }
 
+    /// Remembers the copy of each list the candidate changed as rejected,
+    /// until that list is checked past it.
+    pub fn reject_candidate(&mut self) {
+        let Some(rejected) = self.candidate.take() else {
+            return;
+        };
+        for (index, source) in rejected.sources.iter().enumerate() {
+            let kept = self
+                .current
+                .as_ref()
+                .and_then(|current| current.sources.get(index))
+                .is_some_and(|current| current.sha256 == source.sha256);
+            if !kept {
+                self.schedule[index].rejected = Some(source.sha256);
+            }
+        }
+    }
+
     /// The newest descriptor of `filter` this record holds.
+    /// A rejected copy is never a list's prior copy: reusing it would stage
+    /// the same rejected bytes again.
     pub fn prior(&self, filter: OfficialFilter) -> Option<&Source> {
-        [&self.candidate, &self.rejected, &self.current]
+        [&self.candidate, &self.current]
             .into_iter()
             .flatten()
             .next()
@@ -491,7 +527,6 @@ impl OfficialStore {
             self.record.current.as_ref(),
             self.record.previous.as_ref(),
             self.record.candidate.as_ref(),
-            self.record.rejected.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -572,10 +607,13 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
             .attempted
             .is_some_and(|t| t > now.saturating_add(31 * DAY))
         || record.schedule.len() != OfficialFilter::ALL.len()
-        || record
-            .schedule
-            .iter()
-            .any(|s| s.due > now.saturating_add(31 * DAY) || s.failure_streak > 8)
+        || record.schedule.iter().any(|s| {
+            s.due > now.saturating_add(31 * DAY)
+                || s.failure_streak > 8
+                || s.stale
+                    .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
+                || s.checked.is_some_and(|t| t > now.saturating_add(31 * DAY))
+        })
         || record.retained.len() > OfficialFilter::ALL.len()
         || record
             .retained
@@ -590,7 +628,6 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
         record.current.as_ref(),
         record.previous.as_ref(),
         record.candidate.as_ref(),
-        record.rejected.as_ref(),
     ]
     .into_iter()
     .flatten()

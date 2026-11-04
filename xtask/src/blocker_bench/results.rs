@@ -117,6 +117,8 @@ pub(super) struct SpeedometerRun {
     pub(super) footprint_before_mb: Option<f64>,
     pub(super) footprint_mb: Option<f64>,
     pub(super) blocked: Option<u64>,
+    /// Speedometer's own mean time per suite, in milliseconds.
+    pub(super) suites: Option<serde_json::Value>,
     pub(super) errors: Vec<String>,
 }
 

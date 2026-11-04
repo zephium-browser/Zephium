@@ -83,7 +83,10 @@ const SPEEDOMETER_SETTLE: Duration = Duration::from_secs(20);
 /// The score is in the page once `#result-number` has text; a failed run
 /// writes "Error" there.
 const SPEEDOMETER_STATE: &str = "const text = (id) => document.getElementById(id)?.textContent.trim() ?? '';\n\
-    return { score: text('result-number'), range: text('confidence-number'), progress: text('info-progress') };";
+    const score = text('result-number');\n\
+    const m = score && window.benchmarkClient && window.benchmarkClient.metrics;\n\
+    const suites = m ? Object.fromEntries(Object.entries(m).filter(([k]) => !k.includes('/')).map(([k, v]) => [k, v.mean])) : null;\n\
+    return { score, range: text('confidence-number'), progress: text('info-progress'), suites };";
 
 /// Long-lived, monetized music videos, and one of over twenty minutes.
 const VIDEOS: [(&str, &str); 5] = [
@@ -212,6 +215,10 @@ struct Options {
     speedometer: Option<usize>,
     speedometer_url: Option<String>,
     speedometer_settle: Duration,
+    /// Keep each browser's profile (Zephium's QA session, the others' profile
+    /// directory) across Speedometer runs, after one uncounted warm-up run, as a
+    /// returning user's caches would be.
+    speedometer_warm: bool,
     label: Option<String>,
     compare: Option<PathBuf>,
     zephium: Option<PathBuf>,
@@ -233,6 +240,7 @@ impl Options {
             runs: 3,
             settle: Duration::from_millis(6000),
             speedometer_settle: SPEEDOMETER_SETTLE,
+            speedometer_warm: false,
             ..Options::default()
         };
         let mut arguments = arguments.iter();
@@ -274,6 +282,7 @@ impl Options {
                     options.speedometer = Some(number(&value()?, flag)?.max(1) as usize);
                 }
                 "--speedometer-url" => options.speedometer_url = Some(value()?),
+                "--speedometer-warm" => options.speedometer_warm = true,
                 "--speedometer-settle-ms" => {
                     options.speedometer_settle = Duration::from_millis(number(&value()?, flag)?);
                 }
@@ -309,6 +318,9 @@ impl Options {
         ];
         if passes.into_iter().filter(|pass| *pass).count() > 1 {
             return Err("--youtube, --startup and --speedometer are separate passes".into());
+        }
+        if options.speedometer_warm && options.speedometer.is_none() {
+            return Err("--speedometer-warm needs --speedometer".into());
         }
         if let Some(label) = &options.label {
             let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
@@ -444,6 +456,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             "settleMs": context.options.settle.as_millis() as u64,
             "startup": context.options.startup,
             "speedometer": context.options.speedometer,
+            "speedometerWarm": context.options.speedometer_warm,
             "net": !context.options.no_net,
             "warmup": !context.options.no_warmup,
             "buildsRunning": builds,
@@ -894,23 +907,38 @@ impl Context {
         let profile = if config.zephium() {
             None
         } else {
-            let directory = tempfile::Builder::new()
-                .prefix(&format!("{}-", config.name()))
-                .tempdir_in(self.cache.join("profiles"))
-                .map_err(|e| e.to_string())?;
-            if let Some(template) = self.templates.get(config.name()) {
-                copy_profile(template, directory.path())
-                    .map_err(|e| format!("copying the template profile: {e}"))?;
-            }
-            Some(directory)
+            Some(self.profile(config)?)
         };
-        let command = self.command(
-            config,
-            profile
-                .as_ref()
-                .map_or(Path::new(""), tempfile::TempDir::path),
-            qa,
-        )?;
+        self.launch_in(config, qa, profile, None, log)
+    }
+
+    /// A new profile directory for a non-Zephium browser, from its template.
+    fn profile(&self, config: Config) -> Result<tempfile::TempDir, String> {
+        let directory = tempfile::Builder::new()
+            .prefix(&format!("{}-", config.name()))
+            .tempdir_in(self.cache.join("profiles"))
+            .map_err(|e| e.to_string())?;
+        if let Some(template) = self.templates.get(config.name()) {
+            copy_profile(template, directory.path())
+                .map_err(|e| format!("copying the template profile: {e}"))?;
+        }
+        Ok(directory)
+    }
+
+    /// Starts `config` in `profile`, owned by the session, or in `kept`, a
+    /// directory the caller keeps across launches.
+    fn launch_in(
+        &self,
+        config: Config,
+        qa: Option<&QaSession>,
+        profile: Option<tempfile::TempDir>,
+        kept: Option<&Path>,
+        log: &str,
+    ) -> Result<Session, String> {
+        let directory = kept
+            .or_else(|| profile.as_ref().map(tempfile::TempDir::path))
+            .unwrap_or(Path::new(""));
+        let command = self.command(config, directory, qa)?;
         let stderr = std::fs::File::create(self.out.join("logs").join(format!("{log}.log")))
             .map_err(|e| e.to_string())?;
         let (mut driver, ready) = Driver::start(command, Stdio::from(stderr), READY_WITHIN)?;
@@ -1599,31 +1627,82 @@ fn run_speedometer(
         .speedometer_url
         .as_deref()
         .unwrap_or(SPEEDOMETER_URL);
-    for run in 1..=runs {
-        for config in rotated(&context.options.browsers, run - 1) {
+    let warm = context.options.speedometer_warm;
+    // Warm runs keep each browser's profile: Zephium's QA session, or the
+    // other browsers' profile directory.
+    let mut kept_sessions: BTreeMap<&str, QaSession> = BTreeMap::new();
+    let mut kept_profiles: BTreeMap<&str, tempfile::TempDir> = BTreeMap::new();
+    // A browser whose warm-up gave no score is not measured as warm.
+    let mut unwarmed: Vec<&str> = Vec::new();
+    if warm {
+        for config in &context.options.browsers {
             let name = config.name();
-            eprintln!("run {run}/{runs} {name}: leave the machine alone");
-            let qa = config
-                .zephium()
-                .then(|| QaSession::new(config, &format!("s{run}")));
+            if config.zephium() {
+                kept_sessions.insert(name, QaSession::new(*config, "sw"));
+                continue;
+            }
+            match context.profile(*config) {
+                Ok(profile) => {
+                    kept_profiles.insert(name, profile);
+                }
+                Err(error) => {
+                    eprintln!("  {name}: no profile to keep warm: {error}");
+                    results.launches.push(Launch {
+                        config: name.to_string(),
+                        phase: "warm-up".into(),
+                        error: Some(error),
+                        ..Launch::default()
+                    });
+                    unwarmed.push(name);
+                }
+            }
+        }
+    }
+    for run in usize::from(!warm)..=runs {
+        for config in rotated(&context.options.browsers, run.saturating_sub(1)) {
+            let name = config.name();
+            if unwarmed.contains(&name) {
+                continue;
+            }
+            if run == 0 {
+                eprintln!("warm-up {name}: leave the machine alone");
+            } else {
+                eprintln!("run {run}/{runs} {name}: leave the machine alone");
+            }
+            let fresh =
+                (!warm && config.zephium()).then(|| QaSession::new(config, &format!("s{run}")));
+            let qa = fresh.as_ref().or_else(|| kept_sessions.get(name));
             let mut launch = Launch {
                 config: name.to_string(),
                 run,
-                phase: "run".into(),
+                phase: if run == 0 { "warm-up" } else { "run" }.into(),
                 ..Launch::default()
             };
-            let mut session =
-                match context.launch(config, qa.as_ref(), &format!("{name}-speedometer-r{run}")) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        eprintln!("  {name} did not start: {error}");
-                        launch.error = Some(error);
-                        results.launches.push(launch);
-                        continue;
+            let launched = (!warm && !config.zephium())
+                .then(|| context.profile(config))
+                .transpose()
+                .and_then(|profile| {
+                    context.launch_in(
+                        config,
+                        qa,
+                        profile,
+                        kept_profiles.get(name).map(tempfile::TempDir::path),
+                        &format!("{name}-speedometer-r{run}"),
+                    )
+                });
+            let mut session = match launched {
+                Ok(session) => session,
+                Err(error) => {
+                    eprintln!("  {name} did not start: {error}");
+                    launch.error = Some(error);
+                    results.launches.push(launch);
+                    if run == 0 {
+                        unwarmed.push(name);
                     }
-                };
+                    continue;
+                }
+            };
             record_session(&mut launch, &session);
-            results.launches.push(launch);
             let record = speedometer_run(
                 &mut session,
                 config,
@@ -1643,10 +1722,26 @@ fn run_speedometer(
                     .first()
                     .map_or(String::new(), |error| format!("  ! {error}")),
             );
-            results.speedometer.push(record);
+            if run > 0 {
+                results.launches.push(launch);
+                results.speedometer.push(record);
+            } else if record.score.is_none() {
+                // Only a failed warm-up is kept, so the Launches table says why
+                // this browser has no warm runs.
+                eprintln!("  {name}: the warm-up gave no score, so its warm runs are skipped");
+                launch.error = Some(
+                    record
+                        .errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "the warm-up gave no score".into()),
+                );
+                results.launches.push(launch);
+                unwarmed.push(name);
+            }
             session.driver.quit();
             drop(session);
-            drop(qa);
+            drop(fresh);
             results.save(saved)?;
         }
     }
@@ -1700,6 +1795,10 @@ fn speedometer_run(
                 record.range_text = text("range");
                 record.score = number_in(&score);
                 record.score_text = Some(score);
+                record.suites = last
+                    .get("suites")
+                    .cloned()
+                    .filter(|suites| !suites.is_null());
                 break true;
             }
             if started.elapsed() >= SPEEDOMETER_CAP {
@@ -1947,6 +2046,7 @@ mod tests {
             "--youtube --startup 3",
             "--speedometer 2 --youtube",
             "--label ../x",
+            "--speedometer-warm",
         ] {
             assert!(Options::parse(&arguments(bad)).is_err(), "{bad}");
         }
