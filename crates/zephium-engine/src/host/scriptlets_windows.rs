@@ -240,13 +240,18 @@ impl EngineHost {
         }
         let wait = self.scriptlets.waits.entry(profile).or_default();
         wait.adds.extend(pending);
-        // Each replacement gets the full time from its own start.
-        wait.timeout = crate::platform::imp::schedule_browser_timeout(READY_WITHIN, move || {
-            with_scriptlets(move |host| {
-                eprintln!("content blocker: the scriptlet program was not on every view in time");
-                host.release_scriptlet_wait(profile);
-            });
-        });
+        // Armed once, so changes arriving in a stream cannot hold the wait open.
+        if wait.timeout.is_none() {
+            wait.timeout =
+                crate::platform::imp::schedule_browser_timeout(READY_WITHIN, move || {
+                    with_scriptlets(move |host| {
+                        eprintln!(
+                            "content blocker: the scriptlet program was not on every view in time"
+                        );
+                        host.release_scriptlet_wait(profile);
+                    });
+                });
+        }
         true
     }
 
@@ -299,11 +304,14 @@ impl EngineHost {
         profile: ProfileId,
         generation: ContentPolicyGeneration,
     ) -> bool {
-        if !self.refresh_profile_scriptlets(profile) {
+        self.refresh_profile_scriptlets(profile);
+        // A generation joins the wait still open from an earlier change; the
+        // one it replaces settles now.
+        let Some(wait) = self.scriptlets.waits.get_mut(&profile) else {
             return false;
-        }
-        if let Some(wait) = self.scriptlets.waits.get_mut(&profile) {
-            wait.generation = Some(generation);
+        };
+        if let Some(replaced) = wait.generation.replace(generation) {
+            self.settle_applied_content_policy(profile, replaced);
         }
         true
     }
