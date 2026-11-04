@@ -179,7 +179,16 @@ impl SourceFormat {
 /// Origin's own lists, which are written for them. User filters and every
 /// other list never may.
 pub fn official_source_trusts_scriptlets(id: &SourceId) -> bool {
-    matches!(id.as_str(), "ublock-filters" | "ublock-quick-fixes")
+    matches!(
+        id.as_str(),
+        "ublock-filters"
+            | "ublock-quick-fixes"
+            | "ublock-link-shorteners"
+            | "ublock-privacy"
+            | "ublock-resource-abuse"
+            | "ublock-unbreak"
+            | "ublock-badware"
+    )
 }
 
 /// Owned input list consumed by [`Compiler::compile`].
@@ -1158,15 +1167,6 @@ fn compile_webkit(
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;
             }
-            let mut kept = Vec::with_capacity(native_rules.len());
-            for native in native_rules {
-                let converted_rule = ConvertedRule {
-                    native,
-                    resource_types: resource_types.clone(),
-                };
-                if matches!(converted_rule.native.action.typ, CbType::Block)
-                    && converted_rule.native.trigger.url_filter.contains(".*")
-                    && pruned.contains(
             if source.id.as_str() == NAVIGATION_CHECKED_SOURCE
                 && native_rules.iter().any(|native| {
                     matches!(native.action.typ, CbType::Block)
@@ -1176,6 +1176,15 @@ fn compile_webkit(
                 increment(&mut drops, WebKitDropReason::NavigationChecked);
                 continue;
             }
+            let mut kept = Vec::with_capacity(native_rules.len());
+            for native in native_rules {
+                let converted_rule = ConvertedRule {
+                    native,
+                    resource_types: resource_types.clone(),
+                };
+                if matches!(converted_rule.native.action.typ, CbType::Block)
+                    && converted_rule.native.trigger.url_filter.contains(".*")
+                    && pruned.contains(
                         &serde_json::to_vec(&canonical(&converted_rule))
                             .map_err(CompileError::SerializeWebKit)?,
                     )
