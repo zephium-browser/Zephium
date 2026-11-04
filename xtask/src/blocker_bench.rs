@@ -1646,6 +1646,7 @@ fn youtube_step(
                     *consent_pending &= !again.answered;
                     if let Some(reloaded) = again.reloaded {
                         record.nav_ms = reloaded.load_ms;
+                        record.timed_out |= reloaded.timed_out;
                     }
                 }
                 Some(None) if wait_ms > 0 => *consent_pending = false,
