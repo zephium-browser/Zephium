@@ -8,10 +8,14 @@
     TabView,
   } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
+  import { settle } from "$domain/operations";
   import Button from "$shared/ui/Button";
 
   let { tab, failure }: { tab: TabView; failure: TabFailure } = $props();
   let details = $state(false);
+  /** A choice on the blocked page that did not go through; it says so. */
+  let actionFailed = $state(false);
+  let acting = $state(false);
 
   let host = $derived.by(() => {
     try {
@@ -49,13 +53,18 @@
     void commands.tabsContinuePastCertificate(tab.id).catch(() => {});
   }
 
-  function leaveBlocked() {
-    void commands.tabsLeaveBlockedPage(tab.id).catch(() => {});
+  async function act(admission: () => ReturnType<typeof commands.tabsLeaveBlockedPage>) {
+    if (acting) return;
+    acting = true;
+    actionFailed = false;
+    const result = await settle(admission()).catch(() => null);
+    acting = false;
+    actionFailed = result === null || result.outcome === "rejected" || result.outcome === "failed";
   }
 
-  function continueBlocked() {
-    void commands.tabsContinuePastBlock(tab.id).catch(() => {});
-  }
+  const leaveBlocked = () => act(() => commands.tabsLeaveBlockedPage(tab.id));
+  // The address shown is sent back, so only this refusal can be lifted.
+  const continueBlocked = () => act(() => commands.tabsContinuePastBlock(tab.id, failure.url));
 </script>
 
 <!--
@@ -67,15 +76,21 @@
 {#if failure.reason === "blocked"}
   <!--
     The filter lists refused this page before anything was requested. Going
-    back is the way out; opening it anyway stays quiet and lasts until quit.
+    back is the way out; opening it anyway stays quiet and lasts until quit,
+    and is offered only where Zephium's own check refused it.
   -->
   <div class="failed-page" role="alert">
     <h1>{m.navigation_blocked_title({ host })}</h1>
     <p>{blocked[failure.blocked ?? "filter_lists"]()}</p>
-    <Button variant="primary" onclick={leaveBlocked}>{m.navigation_blocked_go_back()}</Button>
-    <Button variant="ghost" size="compact" onclick={continueBlocked}
-      >{m.navigation_blocked_continue()}</Button
+    <Button variant="primary" pending={acting} onclick={leaveBlocked}
+      >{m.navigation_blocked_go_back()}</Button
     >
+    {#if failure.can_continue}
+      <Button variant="ghost" size="compact" disabled={acting} onclick={continueBlocked}
+        >{m.navigation_blocked_continue()}</Button
+      >
+    {/if}
+    {#if actionFailed}<p class="action-failed">{m.navigation_blocked_action_failed()}</p>{/if}
   </div>
 {:else}
   <div class="failed-page" role="alert">

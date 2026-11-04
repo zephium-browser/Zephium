@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "Es una redirección conocida de anuncios o de seguimiento, bloqueada por tus listas de filtros.",
   "navigation_blocked_go_back": "Volver",
   "navigation_blocked_continue": "Continuar de todos modos",
+  "navigation_blocked_action_failed": "No se pudo hacer. Inténtalo de nuevo.",
   "download_error_permission": "Zephium no tiene permiso para guardar en esta carpeta.",
   "download_reason_permission": "Sin acceso a esta carpeta",
   "download_reason_destination": "No se pudo guardar en esta carpeta",

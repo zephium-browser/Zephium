@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "C'est une redirection publicitaire ou de pistage connue, bloquée par vos listes de filtres.",
   "navigation_blocked_go_back": "Revenir en arrière",
   "navigation_blocked_continue": "Continuer quand même",
+  "navigation_blocked_action_failed": "Impossible pour le moment. Réessayez.",
   "download_error_permission": "Zephium n’est pas autorisé à enregistrer dans ce dossier.",
   "download_reason_permission": "Accès à ce dossier refusé",
   "download_reason_destination": "Impossible d’enregistrer dans ce dossier",

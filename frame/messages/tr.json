@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "Bilinen bir reklam veya izleme yönlendirmesi; filtre listeleriniz tarafından engellendi.",
   "navigation_blocked_go_back": "Geri dön",
   "navigation_blocked_continue": "Yine de aç",
+  "navigation_blocked_action_failed": "Bu yapılamadı. Tekrar deneyin.",
   "download_error_permission": "Zephium'un bu klasöre kaydetmesine izin verilmiyor.",
   "download_reason_permission": "Bu klasöre erişim yok",
   "download_reason_destination": "Bu klasöre kaydedilemedi",

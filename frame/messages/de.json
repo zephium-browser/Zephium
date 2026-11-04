@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "Es ist eine bekannte Werbe- oder Tracking-Weiterleitung, blockiert durch deine Filterlisten.",
   "navigation_blocked_go_back": "Zurück",
   "navigation_blocked_continue": "Trotzdem öffnen",
+  "navigation_blocked_action_failed": "Das hat nicht geklappt. Versuche es noch einmal.",
   "download_error_permission": "Zephium darf in diesen Ordner nicht speichern.",
   "download_reason_permission": "Kein Zugriff auf diesen Ordner",
   "download_reason_destination": "Konnte nicht in diesem Ordner gespeichert werden",

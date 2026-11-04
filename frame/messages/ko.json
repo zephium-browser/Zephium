@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "알려진 광고 또는 추적 리디렉션으로, 필터 목록에 의해 차단되었습니다.",
   "navigation_blocked_go_back": "돌아가기",
   "navigation_blocked_continue": "그래도 열기",
+  "navigation_blocked_action_failed": "실행하지 못했어요. 다시 시도해 주세요.",
   "download_error_permission": "Zephium은 이 폴더에 저장할 권한이 없어요.",
   "download_reason_permission": "이 폴더에 접근할 수 없음",
   "download_reason_destination": "이 폴더에 저장하지 못했어요",

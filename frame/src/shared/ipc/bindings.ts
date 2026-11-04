@@ -290,7 +290,7 @@ export const commands = {
 	 *  Opens the page the filter lists refused anyway; its host stays allowed
 	 *  until the app quits.
 	 */
-	tabsContinuePastBlock: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_block", { id }),
+	tabsContinuePastBlock: (id: string, url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_block", { id, url }),
 	/**  Leaves the page the filter lists refused. */
 	tabsLeaveBlockedPage: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_leave_blocked_page", { id }),
 	/**  Shows the folder with Zephium's local log and crash report. */

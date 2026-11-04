@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "É um redirecionamento conhecido de anúncio ou rastreamento, bloqueado pelas suas listas de filtros.",
   "navigation_blocked_go_back": "Voltar",
   "navigation_blocked_continue": "Continuar mesmo assim",
+  "navigation_blocked_action_failed": "Não foi possível. Tente novamente.",
   "download_error_permission": "O Zephium não tem permissão para salvar nesta pasta.",
   "download_reason_permission": "Sem acesso a esta pasta",
   "download_reason_destination": "Não foi possível salvar nesta pasta",

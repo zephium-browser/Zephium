@@ -6,8 +6,10 @@ import { tabFixture } from "$shared/testing/fixtures";
 import NavigationError from "../components/NavigationError.svelte";
 
 const continued = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
-const left = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
-const unblocked = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const left = vi.hoisted(() => vi.fn(async () => ({ accepted: true, operation_id: null })));
+const unblocked = vi.hoisted(() =>
+  vi.fn(async (_id: string, _url: string) => ({ accepted: true, operation_id: null })),
+);
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -72,7 +74,7 @@ test("a badware page names the list, goes back first and lets the person continu
     url: "https://scam.example/win",
     reason: "blocked",
     blocked: "badware",
-    can_continue: false,
+    can_continue: true,
   });
   await expect.element(page.getByRole("heading")).toHaveTextContent("Zephium blocked scam.example");
   await expect
@@ -82,7 +84,27 @@ test("a badware page names the list, goes back first and lets the person continu
   await page.getByRole("button", { name: "Go back" }).click();
   expect(left).toHaveBeenCalledExactlyOnceWith("tab-7");
   await page.getByRole("button", { name: "Continue anyway" }).click();
-  expect(unblocked).toHaveBeenCalledExactlyOnceWith("tab-7");
+  // The address shown goes back with the choice, so only this refusal lifts.
+  expect(unblocked).toHaveBeenCalledExactlyOnceWith("tab-7", "https://scam.example/win");
+  expect(page.getByText("Try again.", { exact: false }).query()).toBeNull();
+});
+
+test("a refusal the engine enforces offers only Go back", async () => {
+  show({
+    url: "https://ad.example/",
+    reason: "blocked",
+    blocked: "filter_lists",
+    can_continue: false,
+  });
+  await expect.element(page.getByRole("button", { name: "Go back" })).toBeVisible();
+  expect(page.getByRole("button", { name: "Continue anyway" }).query()).toBeNull();
+});
+
+test("a choice that does not go through says so", async () => {
+  left.mockResolvedValueOnce({ accepted: false, operation_id: null });
+  show({ url: "https://scam.example/", reason: "blocked", blocked: "badware", can_continue: true });
+  await page.getByRole("button", { name: "Go back" }).click();
+  await expect.element(page.getByText("Couldn’t do that. Try again.")).toBeVisible();
 });
 
 test("a page the other lists refuse says it is an ad or tracking redirect", async () => {

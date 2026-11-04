@@ -3053,6 +3053,7 @@
   "navigation_blocked_filter_lists": "Это известное рекламное или отслеживающее перенаправление, заблокированное вашими списками фильтров.",
   "navigation_blocked_go_back": "Назад",
   "navigation_blocked_continue": "Всё равно открыть",
+  "navigation_blocked_action_failed": "Не получилось. Попробуйте ещё раз.",
   "download_error_permission": "Zephium не может сохранять файлы в эту папку.",
   "download_reason_permission": "Нет доступа к этой папке",
   "download_reason_destination": "Не удалось сохранить в эту папку",
