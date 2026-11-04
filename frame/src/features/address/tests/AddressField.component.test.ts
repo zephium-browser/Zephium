@@ -4,6 +4,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { preferences } from "$domain/preferences";
+import { uiCommands } from "$domain/ui-commands";
 import AddressFieldHost from "./AddressFieldHost.svelte";
 
 const native = vi.hoisted(() => ({
@@ -99,6 +100,27 @@ test("a refused page over the last one shows its own address, without the last p
   expect(screen.container.querySelector("[data-trailing]")?.textContent).toBe("null");
   input.focus();
   await expect.poll(() => input.value).toBe("https://blocked-badware.test/win");
+});
+
+test("the location shortcut on a refused page edits the refused address", async () => {
+  await uiCommands.init();
+  await field(
+    {},
+    {
+      failure: {
+        url: "https://blocked-badware.test/win",
+        reason: "blocked",
+        can_continue: true,
+        certificate: null,
+        blocked: "badware",
+        covers_page: true,
+      },
+    },
+  );
+  emitNativeEvent("uiCommand", "url.focus");
+  await expect.poll(() => native.edit.mock.calls.length).toBe(1);
+  expect(native.edit).toHaveBeenCalledWith(tabs.activeId(), "https://blocked-badware.test/win");
+  uiCommands.dispose();
 });
 
 test("editing shows the whole address and rests on the host", async () => {

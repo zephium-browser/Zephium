@@ -2285,10 +2285,15 @@ pub(crate) fn restore_browser_chrome(
         if (row.dataset.zephiumTabUrl !== (active.url ?? '') || row.dataset.zephiumProjectionRevision !== active.projection_revision || row.querySelector('[data-zephium-tab-label]')?.textContent !== active.title) return '';
         const address = document.querySelector('[data-zephium-address]');
         if (!(address instanceof HTMLInputElement)) return '';
-        const host = active.url ? new URL(active.url).host : '';
+        // A failure filling the pane names its own address, on failedPane's terms.
+        const failure = active.failure;
+        const failed = !!failure && (failure.covers_page || (!active.loading && (!active.url || active.availability?.state === 'sleeping')));
+        const shown = failed ? failure.url : active.url;
+        let host = '';
+        try {{ host = shown ? new URL(shown).host : ''; }} catch {{ return ''; }}
         if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
         if (address.value !== host) return '';
-        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading)) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading && !failed)) return '';
       }}
       void document.documentElement.getBoundingClientRect();
       return {expected};
