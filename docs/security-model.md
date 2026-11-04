@@ -1088,9 +1088,10 @@ policies; they must not restore a generic fetch capability for page-controlled U
 
 **Native network blocker (release seed active; TUF unprovisioned).** The tree contains a
 bounded authenticated source updater, network-rule compiler, persistent caches,
-coordinator, and native enforcement adapters. The desktop embeds exact immutable EasyList
-and EasyPrivacy snapshots whose compressed/raw bytes, upstream revisions, approved
-CC-BY-SA-3.0 metadata, and compiler reports are authenticated by the signed application
+coordinator, and native enforcement adapters. The desktop embeds exact immutable EasyList,
+EasyPrivacy, uBlock filters and uBlock quick-fixes snapshots whose compressed/raw bytes,
+upstream revisions, approved CC-BY-SA-3.0 or GPL-3.0-only metadata, and compiler reports
+are authenticated by the signed application
 release. It deliberately embeds no production TUF root or repository origins/identity, so
 bundled mode performs no source-network request and exposes distinct `release_bundle`
 provenance. Profile preferences remain disabled by default. Disabled profiles install an
@@ -1124,8 +1125,8 @@ slot quarantined until its exact callback.
 
 The release-seed loader verifies deterministic gzip identity and performs bounded lazy
 inflation plus exact raw length/digest/header validation after a compiled-cache miss. It
-drops inflated source strings after compilation. EasyList's source-refresh timestamp is
-reported as advisory `source_refresh_due` for release-bundle provenance; it cannot
+drops inflated source strings after compilation. The catalog's earliest source-refresh
+time is reported as advisory `source_refresh_due` for release-bundle provenance; it cannot
 invalidate the signed release's immutable policy or degrade an exactly installed native
 generation. Bundles install the exact attribution notice and license legal text.
 
@@ -1896,8 +1897,9 @@ The following are roadmap items or disabled backends, not current security guara
   guaranteed malware detection, and automatic transfer resumption;
 - Chrome/Firefox extension compatibility beyond the subset in
   `docs/extension-release-scope.md`;
-- continuously maintained online blocker sources or full EasyList semantics: the usable
-  network-only release seed is bundled, but production TUF trust is unprovisioned and
+- signed blocker-list publication or full filter-list semantics: the release seed is
+  bundled and the official lists update over HTTPS from their publishers, but TUF
+  publication is unprovisioned, so no list update carries a Zephium signature, and
   packaged enforcement/endurance proof is still a release gate;
 - an anti-phishing service, or any way past a certificate error for a public site;
 - rollback-resistant update metadata: the updater (`desktop/src/updates.rs`) verifies a

@@ -1123,6 +1123,34 @@ proptest! {
 
 #[cfg(feature = "runtime-exact")]
 #[test]
+fn rules_inside_a_false_if_block_are_not_compiled() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source(
+                "!#if env_firefox\n||firefox-only.example^\n!#else\n||elsewhere.example^\n!#endif",
+            )],
+        )
+        .unwrap();
+    let action = |url: &str| {
+        rules
+            .evaluate(request(url, "https://page.example/"))
+            .unwrap()
+            .action()
+    };
+    assert_ne!(
+        action("https://firefox-only.example/a.js"),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action("https://elsewhere.example/a.js"),
+        NetworkAction::Block
+    );
+    assert_eq!(rules.report().sources()[0].ignored_lines(), 4);
+}
+
+#[cfg(feature = "runtime-exact")]
+#[test]
 fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
     let rules = Compiler::default()
         .compile(

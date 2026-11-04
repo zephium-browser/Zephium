@@ -56,26 +56,36 @@ local startup artifact does not weaken worker retirement barriers.
 
 ## Official list maintenance
 
-Desktop builds use these fixed publisher endpoints:
+Desktop builds use these fixed publisher endpoints, in catalog order:
 
-- `https://easylist.to/easylist/easylist.txt`
-- `https://easylist.to/easylist/easyprivacy.txt`
+| List | Endpoint | License |
+| --- | --- | --- |
+| EasyList | `https://easylist.to/easylist/easylist.txt` | CC-BY-SA-3.0 |
+| EasyPrivacy | `https://easylist.to/easylist/easyprivacy.txt` | CC-BY-SA-3.0 |
+| uBlock filters | `https://ublockorigin.github.io/uAssets/filters/filters.txt` | GPL-3.0-only |
+| uBlock filters – Quick fixes | `https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt` | GPL-3.0-only |
 
 HTTPS authenticates the server/transport; these downloads do not have an
-independent publisher signature. The app trusts the official publisher's site.
-The signed application also embeds a licensed offline EasyList/EasyPrivacy pair.
+independent publisher signature. The app trusts the official publishers' sites.
+The signed application also embeds the same four lists as a licensed offline
+seed. EasyList lists carry a numeric `Version` and upstream `Commit`; the uBlock
+Origin lists have neither and are versioned by the UTC minute of their
+`Last modified` header; the seed also records that header in full, so a copy
+changed within the same minute is accepted only when it was modified later.
+Their `!#include` lines are not followed.
 Optional TUF support remains independently tested, but no TUF publication
 infrastructure or signing keys are required by this release design.
 
 The updater uses system TLS verification, bounded streaming, no redirects,
 cookies or referrer, conditional ETag/Last-Modified requests, and one worker.
-It persists a due time approximately 24–30 hours after a successful check,
-respects longer server backoff, and performs no startup fetch while fresh.
+It persists a due time approximately 24–30 hours after a successful check;
+quick fixes follow their own `Expires` header (8 hours today) within 4–24
+hours. It respects longer server backoff, and performs no startup fetch while fresh.
 Manual refresh coalesces and is rate-limited. Existing application maintenance
 triggers due work; the blocker adds no idle polling timer.
 
 Headers, titles, URLs, lengths, hashes, rule counts and suspicious shrinkage are
-validated. Both sources form one candidate. The worker prepares the policy,
+validated. The four lists form one candidate. The worker prepares the policy,
 then macOS preflights the native network artifact before durable
 activation. Static cosmetic syntax and budgets are validated by the compiler. Windows prepares its frozen matcher before publication. Failed
 candidates leave the working policy installed. Current, previous and bundled
@@ -84,11 +94,29 @@ streaming buffer. A 304 is accepted only for the exact verified retained bytes
 and validators actually sent; otherwise one unconditional retry is allowed.
 Unchanged source bytes avoid policy recompilation.
 
-The current bundled pair is **202609300903**, 3,568,061 uncompressed bytes.
+A rejected candidate is remembered. A list whose download is a copy that
+candidate held keeps its current copy, so the other lists' updates go through;
+that holds for an older copy too, so a revert to rejected bytes is never staged
+again. The rejection is forgotten only after a refresh that checked every list.
+Known limit: the candidate is rejected as a whole, so every list that changed
+in it is withheld, including those that compiled fine. Each recovers when its
+publisher next changes it (quick fixes within about 8 hours, the others daily).
+
+The current bundled seed is **202611021408**, 4,073,004 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
-attribution, license, and deterministic quality report. Release tooling and SBOM
-checks bind those artifacts to the shipping graph (`release-bundle` plus
-`official-https`), rather than claiming downloaded bytes are release-signed.
+attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
+`LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
+its oldest list, which the release gate allows to be at most 30 days old.
+Release tooling and SBOM checks bind those artifacts to the shipping graph
+(`release-bundle` plus `official-https`), rather than claiming downloaded bytes
+are release-signed. Refresh the seed with:
+
+```sh
+cargo xtask update-blocker-seed --easylist PATH --easyprivacy PATH \
+  --ublock-filters PATH --ublock-quick-fixes PATH \
+  --license assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt \
+  --gpl-license assets/blocker-seed/v1/LICENSE-GPL-3.0.txt
+```
 
 ## macOS
 
@@ -238,7 +266,7 @@ evidence and the date, and is reported upstream when it applies there.
 | Source count / candidate rules | 32 / 250,000 |
 | Physical line / lines | 64 KiB / 500,000 |
 | WebKit rules / JSON | 140,000 / 32 MiB |
-| Runtime regexes / raw pattern bytes | 1,152 / 2 MiB |
+| Runtime regexes / raw pattern bytes | 1,536 / 2 MiB |
 | Filter evaluations per request | 256 |
 | Request/source URL | 32 KiB each |
 | Cosmetic rules / portable policy | 50,000 / 16 MiB |

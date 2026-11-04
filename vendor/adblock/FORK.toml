@@ -1,7 +1,7 @@
 schema = 1
 fork = "Zephium adblock-rust network-policy adapter"
 reviewed_on = "2026-07-25"
-production_status = "release-authenticated EasyList and EasyPrivacy baseline; profile protection remains disabled by default pending native and endurance release gates"
+production_status = "release-authenticated EasyList, EasyPrivacy and uBlock Origin list baseline; profile protection remains disabled by default pending native and endurance release gates"
 
 [upstream]
 repository = "https://github.com/brave/adblock-rust"

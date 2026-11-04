@@ -47,7 +47,7 @@ const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
 #[cfg(feature = "runtime")]
-const MAX_RUNTIME_REGEXES: usize = 1_152;
+const MAX_RUNTIME_REGEXES: usize = 1_536;
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_PATTERN_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "runtime")]
@@ -442,6 +442,7 @@ fn prepare_source(
     let mut runtime_approximated_rules = 0usize;
     let mut runtime_resource_approximated_rules = 0usize;
     let mut runtime_source_kind_approximated_rules = 0usize;
+    let mut conditions = crate::conditions::ListConditions::default();
 
     for (line_index, raw_line) in source.contents.split('\n').enumerate() {
         *physical_line_total = physical_line_total
@@ -466,6 +467,10 @@ fn prepare_source(
             });
         }
         let line = line.trim();
+        if matches!(source.format, SourceFormat::Standard) && !conditions.keep(line) {
+            ignored_lines += 1;
+            continue;
+        }
         if is_ignored_line(source.format, line) {
             ignored_lines += 1;
             continue;
@@ -645,6 +650,12 @@ fn inspect_rule(
                 && has_unsupported_method_predicate(raw_line)
             {
                 return Ok(Admission::Drop(InputDropReason::UnsupportedMethodPredicate));
+            }
+            #[cfg(feature = "runtime")]
+            if matches!(target, CompileTarget::Runtime) && !runtime_regex_compiles(&filter) {
+                return Ok(Admission::Drop(
+                    InputDropReason::UnsupportedRegularExpression,
+                ));
             }
             let attribution_sensitive = filter.opt_domains.is_some()
                 || filter.opt_not_domains.is_some()
@@ -860,6 +871,30 @@ pub(crate) fn looks_like_cosmetic_rule(line: &str) -> bool {
     };
     let tail = &bytes[sharp.saturating_add(1)..(sharp.saturating_add(5)).min(bytes.len())];
     tail.contains(&b'#')
+}
+
+#[cfg(feature = "runtime")]
+/// Whether a `/regex/` rule compiles the way the runtime matcher compiles it,
+/// so one rule the regex engine refuses cannot fail the whole policy.
+fn runtime_regex_compiles(filter: &adblock::filters::network::NetworkFilter) -> bool {
+    if !filter.mask.contains(NetworkFilterMask::IS_COMPLETE_REGEX) {
+        return true;
+    }
+    let adblock::filters::network::FilterPart::Simple(pattern) = &filter.filter else {
+        return true;
+    };
+    let Some(inner) = pattern
+        .strip_prefix('/')
+        .and_then(|rest| rest.strip_suffix('/'))
+    else {
+        return true;
+    };
+    regex::bytes::RegexBuilder::new(&inner.replace("\\/", "/").replace("\\:", ":"))
+        .unicode(false)
+        .size_limit(MAX_RUNTIME_REGEX_SIZE_BYTES)
+        .dfa_size_limit(MAX_RUNTIME_REGEX_DFA_SIZE_BYTES)
+        .build()
+        .is_ok()
 }
 
 fn has_named_option(line: &str, expected: &str) -> bool {
