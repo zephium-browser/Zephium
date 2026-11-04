@@ -258,9 +258,10 @@ mod v1 {
     }
 }
 
-/// A schema-1 record: its downloaded lists are kept for reuse, and every list
-/// is due now, since no package can be complete without the new ones.
-fn migrate(old: v1::Record, now: u64) -> Option<Record> {
+/// A schema-1 record: the lists of its newest package whose bytes still
+/// verify are kept for reuse, and every list is due now, since no package can
+/// be complete without the new ones.
+fn migrate(old: v1::Record, now: u64, intact: impl Fn(&Source) -> bool) -> Option<Record> {
     if old.schema != 1 {
         return None;
     }
@@ -268,10 +269,10 @@ fn migrate(old: v1::Record, now: u64) -> Option<Record> {
     record.jitter = old.jitter;
     record.attempted = old.attempted;
     record.verification = old.verification;
-    record.retained = old
-        .current
-        .or(old.previous)
-        .map(|package| {
+    record.retained = [old.current, old.previous]
+        .into_iter()
+        .flatten()
+        .map(|package| -> Vec<Source> {
             let [easylist, easyprivacy] = package.sources;
             [
                 (OfficialFilter::EasyList, easylist),
@@ -290,8 +291,45 @@ fn migrate(old: v1::Record, now: u64) -> Option<Record> {
             })
             .collect()
         })
+        .find(|sources| sources.iter().all(&intact))
         .unwrap_or_default();
     Some(record)
+}
+
+/// Whether a source's object is present with exactly its bytes.
+fn source_intact(root: &Path, source: &Source) -> bool {
+    use std::io::Read;
+    if source.bytes > MAX_SOURCE {
+        return false;
+    }
+    let Some(mut file) =
+        crate::file_identity::open_verified_regular(&root.join(object_name(&source.sha256)))
+    else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() != source.bytes {
+        return false;
+    }
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes) => {
+                total = total.saturating_add(bytes as u64);
+                if total > source.bytes {
+                    return false;
+                }
+                digest.update(&buffer[..bytes]);
+            }
+            Err(_) => return false,
+        }
+    }
+    total == source.bytes && digest.finalize() == source.sha256
 }
 
 pub(crate) struct OfficialStore {
@@ -313,7 +351,7 @@ impl OfficialStore {
                 Ok(record) => (record, false),
                 Err(_) => serde_json::from_slice::<v1::Record>(&bytes)
                     .ok()
-                    .and_then(|old| migrate(old, now))
+                    .and_then(|old| migrate(old, now, |source| source_intact(&root, source)))
                     .map(|record| (record, true))
                     .ok_or(StoreError::StateCorrupt)?,
             };
@@ -387,37 +425,10 @@ impl OfficialStore {
     /// Check retained source identity with a small fixed buffer before choosing
     /// the startup current/LKG snapshot. This does not parse or inflate lists.
     pub fn intact(&self, package: &Package) -> bool {
-        use std::io::Read;
-        package.sources.iter().all(|source| {
-            let Some(mut file) = crate::file_identity::open_verified_regular(
-                &self.root.join(object_name(&source.sha256)),
-            ) else {
-                return false;
-            };
-            let Ok(metadata) = file.metadata() else {
-                return false;
-            };
-            if metadata.len() != source.bytes {
-                return false;
-            }
-            let mut digest = Sha256::new();
-            let mut total = 0u64;
-            let mut buffer = [0u8; 65536];
-            loop {
-                match file.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(bytes) => {
-                        total = total.saturating_add(bytes as u64);
-                        if total > source.bytes {
-                            return false;
-                        }
-                        digest.update(&buffer[..bytes]);
-                    }
-                    Err(_) => return false,
-                }
-            }
-            total == source.bytes && digest.finalize() == source.sha256
-        })
+        package
+            .sources
+            .iter()
+            .all(|source| source_intact(&self.root, source))
     }
 
     pub fn cached_bytes(&self, source: &Source) -> Result<Vec<u8>, StoreError> {
@@ -1061,5 +1072,91 @@ mod tests {
             serde_json::from_slice(&std::fs::read(path.join("state.json")).unwrap()).unwrap();
         assert_eq!(written.schema, SCHEMA);
         assert_eq!(written.retained.len(), 2);
+    }
+
+    #[test]
+    fn a_first_schema_state_keeps_its_previous_lists_when_the_current_ones_are_gone() {
+        // A current object that is missing, or of the right size with other bytes.
+        for tampered in [false, true] {
+            migrates_to_previous_lists(tampered);
+        }
+    }
+
+    fn migrates_to_previous_lists(tampered: bool) {
+        let directory = root();
+        let path = directory.path().join("official");
+        create_private_directory(&path).unwrap();
+        let source = |bytes: &[u8], version: &str| {
+            serde_json::json!({
+                "sha256": Sha256::digest(bytes),
+                "bytes": bytes.len(),
+                "rules": 12000,
+                "version": version,
+                "etag": null,
+                "last_modified": null,
+            })
+        };
+        let (mut current, mut previous) = (Vec::new(), Vec::new());
+        for filter in [OfficialFilter::EasyList, OfficialFilter::EasyPrivacy] {
+            let older = test_list(filter);
+            atomic_write(&path.join(object_name(&Sha256::digest(&older))), &older).unwrap();
+            previous.push(source(&older, "202609290001"));
+            let mut newer = test_list(filter);
+            newer.extend_from_slice(b"||newer.example.invalid^\n");
+            // Only the second current list is on disk intact.
+            let object = path.join(object_name(&Sha256::digest(&newer)));
+            if filter == OfficialFilter::EasyPrivacy {
+                atomic_write(&object, &newer).unwrap();
+            } else if tampered {
+                let mut other = newer.clone();
+                *other.last_mut().unwrap() = b' ';
+                atomic_write(&object, &other).unwrap();
+            }
+            current.push(source(&newer, "202609300001"));
+        }
+        let identity = |revision: u64| {
+            serde_json::json!({
+                "revision": revision,
+                "manifest_sha256": vec![7u8; 32],
+                "created_unix": 900,
+                "expires_unix": 900 + 7 * DAY,
+                "source_count": 2,
+                "source_bytes": 1,
+            })
+        };
+        let state = serde_json::json!({
+            "schema": 1,
+            "highest_revision": 102,
+            "jitter": 60,
+            "due": 5000,
+            "attempted": 950,
+            "checked": 950,
+            "failure_streak": 0,
+            "verification": 3,
+            "current": { "identity": identity(102), "sources": current },
+            "previous": { "identity": identity(101), "sources": previous },
+            "candidate": null,
+            "rejected": null,
+        });
+        atomic_write(
+            &path.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let store = OfficialStore::open(path.clone(), 100, 1000).unwrap();
+        let versions: Vec<&str> = store
+            .record
+            .retained
+            .iter()
+            .map(|s| s.version.as_str())
+            .collect();
+        assert_eq!(
+            versions,
+            ["202609290001", "202609290001"],
+            "tampered {tampered}"
+        );
+        for source in &store.record.retained {
+            assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
     }
 }
