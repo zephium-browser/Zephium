@@ -121,7 +121,8 @@ The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
 `LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
-its oldest list, which the release gate allows to be at most 30 days old.
+its oldest list, which the release gate allows to be at most 30 days old;
+resource abuse, which changes every few months, does not date it.
 Release tooling and SBOM checks bind those artifacts to the shipping graph
 (`release-bundle` plus `official-https`), rather than claiming downloaded bytes
 are release-signed. Refresh the seed with:

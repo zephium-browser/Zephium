@@ -95,6 +95,9 @@ struct SourceSpec {
     min_bytes: usize,
     min_rules: usize,
     follows_expires: bool,
+    /// Whether the list's `Last modified` dates the seed. A list that changes
+    /// only every few months would otherwise make every seed look stale.
+    dates_seed: bool,
 }
 
 const SOURCES: [SourceSpec; 9] = [
@@ -109,6 +112,7 @@ const SOURCES: [SourceSpec; 9] = [
         min_bytes: 256 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "easyprivacy",
@@ -121,6 +125,7 @@ const SOURCES: [SourceSpec; 9] = [
         min_bytes: 256 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "ublock-filters",
@@ -133,6 +138,7 @@ const SOURCES: [SourceSpec; 9] = [
         min_bytes: 128 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "ublock-quick-fixes",
@@ -145,79 +151,76 @@ const SOURCES: [SourceSpec; 9] = [
         min_bytes: 8 * 1024,
         min_rules: 50,
         follows_expires: true,
+        dates_seed: true,
     },
-    uassets(
-        "ublock-link-shorteners",
-        "ublock-link-shorteners.txt",
-        "uBlock filters \u{2013} Link shorteners",
-        "https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt",
-        Some(UASSETS),
-        32 * 1024,
-        500,
-    ),
-    uassets(
-        "ublock-privacy",
-        "ublock-privacy.txt",
-        "uBlock filters \u{2013} Privacy",
-        "https://ublockorigin.github.io/uAssets/filters/privacy.min.txt",
-        None,
-        32 * 1024,
-        500,
-    ),
-    uassets(
-        "ublock-resource-abuse",
-        "ublock-resource-abuse.txt",
-        "uBlock filters \u{2013} Resource abuse",
-        "https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt",
-        Some(UASSETS),
-        2 * 1024,
-        20,
-    ),
-    uassets(
-        "ublock-unbreak",
-        "ublock-unbreak.txt",
-        "uBlock filters \u{2013} Unbreak",
-        "https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt",
-        None,
-        32 * 1024,
-        500,
-    ),
-    uassets(
-        "ublock-badware",
-        "ublock-badware.txt",
-        "uBlock filters \u{2013} Badware risks",
-        "https://ublockorigin.github.io/uAssets/filters/badware.min.txt",
-        None,
-        32 * 1024,
-        1000,
-    ),
+    SourceSpec {
+        id: "ublock-link-shorteners",
+        target: "ublock-link-shorteners.txt",
+        title: "uBlock filters \u{2013} Link shorteners",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt",
+        homepage: Some(UASSETS),
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-privacy",
+        target: "ublock-privacy.txt",
+        title: "uBlock filters \u{2013} Privacy",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/privacy.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-resource-abuse",
+        target: "ublock-resource-abuse.txt",
+        title: "uBlock filters \u{2013} Resource abuse",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt",
+        homepage: Some(UASSETS),
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 2 * 1024,
+        min_rules: 20,
+        follows_expires: false,
+        dates_seed: false,
+    },
+    SourceSpec {
+        id: "ublock-unbreak",
+        target: "ublock-unbreak.txt",
+        title: "uBlock filters \u{2013} Unbreak",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-badware",
+        target: "ublock-badware.txt",
+        title: "uBlock filters \u{2013} Badware risks",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/badware.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 1000,
+        follows_expires: false,
+        dates_seed: true,
+    },
 ];
 
 const UASSETS: &str = "https://github.com/uBlockOrigin/uAssets";
-
-/// One of uBlock Origin's daily lists, published next to its main filters.
-const fn uassets(
-    id: &'static str,
-    target: &'static str,
-    title: &'static str,
-    source_url: &'static str,
-    homepage: Option<&'static str>,
-    min_bytes: usize,
-    min_rules: usize,
-) -> SourceSpec {
-    SourceSpec {
-        id,
-        target,
-        title,
-        source_url,
-        homepage,
-        license: &GPL_3,
-        header: HeaderFormat::Dated,
-        min_bytes,
-        min_rules,
-        follows_expires: false,
-    }
-}
 
 #[derive(Clone, Debug)]
 struct SourceInput {
@@ -897,13 +900,12 @@ fn build_catalog(sources: &[SourceInput], revision: u64) -> Result<CatalogManife
     }
     // The oldest list dates the seed, so the release gate measures the
     // stalest list rather than the most recently refreshed one.
-    let created_unix = sources
-        .iter()
+    let dating = || sources.iter().filter(|source| source.spec.dates_seed);
+    let created_unix = dating()
         .map(|source| source.header.modified_unix)
         .min()
         .ok_or_else(|| "blocker seed has no creation time".to_owned())?;
-    let expires_unix = sources
-        .iter()
+    let expires_unix = dating()
         .map(|source| source.header.modified_unix + source.header.expiry_seconds)
         .min()
         .ok_or_else(|| "blocker seed has no expiry time".to_owned())?;
@@ -2380,6 +2382,25 @@ mod tests {
         );
         assert_eq!(next_revision(&old, None).unwrap(), 202611021459);
         assert!(build_catalog(&newer, 202611021459).is_err());
+    }
+
+    #[test]
+    fn a_rarely_changed_list_does_not_date_the_seed() {
+        let abuse = SOURCES
+            .iter()
+            .position(|spec| spec.id == "ublock-resource-abuse")
+            .unwrap();
+        let inputs = [
+            dated_input(0, "202611031000", b"a"),
+            dated_input(3, "202611041000", b"b"),
+            dated_input(abuse, "202610020529", b"c"),
+        ];
+        let catalog = catalog_of(&inputs, 202611041000);
+        assert_eq!(
+            catalog.created_unix,
+            timestamp_from_version("202611031000").unwrap().0
+        );
+        assert!(catalog.expires_unix > catalog.created_unix);
     }
 
     #[test]
