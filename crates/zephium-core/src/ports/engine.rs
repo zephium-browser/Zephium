@@ -901,6 +901,12 @@ pub trait Engine {
     fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Opens the passwords panel on a page that is not encrypted, once the
+    /// person has said to fill there anyway; the page gets the keyboard back
+    /// first.
+    fn autofill_insecure_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Starts watching the committed document's icon links: what they name
     /// arrives as `EngineEvent::FaviconCandidates` when the head first has
     /// icons and whenever they change until the page has loaded. One call per
@@ -1763,6 +1769,11 @@ pub enum EngineEvent {
     HttpAuthEnded {
         id: ItemId,
         request: u32,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; nothing is
+    /// filled until the person says to.
+    InsecureAutofillRequested {
+        id: ItemId,
     },
     DownloadRequested {
         id: ItemId,

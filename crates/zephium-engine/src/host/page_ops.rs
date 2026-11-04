@@ -185,7 +185,35 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        // A password filled into a page that is not encrypted crosses the
+        // network readable: the person is asked first.
+        let insecure = view
+            .navigation
+            .committed_snapshot()
+            .and_then(|(_, url)| url::Url::parse(&url).ok())
+            .is_some_and(|url| zephium_core::certificates::crosses_network_unencrypted(&url));
+        if insecure {
+            view.event_permit
+                .emit(&self.sink, EngineEvent::InsecureAutofillRequested { id });
+            return;
+        }
         let page = crate::platform::imp::native_webview(view);
+        if !crate::platform::macos::autofill::show_passwords(&page) {
+            eprintln!("engine: AutoFill has no focused field here");
+        }
+    }
+
+    /// The person chose to fill a page that is not encrypted. Answering the
+    /// card took the keyboard; the page gets it back, with the field it had.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn autofill_insecure_password(&self, id: ItemId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let page = crate::platform::imp::native_webview(view);
+        if let Some(window) = page.window() {
+            window.makeFirstResponder(Some(&page));
+        }
         if !crate::platform::macos::autofill::show_passwords(&page) {
             eprintln!("engine: AutoFill has no focused field here");
         }

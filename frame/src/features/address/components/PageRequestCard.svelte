@@ -53,31 +53,38 @@
   let app = $derived(request.kind === "external_app" ? request : null);
   // A hung page: the person may wait for it or reload it in a fresh view.
   let hung = $derived(request.kind === "unresponsive");
+  // AutoFill on a page that is not encrypted: a password filled there
+  // crosses the network readable.
+  let fill = $derived(request.kind === "insecure_autofill" ? request : null);
   let title = $derived(
-    auth
-      ? auth.proxy
-        ? m.page_request_sign_in_proxy_title({ host: auth.host })
-        : m.page_request_sign_in_title({ host: auth.host })
-      : app
-        ? app.app
-          ? m.page_request_app_title({ app: app.app })
-          : m.page_request_app_missing({ scheme: app.scheme })
-        : hung
-          ? m.page_request_unresponsive_title()
-          : m.page_request_popup_title(),
+    fill
+      ? m.page_request_autofill_insecure_title()
+      : auth
+        ? auth.proxy
+          ? m.page_request_sign_in_proxy_title({ host: auth.host })
+          : m.page_request_sign_in_title({ host: auth.host })
+        : app
+          ? app.app
+            ? m.page_request_app_title({ app: app.app })
+            : m.page_request_app_missing({ scheme: app.scheme })
+          : hung
+            ? m.page_request_unresponsive_title()
+            : m.page_request_popup_title(),
   );
   let detail = $derived(
-    app
-      ? app.app
-        ? app.site
-          ? m.page_request_app_detail({ site: app.site })
-          : m.page_request_app_detail_page()
-        : null
-      : hung
-        ? m.page_request_unresponsive_detail()
-        : request.kind === "popup" && request.host
-          ? request.host
-          : null,
+    fill
+      ? m.page_request_autofill_insecure_detail({ host: fill.host })
+      : app
+        ? app.app
+          ? app.site
+            ? m.page_request_app_detail({ site: app.site })
+            : m.page_request_app_detail_page()
+          : null
+        : hung
+          ? m.page_request_unresponsive_detail()
+          : request.kind === "popup" && request.host
+            ? request.host
+            : null,
   );
   let openable = $derived(
     app ? app.app !== null : request.kind === "popup" && request.host !== null,
@@ -128,6 +135,15 @@
       </Button>
       <Button size="compact" variant="primary" disabled={!username} onclick={signIn}>
         {m.page_request_sign_in_submit()}
+      </Button>
+    </div>
+  {:else if fill}
+    <div class="actions">
+      <Button size="compact" variant="ghost" onclick={() => answer("dismiss")}>
+        {m.page_request_cancel()}
+      </Button>
+      <Button size="compact" variant="primary" onclick={() => answer("allow")}>
+        {m.page_request_autofill_insecure_fill()}
       </Button>
     </div>
   {:else if hung}

@@ -81,6 +81,19 @@ impl Shell {
         }
     }
 
+    /// AutoFill on a page that is not encrypted waits for the person, on the
+    /// tab in front only.
+    pub(super) fn on_insecure_autofill_requested(&mut self, id: ItemId) {
+        let in_front = self.windows.focused().and_then(|window| window.active) == Some(id);
+        if in_front
+            && self
+                .items
+                .set_page_request(id, PageRequest::InsecureAutofill)
+        {
+            self.project_tab(id);
+        }
+    }
+
     pub(super) fn on_http_auth_requested(&mut self, id: ItemId, prompt: HttpAuthPrompt) {
         let request = prompt.request;
         if self
@@ -171,6 +184,16 @@ impl Shell {
                     ),
                 }
             }
+            (
+                PageRequest::InsecureAutofill,
+                PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow,
+            ) => match self.engine.autofill_insecure_password(id) {
+                NativeDispatch::Rejected | NativeDispatch::Unsupported => operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::NativeDispatchRejected,
+                ),
+                _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
+            },
             (PageRequest::Unresponsive, PageRequestDecision::Dismiss) => {
                 self.crash
                     .unresponsive_waits

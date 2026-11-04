@@ -420,6 +420,9 @@ impl Shell {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::InsecureAutofillRequested { id } => {
+                self.on_insecure_autofill_requested(id)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
@@ -809,6 +812,7 @@ impl Shell {
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
