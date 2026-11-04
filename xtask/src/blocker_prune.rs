@@ -39,6 +39,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
         ),
         "notify" => notify(&options.path("rules")?, &options.path("output")?),
         "hosts" => hosts(&options.path("rules")?, &options.path("output")?),
+        "host-floor" => host_floor(),
         "admit" => admit(
             &options.path("allowed")?,
             &options.path("pages")?,
@@ -60,6 +61,7 @@ fn usage() -> String {
     "usage: cargo xtask blocker-prune <materialize --output PATH \
      | notify --rules ARTIFACT --output PATH \
      | hosts --rules ARTIFACT --output PATH \
+     | host-floor \
      | admit --allowed HOSTS --pages PATH --output PATH \
      | build --rules ARTIFACT --loads PATH... --matches PATH... --visits PATH... --corpus TEXT \
        --output PATH>"
@@ -176,6 +178,62 @@ fn hosts(rules_path: &Path, output: &Path) -> Result<(), String> {
     let mut text = pages.into_iter().collect::<Vec<_>>().join("\n");
     text.push('\n');
     write(output, &text)
+}
+
+/// Refuses unless this Mac's macOS and Safari meet the engine security floor
+/// the app pins: the corpus loads real pages in WebKit.
+fn host_floor() -> Result<(), String> {
+    let read = |args: &[&str]| -> Result<String, String> {
+        let output = std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output()
+            .map_err(|error| format!("{}: {error}", args[0]))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let macos = read(&["sw_vers", "-productVersion"])?;
+    let safari = read(&[
+        "defaults",
+        "read",
+        "/Applications/Safari.app/Contents/Info.plist",
+        "CFBundleShortVersionString",
+    ])?;
+    meets_host_floor(&macos, &safari)?;
+    println!("macOS {macos} and Safari {safari} meet the engine security floor");
+    Ok(())
+}
+
+fn meets_host_floor(macos: &str, safari: &str) -> Result<(), String> {
+    use zephium_core::macos::{
+        ProductVersion, GOLDEN_GATE_SECURITY_FLOOR, SAFARI_SECURITY_FLOOR, SEQUOIA_SECURITY_FLOOR,
+        SONOMA_SECURITY_FLOOR, TAHOE_SECURITY_FLOOR,
+    };
+    let version = |text: &str| -> Result<ProductVersion, String> {
+        let mut parts: Vec<&str> = text.split('.').collect();
+        parts.resize(3.max(parts.len()), "0");
+        parts
+            .join(".")
+            .parse::<ProductVersion>()
+            .map_err(|_| format!("unreadable version {text:?}"))
+    };
+    let (macos_version, safari_version) = (version(macos)?, version(safari)?);
+    let floor = match macos_version.components()[0] {
+        14 => SONOMA_SECURITY_FLOOR,
+        15 => SEQUOIA_SECURITY_FLOOR,
+        26 => TAHOE_SECURITY_FLOOR,
+        27 => GOLDEN_GATE_SECURITY_FLOOR,
+        major => return Err(format!("macOS {major} has no reviewed security floor")),
+    };
+    if macos_version < floor {
+        return Err(format!(
+            "macOS {macos} is below the security floor {floor}; update it before recording"
+        ));
+    }
+    if safari_version < SAFARI_SECURITY_FLOOR {
+        return Err(format!(
+            "Safari {safari} is below the security floor {SAFARI_SECURITY_FLOOR}; update it before recording"
+        ));
+    }
+    Ok(())
 }
 
 /// The pages of `pages` whose host is on the reviewed list, written to
@@ -548,6 +606,15 @@ mod tests {
         );
         assert_eq!(listed, [0]);
         assert!(written.contains("Pruned: 1 of 2 wildcard block rules."));
+    }
+
+    #[test]
+    fn the_corpus_never_records_below_the_engine_security_floor() {
+        assert!(meets_host_floor("26.6.2", "26.6.2").is_err());
+        assert!(meets_host_floor("26.7.2", "26.7.2").is_ok());
+        assert!(meets_host_floor("27.2", "27.2").is_ok());
+        assert!(meets_host_floor("27.1", "27.1").is_err());
+        assert!(meets_host_floor("13.7", "18.0").is_err());
     }
 
     #[test]

@@ -372,8 +372,9 @@ unsupported.
   fails the pass.
 
 Refreshing the list is a release step, not CI, and runs only on a Mac whose
-macOS and Safari meet the engine security floor
-(`cargo xtask check-release-engine-security`): it loads hundreds of real pages
+macOS and Safari meet the engine security floor the app pins:
+`scripts/blocker-corpus/run.sh` starts with `cargo xtask blocker-prune
+host-floor`, which refuses below it. It loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
 load against the bundled lists through a local listener that answers nothing.
 After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:

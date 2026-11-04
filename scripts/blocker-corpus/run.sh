@@ -24,6 +24,8 @@ done
 } > "$out/consent.js"
 
 cd "$repo"
+# The corpus loads real pages in WebKit; never below the pinned security floor.
+cargo xtask blocker-prune host-floor
 rm -f "$out/rules.json"
 cargo xtask blocker-prune materialize --output "$out/rules.json"
 cargo xtask blocker-prune notify --rules "$out/rules.json" --output "$out/notify.json"
