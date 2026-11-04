@@ -2,8 +2,9 @@
 // A heavy page must not lose requests from the probe's count to the default
 // buffer of 250.
 performance.setResourceTimingBufferSize(10000);
-// When the first video frame played, and the first one that was not an ad,
-// in ms since navigation, from the video element's own events.
+// When a video first reported playing past 0 s, and the first time one did
+// with no ad showing, in ms since navigation: the first `playing` or
+// `timeupdate` event that qualifies, not a painted frame.
 (() => {
   const record = { firstFrameMs: null, contentFrameMs: null };
   Object.defineProperty(window, '__benchVideo', { value: record });

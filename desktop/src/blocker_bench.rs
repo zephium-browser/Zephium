@@ -557,7 +557,13 @@ fn open_private(
         return Err("no private window opened".into());
     };
     select(shell, bench, &tab);
-    bench.wait_idle(&tab, deadline);
+    if !bench.wait_idle(&tab, deadline) {
+        bench.watch(false);
+        return Err(format!(
+            "the tab was still loading after {} ms",
+            timeout.as_millis()
+        ));
+    }
     bench.watch(true);
     let started = Instant::now();
     let dispatched = shell.dispatch(Command::Navigate {

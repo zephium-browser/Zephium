@@ -544,6 +544,37 @@ fn startup_section(results: &Results) -> String {
     )
 }
 
+/// Which launches took the document-start script the watch timings come from.
+fn preload_line(results: &Results) -> String {
+    let mut taken: BTreeMap<(usize, &str), (usize, usize)> = BTreeMap::new();
+    for launch in results
+        .launches
+        .iter()
+        .filter(|launch| launch.phase == "run")
+    {
+        let order = results
+            .configs
+            .iter()
+            .position(|config| *config == launch.config)
+            .unwrap_or(usize::MAX);
+        let count = taken.entry((order, &launch.config)).or_default();
+        count.0 += usize::from(launch.preload == Some(true));
+        count.1 += 1;
+    }
+    let parts: Vec<String> = taken
+        .iter()
+        .map(|((_, config), (yes, all))| format!("{config} {yes}/{all}"))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Launches that took the document-start script: {}.",
+            parts.join(", ")
+        )
+    }
+}
+
 fn youtube_section(results: &Results) -> String {
     let mut groups: BTreeMap<(usize, String), Vec<&YoutubeStep>> = BTreeMap::new();
     for step in &results.youtube {
@@ -635,7 +666,8 @@ fn youtube_section(results: &Results) -> String {
         })
         .collect();
     format!(
-        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first frame that was not an ad, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts seeks that did not play within 15 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
+        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first `playing` or `timeupdate` event past 0 s with no ad showing, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts the seeks that did not play again within 15 s out of the two each completed watch visit made (a failed visit's are not counted; fewer is better), and `player ad data` is what the player response carried for ads. {}\n\n{}\n",
+        preload_line(results),
         table(
             &[
                 "config",
@@ -1126,6 +1158,14 @@ mod tests {
             error: Some("exited".into()),
             ..Launch::default()
         });
+        for preload in [Some(true), Some(false)] {
+            results.launches.push(Launch {
+                config: ZEPHIUM_ON.into(),
+                phase: "run".into(),
+                preload,
+                ..Launch::default()
+            });
+        }
         results.youtube.push(YoutubeStep {
             config: ZEPHIUM_ON.into(),
             step: "watch".into(),
@@ -1133,6 +1173,10 @@ mod tests {
             ..YoutubeStep::default()
         });
         let text = render(&results);
+        assert!(
+            text.contains(&format!("document-start script: {ZEPHIUM_ON} 1/2.")),
+            "{text}"
+        );
         assert!(text.contains("1000 ± 141"), "{text}");
         assert!(text.contains("| 2 "), "{text}");
         assert!(text.contains("0/1"), "{text}");
