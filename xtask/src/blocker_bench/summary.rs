@@ -621,6 +621,7 @@ fn youtube_section(results: &Results) -> String {
                 .collect();
             let seeks: Vec<Option<f64>> = steps
                 .iter()
+                .filter(|s| s.errors.is_empty() && !s.timed_out)
                 .filter_map(|s| s.result.as_ref()?.get("seekMs")?.as_array().cloned())
                 .flatten()
                 .map(|seek| seek.as_f64())
@@ -1170,6 +1171,13 @@ mod tests {
             config: ZEPHIUM_ON.into(),
             step: "watch".into(),
             result: Some(json!({ "adSeen": false, "adMs": 0, "adPlacements": 2, "playerAds": 0, "adSlots": 1, "played": 29.5, "stalledMs": 0, "contentFrameMs": 1840, "seekMs": [420, null] })),
+            ..YoutubeStep::default()
+        });
+        results.youtube.push(YoutubeStep {
+            config: ZEPHIUM_ON.into(),
+            step: "watch".into(),
+            result: Some(json!({ "seekMs": [null, null] })),
+            timed_out: true,
             ..YoutubeStep::default()
         });
         let text = render(&results);
