@@ -285,6 +285,16 @@ impl Compiler {
         if sources.is_empty() {
             return Err(CompileError::NoSources);
         }
+        // Spike only: extra rules from a file, compiled after the lists.
+        if let Some(extra) = std::env::var_os("ZEPHIUM_SPIKE_EXTRA_RULES")
+            .and_then(|path| std::fs::read_to_string(path).ok())
+        {
+            sources.push(FilterSource::new(
+                SourceId::new("spike-extra").expect("a source id"),
+                SourceFormat::Standard,
+                extra,
+            ));
+        }
         if sources.len() > self.limits.max_sources() {
             return Err(CompileError::TooManySources {
                 actual: sources.len(),
