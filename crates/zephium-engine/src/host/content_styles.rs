@@ -85,6 +85,16 @@ impl ViewSiteScope {
     pub(super) fn target(&self) -> String {
         self.target.borrow().clone()
     }
+    fn explicitly_paused_at(&self, url: &str) -> bool {
+        self.preferences
+            .borrow()
+            .as_ref()
+            .is_some_and(|preferences| {
+                BlockerSite::from_url(url)
+                    .and_then(|site| preferences.get(&site))
+                    .is_some_and(|entry| entry.paused)
+            })
+    }
     fn paused_at(&self, url: &str) -> bool {
         match self.preferences.borrow().as_ref() {
             None => true,
@@ -121,7 +131,9 @@ impl ViewSiteScope {
         } else {
             (url, NetworkResourceType::Document)
         };
-        if self.paused_at(source) {
+        // Unlike page styles, unknown site preferences pause nothing here: a
+        // scam page is refused even before the person's choices have loaded.
+        if self.explicitly_paused_at(source) {
             return None;
         }
         let request =
@@ -854,6 +866,18 @@ mod tests {
         assert_eq!(
             scope.blocks_navigation("https://scam.example/", false),
             None
+        );
+    }
+
+    #[test]
+    fn unknown_site_preferences_do_not_pause_the_navigation_check() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(None));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::Badware)
         );
     }
 
