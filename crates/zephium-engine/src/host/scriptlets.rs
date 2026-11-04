@@ -236,11 +236,14 @@ impl EngineHost {
         profile: ProfileId,
         generation: ContentPolicyGeneration,
     ) -> bool {
-        if !self.refresh_profile_scriptlets(profile) {
+        self.refresh_profile_scriptlets(profile);
+        // A generation joins the wait still open from an earlier load; the
+        // one it replaces settles now.
+        let Some(wait) = self.scriptlets.waits.get_mut(&profile) else {
             return false;
-        }
-        if let Some(wait) = self.scriptlets.waits.get_mut(&profile) {
-            wait.generation = Some(generation);
+        };
+        if let Some(replaced) = wait.generation.replace(generation) {
+            self.settle_applied_content_policy(profile, replaced);
         }
         true
     }
