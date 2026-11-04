@@ -192,7 +192,9 @@ Any change that breaks one of these invariants must fail review and release:
    this is a memory measure, not an isolation boundary, and WebView2 does not guarantee
    a new renderer process for it. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
-   event, and every request to launch an OS-registered URI scheme is cancelled.
+   event, and the native launch of an OS-registered URI scheme is always cancelled.
+   The request is then routed to Zephium's own app-link card, which names the app
+   and asks; nothing opens without the person's answer.
 3. Application-requested tab navigation is checked in core and again before the native
    load; page-initiated navigation is checked by Wry's navigation handler. Only `http`,
    `https`, and exact `about:blank` are allowed. URLs are limited to 8 KiB; credentials,
@@ -315,7 +317,12 @@ to the configured search engine; search expansion is bounded before admission.
 Page-initiated top-level navigation uses the same allowlist. On Windows, raw subframe
 navigation also uses that allowlist, privileged subframes remain on the app origin, and
 WebView2's external-URI event is cancelled for every view. No blocked scheme is
-automatically opened through the OS shell. Human macOS/Windows new windows require
+automatically opened through the OS shell. A link for another application, a scheme
+outside a fixed list that excludes content, script, file, share and handler schemes,
+never loads in a tab. It goes to an app-link card on the tab that names the
+application, and the host opens the application only after the person's answer. A
+page that acts by itself with no registered application is ignored. An Always allow
+answer is kept in memory for that profile, site host and scheme until Zephium quits. Human macOS/Windows new windows require
 native user-activation admission and become host-owned tabs as described below. The
 one exception is a site the person allowed to open pop-ups, from the blocked-pop-up
 card or Site settings: its canonical origin is kept in the profile database
@@ -532,7 +539,8 @@ intent does not grant permission to reveal page content.
 
 Rust owns transfer state, bounded profile history and native paths. The trusted
 UI receives typed metadata and issues ID-scoped actions. Private-profile records
-remain in memory. Default behavior asks for a destination; a native directory
+remain in memory. A clicked download saves straight to the Downloads folder by
+default; asking for a destination first is an opt-in preference. A native directory
 selection records its filesystem identity before automatic saves are permitted.
 Same-volume private staging is journaled before native bytes are admitted.
 Publication applies and checks quarantine, synchronizes the file, and uses an
@@ -557,9 +565,9 @@ view/navigation/presentation and foreground parent. The default saves into the
 system Downloads directory; a custom directory requires its picker-issued identity.
 The optional ask-first preference opens the native save dialog. A page's second
 automatic download asks through WebView2's multiple-automatic-download prompt
-described above, and every download it admits still passes this adapter. This admits a first download
-from a foreground document without claiming initiating-frame activation, which
-DownloadStarting does not expose. HTTP origins
+described above, and every download it admits still passes this adapter. Once the
+site is allowed, this admits a download from a foreground document without claiming
+initiating-frame activation, which DownloadStarting does not expose. HTTP origins
 are displayed without URL secrets; origin-less data downloads label their top
 page origin as context, not an initiating-frame assertion.
 
@@ -577,6 +585,44 @@ the retained controller at about:blank until its transfer ends. Native process
 exit proof joins download drain during shutdown/profile retirement. These Windows
 paths have been cross-checked, not yet qualified on a native Windows runtime.
 See [Windows qualification and implementation notes](file-workflows-windows-qa.md).
+
+**Site download permission.** On macOS and Windows a site needs the person's
+permission before it may save files. Decisions are kept per profile and canonical
+top-level site origin in the profile database (`download_sites`, at most 512 sites;
+1 allows, 0 blocks, no row asks). A private profile never reaches the store: an Allow
+lasts only until the private session ends. The engine keeps a mirror per profile. At
+admission a blocked site's download is refused before any record exists. For a site
+with no decision the native download is held (on macOS before its destination is
+chosen, on Windows on the existing `DownloadStarting` deferral) and the shell shows a
+card under the address field with the file name. Allow keeps the site allowed; Not
+now cancels that download only. Further downloads from the same tab and site join the
+waiting card, and a different request while one card waits on that tab is cancelled.
+The wait ends after five minutes, when the page that started it navigates away or its
+view goes (switching to another tab does not end it), or when a sign-in card takes the
+slot, which refuses the download. Block is set from Settings ▸ Privacy ▸ Site settings
+or the address field's site panel. Downloads the person starts from the browser itself
+(WebKit's context-menu download, WebView2's Save link/image as, extension downloads)
+skip the question. A download that a native new tab starts at once is asked about on
+the tab that opened it, keyed by that tab's site.
+
+**Downloads nobody clicked.** On macOS a download that WebKit does not report as
+user-initiated (`WKDownload.isUserInitiated`), or any download when the OS lacks that
+API, is confirmed on the same card even on an allowed site. The card says the site
+wants to download a file and that nothing the person clicked starts it; the choices
+are Download and Cancel, and the answer is never remembered. A download from a
+cross-origin subframe that nobody clicked in is refused outright. On Windows
+`DownloadStarting` reports neither the click nor the frame, so the site permission is
+the guard there, together with WebView2's multiple-automatic-download prompt.
+
+**Held downloads.** A download of a type that can run, install or carry a script or
+macro (programs, installers, disk images, help, shell and installer formats, macOS
+location files) is received in full and then held, not placed among the person's
+files, until the person chooses Keep or Delete. The list is `is_dangerous_file`. A
+download whose response URL (macOS, after redirects) or download URI (Windows) is
+plain `http` to a host outside the person's own network, by the same local-host rule
+as certificate exceptions, is held the same way, and the card says the file came over
+a connection that isn't encrypted. The record stores that flag only when it is true.
+A hold is a prompt, not a scan, and no download reputation check runs on macOS.
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -1424,8 +1470,9 @@ These inherited properties must not be overstated:
   requested controller value; Windows/organization policy governs the effective
   service.
 - Every view also requires CoreWebView2_18. Raw and privileged subframe navigations are
-  checked by native handlers, and OS-registered external URI schemes are always
-  cancelled. Client-certificate selection is also cancelled before WebView2 can fall
+  checked by native handlers, and the native launch of OS-registered external URI
+  schemes is always cancelled; the request goes to the app-link card, which names
+  the app and asks. Client-certificate selection is also cancelled before WebView2 can fall
   back to its native certificate dialog, and HTTP authentication is cancelled
   except on tabs a person reads, which defer it to the sign-in card described above. A
   missing interface or failed registration rejects the raw view or aborts
@@ -1889,7 +1936,7 @@ saved decisions per kind and changes or removes them. On macOS they come from th
 page-permission catalog through the same revision-checked patch path as the prompt;
 on Windows from the human WebView2 profile (`GetNonDefaultPermissionSettings`,
 `SetPermissionState`), reached through a live human view of that profile, so the list
-reports itself incomplete when none is open. Pop-ups come from `popup_sites` on both.
+reports itself incomplete when none is open. Pop-ups come from `popup_sites` and Downloads from `download_sites` on both.
 The actor chooses the profile; chrome supplies only a canonical origin, a closed kind
 and a decision. A private profile lists nothing and every change to it is refused. The
 same two commands (`site_permissions`, optionally for one origin, and
@@ -1908,7 +1955,8 @@ The following are roadmap items or disabled backends, not current security guara
 - Linux as a supported platform: the code stays in the tree, but the app refuses to
   start there;
 - native Windows release qualification of downloads/protection,
-  guaranteed malware detection, and automatic transfer resumption;
+  guaranteed malware detection (macOS runs no download reputation check), and
+  automatic transfer resumption;
 - Chrome/Firefox extension compatibility beyond the subset in
   `docs/extension-release-scope.md`;
 - signed blocker-list publication or full filter-list semantics: the release seed is
