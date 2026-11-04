@@ -20,8 +20,17 @@ soon as the empty native policy is acknowledged; the UI never describes that
 policy as active protection. Updates retain the installed policy throughout.
 Already issued requests cannot be blocked retroactively.
 
-Scriptlets, procedural cosmetics, resource replacement, response-CSP mutation,
-URL-parameter rewriting, and YouTube-specific ad blocking are out of scope.
+Procedural cosmetics, resource replacement, response-CSP mutation and
+URL-parameter rewriting are out of scope.
+
+On macOS 15.4+ and Windows, `##+js(...)` rules run scriptlets from a library
+built into the app, never fetched; lists only choose the scriptlet and its
+arguments, and only uBlock Origin's two lists may call `trusted-*` ones. The
+one exception is YouTube: uBlock Origin's `rpnt` rule and its
+`trusted-edit-inbound-object` values carry JavaScript and request edits in the
+list itself, which the compiler admits only from those two lists, only for
+YouTube's hosts and within fixed sizes. The security model describes the
+limits.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in

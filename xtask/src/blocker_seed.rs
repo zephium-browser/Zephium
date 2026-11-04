@@ -279,6 +279,9 @@ struct CosmeticGolden {
     scriptlet_rules: usize,
     unknown_scriptlet_rules: usize,
     unsupported_scriptlet_rules: usize,
+    page_code_rules: usize,
+    page_code_bytes: usize,
+    refused_page_code_rules: usize,
     scriptlet_hosts: usize,
     scriptlet_calls: usize,
     scriptlet_program_bytes: usize,
@@ -1644,11 +1647,15 @@ pub(crate) fn compile_hidden(
             let bytes = read_regular_file(path, MAX_SOURCE_BYTES)?;
             let text =
                 String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8", path.display()))?;
-            Ok(FilterSource::new(
-                SourceId::new(id).map_err(|error| format!("invalid source ID {id}: {error}"))?,
-                SourceFormat::Standard,
-                text,
-            ))
+            let id =
+                SourceId::new(id).map_err(|error| format!("invalid source ID {id}: {error}"))?;
+            let trusted = zephium_blocker::official_source_trusts_scriptlets(&id);
+            let source = FilterSource::new(id, SourceFormat::Standard, text);
+            Ok(if trusted {
+                source.trusting_scriptlets()
+            } else {
+                source
+            })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let native_target = match expected_target {
@@ -1751,6 +1758,9 @@ pub(crate) fn compile_hidden(
                 scriptlet_rules: report.scriptlet_rules,
                 unknown_scriptlet_rules: report.unknown_scriptlet_rules,
                 unsupported_scriptlet_rules: report.unsupported_scriptlet_rules,
+                page_code_rules: report.page_code_rules,
+                page_code_bytes: report.page_code_bytes,
+                refused_page_code_rules: report.refused_page_code_rules,
                 scriptlet_hosts,
                 scriptlet_calls,
                 scriptlet_program_bytes: policy.scriptlet_program().map_or(0, str::len),

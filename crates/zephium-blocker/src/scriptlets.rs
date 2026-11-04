@@ -6,6 +6,12 @@
 //! from hashed hostnames to the calls for that host, and the library, which
 //! runs only when the frame's host has an entry. The library is reviewed code
 //! shipped in the app and never fetched.
+//!
+//! One owner-approved exception: the text `rpnt` writes into YouTube's own
+//! scripts, and the values `trusted-edit-inbound-object` writes into its
+//! requests, come from uBO's lists. They are admitted only from those lists,
+//! only for YouTube's hosts, and within fixed sizes; anything else is dropped
+//! and counted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,6 +30,23 @@ const CALL_END: &str = "} catch ( e ) { }";
 const MAX_RULES: usize = 20_000;
 const MAX_RULE_BYTES: usize = 8 * 1024;
 const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
+/// Scriptlets whose arguments are page code from the list.
+const PAGE_CODE: &[&str] = &[
+    "trusted-replace-node-text",
+    "trusted-rpnt",
+    "replace-node-text",
+    "rpnt",
+    "trusted-edit-inbound-object",
+];
+/// The only sites page code runs on, each with its subdomains.
+const PAGE_CODE_SITES: &[&str] = &[
+    "youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "www.youtube-nocookie.com",
+];
+const MAX_PAGE_CODE_RULE_BYTES: usize = 16 * 1024;
+const MAX_PAGE_CODE_SITE_BYTES: usize = 64 * 1024;
 
 struct Scriptlet {
     name: &'static str,
@@ -62,6 +85,27 @@ const HELPERS: &[Scriptlet] = &[
         trusted: false,
         dependencies: &["zephium-pattern.fn"],
         source: include_str!("scriptlets/timer-booster.js"),
+    },
+    Scriptlet {
+        name: "zephium-node-text.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/node-text.js"),
+    },
+    Scriptlet {
+        name: "zephium-json-path.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/json-path.js"),
+    },
+    Scriptlet {
+        name: "zephium-inbound-object.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-json-path.fn"],
+        source: include_str!("scriptlets/inbound-object.js"),
     },
     Scriptlet {
         name: "zephium-request-matcher.fn",
@@ -122,6 +166,34 @@ const SCRIPTLETS: &[Scriptlet] = &[
         trusted: false,
         dependencies: &["zephium-pattern.fn", "zephium-timer-booster.fn"],
         source: include_str!("scriptlets/nano-setinterval-booster.js"),
+    },
+    Scriptlet {
+        name: "trusted-replace-node-text.js",
+        aliases: &["trusted-rpnt.js", "replace-node-text.js", "rpnt.js"],
+        trusted: true,
+        dependencies: &["zephium-pattern.fn", "zephium-node-text.fn"],
+        source: include_str!("scriptlets/replace-node-text.js"),
+    },
+    Scriptlet {
+        name: "remove-node-text.js",
+        aliases: &["rmnt.js"],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn", "zephium-node-text.fn"],
+        source: include_str!("scriptlets/remove-node-text.js"),
+    },
+    Scriptlet {
+        name: "edit-inbound-object.js",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-json-path.fn", "zephium-inbound-object.fn"],
+        source: include_str!("scriptlets/edit-inbound-object.js"),
+    },
+    Scriptlet {
+        name: "trusted-edit-inbound-object.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &["zephium-json-path.fn", "zephium-inbound-object.fn"],
+        source: include_str!("scriptlets/trusted-edit-inbound-object.js"),
     },
 ];
 
@@ -189,21 +261,25 @@ pub(crate) struct ScriptletRule {
 pub(crate) enum Kind {
     /// Not scriptlet syntax.
     None,
-    /// A rule to keep, and whether its scriptlet is one the library lacks.
-    Rule { unknown: bool },
+    /// A rule to keep, whether its scriptlet is one the library lacks, and
+    /// the bytes of page code it carries.
+    Rule { unknown: bool, page_code: usize },
     /// Scriptlet syntax we do not run: too long, no hostname, or a hostname
     /// form other than names and single-label entities.
     Unsupported,
+    /// Page code from a list without trust, for a site outside
+    /// `PAGE_CODE_SITES`, or larger than one rule may carry.
+    RefusedPageCode,
 }
 
-pub(crate) fn classify(line: &str) -> Kind {
+pub(crate) fn classify(line: &str, trusted: bool) -> Kind {
     let Some((domains, body)) = line
         .split_once("##+js(")
         .or_else(|| line.split_once("#@#+js("))
     else {
         return Kind::None;
     };
-    if line.len() > MAX_RULE_BYTES || !body.ends_with(')') {
+    if !body.ends_with(')') {
         return Kind::Unsupported;
     }
     let exception = line.contains("#@#+js(");
@@ -211,14 +287,79 @@ pub(crate) fn classify(line: &str) -> Kind {
     if keys.is_none() || (!exception && domains.is_empty()) {
         return Kind::Unsupported;
     }
-    let name = body[..body.len() - 1]
+    let arguments = &body[..body.len() - 1];
+    let name = arguments
         .split(',')
         .next()
         .unwrap_or_default()
         .trim()
         .trim_matches(|c| c == '"' || c == '\'');
+    let name = name.strip_suffix(".js").unwrap_or(name);
+    if !exception && PAGE_CODE.contains(&name) {
+        let bytes = arguments.len();
+        if !trusted || bytes > MAX_PAGE_CODE_RULE_BYTES || page_code_sites(domains).is_none() {
+            return Kind::RefusedPageCode;
+        }
+        return Kind::Rule {
+            unknown: false,
+            page_code: bytes,
+        };
+    }
+    if line.len() > MAX_RULE_BYTES {
+        return Kind::Unsupported;
+    }
     Kind::Rule {
         unknown: !exception && !known(name),
+        page_code: 0,
+    }
+}
+
+/// The `PAGE_CODE_SITES` entries a page-code rule falls under, when it names
+/// at least one site and every one it names is one of them or below one.
+/// Excluded sites only narrow it.
+fn page_code_sites(domains: &str) -> Option<BTreeSet<&'static str>> {
+    domain_keys(domains)?;
+    let mut sites = BTreeSet::new();
+    for domain in domains.split(',') {
+        if domain.is_empty() || domain.starts_with('~') {
+            continue;
+        }
+        let domain = domain.to_ascii_lowercase();
+        // The first entry a host is under, so all of youtube.com shares one total.
+        let site = PAGE_CODE_SITES.iter().find(|site| {
+            domain == **site
+                || domain
+                    .strip_suffix(**site)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })?;
+        sites.insert(*site);
+    }
+    (!sites.is_empty()).then_some(sites)
+}
+
+/// Page code admitted so far under each of `PAGE_CODE_SITES`.
+#[derive(Default)]
+pub(crate) struct PageCodeBudget(BTreeMap<&'static str, usize>);
+
+impl PageCodeBudget {
+    /// Takes a page-code rule's bytes under every site it names, or under
+    /// none when one would pass `MAX_PAGE_CODE_SITE_BYTES`.
+    pub(crate) fn admit(&mut self, line: &str, bytes: usize) -> bool {
+        let Some(sites) = line
+            .split_once("##+js(")
+            .and_then(|(domains, _)| page_code_sites(domains))
+        else {
+            return false;
+        };
+        let fits = sites.iter().all(|site| {
+            self.0.get(site).copied().unwrap_or(0).saturating_add(bytes) <= MAX_PAGE_CODE_SITE_BYTES
+        });
+        if fits {
+            for site in sites {
+                *self.0.entry(site).or_default() += bytes;
+            }
+        }
+        fits
     }
 }
 
@@ -275,7 +416,14 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     }
     let mut keys = BTreeSet::new();
     let (mut trusted, mut untrusted) = (Vec::new(), Vec::new());
+    // A stored policy is admitted again, so page code it holds keeps its limits.
+    let mut budget = PageCodeBudget::default();
     for rule in rules {
+        match classify(&rule.line, rule.trusted) {
+            Kind::Rule { page_code: 0, .. } => {}
+            Kind::Rule { page_code, .. } if budget.admit(&rule.line, page_code) => {}
+            _ => return Err(crate::CosmeticError::InvalidPolicy),
+        }
         let Some((domains, _)) = rule
             .line
             .split_once("##+js(")
@@ -484,27 +632,30 @@ mod tests {
     #[test]
     fn unknown_and_unsupported_rules_are_told_apart() {
         assert!(matches!(
-            classify("a.com##+js(set, a, 1)"),
-            Kind::Rule { unknown: false }
+            classify("a.com##+js(set, a, 1)", false),
+            Kind::Rule { unknown: false, .. }
         ));
         assert!(matches!(
-            classify("a.com##+js(no-such-scriptlet, a)"),
-            Kind::Rule { unknown: true }
+            classify("a.com##+js(no-such-scriptlet, a)", false),
+            Kind::Rule { unknown: true, .. }
         ));
         assert!(matches!(
-            classify("a.com#@#+js()"),
-            Kind::Rule { unknown: false }
+            classify("a.com#@#+js()", false),
+            Kind::Rule { unknown: false, .. }
         ));
-        assert!(matches!(classify("##+js(set, a, 1)"), Kind::Unsupported));
         assert!(matches!(
-            classify("/^a\\.com$/##+js(set, a, 1)"),
+            classify("##+js(set, a, 1)", false),
             Kind::Unsupported
         ));
         assert!(matches!(
-            classify("a.b.*##+js(set, a, 1)"),
+            classify("/^a\\.com$/##+js(set, a, 1)", false),
             Kind::Unsupported
         ));
-        assert!(matches!(classify("a.com##.ad"), Kind::None));
+        assert!(matches!(
+            classify("a.b.*##+js(set, a, 1)", false),
+            Kind::Unsupported
+        ));
+        assert!(matches!(classify("a.com##.ad", false), Kind::None));
     }
 
     #[test]
@@ -512,5 +663,106 @@ mod tests {
         assert!(build(&[rule("a.com##+js(no-such-scriptlet, x)", false)])
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn page_code_runs_only_from_trusted_lists_on_youtube() {
+        let code = "##+js(rpnt, script, /(start\\(\\))/, prepare();$1, sedCount, 1)";
+        let page_code = |line: &str, trusted: bool| match classify(line, trusted) {
+            Kind::Rule { page_code, .. } => Some(page_code),
+            Kind::RefusedPageCode => None,
+            _ => panic!("{line}"),
+        };
+        for site in [
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "music.youtube.com",
+            "www.youtube-nocookie.com",
+            "www.youtube.com,~tv.youtube.com",
+        ] {
+            assert!(
+                page_code(&format!("{site}{code}"), true).is_some_and(|bytes| bytes > 0),
+                "{site}"
+            );
+            assert_eq!(page_code(&format!("{site}{code}"), false), None, "{site}");
+        }
+        for site in [
+            "example.com",
+            "youtube.*",
+            "notyoutube.com",
+            "youtube.com.example",
+            "youtube-nocookie.com",
+            "www.youtube.com,example.com",
+            "~example.com",
+        ] {
+            assert_eq!(page_code(&format!("{site}{code}"), true), None, "{site}");
+        }
+        for name in [
+            "trusted-rpnt",
+            "replace-node-text",
+            "trusted-replace-node-text",
+            "trusted-edit-inbound-object",
+        ] {
+            assert_eq!(
+                page_code(&format!("example.com##+js({name}, a, b, c)"), true),
+                None,
+                "{name}"
+            );
+        }
+        // Other scriptlets keep their own rules, and exceptions carry no code.
+        assert_eq!(
+            page_code("example.com##+js(rmnt, script, a)", true),
+            Some(0)
+        );
+        assert_eq!(
+            page_code("example.com#@#+js(rpnt, script, a, b)", false),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn page_code_has_a_size_per_rule_and_per_site() {
+        let rule = |bytes: usize| {
+            format!(
+                "www.youtube.com##+js(rpnt, script, a, {})",
+                "x".repeat(bytes)
+            )
+        };
+        assert!(matches!(classify(&rule(16_000), true), Kind::Rule { .. }));
+        assert!(matches!(
+            classify(&rule(17_000), true),
+            Kind::RefusedPageCode
+        ));
+        let mut budget = PageCodeBudget::default();
+        let line = rule(15_000);
+        let Kind::Rule { page_code, .. } = classify(&line, true) else {
+            panic!("page code refused");
+        };
+        for _ in 0..4 {
+            assert!(budget.admit(&line, page_code));
+        }
+        // youtube.com and its subdomains share one total; nocookie has its own.
+        assert!(!budget.admit(&line.replacen("www.", "m.", 1), page_code));
+        assert!(budget.admit(
+            &line.replacen("www.youtube.com", "www.youtube-nocookie.com", 1),
+            page_code
+        ));
+    }
+
+    #[test]
+    fn a_stored_policy_cannot_carry_page_code_past_its_limits() {
+        let line = "example.com##+js(rpnt, script, a, b)";
+        assert_eq!(
+            build(&[rule(line, true)]).err(),
+            Some(crate::CosmeticError::InvalidPolicy)
+        );
+        let youtube = "www.youtube.com##+js(rpnt, script, a, b)";
+        assert_eq!(
+            build(&[rule(youtube, false)]).err(),
+            Some(crate::CosmeticError::InvalidPolicy)
+        );
+        let program = build(&[rule(youtube, true)]).unwrap().unwrap();
+        assert!(program.script.contains("function zephiumReplaceNodeText("));
     }
 }
