@@ -1344,9 +1344,8 @@ impl EngineHost {
         self.settle_applied_content_policy(profile, generation);
     }
 
-    /// The applied generation's terminal settlement. On macOS it follows the
-    /// profile's scriptlet context, so views held for startup protection
-    /// wait for both.
+    /// The applied generation's terminal settlement. It follows the profile's
+    /// scriptlet program, so views held for startup protection wait for both.
     pub(super) fn settle_applied_content_policy(
         &mut self,
         profile: ProfileId,

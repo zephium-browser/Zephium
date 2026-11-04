@@ -3,9 +3,10 @@
 //! before its first navigation; a change of program or paused sites replaces
 //! it on every view of the profile.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use webview2_com::AddScriptToExecuteOnDocumentCreatedCompletedHandler;
@@ -18,7 +19,8 @@ use zephium_core::ports::engine::BlockerSiteCompletion;
 use super::dispatch::with_scriptlets;
 use super::EngineHost;
 
-/// How long a site change waits for its views to take the new program.
+/// How long a policy's settlement, a site change or a view's first
+/// navigation waits for its views to take the new program.
 const READY_WITHIN: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
@@ -27,11 +29,12 @@ pub(super) struct Scriptlets {
     waits: HashMap<ProfileId, Wait>,
 }
 
-/// Site changes waiting for the profile's views to take the program that
-/// knows them, so the page reload that follows runs it.
+/// A policy's settlement and site changes waiting for the profile's views to
+/// take the program that knows them, so the page reload that follows runs it.
 #[derive(Default)]
 struct Wait {
     adds: Vec<u64>,
+    generation: Option<ContentPolicyGeneration>,
     sites: Vec<BlockerSiteCompletion>,
     timeout: Option<crate::platform::imp::ContentPolicyTimeout>,
 }
@@ -76,6 +79,26 @@ fn settle_add(slot: &mut Option<Installed>, add: u64, id: Option<String>) -> Opt
     None
 }
 
+/// Handles the window messages that deliver WebView2's completions, waiting
+/// for one at most until `deadline`.
+fn pump_until(deadline: Instant) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
+        MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    };
+    let mut message = MSG::default();
+    // SAFETY: plain message handling on the view's own STA.
+    unsafe {
+        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        let wait = u32::try_from(left.as_millis()).unwrap_or(u32::MAX).min(20);
+        MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
+}
+
 fn remove(view: &wry::WebView, id: &str) {
     // SAFETY: the view's core stays on its creating STA, where this runs.
     let _ = unsafe {
@@ -108,34 +131,54 @@ impl EngineHost {
         self.scriptlets.adds += 1;
         let add = self.scriptlets.adds;
         let core = view.webview();
-        let id = std::rc::Rc::new(RefCell::new(None));
-        let result = id.clone();
-        let added = AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
-            Box::new(move |handler| {
-                // SAFETY: the view's core stays on its creating STA, where this runs.
-                unsafe {
-                    core.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(source), &handler)
+        // None while WebView2 is adding it, then the script's id if it took it.
+        let outcome: Rc<RefCell<Option<Option<String>>>> = Rc::default();
+        let late = Rc::new(Cell::new(false));
+        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new({
+            let (outcome, late, core) = (outcome.clone(), late.clone(), core.clone());
+            move |error, id| {
+                let id = error.ok().map(|()| id);
+                // An add that finished after the view moved on without it is
+                // taken back, so the view never runs a program nothing tracks.
+                if late.get() {
+                    if let Some(id) = id {
+                        // SAFETY: the view's core stays on its creating STA, where this runs.
+                        let _ = unsafe {
+                            core.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(id))
+                        };
+                    }
+                } else {
+                    outcome.replace(Some(id));
                 }
-                .map_err(Into::into)
-            }),
-            Box::new(move |error, id| {
-                error?;
-                result.replace(Some(id));
                 Ok(())
-            }),
-        );
-        match (added, id.take()) {
-            (Ok(()), Some(id)) => {
+            }
+        }));
+        // SAFETY: the view's core stays on its creating STA, where this runs.
+        let started =
+            unsafe { core.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(source), &handler) };
+        if started.is_ok() {
+            let deadline = Instant::now() + READY_WITHIN;
+            while outcome.borrow().is_none() && Instant::now() < deadline {
+                pump_until(deadline);
+            }
+        }
+        match outcome.take() {
+            Some(Some(id)) => {
                 slot.0.replace(Some(Installed {
                     digest,
                     add,
                     id: Some(id),
                 }));
             }
-            (added, _) => eprintln!(
-                "content blocker: the scriptlet program was not added to a view: {:?}",
-                added.err()
-            ),
+            Some(None) => {
+                eprintln!("content blocker: the scriptlet program was not added to a view")
+            }
+            None => {
+                late.set(true);
+                eprintln!(
+                    "content blocker: a view navigates without the scriptlet program, which WebView2 had not taken in time"
+                );
+            }
         }
     }
 
@@ -197,12 +240,13 @@ impl EngineHost {
         }
         let wait = self.scriptlets.waits.entry(profile).or_default();
         wait.adds.extend(pending);
-        if wait.timeout.is_none() {
-            wait.timeout =
-                crate::platform::imp::schedule_browser_timeout(READY_WITHIN, move || {
-                    with_scriptlets(move |host| host.release_scriptlet_wait(profile));
-                });
-        }
+        // Each replacement gets the full time from its own start.
+        wait.timeout = crate::platform::imp::schedule_browser_timeout(READY_WITHIN, move || {
+            with_scriptlets(move |host| {
+                eprintln!("content blocker: the scriptlet program was not on every view in time");
+                host.release_scriptlet_wait(profile);
+            });
+        });
         true
     }
 
@@ -221,8 +265,13 @@ impl EngineHost {
         }
     }
 
+    /// Site changes finish applied even when a view missed the program, since
+    /// their network side did; that miss is logged where it happens.
     fn release_scriptlet_wait(&mut self, profile: ProfileId) {
         if let Some(wait) = self.scriptlets.waits.remove(&profile) {
+            if let Some(generation) = wait.generation {
+                self.settle_applied_content_policy(profile, generation);
+            }
             for site in wait.sites {
                 site.finish(true);
             }
@@ -242,15 +291,21 @@ impl EngineHost {
         }
     }
 
-    /// New views take the program before they navigate, so a policy's
-    /// settlement waits for nothing here.
+    /// Reports the policy applied once the profile's open views run its
+    /// program too; true when that waits on WebView2. New views take the
+    /// program before they navigate.
     pub(super) fn wait_for_scriptlets(
         &mut self,
         profile: ProfileId,
-        _generation: ContentPolicyGeneration,
+        generation: ContentPolicyGeneration,
     ) -> bool {
-        self.refresh_profile_scriptlets(profile);
-        false
+        if !self.refresh_profile_scriptlets(profile) {
+            return false;
+        }
+        if let Some(wait) = self.scriptlets.waits.get_mut(&profile) {
+            wait.generation = Some(generation);
+        }
+        true
     }
 }
 
