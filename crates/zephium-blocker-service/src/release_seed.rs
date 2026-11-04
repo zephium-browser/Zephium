@@ -12,7 +12,7 @@ use zephium_blocker_update::{
 };
 use zephium_core::ports::blocker::BlockerCompileFailure;
 
-const RELEASE_SEED_SCHEMA_VERSION: u32 = 1;
+const RELEASE_SEED_SCHEMA_VERSION: u32 = 2;
 const MAX_RELEASE_SEED_MANIFEST_BYTES: usize = 128 * 1024;
 const MAX_PROVENANCE_FIELD_BYTES: usize = 256;
 
@@ -45,12 +45,18 @@ pub struct ReleaseSeedAssetManifest {
     pub compressed_length: u64,
     /// Lowercase SHA-256 of the compressed bytes.
     pub compressed_sha256: String,
-    /// Exact title from the source's ABP header.
+    /// Exact title from the source's header.
     pub upstream_title: String,
-    /// Exact version from the source's ABP header.
+    /// Exact version from the source's ABP header, or the UTC minute of its
+    /// `Last modified` date for lists without one.
     pub upstream_version: String,
-    /// Exact upstream commit from the source's ABP header.
-    pub upstream_commit: String,
+    /// Exact upstream commit from the source's ABP header; lists without an
+    /// ABP header name none.
+    pub upstream_commit: Option<String>,
+    /// Exact `Last modified` header of a list versioned by it, seconds
+    /// included, so a copy changed within the same minute can be ordered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_modified: Option<String>,
 }
 
 /// Compression formats accepted by the release-seed loader.
@@ -164,16 +170,22 @@ impl ReleaseSeedManifest {
             }
             decode_sha256(&asset.compressed_sha256)?;
             validate_provenance_text(&asset.upstream_title)?;
+            match (&asset.upstream_commit, &asset.upstream_modified) {
+                (Some(_), None) => {}
+                (None, Some(modified)) => validate_provenance_text(modified)?,
+                _ => return Err(ReleaseSeedError::Provenance),
+            }
             if !(8..=20).contains(&asset.upstream_version.len())
                 || !asset
                     .upstream_version
                     .bytes()
                     .all(|byte| byte.is_ascii_digit())
-                || asset.upstream_commit.len() != 40
-                || !asset
-                    .upstream_commit
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || asset.upstream_commit.as_ref().is_some_and(|commit| {
+                    commit.len() != 40
+                        || !commit
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
             {
                 return Err(ReleaseSeedError::Provenance);
             }
@@ -232,7 +244,7 @@ fn load_catalog(
             return Err(ReleaseSeedError::SourceAsset);
         }
         let text = String::from_utf8(output).map_err(|_| ReleaseSeedError::SourceAsset)?;
-        validate_abp_header(&text, descriptor)?;
+        validate_source_header(&text, descriptor)?;
         contents.push(Arc::<str>::from(text));
     }
     manifest
@@ -240,46 +252,144 @@ fn load_catalog(
         .map_err(map_manifest_source_error)
 }
 
-fn validate_abp_header(
+fn validate_source_header(
     source: &str,
     descriptor: &ReleaseSeedAssetManifest,
 ) -> Result<(), ReleaseSeedError> {
     if source.as_bytes().contains(&0) {
         return Err(ReleaseSeedError::SourceAsset);
     }
-    let mut lines = source.lines().take(32);
-    if !lines
-        .next()
-        .is_some_and(|line| line.starts_with("[Adblock Plus ") && line.ends_with(']'))
-    {
-        return Err(ReleaseSeedError::Provenance);
-    }
+    let mut lines = source.lines().take(32).peekable();
+    let adblock = lines
+        .next_if(|line| line.starts_with("[Adblock Plus ") && line.ends_with(']'))
+        .is_some();
     let mut title = None;
     let mut version = None;
     let mut commit = None;
+    let mut modified = None;
     for line in lines {
         title = title.or_else(|| line.strip_prefix("! Title: "));
         version = version.or_else(|| line.strip_prefix("! Version: "));
         commit = commit.or_else(|| line.strip_prefix("! Commit: "));
+        modified = modified.or_else(|| line.strip_prefix("! Last modified: "));
     }
+    let provenance = if adblock {
+        version
+            .zip(commit)
+            .map(|(version, commit)| (version.to_owned(), Some(commit)))
+    } else {
+        modified
+            .filter(|modified| Some(*modified) == descriptor.upstream_modified.as_deref())
+            .and_then(dated_version)
+            .map(|version| (version, None))
+    };
+    let expected = (
+        descriptor.upstream_version.as_str(),
+        descriptor.upstream_commit.as_deref(),
+    );
     if title != Some(descriptor.upstream_title.as_str())
-        || version != Some(descriptor.upstream_version.as_str())
-        || commit != Some(descriptor.upstream_commit.as_str())
+        || provenance
+            .as_ref()
+            .map(|(version, commit)| (version.as_str(), *commit))
+            != Some(expected)
+    {
+        return Err(ReleaseSeedError::Provenance);
+    }
+    Ok(())
+}
+fn validate_provenance_text(value: &str) -> Result<(), ReleaseSeedError> {
+    if value.is_empty()
+        || value.len() > MAX_PROVENANCE_FIELD_BYTES
+        || value.chars().any(char::is_control)
     {
         return Err(ReleaseSeedError::Provenance);
     }
     Ok(())
 }
 
-fn validate_provenance_text(value: &str) -> Result<(), ReleaseSeedError> {
-    if value.is_empty()
-        || value.len() > MAX_PROVENANCE_FIELD_BYTES
-        || !value.is_ascii()
-        || value.chars().any(char::is_control)
+/// An RFC 2822 date such as `Mon, 02 Nov 2026 12:27:09 +0000` as the UTC
+/// `YYYYMMDDHHMM` version the official list updater assigns it.
+fn dated_version(value: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let date = value.split_once(", ").map_or(value, |(_, date)| date);
+    let [day, month, year, time, zone] =
+        <[&str; 5]>::try_from(date.split(' ').collect::<Vec<_>>()).ok()?;
+    let number = |text: &str, digits: std::ops::RangeInclusive<usize>| {
+        (digits.contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<i64>().ok())
+            .flatten()
+    };
+    let month = MONTHS.iter().position(|name| *name == month)? as i64 + 1;
+    let (day, year) = (number(day, 1..=2)?, number(year, 4..=4)?);
+    let mut clock = time.split(':');
+    let hour = number(clock.next()?, 2..=2)?;
+    let minute = number(clock.next()?, 2..=2)?;
+    let second = clock
+        .next()
+        .map_or(Some(0), |second| number(second, 2..=2))?;
+    let (sign, offset) = zone.split_at_checked(1)?;
+    let sign = match sign {
+        "+" => 1,
+        "-" => -1,
+        _ => return None,
+    };
+    let offset = number(offset, 4..=4)?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if clock.next().is_some()
+        || !(1..=month_days).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+        || offset / 100 > 23
+        || offset % 100 > 59
     {
-        return Err(ReleaseSeedError::Provenance);
+        return None;
     }
-    Ok(())
+    let minutes = days_from_civil(year, month, day) * 1440 + hour * 60 + minute
+        - sign * (offset / 100 * 60 + offset % 100);
+    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
+    let minute_of_day = minutes.rem_euclid(1440);
+    (1970..=9999).contains(&year).then(|| {
+        format!(
+            "{year:04}{month:02}{day:02}{:02}{:02}",
+            minute_of_day / 60,
+            minute_of_day % 60
+        )
+    })
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
 }
 
 fn decode_sha256(value: &str) -> Result<[u8; 32], ReleaseSeedError> {
@@ -402,7 +512,8 @@ mod tests {
                 compressed_sha256: hex(Sha256::digest(&compressed).as_slice()),
                 upstream_title: "EasyList".into(),
                 upstream_version: "202607240001".into(),
-                upstream_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                upstream_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                upstream_modified: None,
             }],
         }
         .encode_canonical()
@@ -426,6 +537,66 @@ mod tests {
         .unwrap();
         assert_eq!(release.identity().revision, 202_607_240_001);
         assert_eq!(release.identity().source_count, 1);
+    }
+
+    #[test]
+    fn dated_lists_carry_their_modification_minute_and_no_commit() {
+        let adblock = ReleaseSeedAssetManifest {
+            target: "easylist.txt".into(),
+            compression: ReleaseSeedCompression::Gzip,
+            compressed_length: 1,
+            compressed_sha256: "0".repeat(64),
+            upstream_title: "EasyList".into(),
+            upstream_version: "202607240001".into(),
+            upstream_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            upstream_modified: None,
+        };
+        let dated = ReleaseSeedAssetManifest {
+            target: "ublock-quick-fixes.txt".into(),
+            upstream_title: "uBlock\u{2080} filters \u{2013} Quick fixes".into(),
+            upstream_version: "202611030030".into(),
+            upstream_commit: None,
+            upstream_modified: Some("Mon, 02 Nov 2026 23:30:00 -0100".into()),
+            ..adblock.clone()
+        };
+        let source = "! Title: uBlock\u{2080} filters \u{2013} Quick fixes\n! Last modified: Mon, 02 Nov 2026 23:30:00 -0100\n! Expires: 8 hours\nexample.invalid##.ad\n";
+        assert_eq!(validate_source_header(source, &dated), Ok(()));
+        let committed = ReleaseSeedAssetManifest {
+            upstream_commit: adblock.upstream_commit.clone(),
+            ..dated.clone()
+        };
+        assert_eq!(
+            validate_source_header(source, &committed),
+            Err(ReleaseSeedError::Provenance)
+        );
+        assert_eq!(
+            validate_source_header(&source.replace("23:30", "23:31"), &dated),
+            Err(ReleaseSeedError::Provenance)
+        );
+        assert_eq!(
+            validate_source_header(&source.replace("23:30:00", "23:30:59"), &dated),
+            Err(ReleaseSeedError::Provenance),
+            "the metadata names the exact header, seconds included"
+        );
+        let envelope = ReleaseSeedManifest {
+            schema_version: RELEASE_SEED_SCHEMA_VERSION,
+            catalog_manifest_sha256: "0".repeat(64),
+            assets: vec![adblock, dated],
+        };
+        assert_eq!(envelope.validate(), Ok(()));
+        let unnamed = ReleaseSeedManifest {
+            assets: vec![ReleaseSeedAssetManifest {
+                upstream_modified: None,
+                ..envelope.assets[1].clone()
+            }],
+            ..envelope.clone()
+        };
+        assert_eq!(unnamed.validate(), Err(ReleaseSeedError::Provenance));
+        assert_eq!(
+            dated_version("01 Mar 2028 00:15 +0130").as_deref(),
+            Some("202802292245")
+        );
+        assert_eq!(dated_version("Mon, 31 Nov 2026 12:27:09 +0000"), None);
     }
 
     #[test]

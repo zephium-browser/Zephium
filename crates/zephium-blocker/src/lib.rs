@@ -10,6 +10,7 @@
 mod builtin;
 mod cache;
 mod compiler;
+mod conditions;
 mod cosmetics;
 mod limits;
 mod priority;
@@ -26,6 +27,7 @@ pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};
 pub use compiler::{
     CompileError, CompileTarget, Compiler, FilterSource, SourceFormat, SourceId, SourceIdError,
 };
+pub use conditions::ListConditions;
 pub use cosmetics::{
     prepare_site_preferences, validate_personal_selector, CosmeticError, CosmeticPolicy,
     CosmeticReport,

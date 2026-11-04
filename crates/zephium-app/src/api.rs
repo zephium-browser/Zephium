@@ -858,6 +858,9 @@ pub enum Command {
         operation: u64,
         attempt: u8,
     },
+    /// The catalog's update worker published a new status, such as a finished
+    /// download, so the catalog is maintained now rather than at the next tick.
+    BlockerCatalogChanged,
     /// One bounded-backoff retry for journal reconciliation, native erasure,
     /// or local SQLite finalization.
     ProfileDeletionRetry {

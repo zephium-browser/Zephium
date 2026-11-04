@@ -134,13 +134,20 @@ impl CosmeticPolicy {
                 if line.starts_with('!') || line.starts_with('[') || line.is_empty() {
                     continue;
                 }
-                if let Some(control) = generic_control(line)? {
-                    data.controls.push(control);
-                    if data.controls.len() > MAX_CONTROLS {
-                        return Err(CosmeticError::ResourceLimit);
+                match generic_control(line) {
+                    Ok(Some(control)) => {
+                        data.controls.push(control);
+                        if data.controls.len() > MAX_CONTROLS {
+                            return Err(CosmeticError::ResourceLimit);
+                        }
+                        data.report.generic_controls += 1;
+                        continue;
                     }
-                    data.report.generic_controls += 1;
-                    continue;
+                    Ok(None) => {}
+                    Err(_) => {
+                        data.report.rejected += 1;
+                        continue;
+                    }
                 }
                 if !crate::compiler::looks_like_cosmetic_rule(line) {
                     continue;
@@ -796,7 +803,19 @@ mod tests {
             policy.stylesheet("https://example.com/").unwrap().as_ref(),
             ".good{display:none!important}\n"
         );
-        assert!(CosmeticPolicy::compile(["@@||example.com^$generichide,third-party"]).is_err());
+        // An unsupported generic-hide control is rejected alone, so hiding
+        // stays on there instead of the whole policy failing.
+        let unsupported =
+            CosmeticPolicy::compile(["@@||example.com^$generichide,third-party\n##.good"]).unwrap();
+        assert_eq!(unsupported.report().rejected, 1);
+        assert_eq!(unsupported.report().generic_controls, 0);
+        assert_eq!(
+            unsupported
+                .stylesheet("https://example.com/")
+                .unwrap()
+                .as_ref(),
+            ".good{display:none!important}\n"
+        );
     }
 
     #[test]

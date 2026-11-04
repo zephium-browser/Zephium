@@ -186,7 +186,8 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
     })
 }
 
-/// Compiles the app's release lists (EasyList and EasyPrivacy) exactly as a
+/// Compiles the app's release lists (EasyList, EasyPrivacy and uBlock Origin's
+/// filters and quick fixes) exactly as a
 /// protected profile would, so one recording can be compared with none.
 pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
     use zephium_blocker_service::{
@@ -195,12 +196,13 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
     use zephium_core::ports::blocker::{BlockerCompileOutcome, BlockerCompiler as _};
     let limits = UpdateLimits {
         max_manifest_bytes: 16 * 1024,
-        max_sources: 2,
+        max_sources: 4,
         max_source_bytes: 4 * 1024 * 1024,
-        max_total_source_bytes: 4 * 1024 * 1024,
+        max_total_source_bytes: 8 * 1024 * 1024,
         ..UpdateLimits::default()
     };
-    let licenses = LicensePolicy::new(["CC-BY-SA-3.0"]).map_err(|_| ProbeFailure::Authority)?;
+    let licenses = LicensePolicy::new(["CC-BY-SA-3.0", "GPL-3.0-only"])
+        .map_err(|_| ProbeFailure::Authority)?;
     let seed = ReleaseCatalogSeed::from_embedded_gzip(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -223,6 +225,20 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/../../assets/blocker-seed/v1/easyprivacy.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-filters.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-filters.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-quick-fixes.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"
                 )),
             ),
         ],

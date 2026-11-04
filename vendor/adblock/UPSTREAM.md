@@ -153,9 +153,10 @@ and current enablement gates.
 ## Current product status
 
 The desktop composition root starts from the immutable, release-authenticated
-EasyList + EasyPrivacy seed documented in `assets/blocker-seed/v1`. It
-validates the exact compressed and raw bytes, approved CC-BY-SA-3.0 metadata,
-and upstream provenance before the bounded compiler can consume them. New
+EasyList, EasyPrivacy and uBlock Origin seed documented in
+`assets/blocker-seed/v1`. It validates the exact compressed and raw bytes,
+approved CC-BY-SA-3.0 and GPL-3.0-only metadata, and upstream provenance
+before the bounded compiler can consume them. New
 profile preferences default to disabled; an explicit enable installs the
 exact platform artifact before raw navigation is admitted.
 
