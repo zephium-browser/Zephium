@@ -350,7 +350,7 @@ impl Compiler {
             prepared
                 .iter()
                 .map(|source| (source.cosmetics.as_str(), source.trusted)),
-            target.runs_page_code(),
+            target.runs_page_code() || std::env::var_os("ZEPHIUM_SPIKE_PAGE_CODE").is_some(),
         )
         .map_err(CompileError::Cosmetics)?;
         let cosmetics = if cosmetic_policy.report().accepted == 0 {

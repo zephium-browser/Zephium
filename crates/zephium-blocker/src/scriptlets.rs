@@ -177,6 +177,13 @@ const SCRIPTLETS: &[Scriptlet] = &[
         source: include_str!("scriptlets/nano-setinterval-booster.js"),
     },
     Scriptlet {
+        name: "zephium-fast-ad.js",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/fast-ad.js"),
+    },
+    Scriptlet {
         name: "trusted-replace-node-text.js",
         aliases: &["trusted-rpnt.js", "replace-node-text.js", "rpnt.js"],
         trusted: true,
@@ -420,6 +427,22 @@ pub(crate) struct Program {
 }
 
 pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::CosmeticError> {
+    // Spike only: YouTube runs its own ad, hidden and fast, instead of the list's scriptlets.
+    let spiked: Vec<ScriptletRule>;
+    let rules = if std::env::var_os("ZEPHIUM_SPIKE_FAST_AD").is_some() {
+        spiked = rules
+            .iter()
+            .filter(|rule| !rule.line.split("#").next().unwrap_or_default().contains("youtube"))
+            .cloned()
+            .chain(std::iter::once(ScriptletRule {
+                line: "youtube.com##+js(zephium-fast-ad)".to_owned(),
+                trusted: false,
+            }))
+            .collect();
+        &spiked[..]
+    } else {
+        rules
+    };
     if rules.len() > MAX_RULES {
         return Err(crate::CosmeticError::ResourceLimit);
     }

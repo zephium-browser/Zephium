@@ -1399,7 +1399,12 @@ impl EngineHost {
         }
         #[cfg(target_os = "macos")]
         {
-            builder = builder.with_user_agent(crate::platform::imp::safari_user_agent());
+            builder = builder.with_user_agent(
+                std::env::var("ZEPHIUM_SPIKE_USER_AGENT")
+                    .ok()
+                    .map(|agent| &*Box::leak(agent.into_boxed_str()))
+                    .unwrap_or_else(crate::platform::imp::safari_user_agent),
+            );
         }
 
         #[cfg(target_os = "windows")]
