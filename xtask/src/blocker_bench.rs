@@ -1304,7 +1304,9 @@ fn measure_steps(
             {
                 visit.consent_shown = true;
                 visit.consent_cmp = Some("youtube".into());
-                visit.consent_clicked = Some(format!("{} all", plan.youtube_consent.name()));
+                if again.answered {
+                    visit.consent_clicked = Some(format!("{} all", plan.youtube_consent.name()));
+                }
                 visit.consent_cleared = Some(again.cleared);
                 if let Some(reloaded) = again.reloaded {
                     visit.nav_ms = reloaded.load_ms;
