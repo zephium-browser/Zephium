@@ -389,6 +389,18 @@ unsupported.
   that is not recorded keeps its blocking. A replay batch that never reports
   back, or a recorded load with no replay row, fails the pass.
 
+Speedometer 3.1 in the QA build, warm profiles, AC power, five round-robin
+rounds (mean ± sd), with main's lists (d31275c5f) and the full set (47ae4ceba).
+The full-set cost is paired by round.
+
+| Mac | macOS | Off | Main lists | Full set | Full set vs main |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Mac mini | 26.6.2 (25G83) | 48.32 ± 0.24 | 47.46 ± 0.13 | 46.98 ± 0.13 | −0.48 ± 0.21 (−1.0%) |
+| M5 MacBook | 27.2 (26B123) | 61.98 ± 0.38 | 61.68 ± 0.26 | 61.74 ± 0.17 | −0.06 ± 0.39 (−0.1%) |
+
+On 27.2 the full set costs nothing measurable; on the Mac mini, with 26.6.2's
+older WebKit, it costs 1%. macOS ships the full set without a trim.
+
 Refreshing the list is a release step, not CI: it loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
 load against the bundled lists through a local listener that answers nothing.
