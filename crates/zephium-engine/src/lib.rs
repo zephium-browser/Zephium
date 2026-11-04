@@ -2352,8 +2352,19 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| {
-                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+                let applied = host.set_blocker_site_preferences(profile, preferences);
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if applied {
+                    return host.finish_site_change(profile, completion);
+                }
+                completion.finish(applied)
             });
+        });
+    }
+    #[cfg(target_os = "macos")]
+    fn prepare_profile(&self, partition: Partition) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.prepare_profile(partition));
         });
     }
     fn set_popup_sites(

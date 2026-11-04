@@ -1,4 +1,5 @@
-//! Bounded static CSS policy. No scriptlets, replacement code or DOM scanning.
+//! Bounded static CSS policy, plus the scriptlet rules the scriptlet program is
+//! built from (see `scriptlets`). No replacement code or DOM scanning.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -26,6 +27,13 @@ pub struct CosmeticReport {
     pub rejected: usize,
     /// Generic-hide controls admitted into the document matcher.
     pub generic_controls: usize,
+    /// `##+js` and `#@#+js` rules admitted for the scriptlet program.
+    pub scriptlet_rules: usize,
+    /// Admitted scriptlet rules naming a scriptlet the library lacks.
+    pub unknown_scriptlet_rules: usize,
+    /// Scriptlet rules left out: generic, overlong, or a hostname form the
+    /// program cannot key.
+    pub unsupported_scriptlet_rules: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -64,8 +72,11 @@ struct Data {
     version: u32,
     rules: Vec<Rule>,
     controls: Vec<String>,
+    scriptlets: Vec<crate::scriptlets::ScriptletRule>,
     report: CosmeticReport,
 }
+
+const DATA_VERSION: u32 = 2;
 
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
@@ -77,6 +88,7 @@ pub struct CosmeticPolicy {
     generic_index: Arc<str>,
     generic_index_digest: zephium_core::blocker::ContentRuleDigest,
     fallback_generic: Vec<Rule>,
+    scriptlets: Option<crate::scriptlets::Program>,
 }
 
 // Retain no policy by ourselves. Native profiles own the live public policy;
@@ -107,16 +119,24 @@ impl CosmeticPolicy {
     pub fn compile<'a>(
         sources: impl IntoIterator<Item = &'a str>,
     ) -> Result<Arc<Self>, CosmeticError> {
+        Self::compile_with_trust(sources.into_iter().map(|source| (source, false)))
+    }
+
+    /// As [`Self::compile`], with each source's scriptlet trust.
+    pub fn compile_with_trust<'a>(
+        sources: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
-            version: 1,
+            version: DATA_VERSION,
             rules: Vec::new(),
             controls: Vec::new(),
+            scriptlets: Vec::new(),
             report: CosmeticReport::default(),
         };
         let mut bytes = 0usize;
         let mut lines = 0usize;
         let mut predicates = 0usize;
-        for (source_index, source) in sources.into_iter().enumerate() {
+        for (source_index, (source, trusted)) in sources.into_iter().enumerate() {
             if source_index >= 32 {
                 return Err(CosmeticError::ResourceLimit);
             }
@@ -133,6 +153,22 @@ impl CosmeticPolicy {
                 }
                 if line.starts_with('!') || line.starts_with('[') || line.is_empty() {
                     continue;
+                }
+                match crate::scriptlets::classify(line) {
+                    crate::scriptlets::Kind::None => {}
+                    crate::scriptlets::Kind::Unsupported => {
+                        data.report.unsupported_scriptlet_rules += 1;
+                        continue;
+                    }
+                    crate::scriptlets::Kind::Rule { unknown } => {
+                        data.scriptlets.push(crate::scriptlets::ScriptletRule {
+                            line: line.to_owned(),
+                            trusted,
+                        });
+                        data.report.scriptlet_rules += 1;
+                        data.report.unknown_scriptlet_rules += usize::from(unknown);
+                        continue;
+                    }
                 }
                 match generic_control(line) {
                     Ok(Some(control)) => {
@@ -172,6 +208,8 @@ impl CosmeticPolicy {
         data.rules.dedup();
         data.controls.sort();
         data.controls.dedup();
+        data.scriptlets.sort();
+        data.scriptlets.dedup();
         Self::from_data(data)
     }
 
@@ -201,8 +239,26 @@ impl CosmeticPolicy {
         self.report
     }
 
+    /// The program every frame runs at document start in its own world, when
+    /// any host has scriptlets.
+    pub fn scriptlet_program(&self) -> Option<&str> {
+        self.scriptlets
+            .as_ref()
+            .map(|program| program.script.as_ref())
+    }
+
+    /// Hosts with an entry in the scriptlet program, and distinct call sets.
+    pub fn scriptlet_coverage(&self) -> (usize, usize) {
+        self.scriptlets
+            .as_ref()
+            .map_or((0, 0), |program| (program.hosts, program.calls))
+    }
+
     fn from_data(data: Data) -> Result<Arc<Self>, CosmeticError> {
-        if data.version != 1
+        if data.version != DATA_VERSION
+            || data.scriptlets.len() > data.report.scriptlet_rules
+            || data.report.unknown_scriptlet_rules > data.report.scriptlet_rules
+            || data.scriptlets.windows(2).any(|pair| pair[0] >= pair[1])
             || data.rules.len() > MAX_RULES
             || data.controls.len() > MAX_CONTROLS
             || data.rules.len() > data.report.accepted
@@ -360,6 +416,9 @@ impl CosmeticPolicy {
             .filter(|r| fallback_names.contains(&r.selector))
             .cloned()
             .collect();
+        // Rebuilt from the rules on every decode: the program is executable, so
+        // a persisted copy is never trusted.
+        let scriptlets = crate::scriptlets::build(&data.scriptlets)?;
         let encoded = serde_json::to_vec(&data).map_err(|_| CosmeticError::InvalidPolicy)?;
         if encoded.len() > MAX_POLICY_BYTES {
             return Err(CosmeticError::ResourceLimit);
@@ -374,6 +433,7 @@ impl CosmeticPolicy {
             ),
             generic_index,
             fallback_generic,
+            scriptlets,
         });
         *LIVE_POLICY.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&policy);
         Ok(policy)
@@ -381,6 +441,12 @@ impl CosmeticPolicy {
 }
 
 impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
+    fn scriptlet_program(&self) -> Option<Arc<str>> {
+        self.scriptlets
+            .as_ref()
+            .map(|program| program.script.clone())
+    }
+
     fn fingerprint(&self) -> zephium_core::blocker::ContentRuleDigest {
         zephium_core::blocker::ContentRuleDigest::from_bytes(self.fingerprint)
     }
@@ -798,7 +864,10 @@ mod tests {
             "example.com##+js(foo)\nexample.com##.ad:remove()\nexample.com##.ad:has-text(foo)\nexample.com##.ad{}body{color:red}\nexample.*##.ad\n##.good",
         ]).unwrap();
         assert_eq!(policy.report().accepted, 1);
-        assert_eq!(policy.report().rejected, 5);
+        // The scriptlet rule goes to the scriptlet program, never into CSS.
+        assert_eq!(policy.report().rejected, 4);
+        assert_eq!(policy.report().scriptlet_rules, 1);
+        assert_eq!(policy.report().unknown_scriptlet_rules, 1);
         assert_eq!(
             policy.stylesheet("https://example.com/").unwrap().as_ref(),
             ".good{display:none!important}\n"

@@ -1604,6 +1604,8 @@ impl Shell {
         self.ensure_blocker_statistics(profile, false);
         self.ensure_blocker_site_preferences(profile);
         self.ensure_popup_sites(profile);
+        self.engine
+            .prepare_profile(self.partition_of_profile(profile));
         let accepted = self.blocker.start_uninitialized(profile);
         if let (Some(token), Some(queue)) = (self.blocker.startup_hold(profile), &self.self_queue) {
             queue.schedule_blocker_startup_deadline(

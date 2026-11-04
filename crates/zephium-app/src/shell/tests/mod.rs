@@ -986,6 +986,14 @@ impl Engine for FakeEngine {
         self.warm_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
+    fn prepare_profile(&self, partition: Partition) {
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("prepare-profile {kind} {}", partition.profile()));
+    }
     fn install_content_rules(
         &self,
         profile: ProfileId,

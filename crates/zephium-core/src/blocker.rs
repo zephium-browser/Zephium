@@ -21,9 +21,9 @@ mod cosmetics;
 pub use cosmetics::{DocumentStyleFailure, DocumentStylePlan, DocumentStyleProvider};
 mod sites;
 pub use sites::{
-    BlockerSite, BlockerSitePreferences, PersonalHide, PreparedBlockerSite, PreparedBlockerSites,
-    SitePreferenceChange, SitePreferenceError, MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES,
-    MAX_PERSONAL_RULE_BYTES,
+    scriptlet_program_with_pauses, BlockerSite, BlockerSitePreferences, PersonalHide,
+    PreparedBlockerSite, PreparedBlockerSites, SitePreferenceChange, SitePreferenceError,
+    MAX_PAUSED_BLOCKER_SITES, MAX_PERSONAL_HIDES, MAX_PERSONAL_RULE_BYTES,
 };
 
 /// Upper bound for one native declarative policy crossing the application to

@@ -59,6 +59,23 @@ fn a_regex_past_the_runtime_limits_is_left_out_and_the_rest_compiles() {
     );
 }
 
+#[cfg(feature = "runtime")]
+#[test]
+fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source("||ads.example^\nexample.com##+js(set, a.b, true)")],
+        )
+        .unwrap();
+    let cosmetics = rules.cosmetic_policy().expect("a cosmetic policy");
+    assert_eq!(cosmetics.report().accepted, 0);
+    assert!(cosmetics
+        .scriptlet_program()
+        .unwrap()
+        .contains("zephiumSetConstant("));
+}
+
 #[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());

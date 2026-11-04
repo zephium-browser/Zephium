@@ -75,6 +75,7 @@ struct ProfileRuntime {
     downloads: Rc<RefCell<super::webext_downloads::DownloadNumbers>>,
     installs: HashMap<ExtensionInstallId, Install>,
     surface: Option<ExtensionBrowserSurface>,
+    page_script: Option<zephium_webext_macos::PageScript>,
 }
 
 impl ProfileRuntime {
@@ -130,6 +131,26 @@ impl WebextHost {
         configuration
     }
 
+    /// The scriptlet context of a profile whose runtime exists; `None` too
+    /// below macOS 15.4.
+    pub(super) fn page_script(
+        &self,
+        profile: ProfileId,
+    ) -> Option<&zephium_webext_macos::PageScript> {
+        self.profiles.get(&profile)?.page_script.as_ref()
+    }
+
+    pub(super) fn page_scripts(&self) -> impl Iterator<Item = &zephium_webext_macos::PageScript> {
+        self.profiles
+            .values()
+            .filter_map(|entry| entry.page_script.as_ref())
+    }
+
+    /// Makes the profile's runtime ahead of its first view.
+    pub(super) fn prepare(&mut self, profile: ProfileId, sink: &Sink) {
+        self.profile(profile, sink);
+    }
+
     fn profile(&mut self, profile: ProfileId, sink: &Sink) -> &mut ProfileRuntime {
         self.profiles.entry(profile).or_insert_with(|| {
             let mtm = MainThreadMarker::new().expect("engine host runs on the main thread");
@@ -152,6 +173,8 @@ impl WebextHost {
             });
             *bridge.self_weak.borrow_mut() = Rc::downgrade(&bridge);
             let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
+            let page_script = zephium_webext_macos::PageScript::supported()
+                .then(|| zephium_webext_macos::PageScript::new(runtime.controller(), false));
             ProfileRuntime {
                 runtime,
                 store,
@@ -159,6 +182,7 @@ impl WebextHost {
                 downloads: Rc::default(),
                 installs: HashMap::new(),
                 surface: None,
+                page_script,
             }
         })
     }

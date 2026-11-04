@@ -520,6 +520,9 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
     let (url, timeout) = (text(command, "url")?, timeout(command));
     let shell = shell(app)?;
     raise(app);
+    if command.get("private").and_then(Value::as_bool) == Some(true) {
+        return open_private(&shell, bench, url, timeout);
+    }
     bench.watch(true);
     let started = Instant::now();
     let command = Command::OpenUrl {
@@ -534,6 +537,40 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
         select(&shell, bench, tab);
     }
     load(bench, dispatched, tab, started, timeout)
+}
+
+/// Opens a private window and loads `url` in its first tab.
+fn open_private(
+    shell: &Handle,
+    bench: &Bench,
+    url: &str,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    bench.watch(true);
+    let tab = shell
+        .dispatch(Command::Run("window.newPrivate".into()))
+        .then(|| bench.wait_fresh(deadline))
+        .flatten();
+    let Some((tab, id)) = tab.and_then(|tab| ItemId::parse(&tab).map(|id| (tab, id))) else {
+        bench.watch(false);
+        return Err("no private window opened".into());
+    };
+    select(shell, bench, &tab);
+    if !bench.wait_idle(&tab, deadline) {
+        bench.watch(false);
+        return Err(format!(
+            "the tab was still loading after {} ms",
+            timeout.as_millis()
+        ));
+    }
+    bench.watch(true);
+    let started = Instant::now();
+    let dispatched = shell.dispatch(Command::Navigate {
+        id,
+        input: url.to_owned(),
+    });
+    load(bench, dispatched, Some(tab), started, timeout)
 }
 
 fn navigate(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value, String> {
