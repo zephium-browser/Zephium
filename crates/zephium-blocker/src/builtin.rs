@@ -54,6 +54,8 @@ pub(crate) fn fingerprint() -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"zephium-builtin-rules-v1");
     digest.update(RULES);
+    #[cfg(feature = "qa-test-hosts")]
+    digest.update(QA_BADWARE_RULES);
     digest.finalize()
 }
 
