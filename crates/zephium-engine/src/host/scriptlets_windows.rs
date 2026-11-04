@@ -57,6 +57,25 @@ fn digest(source: &str) -> [u8; 32] {
     Sha256::digest(source.as_bytes()).into()
 }
 
+/// Records a finished add in its view's slot and returns a script to remove:
+/// one a newer program replaced while it was being added. A failed add of the
+/// current program empties the slot, so the next ensure or refresh adds it
+/// again.
+fn settle_add(slot: &mut Option<Installed>, add: u64, id: Option<String>) -> Option<String> {
+    if slot.as_ref().is_none_or(|installed| installed.add != add) {
+        return id;
+    }
+    match id {
+        Some(id) => {
+            if let Some(installed) = slot.as_mut() {
+                installed.id = Some(id);
+            }
+        }
+        None => *slot = None,
+    }
+    None
+}
+
 fn remove(view: &wry::WebView, id: &str) {
     // SAFETY: the view's core stays on its creating STA, where this runs.
     let _ = unsafe {
@@ -180,7 +199,7 @@ impl EngineHost {
         wait.adds.extend(pending);
         if wait.timeout.is_none() {
             wait.timeout =
-                crate::platform::imp::schedule_content_policy_timeout(READY_WITHIN, move || {
+                crate::platform::imp::schedule_browser_timeout(READY_WITHIN, move || {
                     with_scriptlets(move |host| host.release_scriptlet_wait(profile));
                 });
         }
@@ -189,15 +208,8 @@ impl EngineHost {
 
     fn scriptlet_added(&mut self, profile: ProfileId, view: ItemId, add: u64, id: Option<String>) {
         if let Some(observed) = self.views.get(&view) {
-            let mut slot = observed.scriptlet.0.borrow_mut();
-            match slot.as_mut() {
-                Some(installed) if installed.add == add => installed.id = id,
-                // A newer program replaced this one while it was being added.
-                _ => {
-                    if let Some(id) = id {
-                        remove(&observed.view, &id);
-                    }
-                }
+            if let Some(stale) = settle_add(&mut observed.scriptlet.0.borrow_mut(), add, id) {
+                remove(&observed.view, &stale);
             }
         }
         let done = self.scriptlets.waits.get_mut(&profile).is_some_and(|wait| {
@@ -239,5 +251,41 @@ impl EngineHost {
     ) -> bool {
         self.refresh_profile_scriptlets(profile);
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn installed(add: u64) -> Option<Installed> {
+        Some(Installed {
+            digest: [1; 32],
+            add,
+            id: None,
+        })
+    }
+
+    #[test]
+    fn a_failed_add_of_the_current_program_is_added_again() {
+        let mut slot = installed(4);
+        assert_eq!(settle_add(&mut slot, 4, None), None);
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn a_finished_add_is_kept_and_a_replaced_one_removed() {
+        let mut slot = installed(4);
+        assert_eq!(settle_add(&mut slot, 4, Some("a".into())), None);
+        assert_eq!(
+            slot.as_ref().and_then(|installed| installed.id.as_deref()),
+            Some("a")
+        );
+        assert_eq!(
+            settle_add(&mut slot, 3, Some("old".into())).as_deref(),
+            Some("old")
+        );
+        assert_eq!(settle_add(&mut slot, 3, None), None);
+        assert!(slot.is_some());
     }
 }
