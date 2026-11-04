@@ -355,10 +355,14 @@ unsupported.
   is kept until the next refresh. An edit that only changes letter case emits
   the same rule, since url-filters are case-insensitive, and stays pruned.
 - The Windows runtime matcher has no such per-rule cost and compiles every rule.
-- The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
-  sites, the top sites, pages where exceptions apply
-  (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.
-  Adult sites are left out of every list.
+- The corpus covers the benchmark sites, YouTube, ad-heavy news sites, the top
+  sites and pages where exceptions apply (`scripts/blocker-corpus/pages/`), and
+  those hosts the wildcard rules name that are on the reviewed list. Only hosts
+  listed exactly in `scripts/blocker-corpus/hosts-allowed.txt`, which holds
+  well-known sites alone, are loaded: `cargo xtask blocker-prune admit`
+  withholds every other page of every list and prints it for review. Piracy and
+  streaming, link shortener, warez and free-download, adult, gambling and scam
+  sites are never added to it.
 - A rule is listed only when the replay could test it and nothing matched. A
   load WebKit did not check as its recorded type keeps every rule of that type
   whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
@@ -367,7 +371,9 @@ unsupported.
   replay batch that never reports back, or a recorded load with no replay row,
   fails the pass.
 
-Refreshing the list is a release step, not CI: it loads hundreds of real pages
+Refreshing the list is a release step, not CI, and runs only on a Mac whose
+macOS and Safari meet the engine security floor
+(`cargo xtask check-release-engine-security`): it loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
 load against the bundled lists through a local listener that answers nothing.
 After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:
