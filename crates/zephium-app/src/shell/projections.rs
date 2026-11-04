@@ -663,6 +663,16 @@ fn runtime_security_advisory_view(
     }
 }
 
+/// A failure that fills the tab's pane (a refused page, or one that never
+/// opened) titles the tab with its host; the page behind it keeps its own
+/// title for when the person leaves.
+fn failed_pane_title(tab: &TabState) -> Option<String> {
+    let failure = tab.failure.as_deref()?;
+    (failure.covers_page || (!tab.loading && tab.url.is_none()))
+        .then(|| failure.url.host_str().map(str::to_owned))
+        .flatten()
+}
+
 fn tab_view(
     id: ItemId,
     tab: &TabState,
@@ -672,7 +682,7 @@ fn tab_view(
     TabView {
         id: id.to_string(),
         projection_revision: format!("{revision:032x}"),
-        title: tab.title.clone(),
+        title: failed_pane_title(tab).unwrap_or_else(|| tab.title.clone()),
         url: tab.url.as_ref().map(ToString::to_string),
         content: match tab.content {
             zephium_core::item::TabContent::Web => zephium_ipc::TabContentView::Web,

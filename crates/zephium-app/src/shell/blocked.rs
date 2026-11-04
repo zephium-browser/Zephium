@@ -24,6 +24,8 @@ impl Shell {
             Some(url),
             true,
         ) {
+            // The refused page never started; nothing is loading behind it.
+            self.items.set_loading(id, false);
             let _ = self.relayout();
             self.project_tab(id);
         }

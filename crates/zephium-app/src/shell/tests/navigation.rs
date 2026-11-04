@@ -732,26 +732,56 @@ fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
     });
     commit_url(&mut shell, id, "https://news.example/");
     present_committed(&mut shell, id, "https://news.example/");
-    let block = |shell: &mut Shell| {
+    let page_title = tab(&screen).title;
+    let block_for = |shell: &mut Shell, url: &str, reason| {
         shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
             id,
-            url: "https://scam.example/win".into(),
-            reason: NavigationBlockReason::Badware,
+            url: url.into(),
+            reason,
         }))
+    };
+    let block = |shell: &mut Shell| {
+        block_for(
+            shell,
+            "https://scam.example/win",
+            NavigationBlockReason::Badware,
+        )
     };
 
     // A link on the page leads to a refused site: the page stays under the
-    // explanation.
+    // explanation, which the tab is titled for, and nothing is loading.
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: true,
+    }));
     block(&mut shell);
-    let failure = tab(&screen).failure.expect("the refusal is explained");
+    let shown = tab(&screen);
+    let failure = shown.failure.expect("the refusal is explained");
     assert_eq!(failure.reason, TabFailureReason::Blocked);
     assert_eq!(failure.blocked, Some(TabBlockReason::Badware));
     assert_eq!(failure.url, "https://scam.example/win");
     assert!(failure.covers_page);
+    assert_eq!(shown.title, "scam.example");
+    assert!(!shown.loading);
     shell.handle(Command::LeaveBlockedPage(id));
     let shown = tab(&screen);
     assert_eq!(shown.failure, None);
     assert_eq!(shown.url.as_deref(), Some("https://news.example/"));
+    assert_eq!(shown.title, page_title);
+
+    // A second refusal in the same session, for the lists' own reason, is
+    // explained the same way.
+    block_for(
+        &mut shell,
+        "https://ads.example/",
+        NavigationBlockReason::FilterLists,
+    );
+    let shown = tab(&screen);
+    let failure = shown.failure.expect("the second refusal is explained");
+    assert_eq!(failure.blocked, Some(TabBlockReason::FilterLists));
+    assert_eq!(failure.url, "https://ads.example/");
+    assert_eq!(shown.title, "ads.example");
+    shell.handle(Command::LeaveBlockedPage(id));
 
     block(&mut shell);
     shell.handle(Command::ContinuePastBlock(id));

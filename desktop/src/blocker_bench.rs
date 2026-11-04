@@ -236,8 +236,18 @@ fn uptime() -> Duration {
 }
 
 pub(crate) fn engine_event(event: &EngineEvent) {
-    if let (Some(bench), EngineEvent::LoadingChanged { id, loading }) = (BENCH.get(), event) {
-        bench.loading_changed(id.to_string(), *loading, Instant::now());
+    let Some(bench) = BENCH.get() else {
+        return;
+    };
+    match event {
+        EngineEvent::LoadingChanged { id, loading } => {
+            bench.loading_changed(id.to_string(), *loading, Instant::now());
+        }
+        // A refused page never starts loading; showing why is its end.
+        EngineEvent::NavigationBlocked { id, .. } => {
+            bench.loading_changed(id.to_string(), false, Instant::now());
+        }
+        _ => {}
     }
 }
 
