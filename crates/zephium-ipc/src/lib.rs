@@ -1477,6 +1477,8 @@ pub struct BlockerRuleCoverage {
     pub platform_source_kind_approximated_rules: u32,
     pub platform_attribution_approximated_rules: u32,
     pub blocking_rule_entries: u32,
+    pub page_code_rules: u32,
+    pub page_code_bytes: u32,
 }
 
 /// Volatile, process-local health counters for the exact applied runtime

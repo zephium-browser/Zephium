@@ -247,6 +247,10 @@ pub struct ContentRuleCoverage {
     /// This is a structural count, not proof that exceptions leave a
     /// semantically reachable block for every possible request.
     pub blocking_rule_entries: u64,
+    /// Admitted scriptlet rules carrying page code from uBlock Origin's lists for YouTube.
+    pub page_code_rules: u64,
+    /// The bytes of page code those rules carry.
+    pub page_code_bytes: u64,
 }
 
 impl ContentRuleCoverage {
@@ -874,6 +878,8 @@ mod tests {
             platform_source_kind_approximated_rules: 1,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
         assert!(ContentRuleCoverage {
@@ -886,6 +892,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
@@ -898,6 +906,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 2,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
@@ -910,6 +920,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
@@ -922,6 +934,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
         assert!(!ContentRuleCoverage {
@@ -934,6 +948,8 @@ mod tests {
             platform_source_kind_approximated_rules: 1,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
         .is_consistent());
     }
@@ -1019,6 +1035,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         };
         assert!(ContentRules::declarative(
             digest,
