@@ -1788,8 +1788,7 @@ impl EngineHost {
                         watch.committed();
                     }
                     load_site_scope.navigating(&event.url);
-                    #[cfg(target_os = "windows")]
-                    load_site_scope.top_document.committed(&event.url);
+                    load_site_scope.committed(&event.url);
                     load_site_scope.protection.retry();
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content

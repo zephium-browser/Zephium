@@ -40,6 +40,14 @@ impl ViewSiteScope {
         self.target.replace(url.to_owned());
         self.refresh();
     }
+    /// Only Windows judges requests against the main document; WebKit names
+    /// each request's own frame.
+    pub(super) fn committed(&self, url: &str) {
+        #[cfg(target_os = "windows")]
+        self.top_document.committed(url);
+        #[cfg(not(target_os = "windows"))]
+        let _ = url;
+    }
     pub(super) fn refresh(&self) {
         let paused = {
             let preferences = self.preferences.borrow();
