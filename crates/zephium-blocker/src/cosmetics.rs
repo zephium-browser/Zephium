@@ -164,10 +164,14 @@ impl CosmeticPolicy {
                         continue;
                     }
                     crate::scriptlets::Kind::Rule { unknown } => {
-                        data.scriptlets.push(crate::scriptlets::ScriptletRule {
-                            line: line.to_owned(),
-                            trusted,
-                        });
+                        // A scriptlet the library lacks runs nowhere, so it
+                        // is counted and never reaches the program.
+                        if !unknown {
+                            data.scriptlets.push(crate::scriptlets::ScriptletRule {
+                                line: line.to_owned(),
+                                trusted,
+                            });
+                        }
                         data.report.scriptlet_rules += 1;
                         data.report.unknown_scriptlet_rules += usize::from(unknown);
                         continue;
@@ -1051,6 +1055,23 @@ mod tests {
             policy.generic_selectors("https://normal.example/", &vec![".x".to_owned(); 257]),
             Err(DocumentStyleFailure::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn a_scriptlet_the_library_lacks_is_counted_and_leaves_no_trace() {
+        let policy = CosmeticPolicy::compile([concat!(
+            "known.example##+js(set, a.b, true)\n",
+            "only-unknown.example##+js(no-such-scriptlet, x)\n",
+        )])
+        .unwrap();
+        assert_eq!(policy.report().scriptlet_rules, 2);
+        assert_eq!(policy.report().unknown_scriptlet_rules, 1);
+        assert_eq!(policy.scriptlet_coverage(), (1, 1));
+        let program = policy.scriptlet_program().unwrap();
+        assert!(!program.contains("no-such-scriptlet"));
+        assert!(!program.contains(&crate::scriptlets::key_hash("only-unknown.example").to_string()));
+        let encoded = String::from_utf8_lossy(&policy.encode().unwrap()).into_owned();
+        assert!(!encoded.contains("no-such-scriptlet"));
     }
 
     #[test]
