@@ -151,6 +151,20 @@ const SCRIPTLETS: &[Scriptlet] = &[
         source: include_str!("scriptlets/trusted-replace-xhr-response.js"),
     },
     Scriptlet {
+        name: "trusted-prevent-dom-bypass.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &[],
+        source: include_str!("scriptlets/trusted-prevent-dom-bypass.js"),
+    },
+    Scriptlet {
+        name: "no-xhr-if.js",
+        aliases: &["prevent-xhr.js"],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/no-xhr-if.js"),
+    },
+    Scriptlet {
         name: "nano-setTimeout-booster.js",
         aliases: &["nano-stb.js"],
         trusted: false,
@@ -693,6 +707,26 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn youtube_s_bypass_and_xhr_rules_reach_their_scriptlets() {
+        let bypass =
+            "www.youtube.com##+js(trusted-prevent-dom-bypass, Node.prototype.appendChild, fetch)";
+        let xhr = r"www.youtube.com##+js(no-xhr-if, /\/api\/stats\/atr\?.+?&fexp=v1%[-%0-9C]{300\,}&/ method:POST)";
+        let untrusted = build(&[rule(bypass, false), rule(xhr, false)])
+            .unwrap()
+            .unwrap();
+        assert!(!untrusted
+            .script
+            .contains("zephiumTrustedPreventDomBypass(\""));
+        assert!(untrusted.script.contains(
+            r#"zephiumNoXhrIf("/\\/api\\/stats\\/atr\\?.+?&fexp=v1%[-%0-9C]{300,}&/ method:POST")"#
+        ));
+        let trusted = build(&[rule(bypass, true)]).unwrap().unwrap();
+        assert!(trusted
+            .script
+            .contains(r#"zephiumTrustedPreventDomBypass("Node.prototype.appendChild", "fetch")"#));
     }
 
     #[test]
