@@ -265,7 +265,9 @@ test("a restart the runtime waits on is offered in About, even without updates",
   });
   const screen = await render(AboutPage);
   await expect.element(screen.getByText("Restart needed")).toBeVisible();
-  await expect.element(screen.getByText("A newer WebView2 is installed.", { exact: false })).toBeVisible();
+  await expect
+    .element(screen.getByText("A newer WebView2 is installed.", { exact: false }))
+    .toBeVisible();
   await screen.getByRole("button", { name: "Restart to finish updating" }).click();
   expect(native.appRelaunch).toHaveBeenCalledOnce();
   expect(native.relaunch).not.toHaveBeenCalled();

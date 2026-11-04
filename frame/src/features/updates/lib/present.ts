@@ -116,7 +116,7 @@ export const pillLabel = (pill: UpdatePill) =>
         : m.update_installing();
 
 /** What restarting does, said on the pill and in Settings › About. */
-export const restartLabel = (reason: "runtime_update" | "profile") =>
+const restartLabel = (reason: "runtime_update" | "profile") =>
   reason === "profile" ? m.navigation_error_restart() : m.update_restart_finish();
 
 /** A pill whose action is under way takes no second press. */

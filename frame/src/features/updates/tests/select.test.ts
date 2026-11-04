@@ -34,8 +34,9 @@ describe("update notices", () => {
 
   it("lets a waiting update's relaunch stand for the restart too", () => {
     expect(
-      selectNotices(facts({ restart: "runtime_update", status: { state: "ready", version: "1.0.2" } }))
-        .pill,
+      selectNotices(
+        facts({ restart: "runtime_update", status: { state: "ready", version: "1.0.2" } }),
+      ).pill,
     ).toEqual({ kind: "ready", version: "1.0.2" });
   });
 

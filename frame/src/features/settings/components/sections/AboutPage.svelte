@@ -5,7 +5,6 @@
   import { preferences } from "$domain/preferences";
   import { runtime } from "$domain/runtime";
   import { releaseNotesUrl, systemUpdateTarget, updates } from "$domain/updates";
-  import { restartLabel } from "$features/updates";
   import { IS_MAC } from "$shared/platform";
   import { keymap } from "$domain/keymap";
   import * as notices from "$session/notice.svelte";
@@ -204,7 +203,8 @@
         size="compact"
         variant="primary"
         pending={runtime.pendingRelaunch()}
-        onclick={() => void runtime.relaunch()}>{restartLabel(restart)}</Button
+        onclick={() => void runtime.relaunch()}
+        >{restart === "profile" ? m.navigation_error_restart() : m.update_restart_finish()}</Button
       >
     </SettingsRow>
   {/if}
