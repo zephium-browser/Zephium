@@ -1896,6 +1896,34 @@ fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_badware_test_host() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        let navigation = RuntimePolicy::compiled(
+            compile_navigation(&catalog, Compiler::default()).expect("the QA host"),
+        );
+        let url = "https://blocked-badware.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(navigation.decide(&request), NetworkDecision::Block);
+    }
+
     #[cfg(all(
         feature = "runtime-exact",
         feature = "webkit",

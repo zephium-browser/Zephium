@@ -14,9 +14,11 @@ const RULES: &str = concat!(
     include_str!("zephium_rules.txt"),
     "||blocked-ads.test^$document\n"
 );
-/// Protection QA builds only: judged as uBlock Origin's badware list is.
+/// Protection QA builds only: judged as uBlock Origin's badware list is. The
+/// plain rule gives the matcher a request rule, which every policy needs.
 #[cfg(feature = "qa-test-hosts")]
-pub(crate) const QA_BADWARE_RULES: &str = "||blocked-badware.test^$document\n";
+pub(crate) const QA_BADWARE_RULES: &str =
+    "||blocked-badware.test^$document\n||blocked-badware.test^\n";
 
 pub(crate) fn source() -> FilterSource {
     FilterSource::new(
