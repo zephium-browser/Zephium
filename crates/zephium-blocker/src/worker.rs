@@ -1924,6 +1924,38 @@ mod tests {
         assert_eq!(navigation.decide(&request), NetworkDecision::Block);
     }
 
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_ads_test_host_on_the_runtime_engine() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let sources = with_own_rules(
+            vec![FilterSource::new(
+                SourceId::new("easylist").unwrap(),
+                SourceFormat::Standard,
+                "||ads.example^".to_owned(),
+            )],
+            CompileTarget::Runtime,
+        );
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(CompileTarget::Runtime, sources)
+                .unwrap(),
+        );
+        let url = "https://blocked-ads.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&request), NetworkDecision::Block);
+    }
+
     #[cfg(all(
         feature = "runtime-exact",
         feature = "webkit",
