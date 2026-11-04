@@ -14,7 +14,8 @@ use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
 use objc2_foundation::{NSError, NSOperatingSystemVersion, NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{
-    WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
+    WKWebExtension, WKWebExtensionContext, WKWebExtensionContextError,
+    WKWebExtensionContextErrorDomain, WKWebExtensionContextPermissionStatus,
     WKWebExtensionController, WKWebExtensionMatchPattern,
 };
 
@@ -95,6 +96,15 @@ impl PageScript {
         std::fs::rename(&staging, dir)
     }
 
+    /// Whether `dir` holds exactly the package `write` makes for `program`.
+    pub fn holds(dir: &Path, program: &str) -> bool {
+        let same = |file: &str, text: &str| {
+            std::fs::metadata(dir.join(file)).is_ok_and(|meta| meta.len() == text.len() as u64)
+                && std::fs::read(dir.join(file)).is_ok_and(|bytes| bytes == text.as_bytes())
+        };
+        same("manifest.json", MANIFEST) && same(PROGRAM, program)
+    }
+
     /// The package now loaded, if any.
     pub fn root(&self) -> Option<PathBuf> {
         self.state
@@ -124,11 +134,16 @@ impl PageScript {
             state.generation
         };
         let Some(root) = root else {
-            let old = self.state.borrow_mut().loaded.take();
-            if let Some((_, old)) = old {
-                let _ = unsafe { self.controller.unloadExtensionContext_error(&old) };
+            let mut state = self.state.borrow_mut();
+            let result = state
+                .loaded
+                .as_ref()
+                .map_or(Ok(()), |(_, old)| unload(&self.controller, old));
+            if result.is_ok() {
+                state.loaded = None;
             }
-            done(Ok(()));
+            drop(state);
+            done(result);
             return false;
         };
         if !root.is_dir() {
@@ -178,7 +193,7 @@ impl PageScript {
 impl Drop for PageScript {
     fn drop(&mut self) {
         if let Some((_, context)) = self.state.borrow_mut().loaded.take() {
-            let _ = unsafe { self.controller.unloadExtensionContext_error(&context) };
+            let _ = unload(&self.controller, &context);
         }
     }
 }
@@ -202,11 +217,42 @@ fn activate(
         );
     }
     let mut state = state.borrow_mut();
-    if let Some((_, old)) = state.loaded.take() {
-        let _ = unsafe { controller.unloadExtensionContext_error(&old) };
+    let old = state.loaded.take();
+    if let Some((_, old)) = &old {
+        let _ = unload(controller, old);
     }
-    unsafe { controller.loadExtensionContext_error(&context) }
-        .map_err(|error| describe(Some(&error)))?;
-    state.loaded = Some((root, context));
-    Ok(())
+    match unsafe { controller.loadExtensionContext_error(&context) } {
+        Ok(()) => {
+            state.loaded = Some((root, context));
+            Ok(())
+        }
+        Err(error) => {
+            // The old program keeps running when the new one cannot.
+            if let Some((old_root, old)) = old {
+                if unsafe { controller.loadExtensionContext_error(&old) }.is_ok() {
+                    state.loaded = Some((old_root, old));
+                }
+            }
+            Err(describe(Some(&error)))
+        }
+    }
+}
+
+/// Unloads `context`; one already unloaded is not an error.
+fn unload(
+    controller: &WKWebExtensionController,
+    context: &WKWebExtensionContext,
+) -> Result<(), String> {
+    match unsafe { controller.unloadExtensionContext_error(context) } {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.code() == WKWebExtensionContextError::NotLoaded.0
+                && error
+                    .domain()
+                    .isEqualToString(unsafe { WKWebExtensionContextErrorDomain }) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(describe(Some(&error))),
+    }
 }
