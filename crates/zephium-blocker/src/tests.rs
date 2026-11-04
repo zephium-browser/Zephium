@@ -69,6 +69,10 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
             .verify_official_canary()
             .is_err()
     );
+    // A list that blocks the harmless request is refused too.
+    assert!(official("||doubleclick.com^\n||example.com^")
+        .verify_official_canary()
+        .is_err());
     // Lists that are not official are not held to it.
     assert_eq!(
         Compiler::default()
