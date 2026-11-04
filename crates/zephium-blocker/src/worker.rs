@@ -1420,6 +1420,10 @@ pub(crate) fn adapt_rules(
     };
     let result = match rules.target() {
         CompileTarget::Runtime => {
+            if let Err(error) = rules.verify_official_canary() {
+                eprintln!("content blocker: lists refused: {error}");
+                return Err(BlockerCompileFailure::InvalidSource);
+            }
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
             ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
                 .ok_or(BlockerCompileFailure::Internal)
@@ -3640,6 +3644,25 @@ mod tests {
         assert_eq!(
             worker.shutdown_until(Instant::now() + Duration::from_secs(2)),
             BlockerShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn an_official_list_that_stops_blocking_is_refused() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("easylist").unwrap(),
+                    SourceFormat::Standard,
+                    "||unrelated.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            adapt_rules(rules).err(),
+            Some(BlockerCompileFailure::InvalidSource)
         );
     }
 }

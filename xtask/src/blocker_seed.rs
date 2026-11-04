@@ -1791,7 +1791,9 @@ pub(crate) fn compile_hidden(
         .compile(native_target, sources)
         .map_err(|error| format!("{error:?}"))?;
     #[cfg(feature = "blocker-seed-runtime")]
-    verify_runtime_release_seed_smoke(&compiled)?;
+    compiled
+        .verify_official_canary()
+        .map_err(|error| format!("runtime release seed: {error}"))?;
     if let Some(output) = artifact_output {
         let webkit = compiled
             .webkit()
@@ -1922,40 +1924,6 @@ pub(crate) fn compile_hidden(
         "{}",
         String::from_utf8(encoded).map_err(|_| "compiler report is not UTF-8")?
     );
-    Ok(())
-}
-
-#[cfg(feature = "blocker-seed-runtime")]
-fn verify_runtime_release_seed_smoke(
-    compiled: &zephium_blocker::CompiledRules,
-) -> Result<(), String> {
-    use zephium_blocker::{NetworkAction, NetworkRequest, RequestMethod, ResourceType};
-
-    for (url, expected) in [
-        (
-            "https://ad.doubleclick.com/activity;src=1",
-            NetworkAction::Block,
-        ),
-        (
-            "https://www.googletagmanager.com/zephium-blocker-smoke.js",
-            NetworkAction::Block,
-        ),
-        ("https://example.com/app.js", NetworkAction::Allow),
-    ] {
-        let decision = compiled
-            .evaluate_source_independent(NetworkRequest::source_independent(
-                url,
-                ResourceType::Script,
-                RequestMethod::Get,
-            ))
-            .map_err(|error| format!("runtime release-seed smoke probe failed: {error:?}"))?;
-        if decision.action() != expected {
-            return Err(format!(
-                "runtime release-seed smoke probe returned {:?} for {url}, expected {expected:?}",
-                decision.action()
-            ));
-        }
-    }
     Ok(())
 }
 

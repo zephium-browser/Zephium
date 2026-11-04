@@ -37,6 +37,48 @@ fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
         .contains("zephiumSetConstant("));
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_official_canary_refuses_lists_that_stop_blocking() {
+    let official = |easylist: &str| {
+        Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![
+                    FilterSource::new(id("easylist"), SourceFormat::Standard, easylist.to_owned()),
+                    FilterSource::new(
+                        id("easyprivacy"),
+                        SourceFormat::Standard,
+                        "||googletagmanager.com^".to_owned(),
+                    ),
+                ],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        official("||doubleclick.com^").verify_official_canary(),
+        Ok(())
+    );
+    // The list's block is gone.
+    assert!(official("||unrelated.example^")
+        .verify_official_canary()
+        .is_err());
+    // A wildcard exception scoped to one site fails open when no page is known.
+    assert!(
+        official("||doubleclick.com^\n@@*$script,3p,from=elsewhere.example")
+            .verify_official_canary()
+            .is_err()
+    );
+    // Lists that are not official are not held to it.
+    assert_eq!(
+        Compiler::default()
+            .compile(CompileTarget::Runtime, vec![source("||unrelated.example^")])
+            .unwrap()
+            .verify_official_canary(),
+        Ok(())
+    );
+}
+
 #[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());
