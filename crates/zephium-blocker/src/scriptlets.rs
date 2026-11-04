@@ -822,4 +822,32 @@ mod tests {
         assert!(plain < guard && guard < page_code);
         assert_eq!(script.matches("zephiumReplaceNodeText(\"").count(), 1);
     }
+
+    #[test]
+    fn every_page_code_scriptlet_calls_a_guarded_function() {
+        for scriptlet in SCRIPTLETS {
+            let names: Vec<&str> = std::iter::once(scriptlet.name)
+                .chain(scriptlet.aliases.iter().copied())
+                .map(|name| name.strip_suffix(".js").unwrap_or(name))
+                .collect();
+            let page_code = names.iter().filter(|name| PAGE_CODE.contains(name)).count();
+            if page_code == 0 {
+                continue;
+            }
+            // No alias of a page-code scriptlet escapes admission.
+            assert_eq!(page_code, names.len(), "{}", scriptlet.name);
+            let function = function_text(scriptlet.source)
+                .strip_prefix("function ")
+                .and_then(|text| text.split('(').next().map(str::to_owned))
+                .unwrap_or_default();
+            assert!(
+                PAGE_CODE_FUNCTIONS.contains(&function.as_str()),
+                "{} calls {function}, which the host check does not find",
+                scriptlet.name
+            );
+        }
+        for name in PAGE_CODE {
+            assert!(known(name), "{name}");
+        }
+    }
 }
