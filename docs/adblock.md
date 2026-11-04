@@ -357,7 +357,7 @@ shorten the stall on either platform.
 
 WebKit turns a content rule list into automata and runs every one of them on
 every resource load. Rules without `.*` share a few large automata; each rule
-with `.*` gets one of its own, so the list's ~860 wildcard block rules carry
+with `.*` gets one of its own, so the lists' ~1,600 wildcard block rules carry
 most of its per-load cost. `crates/zephium-blocker/src/webkit_pruned.txt` lists
 the wildcard block rules a recorded page corpus never matched, and the WebKit
 compiler leaves them out. The compile report counts them as pruned, not as
@@ -384,9 +384,10 @@ unsupported.
   load WebKit did not check as its recorded type keeps every rule of that type
   whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
   late; a rule that applies only on sites whose page did not load (an
-  `if-domain` rule, or a first-party rule for the host it names) is kept. A
-  replay batch that never reports back, or a recorded load with no replay row,
-  fails the pass.
+  `if-domain` rule, or a first-party rule for the host it names) is kept, and
+  so is a rule for any page whose host no recorded load or visit reached: a site
+  that is not recorded keeps its blocking. A replay batch that never reports
+  back, or a recorded load with no replay row, fails the pass.
 
 Refreshing the list is a release step, not CI: it loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
