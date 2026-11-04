@@ -307,7 +307,13 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "ocx",
     "lnk",
     "url",
+    "website",
     "scf",
+    "msc",
+    "library-ms",
+    "search-ms",
+    "searchconnector-ms",
+    "settingcontent-ms",
     "gadget",
     "application",
     "appref-ms",
@@ -315,7 +321,11 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "appxbundle",
     "msix",
     "msixbundle",
+    "appinstaller",
     "msu",
+    "diagcab",
+    "diagcfg",
+    "diagpkg",
     "xll",
     "wll",
     "xnk",
@@ -370,13 +380,17 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "bash",
     "zsh",
     "csh",
+    "tcsh",
     "ksh",
+    "shar",
     "command",
     "tool",
     "terminal",
     "scpt",
     "scptd",
+    "applescript",
     "workflow",
+    "wflow",
     "action",
     // Java, browser and office carriers
     "jar",
@@ -384,6 +398,8 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "class",
     "xbap",
     "crx",
+    "oxt",
+    "iqy",
     "vsmacros",
     "vss",
     "vst",
@@ -398,12 +414,28 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "ppam",
     "ppsm",
     "sldm",
+    "vsdm",
+    "vssm",
+    "vstm",
     // macOS and Linux packages and applications
     "app",
     "dmg",
     "pkg",
     "mpkg",
     "iso",
+    "img",
+    "dmgpart",
+    "imgpart",
+    "udif",
+    "ndif",
+    "smi",
+    "dc42",
+    "diskcopy42",
+    "sparseimage",
+    "sparsebundle",
+    "dvdr",
+    "toast",
+    "dylib",
     "apk",
     "deb",
     "rpm",
@@ -411,11 +443,53 @@ const DANGEROUS_EXTENSIONS: &[&str] = &[
     "run",
     "bin",
     "mobileconfig",
+    "configprofile",
+    // macOS location files
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "ftploc",
 ];
 
-/// Script types Windows runs from a double click, which other platforms open
-/// in an editor; a developer's `.js` or `.py` on a Mac is not a warning.
-const WINDOWS_SCRIPT_EXTENSIONS: &[&str] = &["js", "py", "pyw", "pyc", "pyo", "rb", "rbw", "pl"];
+/// Types Windows runs, mounts or opens from a double click, which other
+/// platforms treat as ordinary files: a developer's `.js` or `.py`, a VM's
+/// `.vhdx` or a `.chm` manual on a Mac is not a warning.
+#[rustfmt::skip]
+const WINDOWS_ONLY_EXTENSIONS: &[&str] = &[
+    // Scripts
+    "js",
+    "py",
+    "pyw",
+    "pyc",
+    "pyo",
+    "pyd",
+    "pyz",
+    "pyzw",
+    "rb",
+    "rbw",
+    "pl",
+    // Disk images
+    "vhd",
+    "vhdx",
+    // Help files
+    "chm",
+    "hlp",
+    // Access databases and shortcuts; elsewhere `.mat` is MATLAB data
+    "accdb",
+    "accde",
+    "accdr",
+    "accda",
+    "mad",
+    "maf",
+    "mag",
+    "mam",
+    "maq",
+    "mar",
+    "mas",
+    "mat",
+    "mav",
+    "maw",
+];
 
 /// Whether a download of this name must be confirmed before it is kept. The
 /// last extension decides, after the trailing dots and spaces Windows ignores
@@ -434,7 +508,7 @@ pub fn is_dangerous_file_on(name: &str, windows: bool) -> bool {
         };
         !stem.is_empty()
             && !extension.is_empty()
-            && (known(DANGEROUS_EXTENSIONS) || (windows && known(WINDOWS_SCRIPT_EXTENSIONS)))
+            && (known(DANGEROUS_EXTENSIONS) || (windows && known(WINDOWS_ONLY_EXTENSIONS)))
     })
 }
 
@@ -800,6 +874,124 @@ mod tests {
         // Programs are held everywhere.
         assert!(is_dangerous_file_on("setup.exe", false));
         assert!(is_dangerous_file_on("setup.exe", true));
+    }
+    #[test]
+    fn disk_images_shortcuts_and_installer_formats_are_held_everywhere() {
+        let extensions = [
+            // Disk images
+            "img",
+            "iso",
+            "dmgpart",
+            "imgpart",
+            "udif",
+            "ndif",
+            "smi",
+            "dc42",
+            "diskcopy42",
+            "sparseimage",
+            "sparsebundle",
+            "dvdr",
+            "toast",
+            // Windows shell files, installers and diagnostics
+            "msc",
+            "library-ms",
+            "search-ms",
+            "searchconnector-ms",
+            "settingcontent-ms",
+            "appinstaller",
+            "diagcab",
+            "diagcfg",
+            "diagpkg",
+            "website",
+            // macOS location files, scripts and profiles
+            "webloc",
+            "inetloc",
+            "fileloc",
+            "ftploc",
+            "applescript",
+            "wflow",
+            "configprofile",
+            "dylib",
+            // Shell scripts and office carriers
+            "tcsh",
+            "shar",
+            "oxt",
+            "iqy",
+            "vsdm",
+            "vssm",
+            "vstm",
+        ];
+        for extension in extensions {
+            for windows in [false, true] {
+                for name in [
+                    format!("file.{extension}"),
+                    format!("File.{}", extension.to_uppercase()),
+                    format!("a.b.{extension}"),
+                    format!("file.{extension}."),
+                    format!("file.{extension}  "),
+                    format!("file.{extension}. . "),
+                ] {
+                    assert!(is_dangerous_file_on(&name, windows), "{name} {windows}");
+                }
+                for name in [
+                    format!("photo.{extension}.txt"),
+                    format!("notes.{extension}.pdf"),
+                    format!("{extension}.txt"),
+                    format!(".{extension}"),
+                    extension.to_string(),
+                ] {
+                    assert!(!is_dangerous_file_on(&name, windows), "{name} {windows}");
+                }
+            }
+        }
+        for name in [
+            "search.ms",
+            "settings.content",
+            "photo.imge",
+            "photo.im",
+            "backup.sparse",
+            "bookmark.loc",
+            "report.accdb.bak",
+        ] {
+            assert!(!is_dangerous_file_on(name, true), "{name}");
+            assert!(!is_dangerous_file_on(name, false), "{name}");
+        }
+    }
+    #[test]
+    fn types_only_windows_opens_are_held_only_there() {
+        for extension in [
+            "vhd", "vhdx", "chm", "hlp", "pyd", "pyz", "pyzw", "accdb", "accde", "accdr", "accda",
+            "mad", "maf", "mag", "mam", "maq", "mar", "mas", "mat", "mav", "maw",
+        ] {
+            for name in [
+                format!("disk.{extension}"),
+                format!("Disk.{}", extension.to_uppercase()),
+                format!("disk.{extension}."),
+                format!("disk.{extension}  "),
+                format!("disk.{extension}. . "),
+            ] {
+                assert!(is_dangerous_file_on(&name, true), "{name}");
+                assert!(!is_dangerous_file_on(&name, false), "{name}");
+            }
+            for name in [
+                format!("photo.{extension}.txt"),
+                format!("notes.{extension}.pdf"),
+                format!("{extension}.txt"),
+                format!(".{extension}"),
+                extension.to_string(),
+            ] {
+                assert!(!is_dangerous_file_on(&name, true), "{name}");
+                assert!(!is_dangerous_file_on(&name, false), "{name}");
+            }
+        }
+    }
+    #[test]
+    fn the_extension_lists_hold_lowercase_names_once() {
+        let mut seen = std::collections::HashSet::new();
+        for extension in DANGEROUS_EXTENSIONS.iter().chain(WINDOWS_ONLY_EXTENSIONS) {
+            assert_eq!(*extension, extension.to_ascii_lowercase());
+            assert!(seen.insert(*extension), "{extension} is listed twice");
+        }
     }
     #[test]
     fn a_disguised_extension_is_judged_by_what_the_system_will_run() {
