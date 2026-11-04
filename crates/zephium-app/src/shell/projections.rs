@@ -563,6 +563,11 @@ impl Shell {
         tab: &TabState,
         profile: Option<ProfileId>,
     ) -> Option<zephium_ipc::IconRef> {
+        // A failure filling the pane is not the page whose icon the tab had;
+        // that icon returns with the page when the person leaves.
+        if tab.failure_covers_page() {
+            return None;
+        }
         let icon = self.icon_ref(zephium_ipc::IconSurface::Chrome, tab, profile);
         self.keep_or_hold_icon(id, tab, profile?, icon)
     }

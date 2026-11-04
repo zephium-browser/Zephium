@@ -770,6 +770,12 @@ fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
     });
     commit_url(&mut shell, id, "https://news.example/");
     present_committed(&mut shell, id, "https://news.example/");
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id,
+        page_url: "https://news.example/".into(),
+        rgba: vec![9; zephium_core::icon::RGBA32_BYTES],
+    }));
+    assert!(tab(&screen).icon.is_some());
     let page_title = tab(&screen).title;
     let block_for = |shell: &mut Shell, url: &str, reason| {
         shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
@@ -801,11 +807,13 @@ fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
     assert!(failure.covers_page);
     assert_eq!(shown.title, "scam.example");
     assert!(!shown.loading);
+    assert_eq!(shown.icon, None, "the blocked page wears no site's icon");
     shell.handle(Command::LeaveBlockedPage(id));
     let shown = tab(&screen);
     assert_eq!(shown.failure, None);
     assert_eq!(shown.url.as_deref(), Some("https://news.example/"));
     assert_eq!(shown.title, page_title);
+    assert!(shown.icon.is_some(), "the page's icon returns with it");
 
     // A second refusal in the same session, for the lists' own reason, is
     // explained the same way.
