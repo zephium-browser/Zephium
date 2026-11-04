@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use sha2::{Digest, Sha256};
-use zephium_core::blocker::{BlockerSite, ContentRuleDigest};
+use zephium_core::blocker::{
+    BlockerSite, ContentRuleDigest, NetworkDecision, NetworkRequest, NetworkRequestPolicy,
+    NetworkRequestSourceKind, NetworkResourceType,
+};
 use zephium_core::ids::{ItemId, ProfileId};
 
 use super::dispatch::with_document_style;
@@ -16,8 +19,12 @@ use super::EngineHost;
 pub(super) type SitePreferencesSlot =
     Rc<RefCell<Option<Arc<zephium_core::blocker::PreparedBlockerSites>>>>;
 
+/// The policy that judges a profile's pages and frames before they load.
+pub(super) type NavigationSlot = Rc<RefCell<Option<Arc<dyn NetworkRequestPolicy>>>>;
+
 pub(super) struct ViewSiteScope {
     preferences: SitePreferencesSlot,
+    navigation: NavigationSlot,
     target: RefCell<String>,
     pub(super) pause: crate::platform::content_pause::ContentPause,
     pub(super) protection: crate::platform::content_protection::ViewProtection,
@@ -25,9 +32,14 @@ pub(super) struct ViewSiteScope {
 }
 
 impl ViewSiteScope {
-    pub(super) fn new(preferences: SitePreferencesSlot, url: &str) -> Rc<Self> {
+    pub(super) fn new(
+        preferences: SitePreferencesSlot,
+        navigation: NavigationSlot,
+        url: &str,
+    ) -> Rc<Self> {
         let scope = Rc::new(Self {
             preferences,
+            navigation,
             target: RefCell::new(url.to_owned()),
             pause: Default::default(),
             protection: Default::default(),
@@ -49,16 +61,34 @@ impl ViewSiteScope {
         let _ = url;
     }
     pub(super) fn refresh(&self) {
-        let paused = {
-            let preferences = self.preferences.borrow();
-            match preferences.as_ref() {
-                None => true,
-                Some(preferences) => BlockerSite::from_url(&self.target.borrow())
-                    .and_then(|site| preferences.get(&site))
-                    .is_some_and(|entry| entry.paused),
-            }
-        };
+        let paused = self.paused_at(&self.target.borrow());
         self.pause.set(paused);
+    }
+    fn paused_at(&self, url: &str) -> bool {
+        match self.preferences.borrow().as_ref() {
+            None => true,
+            Some(preferences) => BlockerSite::from_url(url)
+                .and_then(|site| preferences.get(&site))
+                .is_some_and(|entry| entry.paused),
+        }
+    }
+    /// Whether the lists refuse a page, or a frame of the view's page, before
+    /// it loads. A site with protection paused is not judged.
+    pub(super) fn blocks_navigation(&self, url: &str, frame: bool) -> bool {
+        let Some(policy) = self.navigation.borrow().clone() else {
+            return false;
+        };
+        let page = self.target.borrow().clone();
+        let (source, kind) = if frame {
+            (page.as_str(), NetworkResourceType::Subdocument)
+        } else {
+            (url, NetworkResourceType::Document)
+        };
+        if self.paused_at(source) {
+            return false;
+        }
+        NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)
+            .is_some_and(|request| policy.decide(&request) == NetworkDecision::Block)
     }
 }
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
@@ -688,6 +718,59 @@ fn decode_identity(text: &str) -> Option<DocumentIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Refuses(Mutex<Vec<(String, Option<String>, NetworkResourceType)>>);
+
+    impl NetworkRequestPolicy for Refuses {
+        fn decide(&self, request: &NetworkRequest<'_>) -> NetworkDecision {
+            self.0.lock().unwrap().push((
+                request.url().to_owned(),
+                request.source_url().map(str::to_owned),
+                request.resource_type(),
+            ));
+            if request.url().contains("scam") {
+                NetworkDecision::Block
+            } else {
+                NetworkDecision::Allow
+            }
+        }
+    }
+
+    #[test]
+    fn navigations_are_judged_by_the_profile_policy_except_on_a_paused_site() {
+        let paused = BlockerSite::from_url("https://paused.example/").unwrap();
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, [(paused, true, Arc::from(""))]),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        assert!(!scope.blocks_navigation("https://scam.example/", false));
+        let policy = Arc::new(Refuses(Mutex::default()));
+        navigation.replace(Some(policy.clone()));
+        assert!(scope.blocks_navigation("https://scam.example/", false));
+        assert!(scope.blocks_navigation("https://scam.example/ad", true));
+        assert!(!scope.blocks_navigation("https://fine.example/", false));
+        assert_eq!(
+            policy.0.lock().unwrap()[..2],
+            [
+                (
+                    "https://scam.example/".to_owned(),
+                    Some("https://scam.example/".to_owned()),
+                    NetworkResourceType::Document,
+                ),
+                (
+                    "https://scam.example/ad".to_owned(),
+                    Some("https://news.example/".to_owned()),
+                    NetworkResourceType::Subdocument,
+                ),
+            ]
+        );
+        scope.navigating("https://paused.example/");
+        // A paused page loads any frame; leaving it is judged as usual.
+        assert!(!scope.blocks_navigation("https://scam.example/ad", true));
+        assert!(scope.blocks_navigation("https://scam.example/", false));
+        assert!(!scope.blocks_navigation("https://paused.example/scam", false));
+    }
     #[test]
     fn reuse_does_not_encode_the_subscription_payload() {
         let plan = zephium_core::blocker::DocumentStylePlan {

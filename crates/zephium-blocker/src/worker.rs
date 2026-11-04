@@ -1232,6 +1232,10 @@ impl ArtifactCache {
             match cache.load(cache_key, target, compiler.limits()) {
                 Ok(Some(loaded)) => {
                     if let Some(rules) = adapt_loaded_rules(loaded) {
+                        let rules = match self.catalog.as_ref().map(PolicyCatalog::load) {
+                            Some(Ok(catalog)) => with_navigation(rules, &catalog, compiler),
+                            _ => rules,
+                        };
                         #[cfg(test)]
                         {
                             self.persistent_hits += 1;
@@ -1275,6 +1279,7 @@ impl ArtifactCache {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
+                            let rules = with_navigation(rules, &catalog, compiler);
                             let durably_cached = match persistent.as_ref() {
                                 Some(cache)
                                     if cache.store(cache_key, &persistent_copy, &rules).is_ok() =>
@@ -1334,6 +1339,45 @@ fn complete_job(
         }));
         admission.finish_delivery(job.profile, job.generation);
     }
+}
+
+/// uBlock Origin's list of scam and malware sites. WebKit gets none of its
+/// wildcard rules, so where it enforces the lists this list alone also judges
+/// each page and frame as it starts loading.
+#[cfg(all(feature = "runtime", not(target_os = "windows")))]
+const NAVIGATION_SOURCE: &str = "ublock-badware";
+
+#[cfg(all(feature = "runtime", not(target_os = "windows")))]
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    catalog: &StaticPolicyCatalog,
+    compiler: Compiler,
+) -> Arc<ContentRules> {
+    let sources: Vec<_> = catalog
+        .instantiate()
+        .into_iter()
+        .filter(|source| source.id().as_str() == NAVIGATION_SOURCE)
+        .collect();
+    if sources.is_empty() || !rules.enabled() {
+        return rules;
+    }
+    match compiler.compile(CompileTarget::Runtime, sources) {
+        Ok(compiled) => rules.with_navigation(Arc::new(RuntimePolicy::compiled(compiled))),
+        Err(error) => {
+            eprintln!("content blocker: navigation check unavailable: {error}");
+            rules
+        }
+    }
+}
+
+/// The runtime policy judges navigations itself.
+#[cfg(any(not(feature = "runtime"), target_os = "windows"))]
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    _: &StaticPolicyCatalog,
+    _: Compiler,
+) -> Arc<ContentRules> {
+    rules
 }
 
 fn with_own_rules(mut sources: Vec<FilterSource>, target: CompileTarget) -> Vec<FilterSource> {
@@ -1816,6 +1860,46 @@ fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "runtime-exact", feature = "webkit", not(target_os = "windows")))]
+    #[test]
+    fn webkit_rules_carry_a_badware_navigation_check() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let source = |id: &str, rules: &str| {
+            PolicySource::new(SourceId::new(id).unwrap(), SourceFormat::Standard, Arc::from(rules))
+        };
+        let catalog = |sources| StaticPolicyCatalog::new(sources).unwrap();
+        let compile = |catalog: &StaticPolicyCatalog| {
+            let compiler = Compiler::default();
+            let compiled = compiler
+                .compile(CompileTarget::WebKit, catalog.instantiate())
+                .unwrap();
+            with_navigation(adapt_rules(compiled).unwrap(), catalog, compiler)
+        };
+        let page = |url| {
+            CoreRequest::exact(
+                url,
+                url,
+                "GET",
+                NetworkResourceType::Document,
+                NetworkRequestSourceKind::Document,
+            )
+            .unwrap()
+        };
+        let with_badware = compile(&catalog(vec![
+            source("easylist", "||ads.example^"),
+            source("ublock-badware", "||scam.example^$doc\n||cdn.example/*/alarm.mp3"),
+        ]));
+        let navigation = with_badware.navigation_policy().expect("a navigation check");
+        assert_eq!(navigation.decide(&page("https://scam.example/")), NetworkDecision::Block);
+        // Only the badware list judges navigations.
+        assert_eq!(navigation.decide(&page("https://ads.example/")), NetworkDecision::Allow);
+        let without = compile(&catalog(vec![source("easylist", "||ads.example^")]));
+        assert!(without.navigation_policy().is_none());
+    }
 
     fn compiler_with_post_ack_exit_gate() -> (Arc<WorkerBlocker>, SyncSender<()>, Receiver<()>) {
         let (queue, receiver) = mpsc::sync_channel::<WorkerCommand>(1);

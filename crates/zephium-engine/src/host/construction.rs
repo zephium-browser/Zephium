@@ -669,7 +669,13 @@ impl EngineHost {
             .entry(partition.profile())
             .or_default()
             .clone();
-        let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        let navigation = self
+            .blocker_navigation
+            .entry(partition.profile())
+            .or_default()
+            .clone();
+        let site_scope =
+            super::content_styles::ViewSiteScope::new(site_preferences, navigation, url);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
             self.popup_sites_for(partition.profile()),
@@ -1153,6 +1159,10 @@ impl EngineHost {
                     return false;
                 }
                 #[cfg(target_os = "windows")]
+                if admitted && navigation_site_scope.blocks_navigation(target.as_str(), false) {
+                    return false;
+                }
+                #[cfg(target_os = "windows")]
                 if admitted {
                     navigation_site_scope.navigating(&target);
                 }
@@ -1216,6 +1226,7 @@ impl EngineHost {
             let action_reader = Rc::downgrade(&page_reader);
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
+            let action_site_scope = site_scope.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
                 // Wry calls only this handler when it is set, for every frame.
                 zephium_core::blocker::PageActivity::shared().note_navigation();
@@ -1253,6 +1264,12 @@ impl EngineHost {
                     super::webext::note_auth_native_navigation(&frame_navigation, action);
                 }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
+                    return false;
+                }
+                if admitted
+                    && action_site_scope
+                        .blocks_navigation(&target, action.target_is_main_frame == Some(false))
+                {
                     return false;
                 }
                 #[cfg(feature = "agentic-browser")]
@@ -2104,6 +2121,16 @@ impl EngineHost {
                 link(uri, user_gesture);
             }) {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
+            let frame_site_scope = site_scope.clone();
+            if let Err(error) = security_policy
+                .judge_frame_navigations(move |uri| frame_site_scope.blocks_navigation(uri, true))
+            {
+                eprintln!("content blocker: frame navigation check failed: {error}");
                 if report_failure {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }

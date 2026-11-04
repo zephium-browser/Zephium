@@ -188,7 +188,7 @@ rfd = { version = "=0.16.0", default-features = false, features = ["common-contr
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
 zephium-webext-macos = { path = "../crates/zephium-webext-macos", version = "=0.1.0" }
-zephium-blocker = { workspace = true, features = ["webkit"] }
+zephium-blocker = { workspace = true, features = ["webkit", "runtime", "runtime-exact"] }
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 libc = "0.2"

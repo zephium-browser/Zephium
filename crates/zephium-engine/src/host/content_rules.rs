@@ -262,6 +262,7 @@ impl EngineHost {
                 state.compiling = Some(CompilingContentPolicy {
                     generation: queued.generation,
                     cosmetics: queued.rules.cosmetics().cloned(),
+                    navigation: queued.rules.navigation_policy().cloned(),
                     superseded: false,
                 });
                 Next::Queued(queued)
@@ -1089,6 +1090,7 @@ impl EngineHost {
             let Some(state) = self.content_policies.get_mut(&profile) else {
                 return;
             };
+            let navigation = compiling.navigation.clone();
             state.applied = Some(AppliedContentPolicy {
                 generation,
                 cosmetics: compiling.cosmetics,
@@ -1100,6 +1102,7 @@ impl EngineHost {
                 #[cfg(not(target_os = "windows"))]
                 digest: native_digest,
             });
+            self.set_profile_navigation(profile, navigation);
             self.refresh_profile_document_styles(profile);
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if self.wait_for_scriptlets(profile, generation) {
@@ -1331,6 +1334,7 @@ impl EngineHost {
                 native_digest,
             );
         }
+        let navigation = compiling.navigation.clone();
         state.applied = Some(AppliedContentPolicy {
             generation,
             cosmetics: compiling.cosmetics,
@@ -1338,6 +1342,7 @@ impl EngineHost {
             #[cfg(not(target_os = "windows"))]
             digest: native_digest,
         });
+        self.set_profile_navigation(profile, navigation);
         self.refresh_profile_document_styles(profile);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if self.wait_for_scriptlets(profile, generation) {
@@ -1440,9 +1445,25 @@ impl EngineHost {
             .is_some_and(|state| state.applied.is_some())
     }
 
+    /// Every view of the profile shares the slot, so its next navigation is
+    /// judged by the policy just applied.
+    fn set_profile_navigation(
+        &mut self,
+        profile: ProfileId,
+        navigation: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+    ) {
+        self.blocker_navigation
+            .entry(profile)
+            .or_default()
+            .replace(navigation);
+    }
+
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
         self.blocker_sites.remove(&profile);
+        if let Some(slot) = self.blocker_navigation.remove(&profile) {
+            slot.replace(None);
+        }
         self.page_styles.remove(&profile);
         self.blocker_statistics.remove(&profile);
         for waiters in self.declarative_content_policy_compilations.values_mut() {
@@ -1767,6 +1788,7 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
                 cosmetics: None,
+                navigation: None,
                 superseded: false,
             }),
             queued: None,
@@ -1810,6 +1832,7 @@ mod tests {
             compiling: Some(CompilingContentPolicy {
                 generation: compiling,
                 cosmetics: None,
+                navigation: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {
