@@ -372,7 +372,9 @@ pub(crate) fn classify(line: &str, trusted: bool) -> Kind {
     if line.len() > MAX_RULE_BYTES {
         return Kind::Unsupported;
     }
-    if !exception && RESPONSE_TEXT.contains(&name) {
+    // Spike only: rmnt runs on YouTube's hosts alone, so the spike measures YouTube.
+    if !exception && (RESPONSE_TEXT.contains(&name) || ["remove-node-text", "rmnt"].contains(&name))
+    {
         let mut named = domains
             .split(',')
             .filter(|domain| !domain.is_empty() && !domain.starts_with('~'))
@@ -892,6 +894,21 @@ mod tests {
     }
 
     #[test]
+    fn the_spike_runs_rmnt_on_youtube_alone() {
+        assert!(matches!(
+            classify(
+                "www.youtube.com##+js(rmnt, script, window\\,\"fetch\")",
+                true
+            ),
+            Kind::Rule { unknown: false, .. }
+        ));
+        assert!(matches!(
+            classify("example.com##+js(rmnt, script, a)", true),
+            Kind::Unsupported
+        ));
+    }
+
+    #[test]
     fn youtube_s_bypass_and_xhr_rules_reach_their_scriptlets() {
         let bypass =
             "www.youtube.com##+js(trusted-prevent-dom-bypass, Node.prototype.appendChild, fetch)";
@@ -1056,7 +1073,7 @@ mod tests {
         }
         // Other scriptlets keep their own rules, and exceptions carry no code.
         assert_eq!(
-            page_code("example.com##+js(rmnt, script, a)", true),
+            page_code("www.youtube.com##+js(rmnt, script, a)", true),
             Some(0)
         );
         assert_eq!(
