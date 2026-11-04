@@ -1192,6 +1192,7 @@ impl RetirementGate {
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
             | event @ EngineEvent::FocusBlocked { id, .. }
+            | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -2917,6 +2918,10 @@ impl Engine for WebviewEngine {
             let _ = (profile, item, request, settlement);
             NativeDispatch::Unsupported
         }
+    }
+
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.allow_blocked_navigation(item, &url))
     }
 
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {

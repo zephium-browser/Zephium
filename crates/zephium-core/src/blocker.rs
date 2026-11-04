@@ -692,9 +692,11 @@ impl ContentRules {
         self.cosmetics.as_ref()
     }
 
-    /// Attaches the policy that judges a page or frame before it loads, for a
-    /// declarative network artifact that cannot.
-    pub fn with_navigation(mut self: Arc<Self>, policy: Arc<dyn NetworkRequestPolicy>) -> Arc<Self> {
+    /// Attaches the policy that judges a page or frame before it loads.
+    pub fn with_navigation(
+        mut self: Arc<Self>,
+        policy: Arc<dyn NetworkRequestPolicy>,
+    ) -> Arc<Self> {
         if self.enabled() {
             let rules = Arc::make_mut(&mut self);
             rules.navigation = Some(NavigationPolicy(policy));
@@ -702,13 +704,10 @@ impl ContentRules {
         self
     }
 
-    /// The policy that judges documents as they start loading: the attached
-    /// one, or else the runtime network policy itself.
+    /// uBlock Origin's badware list alone, which judges each page and frame
+    /// as it starts loading.
     pub fn navigation_policy(&self) -> Option<&Arc<dyn NetworkRequestPolicy>> {
-        self.navigation
-            .as_ref()
-            .map(|navigation| &navigation.0)
-            .or_else(|| self.runtime_policy())
+        self.navigation.as_ref().map(|navigation| &navigation.0)
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {

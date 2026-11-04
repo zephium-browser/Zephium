@@ -1094,6 +1094,11 @@ pub trait Engine {
     fn allow_certificate_exception(&self, _item: ItemId, _url: String) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// The person chose to open the page the lists refused at `url` anyway.
+    /// Its host stays allowed in the tab's profile until the app quits.
+    fn allow_blocked_navigation(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Answers the tab's sign-in prompt with credentials, or cancels it with
     /// None. A stale or unknown request is ignored and its credentials are
     /// dropped.
@@ -1297,7 +1302,18 @@ pub enum NavigationFailureReason {
     /// The server's certificate was refused, and what the engine could tell
     /// about why.
     Certificate(crate::certificates::CertificateProblem),
+    /// The person's filter lists refused the page.
+    Blocked(NavigationBlockReason),
     Other,
+}
+
+/// Why the filter lists refused a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1735,6 +1751,13 @@ pub enum EngineEvent {
     FocusBlocked {
         id: ItemId,
         url: String,
+    },
+    /// The filter lists refused the page the view's main frame was about to
+    /// load; the page that was showing stays, and nothing was requested.
+    NavigationBlocked {
+        id: ItemId,
+        url: String,
+        reason: NavigationBlockReason,
     },
     LinkedDownloadStarted {
         id: ItemId,

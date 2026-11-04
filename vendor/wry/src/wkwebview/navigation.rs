@@ -657,6 +657,10 @@ fn navigation_error_phase(domain: Option<&str>, code: isize) -> NavigationEventP
 
 /// The category a person can be told; never the native error text.
 fn navigation_failure(domain: Option<&str>, code: isize) -> NavigationFailure {
+  // WebKitErrorFrameLoadBlockedByContentBlocker.
+  if (domain, code) == (Some("WebKitErrorDomain"), 104) {
+    return NavigationFailure::Blocked;
+  }
   if domain != Some("NSURLErrorDomain") {
     return NavigationFailure::Other;
   }
@@ -1484,6 +1488,10 @@ mod cancellation_tests {
     assert_eq!(
       navigation_failure(Some("WebKitErrorDomain"), -1009),
       NavigationFailure::Other
+    );
+    assert_eq!(
+      navigation_failure(Some("WebKitErrorDomain"), 104),
+      NavigationFailure::Blocked
     );
   }
   #[test]

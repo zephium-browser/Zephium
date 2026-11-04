@@ -553,7 +553,10 @@ impl SecurityPolicy {
             Ok(())
         }));
         let mut token = 0_i64;
-        unsafe { self.core.add_FrameNavigationStarting(&handler, &mut token)? };
+        unsafe {
+            self.core
+                .add_FrameNavigationStarting(&handler, &mut token)?
+        };
         if let Some(previous) = self.judged_frame_token.replace(token) {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
         }

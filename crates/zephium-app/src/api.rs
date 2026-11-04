@@ -442,6 +442,10 @@ pub enum Command {
     /// The person chose to continue past the certificate the tab refused,
     /// on a host on their own network, and to load it again.
     ContinuePastCertificate(ItemId),
+    /// The person chose to open the page the filter lists refused anyway.
+    ContinuePastBlock(ItemId),
+    /// The person left the page the filter lists refused.
+    LeaveBlockedPage(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {

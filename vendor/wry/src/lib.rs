@@ -3475,6 +3475,8 @@ pub enum NavigationFailure {
   /// The server's certificate was refused, and what the engine could tell
   /// about why.
   Certificate(CertificateProblem),
+  /// macOS: the view's content rules refused the page.
+  Blocked,
   /// Any other failure.
   Other,
 }

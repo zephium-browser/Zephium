@@ -501,6 +501,7 @@ impl Shell {
                 reason: zephium_ipc::TabFailureReason::Crashed,
                 certificate: None,
                 can_continue: false,
+                blocked: None,
                 covers_page: false,
             });
         }
@@ -746,11 +747,21 @@ fn tab_view(
                     Reason::Insecure | Reason::Certificate(_) => {
                         zephium_ipc::TabFailureReason::Insecure
                     }
+                    Reason::Blocked(_) => zephium_ipc::TabFailureReason::Blocked,
                     Reason::Other => zephium_ipc::TabFailureReason::Other,
                 },
                 can_continue: certificate.is_some()
                     && zephium_core::certificates::may_continue(&failure.url),
                 certificate,
+                blocked: match failure.reason {
+                    Reason::Blocked(
+                        zephium_core::ports::engine::NavigationBlockReason::Badware,
+                    ) => Some(zephium_ipc::TabBlockReason::Badware),
+                    Reason::Blocked(
+                        zephium_core::ports::engine::NavigationBlockReason::FilterLists,
+                    ) => Some(zephium_ipc::TabBlockReason::FilterLists),
+                    _ => None,
+                },
                 covers_page: failure.covers_page,
             }
         }),

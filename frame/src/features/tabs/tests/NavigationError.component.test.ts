@@ -6,13 +6,23 @@ import { tabFixture } from "$shared/testing/fixtures";
 import NavigationError from "../components/NavigationError.svelte";
 
 const continued = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const left = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const unblocked = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ tabsContinuePastCertificate: continued as never });
+  return mockBindings({
+    tabsContinuePastCertificate: continued as never,
+    tabsLeaveBlockedPage: left as never,
+    tabsContinuePastBlock: unblocked as never,
+  });
 });
 
-afterEach(() => continued.mockClear());
+afterEach(() => {
+  continued.mockClear();
+  left.mockClear();
+  unblocked.mockClear();
+});
 
 function show(failure: TabFailure) {
   const tab = tabFixture({ id: "tab-7", url: null, failure });
@@ -55,4 +65,34 @@ test("a secure-connection failure without a certificate has no way past", async 
   show({ url: "https://nas.local/", reason: "insecure", can_continue: true });
   await expect.element(page.getByRole("button", { name: "Show details" })).not.toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
+
+test("a badware page names the list, goes back first and lets the person continue", async () => {
+  show({
+    url: "https://scam.example/win",
+    reason: "blocked",
+    blocked: "badware",
+    can_continue: false,
+  });
+  await expect.element(page.getByRole("heading")).toHaveTextContent("Zephium blocked scam.example");
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("uBlock Origin's Badware list as a known scam or malware site");
+  await expect.element(page.getByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Go back" }).click();
+  expect(left).toHaveBeenCalledExactlyOnceWith("tab-7");
+  await page.getByRole("button", { name: "Continue anyway" }).click();
+  expect(unblocked).toHaveBeenCalledExactlyOnceWith("tab-7");
+});
+
+test("a page the other lists refuse says it is an ad or tracking redirect", async () => {
+  show({
+    url: "https://ad.doubleclick.net/ddm/clk/1",
+    reason: "blocked",
+    blocked: "filter_lists",
+    can_continue: false,
+  });
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("a known ad or tracking redirect, blocked by your filter lists");
 });

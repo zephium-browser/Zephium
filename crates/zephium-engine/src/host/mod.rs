@@ -463,6 +463,7 @@ struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
     cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
     navigation: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+    lists: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
     superseded: bool,
 }
 

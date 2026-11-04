@@ -263,6 +263,7 @@ impl EngineHost {
                     generation: queued.generation,
                     cosmetics: queued.rules.cosmetics().cloned(),
                     navigation: queued.rules.navigation_policy().cloned(),
+                    lists: queued.rules.runtime_policy().cloned(),
                     superseded: false,
                 });
                 Next::Queued(queued)
@@ -1090,7 +1091,7 @@ impl EngineHost {
             let Some(state) = self.content_policies.get_mut(&profile) else {
                 return;
             };
-            let navigation = compiling.navigation.clone();
+            let navigation = (compiling.navigation.clone(), compiling.lists.clone());
             state.applied = Some(AppliedContentPolicy {
                 generation,
                 cosmetics: compiling.cosmetics,
@@ -1334,7 +1335,7 @@ impl EngineHost {
                 native_digest,
             );
         }
-        let navigation = compiling.navigation.clone();
+        let navigation = (compiling.navigation.clone(), compiling.lists.clone());
         state.applied = Some(AppliedContentPolicy {
             generation,
             cosmetics: compiling.cosmetics,
@@ -1450,19 +1451,30 @@ impl EngineHost {
     fn set_profile_navigation(
         &mut self,
         profile: ProfileId,
-        navigation: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+        (badware, lists): (
+            Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+            Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+        ),
     ) {
-        self.blocker_navigation
-            .entry(profile)
-            .or_default()
-            .replace(navigation);
+        let slot = self.blocker_navigation.entry(profile).or_default();
+        let mut guard = slot.borrow_mut();
+        guard.badware = badware;
+        guard.lists = lists;
+    }
+
+    /// The person opened a refused page anyway; its host stays open in the
+    /// item's profile until the app quits.
+    pub(crate) fn allow_blocked_navigation(&mut self, item: zephium_core::ids::ItemId, url: &str) {
+        if let Some(view) = self.views.get(&item) {
+            view.site_scope.allow_navigation(url);
+        }
     }
 
     pub(super) fn retire_content_policy(&mut self, profile: ProfileId) {
         self.content_policies.remove(&profile);
         self.blocker_sites.remove(&profile);
         if let Some(slot) = self.blocker_navigation.remove(&profile) {
-            slot.replace(None);
+            slot.replace(Default::default());
         }
         self.page_styles.remove(&profile);
         self.blocker_statistics.remove(&profile);
@@ -1789,6 +1801,7 @@ mod tests {
                 generation: ContentPolicyGeneration::new(1).unwrap(),
                 cosmetics: None,
                 navigation: None,
+                lists: None,
                 superseded: false,
             }),
             queued: None,
@@ -1833,6 +1846,7 @@ mod tests {
                 generation: compiling,
                 cosmetics: None,
                 navigation: None,
+                lists: None,
                 superseded: true,
             }),
             queued: Some(QueuedContentPolicy {

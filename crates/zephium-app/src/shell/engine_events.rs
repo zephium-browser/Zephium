@@ -421,6 +421,9 @@ impl Shell {
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
+            EngineEvent::NavigationBlocked { id, url, reason } => {
+                self.on_navigation_blocked(id, url, reason)
+            }
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -810,6 +813,7 @@ impl Shell {
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
             | EngineEvent::FocusBlocked { id, .. }
+            | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }

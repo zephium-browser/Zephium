@@ -721,6 +721,12 @@ impl Items {
         }
     }
 
+    /// Drops the tab's failure, so the page under it, if any, shows again.
+    pub fn clear_navigation_failure(&mut self, id: ItemId) -> bool {
+        self.tab_mut(id)
+            .is_some_and(|tab| tab.failure.take().is_some())
+    }
+
     /// Clears only the still-current intent. A delayed failure from an older
     /// native request cannot cancel a newer navigation.
     pub fn navigation_failed(&mut self, id: ItemId, request: NavigationRequestId) -> bool {

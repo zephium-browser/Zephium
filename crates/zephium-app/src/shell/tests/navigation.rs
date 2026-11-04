@@ -711,3 +711,53 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
         "another port is another origin"
     );
 }
+
+#[test]
+fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    use zephium_ipc::{TabBlockReason, TabFailureReason};
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let tab = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+    };
+    shell.handle(Command::Navigate {
+        id,
+        input: "news.example".into(),
+    });
+    commit_url(&mut shell, id, "https://news.example/");
+    present_committed(&mut shell, id, "https://news.example/");
+    let block = |shell: &mut Shell| {
+        shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+            id,
+            url: "https://scam.example/win".into(),
+            reason: NavigationBlockReason::Badware,
+        }))
+    };
+
+    // A link on the page leads to a refused site: the page stays under the
+    // explanation.
+    block(&mut shell);
+    let failure = tab(&screen).failure.expect("the refusal is explained");
+    assert_eq!(failure.reason, TabFailureReason::Blocked);
+    assert_eq!(failure.blocked, Some(TabBlockReason::Badware));
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.covers_page);
+    shell.handle(Command::LeaveBlockedPage(id));
+    let shown = tab(&screen);
+    assert_eq!(shown.failure, None);
+    assert_eq!(shown.url.as_deref(), Some("https://news.example/"));
+
+    block(&mut shell);
+    shell.handle(Command::ContinuePastBlock(id));
+    assert!(engine
+        .calls()
+        .contains(&format!("allow-blocked {id} https://scam.example/win")));
+    commit_url(&mut shell, id, "https://scam.example/win");
+    assert_eq!(tab(&screen).failure, None);
+}

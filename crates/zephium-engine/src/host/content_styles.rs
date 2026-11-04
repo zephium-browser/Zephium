@@ -11,6 +11,7 @@ use zephium_core::blocker::{
     NetworkRequestSourceKind, NetworkResourceType,
 };
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ports::engine::NavigationBlockReason;
 
 use super::dispatch::with_document_style;
 use super::permits::EventPermit;
@@ -19,8 +20,19 @@ use super::EngineHost;
 pub(super) type SitePreferencesSlot =
     Rc<RefCell<Option<Arc<zephium_core::blocker::PreparedBlockerSites>>>>;
 
-/// The policy that judges a profile's pages and frames before they load.
-pub(super) type NavigationSlot = Rc<RefCell<Option<Arc<dyn NetworkRequestPolicy>>>>;
+/// What judges a profile's pages and frames before they load.
+pub(super) type NavigationSlot = Rc<RefCell<NavigationGuard>>;
+
+#[derive(Default)]
+pub(super) struct NavigationGuard {
+    /// uBlock Origin's badware list.
+    pub(super) badware: Option<Arc<dyn NetworkRequestPolicy>>,
+    /// The lists' own `$document` rules, where the engine does not apply
+    /// them itself (WebView2; WebKit's content rules do).
+    pub(super) lists: Option<Arc<dyn NetworkRequestPolicy>>,
+    /// Hosts the person opened anyway, until the app quits.
+    pub(super) allowed: std::collections::HashSet<String>,
+}
 
 pub(super) struct ViewSiteScope {
     preferences: SitePreferencesSlot,
@@ -64,6 +76,11 @@ impl ViewSiteScope {
         let paused = self.paused_at(&self.target.borrow());
         self.pause.set(paused);
     }
+    /// The address the view's main frame is on or navigating to.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub(super) fn target(&self) -> String {
+        self.target.borrow().clone()
+    }
     fn paused_at(&self, url: &str) -> bool {
         match self.preferences.borrow().as_ref() {
             None => true,
@@ -72,12 +89,28 @@ impl ViewSiteScope {
                 .is_some_and(|entry| entry.paused),
         }
     }
-    /// Whether the lists refuse a page, or a frame of the view's page, before
-    /// it loads. A site with protection paused is not judged.
-    pub(super) fn blocks_navigation(&self, url: &str, frame: bool) -> bool {
-        let Some(policy) = self.navigation.borrow().clone() else {
-            return false;
+    /// Why the lists refuse a page, or a frame of the view's page, before it
+    /// loads. A site with protection paused is not judged, nor a host the
+    /// person opened anyway.
+    pub(super) fn blocks_navigation(
+        &self,
+        url: &str,
+        frame: bool,
+    ) -> Option<NavigationBlockReason> {
+        let (badware, lists) = {
+            let guard = self.navigation.borrow();
+            if url::Url::parse(url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                .is_some_and(|host| guard.allowed.contains(&host))
+            {
+                return None;
+            }
+            (guard.badware.clone(), guard.lists.clone())
         };
+        if badware.is_none() && lists.is_none() {
+            return None;
+        }
         let page = self.target.borrow().clone();
         let (source, kind) = if frame {
             (page.as_str(), NetworkResourceType::Subdocument)
@@ -85,10 +118,31 @@ impl ViewSiteScope {
             (url, NetworkResourceType::Document)
         };
         if self.paused_at(source) {
-            return false;
+            return None;
         }
-        NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)
-            .is_some_and(|request| policy.decide(&request) == NetworkDecision::Block)
+        let request =
+            NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)?;
+        let refuses = |policy: &Option<Arc<dyn NetworkRequestPolicy>>| {
+            policy
+                .as_ref()
+                .is_some_and(|policy| policy.decide(&request) == NetworkDecision::Block)
+        };
+        if refuses(&badware) {
+            Some(NavigationBlockReason::Badware)
+        } else if refuses(&lists) {
+            Some(NavigationBlockReason::FilterLists)
+        } else {
+            None
+        }
+    }
+    /// Opens the host of `url` in this view's profile until the app quits.
+    pub(super) fn allow_navigation(&self, url: &str) {
+        if let Some(host) = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        {
+            self.navigation.borrow_mut().allowed.insert(host);
+        }
     }
 }
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
@@ -744,12 +798,25 @@ mod tests {
         ));
         let navigation: NavigationSlot = Rc::default();
         let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
-        assert!(!scope.blocks_navigation("https://scam.example/", false));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            None
+        );
         let policy = Arc::new(Refuses(Mutex::default()));
-        navigation.replace(Some(policy.clone()));
-        assert!(scope.blocks_navigation("https://scam.example/", false));
-        assert!(scope.blocks_navigation("https://scam.example/ad", true));
-        assert!(!scope.blocks_navigation("https://fine.example/", false));
+        navigation.borrow_mut().badware = Some(policy.clone());
+        let badware = Some(NavigationBlockReason::Badware);
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/ad", true),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://fine.example/", false),
+            None
+        );
         assert_eq!(
             policy.0.lock().unwrap()[..2],
             [
@@ -767,9 +834,42 @@ mod tests {
         );
         scope.navigating("https://paused.example/");
         // A paused page loads any frame; leaving it is judged as usual.
-        assert!(!scope.blocks_navigation("https://scam.example/ad", true));
-        assert!(scope.blocks_navigation("https://scam.example/", false));
-        assert!(!scope.blocks_navigation("https://paused.example/scam", false));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/ad", true),
+            None
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            badware
+        );
+        assert_eq!(
+            scope.blocks_navigation("https://paused.example/scam", false),
+            None
+        );
+        scope.allow_navigation("https://SCAM.example/elsewhere");
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            None
+        );
+    }
+
+    #[test]
+    fn the_badware_list_names_a_page_before_the_other_lists() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, std::iter::empty()),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let scope = ViewSiteScope::new(preferences, navigation.clone(), "https://news.example/");
+        navigation.borrow_mut().lists = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::FilterLists)
+        );
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            scope.blocks_navigation("https://scam.example/", false),
+            Some(NavigationBlockReason::Badware)
+        );
     }
     #[test]
     fn reuse_does_not_encode_the_subscription_payload() {

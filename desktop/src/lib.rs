@@ -1758,6 +1758,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_answer_page_request,
             tabs_answer_sign_in,
             tabs_continue_past_certificate,
+            tabs_continue_past_block,
+            tabs_leave_blocked_page,
             diagnostics_show_logs,
             diagnostic_report::diagnostics_report,
             tabs_back,
@@ -3027,6 +3029,35 @@ fn tabs_continue_past_certificate(
         &id,
         Command::ContinuePastCertificate,
     )
+}
+
+/// Opens the page the filter lists refused anyway; its host stays allowed
+/// until the app quits.
+#[tauri::command]
+#[specta::specta]
+fn tabs_continue_past_block(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_continue_past_block") {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, Command::ContinuePastBlock)
+}
+
+/// Leaves the page the filter lists refused.
+#[tauri::command]
+#[specta::specta]
+fn tabs_leave_blocked_page(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_leave_blocked_page") {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, Command::LeaveBlockedPage)
 }
 
 #[tauri::command]

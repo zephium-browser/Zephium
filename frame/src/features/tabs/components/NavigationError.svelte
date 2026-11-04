@@ -1,7 +1,12 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import { tabs } from "$domain/tabs";
-  import type { TabCertificateProblem, TabFailure, TabView } from "$shared/ipc/bindings";
+  import type {
+    TabBlockReason,
+    TabCertificateProblem,
+    TabFailure,
+    TabView,
+  } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
 
@@ -23,7 +28,13 @@
     timed_out: m.navigation_error_timed_out,
     insecure: m.navigation_error_insecure,
     crashed: m.navigation_error_crashed,
+    blocked: m.navigation_error_other,
     other: m.navigation_error_other,
+  };
+
+  const blocked: Record<TabBlockReason, () => string> = {
+    badware: m.navigation_blocked_badware,
+    filter_lists: m.navigation_blocked_filter_lists,
   };
 
   const certificate: Record<TabCertificateProblem, () => string> = {
@@ -37,6 +48,14 @@
   function continueUnsafe() {
     void commands.tabsContinuePastCertificate(tab.id).catch(() => {});
   }
+
+  function leaveBlocked() {
+    void commands.tabsLeaveBlockedPage(tab.id).catch(() => {});
+  }
+
+  function continueBlocked() {
+    void commands.tabsContinuePastBlock(tab.id).catch(() => {});
+  }
 </script>
 
 <!--
@@ -45,39 +64,54 @@
   says what was wrong with it; only a host on the person's own network has a
   way past, behind details and a warning.
 -->
-<div class="failed-page" role="alert">
-  <h1>
-    {failure.reason === "insecure"
-      ? m.navigation_error_insecure_title({ host })
-      : failure.reason === "crashed"
-        ? m.navigation_error_crashed_title({ host })
-        : m.navigation_error_title({ host })}
-  </h1>
-  <p>{help[failure.reason]()}</p>
-  {#if failure.certificate}<p>{certificate[failure.certificate]()}</p>{/if}
-  <Button onclick={() => tabs.navigate(tab.id, failure.url)}
-    >{failure.reason === "crashed" ? m.navigation_error_reload() : m.surface_retry()}</Button
-  >
-  {#if failure.certificate && failure.can_continue}
-    <Button
-      variant="ghost"
-      size="compact"
-      aria-expanded={details}
-      aria-controls="certificate-details"
-      onclick={() => (details = !details)}
+{#if failure.reason === "blocked"}
+  <!--
+    The filter lists refused this page before anything was requested. Going
+    back is the way out; opening it anyway stays quiet and lasts until quit.
+  -->
+  <div class="failed-page" role="alert">
+    <h1>{m.navigation_blocked_title({ host })}</h1>
+    <p>{blocked[failure.blocked ?? "filter_lists"]()}</p>
+    <Button variant="primary" onclick={leaveBlocked}>{m.navigation_blocked_go_back()}</Button>
+    <Button variant="ghost" size="compact" onclick={continueBlocked}
+      >{m.navigation_blocked_continue()}</Button
     >
-      {details ? m.navigation_error_hide_details() : m.navigation_error_show_details()}
-    </Button>
-    {#if details}
-      <div id="certificate-details" class="unsafe">
-        <p>{m.navigation_error_certificate_unsafe()}</p>
-        <Button variant="danger" onclick={continueUnsafe}>
-          {m.navigation_error_certificate_continue({ host })}
-        </Button>
-      </div>
+  </div>
+{:else}
+  <div class="failed-page" role="alert">
+    <h1>
+      {failure.reason === "insecure"
+        ? m.navigation_error_insecure_title({ host })
+        : failure.reason === "crashed"
+          ? m.navigation_error_crashed_title({ host })
+          : m.navigation_error_title({ host })}
+    </h1>
+    <p>{help[failure.reason]()}</p>
+    {#if failure.certificate}<p>{certificate[failure.certificate]()}</p>{/if}
+    <Button onclick={() => tabs.navigate(tab.id, failure.url)}
+      >{failure.reason === "crashed" ? m.navigation_error_reload() : m.surface_retry()}</Button
+    >
+    {#if failure.certificate && failure.can_continue}
+      <Button
+        variant="ghost"
+        size="compact"
+        aria-expanded={details}
+        aria-controls="certificate-details"
+        onclick={() => (details = !details)}
+      >
+        {details ? m.navigation_error_hide_details() : m.navigation_error_show_details()}
+      </Button>
+      {#if details}
+        <div id="certificate-details" class="unsafe">
+          <p>{m.navigation_error_certificate_unsafe()}</p>
+          <Button variant="danger" onclick={continueUnsafe}>
+            {m.navigation_error_certificate_continue({ host })}
+          </Button>
+        </div>
+      {/if}
     {/if}
-  {/if}
-</div>
+  </div>
+{/if}
 
 <style>
   .failed-page {

@@ -1341,13 +1341,13 @@ fn complete_job(
     }
 }
 
-/// uBlock Origin's list of scam and malware sites. WebKit gets none of its
-/// wildcard rules, so where it enforces the lists this list alone also judges
-/// each page and frame as it starts loading.
-#[cfg(all(feature = "runtime", not(target_os = "windows")))]
+/// uBlock Origin's list of scam and malware sites, which alone judges each
+/// page and frame as it starts loading: WebKit gets none of its wildcard
+/// rules, and a refused page is named as a scam or malware site.
+#[cfg(feature = "runtime")]
 const NAVIGATION_SOURCE: &str = "ublock-badware";
 
-#[cfg(all(feature = "runtime", not(target_os = "windows")))]
+#[cfg(feature = "runtime")]
 fn with_navigation(
     rules: Arc<ContentRules>,
     catalog: &StaticPolicyCatalog,
@@ -1370,8 +1370,7 @@ fn with_navigation(
     }
 }
 
-/// The runtime policy judges navigations itself.
-#[cfg(any(not(feature = "runtime"), target_os = "windows"))]
+#[cfg(not(feature = "runtime"))]
 fn with_navigation(
     rules: Arc<ContentRules>,
     _: &StaticPolicyCatalog,
@@ -1861,7 +1860,11 @@ fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
 mod tests {
     use super::*;
 
-    #[cfg(all(feature = "runtime-exact", feature = "webkit", not(target_os = "windows")))]
+    #[cfg(all(
+        feature = "runtime-exact",
+        feature = "webkit",
+        not(target_os = "windows")
+    ))]
     #[test]
     fn webkit_rules_carry_a_badware_navigation_check() {
         use zephium_core::blocker::{
@@ -1869,7 +1872,11 @@ mod tests {
             NetworkResourceType,
         };
         let source = |id: &str, rules: &str| {
-            PolicySource::new(SourceId::new(id).unwrap(), SourceFormat::Standard, Arc::from(rules))
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from(rules),
+            )
         };
         let catalog = |sources| StaticPolicyCatalog::new(sources).unwrap();
         let compile = |catalog: &StaticPolicyCatalog| {
@@ -1891,12 +1898,23 @@ mod tests {
         };
         let with_badware = compile(&catalog(vec![
             source("easylist", "||ads.example^"),
-            source("ublock-badware", "||scam.example^$doc\n||cdn.example/*/alarm.mp3"),
+            source(
+                "ublock-badware",
+                "||scam.example^$doc\n||cdn.example/*/alarm.mp3",
+            ),
         ]));
-        let navigation = with_badware.navigation_policy().expect("a navigation check");
-        assert_eq!(navigation.decide(&page("https://scam.example/")), NetworkDecision::Block);
+        let navigation = with_badware
+            .navigation_policy()
+            .expect("a navigation check");
+        assert_eq!(
+            navigation.decide(&page("https://scam.example/")),
+            NetworkDecision::Block
+        );
         // Only the badware list judges navigations.
-        assert_eq!(navigation.decide(&page("https://ads.example/")), NetworkDecision::Allow);
+        assert_eq!(
+            navigation.decide(&page("https://ads.example/")),
+            NetworkDecision::Allow
+        );
         let without = compile(&catalog(vec![source("easylist", "||ads.example^")]));
         assert!(without.navigation_policy().is_none());
     }
