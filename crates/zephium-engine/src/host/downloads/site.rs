@@ -107,6 +107,7 @@ impl Downloads {
             return false;
         };
         let filename = transfer.record.filename.clone();
+        let profile = transfer.partition.profile();
         let Some(hold) = transfer.site.as_mut() else {
             return false;
         };
@@ -129,6 +130,10 @@ impl Downloads {
             hold.request = Some(*request);
             transfer.deadline =
                 DecisionDeadline::new(DecisionPhase::SitePermission, Instant::now());
+            drop(prompts);
+            drop(active);
+            // The list shows the file's own name while it waits.
+            self.changed(profile);
             return true;
         }
         if prompts.values().any(|prompt| prompt.shown_on == shown_on) {
@@ -166,6 +171,7 @@ impl Downloads {
         let (permit, sink) = (hold.ask.permit.clone(), hold.ask.sink.clone());
         drop(prompts);
         drop(active);
+        self.changed(profile);
         permit.emit(
             &sink,
             EngineEvent::DownloadPermissionRequested {
