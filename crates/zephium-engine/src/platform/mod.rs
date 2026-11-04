@@ -62,6 +62,7 @@ pub mod linux;
 pub use linux as imp;
 pub(crate) mod content_pause;
 pub(crate) mod content_protection;
+pub(crate) mod top_document;
 
 /// The frame's content ground in each theme (`--color-page`); native covers
 /// paint it so a page that has not painted yet reads as the empty pane.

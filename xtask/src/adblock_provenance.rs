@@ -877,7 +877,10 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         }
     }
     for (target, expected_features) in [
-        ("cfg(target_os = \"windows\")", ["runtime"].as_slice()),
+        (
+            "cfg(target_os = \"windows\")",
+            ["runtime", "runtime-exact"].as_slice(),
+        ),
         (
             "cfg(all(unix, not(target_os = \"macos\")))",
             ["webkit"].as_slice(),
@@ -2037,7 +2040,7 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
     const TARGETS: [(&str, &[&str], &[&str]); 4] = [
         (
             "x86_64-pc-windows-msvc",
-            &["runtime"],
+            &["runtime", "runtime-exact"],
             &[
                 "addr",
                 "css-validation",

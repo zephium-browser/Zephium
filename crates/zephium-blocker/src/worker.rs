@@ -23,6 +23,8 @@ use crate::cache::{
 };
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
+#[cfg(feature = "runtime-exact")]
+use crate::rules::SourceDocument;
 use crate::{
     CompileError, CompileTarget, CompiledRules, Compiler, FilterSource, NetworkAction,
     NetworkRequest, RequestMethod, ResourceType, SourceFormat, SourceId,
@@ -42,6 +44,7 @@ pub struct PolicySource {
     id: SourceId,
     format: SourceFormat,
     contents: Arc<str>,
+    trusted: bool,
 }
 
 impl PolicySource {
@@ -52,7 +55,15 @@ impl PolicySource {
             id,
             format,
             contents,
+            trusted: false,
         }
+    }
+
+    /// Lets this source's `trusted-*` scriptlet rules run.
+    #[must_use]
+    pub const fn trusting_scriptlets(mut self) -> Self {
+        self.trusted = true;
+        self
     }
 
     /// Returns the immutable source byte length without copying it.
@@ -61,11 +72,16 @@ impl PolicySource {
     }
 
     fn instantiate(&self) -> FilterSource {
-        FilterSource::new(
+        let source = FilterSource::new(
             self.id.clone(),
             self.format,
             self.contents.as_ref().to_owned(),
-        )
+        );
+        if self.trusted {
+            source.trusting_scriptlets()
+        } else {
+            source
+        }
     }
 }
 
@@ -282,7 +298,9 @@ impl StaticPolicyCatalog {
                     SourceFormat::Standard => 0,
                     SourceFormat::Hosts => 1,
                 };
-                (source.id.as_str(), format, source.contents.as_ref())
+                // Trust changes what compiles, so it is part of the key.
+                let trust = if source.trusted { 2 } else { 0 };
+                (source.id.as_str(), format | trust, source.contents.as_ref())
             }),
         )
     }
@@ -1538,34 +1556,99 @@ impl RuntimePolicyCounters {
 struct RuntimePolicy {
     artifact: RuntimePolicyArtifact,
     counters: RuntimePolicyCounters,
+    #[cfg(feature = "runtime-exact")]
+    sources: Mutex<RecentSources>,
+}
+
+/// Documents that recently sent requests, newest first. Every view of a
+/// profile shares one policy, so a few entries cover the pages loading at once.
+#[cfg(feature = "runtime-exact")]
+#[derive(Default)]
+struct RecentSources(Vec<(Box<str>, Arc<SourceDocument>)>);
+
+#[cfg(feature = "runtime-exact")]
+impl RecentSources {
+    const CAPACITY: usize = 8;
+    /// Longer document URLs are parsed per request rather than held.
+    const MAX_URL_BYTES: usize = 2048;
+
+    fn get(&mut self, url: &str) -> Option<Arc<SourceDocument>> {
+        let index = self.0.iter().position(|(held, _)| **held == *url)?;
+        let entry = self.0.remove(index);
+        let source = Arc::clone(&entry.1);
+        self.0.insert(0, entry);
+        Some(source)
+    }
+
+    fn insert(&mut self, url: &str, source: &Arc<SourceDocument>) {
+        if url.len() > Self::MAX_URL_BYTES {
+            return;
+        }
+        self.0.truncate(Self::CAPACITY - 1);
+        self.0.insert(0, (url.into(), Arc::clone(source)));
+    }
 }
 
 impl RuntimePolicy {
     fn compiled(rules: CompiledRules) -> Self {
-        Self {
-            artifact: RuntimePolicyArtifact::Compiled(rules),
-            counters: RuntimePolicyCounters::default(),
-        }
+        Self::new(RuntimePolicyArtifact::Compiled(rules))
     }
 
     #[cfg(feature = "runtime")]
     fn persistent(rules: Box<CachedRuntimeRules>) -> Self {
+        Self::new(RuntimePolicyArtifact::Persistent(rules))
+    }
+
+    fn new(artifact: RuntimePolicyArtifact) -> Self {
         Self {
-            artifact: RuntimePolicyArtifact::Persistent(rules),
+            artifact,
             counters: RuntimePolicyCounters::default(),
+            #[cfg(feature = "runtime-exact")]
+            sources: Mutex::default(),
         }
     }
 
     #[cfg(feature = "runtime-exact")]
-    fn evaluate(
+    fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source_url: &str,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
+        let source = self.source_document(source_url)?;
         match &self.artifact {
-            RuntimePolicyArtifact::Compiled(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Compiled(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
             #[cfg(feature = "runtime")]
-            RuntimePolicyArtifact::Persistent(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Persistent(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
         }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    fn source_document(&self, url: &str) -> Result<Arc<SourceDocument>, crate::MatchError> {
+        // Decisions run on the UI thread: a contended cache parses instead of
+        // waiting.
+        let mut recent = match self.sources.try_lock() {
+            Ok(recent) => Some(recent),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(source) = recent.as_mut().and_then(|recent| recent.get(url)) {
+            return Ok(source);
+        }
+        let source = Arc::new(match &self.artifact {
+            RuntimePolicyArtifact::Compiled(rules) => rules.source_document(url),
+            #[cfg(feature = "runtime")]
+            RuntimePolicyArtifact::Persistent(rules) => rules.source_document(url),
+        }?);
+        if let Some(recent) = recent.as_mut() {
+            recent.insert(url, &source);
+        }
+        Ok(source)
     }
 
     fn evaluate_source_independent(
@@ -1586,41 +1669,48 @@ impl NetworkRequestPolicy for RuntimePolicy {
         let attribution = request.attribution();
         let resource_type = map_resource_type(request.resource_type());
         let method = map_method(request.method());
-        let decision =
-            match attribution {
-                NetworkAttribution::Exact => {
-                    #[cfg(feature = "runtime-exact")]
-                    {
-                        let Some(source_url) = request.source_url() else {
-                            self.counters.record_attribution_unavailable();
-                            return CoreDecision::Allow;
-                        };
-                        self.evaluate(NetworkRequest::new(
-                            request.url(),
-                            source_url,
-                            resource_type,
-                            method,
-                        ))
-                    }
-                    #[cfg(not(feature = "runtime-exact"))]
-                    {
-                        // The shipped WebView2 callback has no exact initiating-frame
-                        // URL. The resolver is used for document cosmetics only;
-                        // it does not grant request attribution. Treat an unexpected
-                        // exact request as a capability mismatch and fail open.
+        let decision = match attribution {
+            NetworkAttribution::Exact => {
+                #[cfg(feature = "runtime-exact")]
+                {
+                    let Some(source_url) = request.source_url() else {
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
-                    }
+                    };
+                    self.evaluate_from(request.url(), source_url, resource_type, method)
                 }
-                NetworkAttribution::TopLevelApproximation
-                | NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
-                    NetworkRequest::source_independent(request.url(), resource_type, method),
-                ),
-                NetworkAttribution::Unavailable => {
+                #[cfg(not(feature = "runtime-exact"))]
+                {
+                    // The shipped WebView2 callback has no exact initiating-frame
+                    // URL. The resolver is used for document cosmetics only;
+                    // it does not grant request attribution. Treat an unexpected
+                    // exact request as a capability mismatch and fail open.
                     self.counters.record_attribution_unavailable();
                     return CoreDecision::Allow;
                 }
-            };
+            }
+            // The main document stands in for the frame WebView2 cannot
+            // name: `$domain` and party options are judged against it.
+            #[cfg(feature = "runtime-exact")]
+            NetworkAttribution::TopLevelApproximation => {
+                let Some(top_level_url) = request.source_url() else {
+                    self.counters.record_attribution_unavailable();
+                    return CoreDecision::Allow;
+                };
+                self.evaluate_from(request.url(), top_level_url, resource_type, method)
+            }
+            #[cfg(not(feature = "runtime-exact"))]
+            NetworkAttribution::TopLevelApproximation => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::Unavailable => {
+                self.counters.record_attribution_unavailable();
+                return CoreDecision::Allow;
+            }
+        };
         match decision {
             Ok(decision) if decision.action() == NetworkAction::Block => CoreDecision::Block,
             Ok(_) => CoreDecision::Allow,
@@ -2466,7 +2556,41 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(feature = "runtime")]
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_exact_runtime_target_applies_zephium_s_own_site_exceptions_per_page() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                with_own_rules(
+                    vec![FilterSource::new(
+                        SourceId::new("list").unwrap(),
+                        SourceFormat::Standard,
+                        "||pagead2.googlesyndication.com^".to_owned(),
+                    )],
+                    CompileTarget::Runtime,
+                ),
+            )
+            .unwrap();
+        let on = |page| {
+            rules
+                .evaluate(NetworkRequest::new(
+                    "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                    page,
+                    ResourceType::Script,
+                    RequestMethod::Get,
+                ))
+                .unwrap()
+                .action()
+        };
+        assert_eq!(
+            on("https://www.allrecipes.com/recipe/1/"),
+            NetworkAction::Allow
+        );
+        assert_eq!(on("https://news.example/story"), NetworkAction::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
     #[test]
     fn the_runtime_target_leaves_out_zephium_s_own_site_exceptions() {
         let compile = |sources| {
@@ -2720,6 +2844,247 @@ mod tests {
             policy.decide(&request("https://unrelated.example/")),
             CoreDecision::Allow
         );
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn top_level_attribution_applies_domain_party_and_scoped_exception_rules() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||tracker.example^$script,domain=publisher.example
+",
+                        "||cdn.example^$third-party
+",
+                        "||ads.example/loader.js
+",
+                        "@@||ads.example/loader.js$domain=friendly.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url, top| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    top,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let unattributed = |url| {
+            policy.decide(
+                &CoreRequest::source_independent(
+                    url,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+
+        let tracker = "https://tracker.example/t.js";
+        assert_eq!(
+            decide(tracker, "https://publisher.example/a"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(tracker, "https://unrelated.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(tracker), CoreDecision::Allow);
+
+        let cdn = "https://cdn.example/lib.js";
+        assert_eq!(
+            decide(cdn, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(decide(cdn, "https://www.cdn.example/"), CoreDecision::Allow);
+        assert_eq!(unattributed(cdn), CoreDecision::Allow);
+
+        // Unattributed, a block that one site excepts fails open everywhere.
+        let loader = "https://ads.example/loader.js";
+        assert_eq!(
+            decide(loader, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(loader, "https://friendly.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(loader), CoreDecision::Allow);
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_document_parsed_once_decides_like_its_url() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    [
+                        "||cdn.example^$third-party",
+                        "||widget.example^$~third-party",
+                        "||tracker.example^$domain=publisher.example|b.co.uk",
+                        "||ads.example/loader.js",
+                        "@@||ads.example/loader.js$domain=friendly.example",
+                        "||pages.github.io^$third-party",
+                        "||xn--bcher-kva.example^$domain=xn--bcher-kva.example",
+                    ]
+                    .join("\n"),
+                )],
+            )
+            .unwrap();
+        let urls = [
+            "https://cdn.example/lib.js",
+            "https://static.cdn.example/lib.js",
+            "https://widget.example/w.js",
+            "https://tracker.example/t.js",
+            "https://ads.example/loader.js",
+            "https://a.pages.github.io/x.js",
+            "https://xn--bcher-kva.example/i.js",
+        ];
+        let documents = [
+            "https://publisher.example/a?b=c#d",
+            "https://WWW.CDN.EXAMPLE:8443/",
+            "https://widget.example/",
+            "https://friendly.example/",
+            "https://a.b.co.uk/",
+            "https://a.pages.github.io/",
+            "https://b.pages.github.io/",
+            "https://bücher.example/",
+            "http://127.0.0.1:8080/",
+        ];
+        for document in documents {
+            let source = rules.source_document(document).unwrap();
+            for url in urls {
+                assert_eq!(
+                    rules.evaluate_from(url, &source, ResourceType::Script, RequestMethod::Get),
+                    rules.evaluate(NetworkRequest::new(
+                        url,
+                        document,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                    "{url} from {document}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_source_document_too_long_or_unparsable_is_refused() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let limit = crate::CompileLimits::default().max_source_url_bytes();
+        let long = format!("https://a.example/{}", "x".repeat(limit));
+        assert!(matches!(
+            rules.source_document(&long),
+            Err(crate::MatchError::SourceUrlTooLong { .. })
+        ));
+        assert!(matches!(
+            rules.source_document("not a url"),
+            Err(crate::MatchError::InvalidRequest)
+        ));
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn recent_documents_are_parsed_once_and_bounded() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let first = policy.source_document("https://a.example/").unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        for index in 0..RecentSources::CAPACITY {
+            policy
+                .source_document(&format!("https://{index}.example/"))
+                .unwrap();
+        }
+        assert!(!Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        let long = format!(
+            "https://a.example/{}",
+            "x".repeat(RecentSources::MAX_URL_BYTES)
+        );
+        let once = policy.source_document(&long).unwrap();
+        assert!(!Arc::ptr_eq(&once, &policy.source_document(&long).unwrap()));
+        assert_eq!(
+            policy.sources.lock().unwrap().0.len(),
+            RecentSources::CAPACITY
+        );
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+    #[test]
+    fn runtime_only_policy_keeps_top_level_requests_source_independent() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||generic.example^
+",
+                        "||tracker.example^$script,domain=publisher.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    "https://publisher.example/",
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(decide("https://generic.example/a.js"), CoreDecision::Block);
+        assert_eq!(decide("https://tracker.example/t.js"), CoreDecision::Allow);
+        assert_eq!(policy.diagnostics().attribution_unavailable, 0);
     }
 
     #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]

@@ -20,6 +20,23 @@ fn source_independent_request(url: &str) -> NetworkRequest<'_> {
     NetworkRequest::source_independent(url, ResourceType::Script, RequestMethod::Get)
 }
 
+#[cfg(feature = "runtime")]
+#[test]
+fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source("||ads.example^\nexample.com##+js(set, a.b, true)")],
+        )
+        .unwrap();
+    let cosmetics = rules.cosmetic_policy().expect("a cosmetic policy");
+    assert_eq!(cosmetics.report().accepted, 0);
+    assert!(cosmetics
+        .scriptlet_program()
+        .unwrap()
+        .contains("zephiumSetConstant("));
+}
+
 #[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());
@@ -1189,6 +1206,64 @@ fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
     );
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_built_in_rules_let_two_ad_recovery_sites_fetch_criteo_s_probe() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                source("||ads.example^\n||criteo.net^$third-party"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let action = |url: &str, page: &str, resource_type| {
+        rules
+            .evaluate(NetworkRequest::new(
+                url,
+                page,
+                resource_type,
+                RequestMethod::Get,
+            ))
+            .unwrap()
+            .action()
+    };
+    let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
+    for page in [
+        "https://www.mirror.co.uk/",
+        "https://www.tomsguide.com/news/",
+    ] {
+        assert_ne!(
+            action(probe, page, ResourceType::XmlHttpRequest),
+            NetworkAction::Block,
+            "{page}"
+        );
+        assert_eq!(
+            action(probe, page, ResourceType::Script),
+            NetworkAction::Block,
+            "{page}"
+        );
+        assert_eq!(
+            action(
+                "https://static.criteo.net/js/ld/publishertag.js",
+                page,
+                ResourceType::XmlHttpRequest
+            ),
+            NetworkAction::Block,
+            "{page}"
+        );
+    }
+    assert_eq!(
+        action(
+            probe,
+            "https://www.allrecipes.com/",
+            ResourceType::XmlHttpRequest
+        ),
+        NetworkAction::Block
+    );
+}
+
 #[cfg(feature = "webkit")]
 fn pruned(text: String) -> &'static crate::webkit_prune::PrunedRules {
     Box::leak(Box::new(crate::webkit_prune::PrunedRules::parse(&text)))
@@ -1239,7 +1314,7 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
         .compile(
             CompileTarget::WebKit,
             vec![
-                source("||pagead2.googlesyndication.com^"),
+                source("||pagead2.googlesyndication.com^\n||criteo.net^$third-party"),
                 crate::builtin::source(),
             ],
         )
@@ -1250,32 +1325,40 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     let exception = json.find("ignore-previous-rules").unwrap();
     assert!(json.find("\"block\"").unwrap() < exception);
     let emitted: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
-    let mut domains: Vec<&str> = emitted
-        .iter()
-        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
-        .flat_map(|rule| rule["trigger"]["if-domain"].as_array().unwrap())
-        .map(|domain| domain.as_str().unwrap())
-        .collect();
-    domains.sort_unstable();
-    let filters: Vec<regex::Regex> = emitted
-        .iter()
-        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
-        .map(|rule| {
-            regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
-                .case_insensitive(true)
-                .build()
-                .unwrap()
-        })
-        .collect();
     let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
-    for filter in &filters {
-        assert!(filter.is_match(loader));
-        assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
-        assert!(!filter.is_match(&format!("{loader}x")));
+    let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
+    let (mut loader_sites, mut probe_sites) = (Vec::new(), Vec::new());
+    for rule in emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+    {
+        let filter = regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let sites = rule["trigger"]["if-domain"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|domain| domain.as_str().unwrap());
+        if filter.is_match(loader) {
+            assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
+            assert!(!filter.is_match(&format!("{loader}x")));
+            loader_sites.extend(sites);
+        } else {
+            assert!(filter.is_match(probe));
+            assert!(!filter.is_match(&format!("{probe}x")));
+            // The probe's fetch, never the tag as a script.
+            let types = rule["trigger"]["resource-type"].as_array().unwrap();
+            assert_eq!(types, &["fetch"], "{types:?}");
+            probe_sites.extend(sites);
+        }
     }
+    loader_sites.sort_unstable();
+    probe_sites.sort_unstable();
     // A leading `*` makes WebKit apply the exception on every subdomain too.
     assert_eq!(
-        domains,
+        loader_sites,
         [
             "*allrecipes.com",
             "*bild.de",
@@ -1285,6 +1368,7 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
             "*tomsguide.com"
         ]
     );
+    assert_eq!(probe_sites, ["*mirror.co.uk", "*tomsguide.com"]);
 }
 
 #[test]

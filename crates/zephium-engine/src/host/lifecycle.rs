@@ -343,6 +343,8 @@ impl EngineHost {
         self.stages.clear();
         #[cfg(target_os = "macos")]
         self.macos_ephemeral_data_stores.clear();
+        #[cfg(target_os = "macos")]
+        self.scriptlets.end_private();
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.anonymous_work_stores.clear();
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]

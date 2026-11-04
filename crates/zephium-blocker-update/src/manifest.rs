@@ -233,11 +233,14 @@ impl CatalogManifest {
             if Sha256::digest(contents.as_bytes()).as_slice() != expected {
                 return Err(ManifestError::TargetMismatch);
             }
-            sources.push(PolicySource::new(
-                SourceId::new(descriptor.id.as_str()).map_err(|_| ManifestError::SourceId)?,
-                descriptor.format.into(),
-                Arc::clone(contents),
-            ));
+            let id = SourceId::new(descriptor.id.as_str()).map_err(|_| ManifestError::SourceId)?;
+            let trusted = zephium_blocker::official_source_trusts_scriptlets(&id);
+            let source = PolicySource::new(id, descriptor.format.into(), Arc::clone(contents));
+            sources.push(if trusted {
+                source.trusting_scriptlets()
+            } else {
+                source
+            });
         }
         StaticPolicyCatalog::new(sources).map_err(|_| ManifestError::Catalog)
     }

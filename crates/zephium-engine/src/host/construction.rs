@@ -214,6 +214,18 @@ impl EngineHost {
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }
+            #[cfg(target_os = "windows")]
+            {
+                // The spare took the program current when it was built.
+                self.ensure_view_scriptlets(
+                    partition.profile(),
+                    &spare.view.view,
+                    &spare.view.scriptlet,
+                );
+                if !spare.view.event_permit.allows_navigation(url) {
+                    return;
+                }
+            }
             #[cfg(target_os = "macos")]
             {
                 // Prepare the real viewport while still hidden, before the first
@@ -1025,6 +1037,8 @@ impl EngineHost {
                                 return None;
                             }
                         };
+                    self.scriptlets.attach_private(profile, &configuration);
+                    self.refresh_profile_scriptlets(profile);
                     use wry::WebViewBuilderExtMacos;
                     (
                         builder.with_webview_configuration(configuration),
@@ -1034,6 +1048,7 @@ impl EngineHost {
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     use wry::WebViewBuilderExtMacos;
                     let configuration = self.webext.configuration(profile, &self.sink);
+                    self.refresh_profile_scriptlets(profile);
                     if crate::platform::imp::proxy::apply(
                         &configuration,
                         crate::network::current().as_ref(),
@@ -1788,6 +1803,7 @@ impl EngineHost {
                         watch.committed();
                     }
                     load_site_scope.navigating(&event.url);
+                    load_site_scope.committed(&event.url);
                     load_site_scope.protection.retry();
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
@@ -2264,6 +2280,7 @@ impl EngineHost {
                 &content_policy,
                 &site_scope.pause,
                 &site_scope.protection,
+                &site_scope.top_document,
             ) {
                 Ok(registration) => registration,
                 Err(error) => {
@@ -2533,6 +2550,10 @@ impl EngineHost {
         // why an unstaged Linux warm spare remains disabled.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
+        #[cfg(target_os = "windows")]
+        let scriptlet = super::scriptlets::ViewScriptlet::default();
+        #[cfg(target_os = "windows")]
+        self.ensure_view_scriptlets(partition.profile(), &view, &scriptlet);
         if !event_permit.allows_navigation(url) {
             // WebView construction can pump WebView2 messages. Do not perform
             // the first content load after the outer generation was retired.
@@ -2608,6 +2629,8 @@ impl EngineHost {
             discard_settle_timer: std::cell::RefCell::new(None),
             #[cfg(target_os = "windows")]
             request_witness,
+            #[cfg(target_os = "windows")]
+            scriptlet,
             #[cfg(target_os = "windows")]
             extension_window: Cell::new(None),
             #[cfg(target_os = "windows")]

@@ -187,10 +187,10 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        // Zephium's own six exceptions compile with the lists where requests
-        // carry their page, which Windows requests do not, and the Windows
-        // matcher drops one regex rule its regex engine cannot compile.
-        let own = if cfg!(target_os = "windows") { 0 } else { 6 };
+        // Zephium's own eight exceptions compile with the lists where requests
+        // carry their page; on Windows that is the view's main document. The
+        // Windows matcher drops one regex rule its regex engine cannot compile.
+        let own = 8;
         let accepted = if cfg!(target_os = "windows") {
             104_783
         } else {

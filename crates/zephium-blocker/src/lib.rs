@@ -16,6 +16,7 @@ mod limits;
 mod priority;
 mod report;
 mod rules;
+mod scriptlets;
 mod sha256;
 #[cfg(feature = "webkit")]
 mod webkit;
@@ -25,7 +26,8 @@ mod worker;
 
 pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};
 pub use compiler::{
-    CompileError, CompileTarget, Compiler, FilterSource, SourceFormat, SourceId, SourceIdError,
+    official_source_trusts_scriptlets, CompileError, CompileTarget, Compiler, FilterSource,
+    SourceFormat, SourceId, SourceIdError,
 };
 pub use conditions::ListConditions;
 pub use cosmetics::{
@@ -55,7 +57,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 5;
+pub const POLICY_FORMAT_VERSION: u32 = 6;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;
@@ -81,7 +83,7 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
-    if cfg!(feature = "webkit") {
+    if cfg!(feature = "webkit") || cfg!(feature = "runtime-exact") {
         digest.update(builtin::fingerprint());
     }
     #[cfg(feature = "webkit")]

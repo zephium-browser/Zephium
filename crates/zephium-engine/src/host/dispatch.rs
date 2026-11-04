@@ -259,6 +259,8 @@ enum HostTaskKey {
     SuspendRetry(ItemId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
+    #[cfg(target_os = "macos")]
+    Scriptlets(ProfileId),
 }
 
 struct QueuedHostTask {
@@ -350,6 +352,13 @@ pub(crate) fn install(
     #[cfg(not(target_os = "windows"))]
     let content_rule_cache = crate::erasure::canonical_owned_root(&data_root.join("content-rules"))
         .map_err(|error| format!("cannot secure content-rule cache: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let scriptlet_root = crate::erasure::canonical_owned_root(&data_root.join("scriptlets"))
+        .map_err(|error| format!("cannot secure scriptlet packages: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let private_scriptlet_root =
+        crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
+            .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
         &data_root.join("private-runtime"),
@@ -504,6 +513,10 @@ pub(crate) fn install(
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             webext: Default::default(),
+            #[cfg(target_os = "macos")]
+            scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
+            #[cfg(target_os = "windows")]
+            scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
@@ -1179,6 +1192,28 @@ pub(super) fn with_extension_lifecycle<F>(
         Some(HostTaskKey::Extension(runtime, popup)),
         f,
     );
+}
+
+/// The profile's scriptlet context is in place, or its wait timed out.
+#[cfg(target_os = "macos")]
+pub(super) fn with_scriptlets_ready<F>(profile: ProfileId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::Scriptlets(profile)),
+        f,
+    );
+}
+
+/// A view took, or failed to take, a replaced scriptlet program.
+#[cfg(target_os = "windows")]
+pub(super) fn with_scriptlets<F>(f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(HostTaskPriority::Lifecycle, None, f);
 }
 
 #[cfg(target_os = "windows")]

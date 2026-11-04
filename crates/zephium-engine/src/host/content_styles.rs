@@ -21,6 +21,7 @@ pub(super) struct ViewSiteScope {
     target: RefCell<String>,
     pub(super) pause: crate::platform::content_pause::ContentPause,
     pub(super) protection: crate::platform::content_protection::ViewProtection,
+    pub(super) top_document: crate::platform::top_document::TopDocument,
 }
 
 impl ViewSiteScope {
@@ -30,6 +31,7 @@ impl ViewSiteScope {
             target: RefCell::new(url.to_owned()),
             pause: Default::default(),
             protection: Default::default(),
+            top_document: Default::default(),
         });
         scope.refresh();
         scope
@@ -37,6 +39,14 @@ impl ViewSiteScope {
     pub(super) fn navigating(&self, url: &str) {
         self.target.replace(url.to_owned());
         self.refresh();
+    }
+    /// Only Windows judges requests against the main document; WebKit names
+    /// each request's own frame.
+    pub(super) fn committed(&self, url: &str) {
+        #[cfg(target_os = "windows")]
+        self.top_document.committed(url);
+        #[cfg(not(target_os = "windows"))]
+        let _ = url;
     }
     pub(super) fn refresh(&self) {
         let paused = {
@@ -264,6 +274,8 @@ impl EngineHost {
             spare.view.site_scope.refresh();
         }
         self.refresh_profile_document_styles(profile);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.refresh_profile_scriptlets(profile);
         true
     }
     pub(super) fn refresh_profile_document_styles(&mut self, profile: ProfileId) {

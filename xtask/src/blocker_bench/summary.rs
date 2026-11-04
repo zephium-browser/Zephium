@@ -544,6 +544,37 @@ fn startup_section(results: &Results) -> String {
     )
 }
 
+/// Which launches took the document-start script the watch timings come from.
+fn preload_line(results: &Results) -> String {
+    let mut taken: BTreeMap<(usize, &str), (usize, usize)> = BTreeMap::new();
+    for launch in results
+        .launches
+        .iter()
+        .filter(|launch| launch.phase == "run")
+    {
+        let order = results
+            .configs
+            .iter()
+            .position(|config| *config == launch.config)
+            .unwrap_or(usize::MAX);
+        let count = taken.entry((order, &launch.config)).or_default();
+        count.0 += usize::from(launch.preload == Some(true));
+        count.1 += 1;
+    }
+    let parts: Vec<String> = taken
+        .iter()
+        .map(|((_, config), (yes, all))| format!("{config} {yes}/{all}"))
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Launches that took the document-start script: {}.",
+            parts.join(", ")
+        )
+    }
+}
+
 fn youtube_section(results: &Results) -> String {
     let mut groups: BTreeMap<(usize, String), Vec<&YoutubeStep>> = BTreeMap::new();
     for step in &results.youtube {
@@ -588,6 +619,13 @@ fn youtube_section(results: &Results) -> String {
                     Some(field("adPlacements")? + field("playerAds")? + field("adSlots")?)
                 })
                 .collect();
+            let seeks: Vec<Option<f64>> = steps
+                .iter()
+                .filter(|s| s.errors.is_empty() && !s.timed_out)
+                .filter_map(|s| s.result.as_ref()?.get("seekMs")?.as_array().cloned())
+                .flatten()
+                .map(|seek| seek.as_f64())
+                .collect();
             let column = |values: Vec<f64>, places: usize| spread(&values, places);
             let numbers = |pick: fn(&YoutubeStep) -> Option<f64>| -> Vec<f64> {
                 steps.iter().filter_map(|s| pick(s)).collect()
@@ -610,6 +648,17 @@ fn youtube_section(results: &Results) -> String {
                 flag("enforcement"),
                 column(result("played"), 1),
                 column(result("stalledMs"), 0),
+                column(result("contentFrameMs"), 0),
+                column(seeks.iter().flatten().copied().collect(), 0),
+                if seeks.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        seeks.iter().filter(|s| s.is_none()).count(),
+                        seeks.len()
+                    )
+                },
                 column(player_ads, 1),
                 column(numbers(|s| s.blocked.map(|b| b as f64)), 1),
                 column(numbers(|s| s.cpu_ms), 0),
@@ -618,7 +667,8 @@ fn youtube_section(results: &Results) -> String {
         })
         .collect();
     format!(
-        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, and `player ad data` is what the player response carried for ads.\n\n{}\n",
+        "## YouTube\n\n`feedAds` counts the ad renderers seen on the home feed, or over eight steps down the shorts reel, which reach the number of shorts in `shorts` (a reel that does not move fails the step); on a watch page `ad seen`, `ad UI`, `companion` and `enforcement` count the videos that showed a pre-roll, the player's ad controls, a companion slot and a blocker warning, `adMs` is the time the player spent on ads out of 30 s, `start ms` is from navigation to the first `playing` or `timeupdate` event past 0 s with no ad showing, `seek ms` is from a seek to 40 % or 70 % of the video until it plays again, ads the seek brought included, `seek missed` counts the seeks that did not play again within 15 s out of the two each completed watch visit made (a failed visit's are not counted; fewer is better), and `player ad data` is what the player response carried for ads. {}\n\n{}\n",
+        preload_line(results),
         table(
             &[
                 "config",
@@ -634,6 +684,9 @@ fn youtube_section(results: &Results) -> String {
                 "enforcement",
                 "played s",
                 "stalled ms",
+                "start ms",
+                "seek ms",
+                "seek missed",
                 "player ad data",
                 "blocked",
                 "cpuMs",
@@ -1106,16 +1159,38 @@ mod tests {
             error: Some("exited".into()),
             ..Launch::default()
         });
+        for preload in [Some(true), Some(false)] {
+            results.launches.push(Launch {
+                config: ZEPHIUM_ON.into(),
+                phase: "run".into(),
+                preload,
+                ..Launch::default()
+            });
+        }
         results.youtube.push(YoutubeStep {
             config: ZEPHIUM_ON.into(),
             step: "watch".into(),
-            result: Some(json!({ "adSeen": false, "adMs": 0, "adPlacements": 2, "playerAds": 0, "adSlots": 1, "played": 29.5, "stalledMs": 0 })),
+            result: Some(json!({ "adSeen": false, "adMs": 0, "adPlacements": 2, "playerAds": 0, "adSlots": 1, "played": 29.5, "stalledMs": 0, "contentFrameMs": 1840, "seekMs": [420, null] })),
+            ..YoutubeStep::default()
+        });
+        results.youtube.push(YoutubeStep {
+            config: ZEPHIUM_ON.into(),
+            step: "watch".into(),
+            result: Some(json!({ "seekMs": [null, null] })),
+            timed_out: true,
             ..YoutubeStep::default()
         });
         let text = render(&results);
+        assert!(
+            text.contains(&format!("document-start script: {ZEPHIUM_ON} 1/2.")),
+            "{text}"
+        );
         assert!(text.contains("1000 ± 141"), "{text}");
         assert!(text.contains("| 2 "), "{text}");
         assert!(text.contains("0/1"), "{text}");
         assert!(text.contains("3.0"), "{text}");
+        assert!(text.contains("| 1840 "), "{text}");
+        assert!(text.contains("| 420 "), "{text}");
+        assert!(text.contains("| 1/2 "), "{text}");
     }
 }

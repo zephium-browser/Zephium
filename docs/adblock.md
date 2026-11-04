@@ -20,8 +20,11 @@ soon as the empty native policy is acknowledged; the UI never describes that
 policy as active protection. Updates retain the installed policy throughout.
 Already issued requests cannot be blocked retroactively.
 
-Scriptlets, procedural cosmetics, resource replacement, response-CSP mutation,
-URL-parameter rewriting, and YouTube-specific ad blocking are out of scope.
+Procedural cosmetics, resource replacement, response-CSP mutation and
+URL-parameter rewriting are out of scope. On macOS 15.4+ and Windows,
+`##+js(...)` rules run scriptlets from a library built into the app, never
+fetched; lists only choose the scriptlet and its arguments, and only uBlock
+Origin's two lists may call `trusted-*` ones.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in
@@ -152,11 +155,26 @@ contexts, service workers and already-running shared-worker requests are not
 intercepted by the current adapter. Registering environment worker requests on
 every tab would multiply synchronous work; they need a future environment owner.
 
-WebView2 does not supply an exact initiating frame URL in this callback. The
-matcher therefore applies source-independent decisions and conservatively
-allows requests where an unknown-attribution exception could matter. It never
-substitutes the mutable top-level URL or invents third-party classification.
-The report records this coverage loss separately from resource-type losses.
+WebView2 does not supply the initiating frame URL in this callback. Each view
+instead keeps the HTTP(S) main document it last committed, and every request it
+filters is matched with that document as its source: `$domain` options and
+first/third-party classification are judged against the main document, not the
+frame. A frame's requests are therefore third party to the page that embeds it
+whenever their host's site differs from the page's.
+
+The source changes at commit (WebView2 `ContentLoading`, which runs before the
+new document's scripts), not when a navigation starts. The old document keeps
+its own source until then, so its requests during the navigation are not judged
+against the incoming site, and a redirect, failed navigation or download changes
+nothing. Requests it sends while unloading, such as beacons, can arrive after
+the commit and are judged against the new document. A request the new document
+makes before its commit, such as an Early Hints preload, is judged against the
+previous document. Before a view's first HTTP(S) commit, and after a commit to
+any other scheme or to a URL over 32 KiB, matching is source-independent:
+domain- and party-scoped rules are skipped, and a block that such an exception
+could cancel fails open. Service- and shared-worker requests are not
+intercepted, so they have no main-document source either. The report still
+counts attribution-sensitive rules separately from resource-type losses.
 
 Document-created fixed scripts and constructed sheets provide main-document
 cosmetics and personal hides. Live updates use `ExecuteScript`, with exact
@@ -240,13 +258,14 @@ stream. Unavailable statistics produce an error, never an invented zero.
 ## Zephium's own rules
 
 `crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
-own, reviewed and shipped with the app, compiled after every catalog's lists
-on macOS; its digest is part of the WebKit artifact's cache key. Windows leaves
-it out until its requests carry their page: the runtime matcher sees them
-without one, and a site-scoped exception would then apply on every site. It
-holds exceptions only, never blocks (a test enforces this), for breakage the
-downloaded lists do not fix yet. Each rule has a comment naming its site, the
-evidence and the date, and is reported upstream when it applies there.
+own, reviewed and shipped with the app, compiled after every catalog's lists;
+its digest is part of the artifact's cache key. On Windows its site-scoped
+exceptions are judged against the view's main document, like every rule there
+(see above); before a view's first HTTP(S) commit they fail open on any site,
+as any site-scoped exception does there. It holds exceptions only, never
+blocks (a test enforces this), for breakage the downloaded lists do not fix
+yet. Each rule has a comment naming its site, the evidence and the date, and is
+reported upstream when it applies there.
 
 - Ad recovery: some sites (allrecipes, simplyrecipes, people, bild, mirror,
   tomsguide) probe AdSense's loader and, when it is blocked, re-serve the same
@@ -257,6 +276,11 @@ evidence and the date, and is reported upstream when it applies there.
   the ads stay blocked. In Zephium on macOS with the fix (3 runs each), protection on
   used 4.4 s of CPU and 123 requests on allrecipes against 16.2 s and 301 off,
   and 2.4 s and 89 requests on simplyrecipes against 8.6 s and 299.
+- Ad recovery, second probe: mirror and tomsguide also fetch criteo's prebid
+  tag beside the loader. EasyPrivacy blocks it as third party, which starts the
+  same recovery: 36 to 58 requests to the proxy hosts in 16 seconds of the home
+  page in Zephium on Windows, against 2 or 3 with the exception. The exception
+  allows only that fetch on those two sites; the tag never loads as a script.
 
 ## Budgets and evidence
 
@@ -288,6 +312,29 @@ Child-frame cosmetic delivery is no longer enabled. Native QA also caught and
 fixed stale site controls after navigation: site identity/readiness now participate
 in status deduplication and focused tab updates publish that status.
 No test result claims Windows runtime, installer, battery or broad-web coverage.
+
+## YouTube
+
+uBlock Origin's `set` rules remove the pre-roll ad data from the watch page, so
+no pre-roll plays, but the video still starts later than in Brave. Measured on
+2026-11-04 with QA builds, 5 videos × 3 runs per browser, mean ± sd:
+
+| | Zephium | Brave |
+| --- | --- | --- |
+| macOS start ms | 8871 ± 6078 | 3831 ± 5339 |
+| macOS stall ms | 7200 ± 5805 | 2083 ± 5245 |
+| Windows start ms | 11308 ± 5403 | 4036 ± 3764 |
+| Windows stall ms | 7650 ± 5438 | 1567 ± 3521 |
+
+The stall is the player waiting for its first content media. Both browsers are
+served the ad data in the page and SABR streaming. On macOS, YouTube's client
+under WebKit requests neither of its ad probes
+(`static.doubleclick.net/instream/ad_status.js`,
+`googleads.g.doubleclick.net/pagead/id`) nor a second `/youtubei/v1/player`,
+with protection on or off, and the hold is timed by the server: with the ad
+left in, muted and played at 16×, content still arrived about the ad's length
+after it began. uBlock Origin's rule that rewrites YouTube's page script did not
+shorten the stall on either platform.
 
 ## Rules WebKit never needed
 

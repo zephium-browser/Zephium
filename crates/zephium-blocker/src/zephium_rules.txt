@@ -1,6 +1,6 @@
 ! Zephium's own filter rules, reviewed and shipped with the app and compiled
-! after the downloaded lists on macOS; see docs/adblock.md. Exceptions only:
-! this list never adds a block.
+! after the downloaded lists wherever requests carry their page; see
+! docs/adblock.md. Exceptions only: this list never adds a block.
 
 ! Ad recovery. These sites probe AdSense's loader, as a script and with fetch;
 ! when it is blocked they start a recovery that re-serves the same ads through
@@ -23,3 +23,14 @@
 @@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=simplyrecipes.com
 ! tomsguide.com, 2026-11-03: 59 recovery requests, 2 with the exception.
 @@||pagead2.googlesyndication.com/pagead/js/adsbygoogle.js^$domain=tomsguide.com
+
+! Ad-Shield, on mirror and tomsguide, also fetches criteo's prebid tag beside
+! the loader, and EasyPrivacy blocks it as third party; that starts the same
+! recovery. Letting the fetch through, never the tag as a script, keeps it idle.
+! Evidence: recovery-host requests in 16 s of the home page in Zephium on
+! Windows with the bundled lists, without and with the exception.
+
+! mirror.co.uk, 2026-11-04: 47 and 36 recovery requests, 2 with the exception.
+@@||static.criteo.net/js/ld/publishertag.prebid.js^$xmlhttprequest,domain=mirror.co.uk
+! tomsguide.com, 2026-11-04: 48 and 58 recovery requests, 3 with the exception.
+@@||static.criteo.net/js/ld/publishertag.prebid.js^$xmlhttprequest,domain=tomsguide.com
