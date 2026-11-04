@@ -543,10 +543,10 @@ impl SecurityPolicy {
             };
             unsafe {
                 let mut uri = PWSTR::null();
-                args.Uri(&mut uri)?;
-                if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                    .is_some_and(|uri| blocks(&uri))
-                {
+                let uri = args.Uri(&mut uri).ok().and_then(|()| {
+                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                });
+                if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
                 }
             }
@@ -562,6 +562,11 @@ impl SecurityPolicy {
         }
         Ok(())
     }
+}
+
+/// A frame whose address cannot be read is refused, never let through.
+fn frame_refused(uri: Option<&str>, blocks: impl Fn(&str) -> bool) -> bool {
+    uri.is_none_or(blocks)
 }
 
 impl Drop for SecurityPolicy {
@@ -2623,5 +2628,18 @@ mod bootstrap_history_tests {
             &["https://a.test/", "https://b.test/"]
         )));
         assert!(!blank_bootstrap_only("not json"));
+    }
+}
+
+#[cfg(test)]
+mod frame_judge_tests {
+    use super::frame_refused;
+
+    #[test]
+    fn a_frame_whose_address_cannot_be_read_is_refused() {
+        let blocks = |uri: &str| uri.contains("scam");
+        assert!(frame_refused(None, blocks));
+        assert!(frame_refused(Some("https://scam.example/"), blocks));
+        assert!(!frame_refused(Some("https://fine.example/"), blocks));
     }
 }
