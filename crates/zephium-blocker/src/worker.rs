@@ -1983,7 +1983,11 @@ mod tests {
             NetworkDecision::Allow
         );
         let without = compile(&catalog(vec![source("easylist", "||ads.example^")]));
-        assert!(without.navigation_policy().is_none());
+        // Protection QA builds always carry their test host.
+        assert_eq!(
+            without.navigation_policy().is_some(),
+            cfg!(feature = "qa-test-hosts")
+        );
     }
 
     fn compiler_with_post_ack_exit_gate() -> (Arc<WorkerBlocker>, SyncSender<()>, Receiver<()>) {
@@ -3293,6 +3297,8 @@ mod tests {
         all(not(target_os = "windows"), feature = "webkit")
     ))]
     #[test]
+    // Protection QA builds add a rule of their own, so no catalog fails alone.
+    #[cfg(not(feature = "qa-test-hosts"))]
     fn deterministic_compile_failure_is_cached_once() {
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("invalid").unwrap(),

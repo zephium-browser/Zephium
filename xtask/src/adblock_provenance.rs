@@ -763,9 +763,18 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     let blocker_features = require_table(&blocker, "features")?;
     require_key_set(
         blocker_features,
-        &["default", "runtime", "runtime-exact", "webkit"],
+        &[
+            "default",
+            "qa-test-hosts",
+            "runtime",
+            "runtime-exact",
+            "webkit",
+        ],
         "zephium-blocker feature table",
     )?;
+    // Protection QA builds only; the desktop feature graphs below prove no
+    // release build resolves it.
+    require_string_array(blocker_features, "qa-test-hosts", &[])?;
     require_string_array(
         blocker_features,
         "default",
