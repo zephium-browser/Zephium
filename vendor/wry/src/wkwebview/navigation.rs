@@ -744,10 +744,28 @@ pub(crate) fn did_fail_navigation(
           }
         }
       }
+      // The view's current address is still the page before; only the
+      // error names the address the content rule refused.
+      let document = if failure == NavigationFailure::Blocked {
+        error
+          .userInfo()
+          .objectForKey(unsafe { NSURLErrorFailingURLErrorKey })
+          .and_then(|value| {
+            value
+              .downcast_ref::<NSURL>()
+              .and_then(|url| url.absoluteString())
+          })
+          .and_then(|value| bounded_nsstring(&value, PAGE_URL_LIMIT))
+          .map_or(crate::FailedDocument::Kept, |url| {
+            crate::FailedDocument::Refused { url }
+          })
+      } else {
+        crate::FailedDocument::Kept
+      };
       handler(
         NavigationId::from_raw(navigation_key(navigation) as u64),
         failure,
-        crate::FailedDocument::Kept,
+        document,
       );
     }
   }

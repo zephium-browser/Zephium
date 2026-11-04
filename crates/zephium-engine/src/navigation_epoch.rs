@@ -202,6 +202,20 @@ impl NavigationEpochTracker {
         Some(epoch)
     }
 
+    /// The shell's request behind a navigation to `target` that has not
+    /// started yet, so a refusal of it can name what it refuses.
+    pub(crate) fn pending_request_for(&self, target: &str) -> Option<NavigationRequestId> {
+        let target = canonical_navigation_target(target)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = state.current.as_ref()?;
+        (current.phase == TrackedNavigationPhase::AwaitingStart && current.target == target)
+            .then_some(current.request)
+            .flatten()
+    }
+
     /// A synchronous native load refusal must not strand the still-rendered
     /// previous document behind an uncommitted epoch. This is generation- and
     /// epoch-exact, so a re-entrant replacement navigation is never rolled
@@ -687,6 +701,26 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_only_the_request_still_waiting_to_start() {
+        let tracker = NavigationEpochTracker::new();
+        tracker
+            .begin_request("https://scam.example/win", NavigationRequestId(5))
+            .unwrap();
+        assert_eq!(
+            tracker.pending_request_for("https://scam.example/win"),
+            Some(NavigationRequestId(5))
+        );
+        // A redirect or link elsewhere is not the request.
+        assert_eq!(tracker.pending_request_for("https://other.example/"), None);
+        // A navigation the engine began on its own names none.
+        tracker.begin("https://scam.example/win").unwrap();
+        assert_eq!(
+            tracker.pending_request_for("https://scam.example/win"),
+            None
+        );
+    }
 
     #[test]
     fn native_provider_redirects_keep_auth_cleanup_but_user_navigation_releases_it() {

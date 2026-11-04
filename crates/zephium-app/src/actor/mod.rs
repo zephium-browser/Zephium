@@ -1290,7 +1290,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::AnswerPageRequest { .. }
             | Command::AnswerHttpAuth { .. }
             | Command::ContinuePastCertificate(_)
-            | Command::ContinuePastBlock(_)
+            | Command::ContinuePastBlock { .. }
             | Command::LeaveBlockedPage(_)
             | Command::GoBack(_)
             | Command::GoForward(_)

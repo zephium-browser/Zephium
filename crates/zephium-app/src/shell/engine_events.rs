@@ -421,9 +421,13 @@ impl Shell {
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
-            EngineEvent::NavigationBlocked { id, url, reason } => {
-                self.on_navigation_blocked(id, url, reason)
-            }
+            EngineEvent::NavigationBlocked {
+                id,
+                url,
+                reason,
+                request,
+                can_continue,
+            } => self.on_navigation_blocked(id, url, reason, request, can_continue),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url

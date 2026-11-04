@@ -95,11 +95,6 @@ impl ViewSiteScope {
         let paused = self.paused_at(&self.target.borrow());
         self.pause.set(paused);
     }
-    /// The address the view's main frame is on or navigating to.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-    pub(super) fn target(&self) -> String {
-        self.target.borrow().clone()
-    }
     fn explicitly_paused_at(&self, url: &str) -> bool {
         self.preferences
             .borrow()

@@ -3073,11 +3073,17 @@ fn tabs_continue_past_block(
     caller: WebviewWindow,
     shell: State<'_, Handle>,
     id: String,
+    url: String,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Main, "tabs_continue_past_block") {
         return rejected_operation();
     }
-    dispatch_with_id(caller.app_handle(), &shell, &id, Command::ContinuePastBlock)
+    if !bounded(&url, MAX_NAVIGATION_INPUT_BYTES) {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
+        Command::ContinuePastBlock { id, url }
+    })
 }
 
 /// Leaves the page the filter lists refused.

@@ -1758,6 +1758,12 @@ pub enum EngineEvent {
         id: ItemId,
         url: String,
         reason: NavigationBlockReason,
+        /// The navigation the shell asked for that this refuses, when the
+        /// engine can tell; a refused link or redirect names none.
+        request: Option<NavigationRequestId>,
+        /// False where the engine itself refuses the page (WebKit's content
+        /// rules), which allowing the host cannot lift.
+        can_continue: bool,
     },
     LinkedDownloadStarted {
         id: ItemId,

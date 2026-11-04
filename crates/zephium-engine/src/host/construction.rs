@@ -174,6 +174,8 @@ impl EngineHost {
                         id,
                         url: url.to_owned(),
                         reason,
+                        request: None,
+                        can_continue: true,
                     },
                 );
             }
@@ -844,6 +846,7 @@ impl EngineHost {
             let permit = event_permit.clone();
             let sink = self.sink.clone();
             let item = id.clone();
+            let refused_navigation = navigation.clone();
             Rc::new(move |target: &str, frame: bool| {
                 let Some(reason) = scope.blocks_navigation(target, frame) else {
                     return false;
@@ -855,6 +858,8 @@ impl EngineHost {
                             id: item.get(),
                             url: target.to_owned(),
                             reason,
+                            request: refused_navigation.pending_request_for(target),
+                            can_continue: true,
                         },
                     );
                 }
@@ -1316,7 +1321,12 @@ impl EngineHost {
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
                 }
-                if admitted && action_refused(&target, action.target_is_main_frame == Some(false)) {
+                // A new-window action (no target frame) is judged by the tab it
+                // opens, which shows the explanation; the opener stays as it is.
+                if admitted
+                    && action.target_is_main_frame.is_some()
+                    && action_refused(&target, action.target_is_main_frame == Some(false))
+                {
                     return false;
                 }
                 #[cfg(feature = "agentic-browser")]
@@ -1772,27 +1782,40 @@ impl EngineHost {
             let failure_id = load_id.clone();
             let failure_certificates = Rc::downgrade(&certificates);
             let failure_replaced = replaced_navigation.clone();
-            let failure_scope = site_scope.clone();
             builder =
                 builder.with_navigation_failure_handler(move |navigation, reason, document| {
                     let reason = failure_reason(reason);
                     // WebKit's content rules refused the page the view was
                     // navigating to; chrome explains it as the lists' own
-                    // refusals are.
-                    if let NavigationFailureReason::Blocked(reason) = reason {
+                    // refusals are, under the refused address the error
+                    // names. The rule stays installed, so an allowance cannot
+                    // open it: there is no way past.
+                    if let (
+                        NavigationFailureReason::Blocked(block),
+                        wry::FailedDocument::Refused { url },
+                    ) = (reason, &document)
+                    {
                         failure_permit.emit(
                             &failure_sink,
                             EngineEvent::NavigationBlocked {
                                 id: failure_id.get(),
-                                url: failure_scope.target(),
-                                reason,
+                                url: url.clone(),
+                                reason: block,
+                                request: None,
+                                can_continue: false,
                             },
                         );
                         return;
                     }
+                    // A refusal that names no address is explained as any
+                    // other failure, never under the previous page's host.
+                    let reason = match reason {
+                        NavigationFailureReason::Blocked(_) => NavigationFailureReason::Other,
+                        reason => reason,
+                    };
                     let replaced = match document {
                         wry::FailedDocument::Replaced { url } => Some(url),
-                        wry::FailedDocument::Kept => None,
+                        wry::FailedDocument::Kept | wry::FailedDocument::Refused { .. } => None,
                     };
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();

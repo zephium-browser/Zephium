@@ -3,7 +3,9 @@
 //! app quits.
 
 use super::*;
-use zephium_core::ports::engine::{NavigationBlockReason, NavigationFailureReason};
+use zephium_core::ports::engine::{
+    NavigationBlockReason, NavigationFailureReason, NavigationRequestId,
+};
 
 impl Shell {
     pub(super) fn on_navigation_blocked(
@@ -11,6 +13,8 @@ impl Shell {
         id: ItemId,
         url: String,
         reason: NavigationBlockReason,
+        request: Option<NavigationRequestId>,
+        can_continue: bool,
     ) {
         let Some(url) = url::Url::parse(&url)
             .ok()
@@ -18,12 +22,10 @@ impl Shell {
         else {
             return;
         };
-        if self.items.record_navigation_failure(
-            id,
-            NavigationFailureReason::Blocked(reason),
-            Some(url),
-            true,
-        ) {
+        if self
+            .items
+            .record_refusal(id, reason, url, request, can_continue)
+        {
             // The refused page never started; nothing is loading behind it.
             self.items.set_loading(id, false);
             let _ = self.relayout();
@@ -39,13 +41,27 @@ impl Shell {
             .map(|failure| failure.url.clone())
     }
 
-    pub(super) fn operation_continue_past_block(&mut self, id: ItemId) -> OperationDisposition {
+    /// `shown` is the refused address the person was looking at; only that
+    /// refusal, and only one Zephium's own check made, may be lifted.
+    pub(super) fn operation_continue_past_block(
+        &mut self,
+        id: ItemId,
+        shown: &str,
+    ) -> OperationDisposition {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         let Some(url) = self.blocked_url(id) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
+        let continuable = self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.failure.as_deref())
+            .is_some_and(|failure| failure.can_continue);
+        if url::Url::parse(shown).ok().as_ref() != Some(&url) || !continuable {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
         if self.engine.allow_blocked_navigation(id, url.to_string()) == NativeDispatch::Rejected {
             return operation_result(
                 OperationOutcome::Rejected,

@@ -629,6 +629,7 @@ impl Items {
                         url,
                         reason: crate::ports::engine::NavigationFailureReason::Other,
                         covers_page: false,
+                        can_continue: false,
                     }));
                 }
             }
@@ -797,7 +798,44 @@ impl Items {
             url,
             reason,
             covers_page,
+            can_continue: false,
         }));
+        true
+    }
+
+    /// A page the lists refused covers the tab. A refusal is dropped when the
+    /// person has since asked for something else: it must name the pending
+    /// request, or, unattributed, the very address that request is for.
+    pub fn record_refusal(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationBlockReason,
+        url: Url,
+        request: Option<NavigationRequestId>,
+        can_continue: bool,
+    ) -> bool {
+        if let Some(pending) = self.pending_navigations.get(&id) {
+            let current = match request {
+                Some(request) => request == pending.request,
+                None => pending.url.as_ref() == Some(&url),
+            };
+            if !current {
+                return false;
+            }
+        }
+        if !self.record_navigation_failure(
+            id,
+            crate::ports::engine::NavigationFailureReason::Blocked(reason),
+            Some(url),
+            true,
+        ) {
+            return false;
+        }
+        // The refused navigation is over; nothing else waits on it.
+        self.pending_navigations.remove(&id);
+        if let Some(failure) = self.tab_mut(id).and_then(|tab| tab.failure.as_mut()) {
+            failure.can_continue = can_continue;
+        }
         true
     }
 
