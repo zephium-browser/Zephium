@@ -131,6 +131,7 @@ type RandomState = std::hash::BuildHasherDefault<seahash::SeaHasher>;
 pub struct RegexManager {
     map: HashMap<u64, RegexEntry, RandomState>,
     compiled_regex_count: usize,
+    omitted_regex_count: usize,
     prepared_pattern_bytes: usize,
     largest_prepared_regex_patterns: usize,
     largest_prepared_regex_pattern_bytes: usize,
@@ -152,6 +153,7 @@ impl Default for RegexManager {
         Self {
             map: Default::default(),
             compiled_regex_count: 0,
+            omitted_regex_count: 0,
             prepared_pattern_bytes: 0,
             largest_prepared_regex_patterns: 0,
             largest_prepared_regex_pattern_bytes: 0,
@@ -194,6 +196,37 @@ where
         mask.is_complete_regex(),
         size_limit_bytes,
         dfa_size_limit_bytes,
+    )
+}
+
+/// Whether a rule's regex compiles within these limits exactly as runtime
+/// preparation compiles it, so admission can leave out a rule that would
+/// otherwise fail the whole matcher. A rule that needs no regex compiles.
+pub fn regex_compiles_within(
+    mask: NetworkFilterMask,
+    patterns: &[&str],
+    size_limit_bytes: usize,
+    dfa_size_limit_bytes: usize,
+) -> bool {
+    if !mask.is_regex() && !mask.is_complete_regex() {
+        return true;
+    }
+    // Compilation slices a complete regex's slashes off unchecked.
+    if mask.is_complete_regex()
+        && patterns.iter().any(|pattern| {
+            pattern.len() < 2 || !pattern.starts_with('/') || !pattern.ends_with('/')
+        })
+    {
+        return false;
+    }
+    !matches!(
+        make_regexp_bounded(
+            mask,
+            patterns.iter().copied(),
+            size_limit_bytes,
+            dfa_size_limit_bytes
+        ),
+        CompiledRegex::RegexParsingError(_)
     )
 }
 
@@ -323,8 +356,13 @@ impl RegexManager {
             return Ok(());
         }
         let regex = make_regexp_bounded(mask, filters, size_limit_bytes, dfa_size_limit_bytes);
+        // A regex past the limits, often several rules the optimizer merged,
+        // is kept as one that never matches and counted, so it cannot fail
+        // the whole matcher; frozen lookups still find it prepared.
         if matches!(regex, CompiledRegex::RegexParsingError(_)) {
-            return Err(());
+            self.omitted_regex_count += 1;
+        } else {
+            self.compiled_regex_count += 1;
         }
         self.map.insert(
             key,
@@ -334,7 +372,6 @@ impl RegexManager {
                 usage_count: 0,
             },
         );
-        self.compiled_regex_count += 1;
         Ok(())
     }
 
@@ -349,6 +386,10 @@ impl RegexManager {
 
     pub(crate) fn compiled_regex_count(&self) -> usize {
         self.compiled_regex_count
+    }
+
+    pub(crate) fn omitted_regex_count(&self) -> usize {
+        self.omitted_regex_count
     }
 
     pub(crate) fn prepared_pattern_bytes(&self) -> usize {

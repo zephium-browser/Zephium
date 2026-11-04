@@ -16,6 +16,9 @@ const MAX_SCOPE_PREDICATES: usize = 100_000;
 const MAX_POLICY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STYLESHEET_BYTES: usize = 1024 * 1024;
 const MAX_CONTROLS: usize = 4_096;
+/// The generic-hide matcher's per-regex compile limits.
+const CONTROL_REGEX_SIZE_BYTES: usize = 96 * 1024;
+const CONTROL_REGEX_DFA_SIZE_BYTES: usize = 16 * 1024;
 
 /// Static cosmetic admission statistics, separate from network rule coverage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -161,16 +164,24 @@ impl CosmeticPolicy {
                         continue;
                     }
                     crate::scriptlets::Kind::Rule { unknown } => {
-                        data.scriptlets.push(crate::scriptlets::ScriptletRule {
-                            line: line.to_owned(),
-                            trusted,
-                        });
+                        // A scriptlet the library lacks runs nowhere, so it
+                        // is counted and never reaches the program.
+                        if !unknown {
+                            data.scriptlets.push(crate::scriptlets::ScriptletRule {
+                                line: line.to_owned(),
+                                trusted,
+                            });
+                        }
                         data.report.scriptlet_rules += 1;
                         data.report.unknown_scriptlet_rules += usize::from(unknown);
                         continue;
                     }
                 }
                 match generic_control(line) {
+                    Ok(Some(control)) if !control_compiles(&control) => {
+                        data.report.rejected += 1;
+                        continue;
+                    }
                     Ok(Some(control)) => {
                         data.controls.push(control);
                         if data.controls.len() > MAX_CONTROLS {
@@ -310,8 +321,9 @@ impl CosmeticPolicy {
             if generic_control(&original)?.as_ref() != Some(control) {
                 return Err(CosmeticError::InvalidPolicy);
             }
-            adblock::filters::network::NetworkFilter::parse(control, false, Default::default())
-                .map_err(|_| CosmeticError::InvalidPolicy)?;
+            if !control_compiles(control) {
+                return Err(CosmeticError::InvalidPolicy);
+            }
         }
         // Let adblock-rust own generic classification and hostname exceptions.
         let mut selected_filters = FilterSet::new(false);
@@ -349,8 +361,8 @@ impl CosmeticPolicy {
                 max_pattern_bytes: 256 * 1024,
                 max_patterns_per_regex: 256,
                 max_pattern_bytes_per_regex: 128 * 1024,
-                max_regex_size_bytes: 96 * 1024,
-                max_regex_dfa_size_bytes: 16 * 1024,
+                max_regex_size_bytes: CONTROL_REGEX_SIZE_BYTES,
+                max_regex_dfa_size_bytes: CONTROL_REGEX_DFA_SIZE_BYTES,
                 max_filter_checks_per_request: 256,
             })
             .map_err(|_| CosmeticError::ResourceLimit)?;
@@ -765,6 +777,26 @@ fn parse_rule(line: &str) -> Result<Rule, CosmeticError> {
     })
 }
 
+/// Whether a control parses and its regex compiles within the generic-hide
+/// matcher's limits, so one control cannot fail the whole matcher.
+fn control_compiles(control: &str) -> bool {
+    use adblock::filters::network::{FilterPart, NetworkFilter};
+    let Ok(filter) = NetworkFilter::parse(control, false, Default::default()) else {
+        return false;
+    };
+    let patterns: Vec<&str> = match &filter.filter {
+        FilterPart::Empty => Vec::new(),
+        FilterPart::Simple(pattern) => vec![pattern.as_ref()],
+        FilterPart::AnyOf(patterns) => patterns.iter().map(AsRef::as_ref).collect(),
+    };
+    adblock::regex_manager::regex_compiles_within(
+        filter.mask,
+        &patterns,
+        CONTROL_REGEX_SIZE_BYTES,
+        CONTROL_REGEX_DFA_SIZE_BYTES,
+    )
+}
+
 fn generic_control(line: &str) -> Result<Option<String>, CosmeticError> {
     let Some((pattern, options)) = line.rsplit_once('$') else {
         return Ok(None);
@@ -1023,6 +1055,35 @@ mod tests {
             policy.generic_selectors("https://normal.example/", &vec![".x".to_owned(); 257]),
             Err(DocumentStyleFailure::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn a_scriptlet_the_library_lacks_is_counted_and_leaves_no_trace() {
+        let policy = CosmeticPolicy::compile([concat!(
+            "known.example##+js(set, a.b, true)\n",
+            "only-unknown.example##+js(no-such-scriptlet, x)\n",
+        )])
+        .unwrap();
+        assert_eq!(policy.report().scriptlet_rules, 2);
+        assert_eq!(policy.report().unknown_scriptlet_rules, 1);
+        assert_eq!(policy.scriptlet_coverage(), (1, 1));
+        let program = policy.scriptlet_program().unwrap();
+        assert!(!program.contains("no-such-scriptlet"));
+        assert!(!program.contains(&crate::scriptlets::key_hash("only-unknown.example").to_string()));
+        let encoded = String::from_utf8_lossy(&policy.encode().unwrap()).into_owned();
+        assert!(!encoded.contains("no-such-scriptlet"));
+    }
+
+    #[test]
+    fn a_generic_hide_control_past_the_regex_limits_is_rejected() {
+        let policy = CosmeticPolicy::compile([concat!(
+            "@@||ok.example^$generichide\n",
+            r"@@/^https?:\/\/big\.example\/[+\/0-9a-zA-Z]{400,1200}$/$generichide",
+            "\n",
+        )])
+        .unwrap();
+        assert_eq!(policy.report().generic_controls, 1);
+        assert_eq!(policy.report().rejected, 1);
     }
 
     #[test]

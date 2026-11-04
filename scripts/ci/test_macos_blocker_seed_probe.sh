@@ -20,7 +20,7 @@ for invariant in \
   'private let identifierPrefix = "app.zephium.rules.v1."' \
   'private let artifactDigestDomain = Data("zephium-webkit-content-rules".utf8)' \
   'private let artifactFormatVersion: UInt32 = 4' \
-  '"4540fdeb6bf500e092e07122eec5e5c235f829bd4ac1ce372dc6dbc1567dbfec"' \
+  '"17f1b77381b10b94794d78e8b141f4d8de2445ba9e4ad7f0a2d12bd349acc9f1"' \
   'guard digest == expectedReleaseArtifactDigest else' \
   'let store = WKContentRuleListStore(url: cacheURL)' \
   'store.compileContentRuleList(' \

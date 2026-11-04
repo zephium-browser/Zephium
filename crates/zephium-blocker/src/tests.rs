@@ -20,6 +20,45 @@ fn source_independent_request(url: &str) -> NetworkRequest<'_> {
     NetworkRequest::source_independent(url, ResourceType::Script, RequestMethod::Get)
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn a_regex_past_the_runtime_limits_is_left_out_and_the_rest_compiles() {
+    // One rule too large on its own is dropped at admission.
+    let alone = r"/^https?:\/\/big\.example\/[+\/0-9a-zA-Z]{400,1200}$/$script";
+    // Rules that each compile but that the optimizer merges into one regex
+    // set too large together; the merged set is prepared as never matching.
+    let merged: String = (0..8)
+        .map(|n| {
+            format!(
+                r"/^https?:\/\/ad{n}\.example\/[+\/0-9a-zA-Z]{{40,120}}$/$script{}",
+                "\n"
+            )
+        })
+        .collect();
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source(&format!("||ads.example^\n{alone}\n{merged}"))],
+        )
+        .unwrap();
+    let report = rules.report();
+    assert_eq!(
+        report.dropped_for(InputDropReason::UnsupportedRegularExpression),
+        1
+    );
+    assert!(report.runtime().unwrap().omitted_regexes() >= 1);
+    assert_eq!(
+        rules
+            .evaluate(request(
+                "https://ads.example/tracker.js",
+                "https://site.example/"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
+    );
+}
+
 #[cfg(feature = "runtime")]
 #[test]
 fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
@@ -81,6 +120,28 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
             .verify_official_canary(),
         Ok(())
     );
+}
+
+#[test]
+fn a_malformed_complete_regex_never_compiles_instead_of_panicking() {
+    use adblock::filters::network::NetworkFilterMask;
+    for pattern in ["", "/", "x", "/a", "a/", "/é", "é/"] {
+        assert!(
+            !adblock::regex_manager::regex_compiles_within(
+                NetworkFilterMask::IS_COMPLETE_REGEX,
+                &[pattern],
+                96 * 1024,
+                16 * 1024
+            ),
+            "{pattern}"
+        );
+    }
+    assert!(adblock::regex_manager::regex_compiles_within(
+        NetworkFilterMask::IS_COMPLETE_REGEX,
+        &["/ads?/"],
+        96 * 1024,
+        16 * 1024
+    ));
 }
 
 #[test]
@@ -1374,11 +1435,15 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
     let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
     let (mut loader_sites, mut probe_sites) = (Vec::new(), Vec::new());
+    // A trailing `^` emits a pair of rules, so each exception is judged by
+    // what its rules match together.
+    let (mut loader_filters, mut probe_filters) = (Vec::new(), Vec::new());
     for rule in emitted
         .iter()
         .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
     {
-        let filter = regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
+        let pattern = rule["trigger"]["url-filter"].as_str().unwrap();
+        let filter = regex::RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
             .unwrap();
@@ -1387,21 +1452,28 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
             .unwrap()
             .iter()
             .map(|domain| domain.as_str().unwrap());
-        if filter.is_match(loader) {
-            assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
-            assert!(!filter.is_match(&format!("{loader}x")));
+        if pattern.contains("adsbygoogle") {
+            loader_filters.push(filter);
             loader_sites.extend(sites);
         } else {
-            assert!(filter.is_match(probe));
-            assert!(!filter.is_match(&format!("{probe}x")));
             // The probe's fetch, never the tag as a script.
             let types = rule["trigger"]["resource-type"].as_array().unwrap();
             assert_eq!(types, &["fetch"], "{types:?}");
+            probe_filters.push(filter);
             probe_sites.extend(sites);
         }
     }
+    let any =
+        |filters: &[regex::Regex], url: &str| filters.iter().any(|filter| filter.is_match(url));
+    assert!(any(&loader_filters, loader));
+    assert!(any(&loader_filters, &format!("{loader}?client=ca-pub-1")));
+    assert!(!any(&loader_filters, &format!("{loader}x")));
+    assert!(any(&probe_filters, probe));
+    assert!(!any(&probe_filters, &format!("{probe}x")));
     loader_sites.sort_unstable();
+    loader_sites.dedup();
     probe_sites.sort_unstable();
+    probe_sites.dedup();
     // A leading `*` makes WebKit apply the exception on every subdomain too.
     assert_eq!(
         loader_sites,
@@ -1518,4 +1590,69 @@ fn the_runtime_target_ignores_pruned_rules() {
     let (with, without) = (compile(&[entry_for(PRUNABLE)]), compile(&[]));
     assert_eq!(with.digest(), without.digest());
     assert_eq!(with.report(), without.report());
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_rule_stays_unsplit_where_splitting_would_pass_the_webkit_rule_limit() {
+    let compile =
+        |max_webkit_rules| compile_within(max_webkit_rules, 64 * 1024, "/banner.js^$script\n");
+    let split = compile(2);
+    let split = split.webkit().unwrap();
+    assert_eq!(split.rule_count(), 2);
+    assert!(!split.json().contains(".*"));
+    let unsplit = compile(1);
+    let unsplit = unsplit.webkit().unwrap();
+    assert_eq!(unsplit.rule_count(), 1);
+    assert!(unsplit
+        .json()
+        .contains(r"/banner\\.js([^A-Za-z0-9_.%-].*)?$"));
+}
+
+#[cfg(feature = "webkit")]
+fn compile_within(
+    max_webkit_rules: usize,
+    max_webkit_json_bytes: usize,
+    rules: &str,
+) -> CompiledRules {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules,
+        max_webkit_json_bytes,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    Compiler::new(limits)
+        .compile(CompileTarget::WebKit, vec![source(rules)])
+        .unwrap()
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_list_that_fits_only_unsplit_is_compiled_unsplit_whole() {
+    // Split, the first rule alone would take both places; unsplit, both fit.
+    let rules = "/a.js^$script\n/b.js^$script\n";
+    let whole = compile_within(2, 64 * 1024, rules);
+    let whole = whole.webkit().unwrap();
+    assert_eq!(whole.rule_count(), 2);
+    assert_eq!(whole.json().matches("([^A-Za-z0-9_.%-].*)?$").count(), 2);
+
+    let unsplit_bytes = compile_within(1, 64 * 1024, "/banner.js^$script\n")
+        .webkit()
+        .unwrap()
+        .json()
+        .len();
+    let by_bytes = compile_within(2, unsplit_bytes, "/banner.js^$script\n");
+    let by_bytes = by_bytes.webkit().unwrap();
+    assert_eq!(
+        by_bytes.rule_count(),
+        1,
+        "the split form is past the byte limit"
+    );
 }

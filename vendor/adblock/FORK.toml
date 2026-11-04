@@ -38,6 +38,8 @@ name = "bounded prepared runtime matcher"
 paths = ["src/blocker.rs", "src/engine.rs", "src/regex_manager.rs"]
 invariants = [
   "all regex-backed rules are compiled transactionally on a worker before publication",
+  "a regex past the size limits, alone or merged by the optimizer, is prepared as never matching and counted instead of failing preparation",
+  "admission can test one rule's regex with the same bounded compilation preparation uses",
   "regex count, aggregate bytes, and per-regex pattern budgets are enforced",
   "exact and source-independent prepared matching share the configured per-request filter-check ceiling across every scanned list",
   "prepared match failures distinguish unprepared state, transient unavailability, and candidate-budget exhaustion without allocating",
