@@ -104,6 +104,8 @@ pub struct NetworkMatcherPreparationLimits {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkMatcherPreparation {
     pub regexes: usize,
+    /// Regexes past the limits, prepared as never matching.
+    pub omitted_regexes: usize,
     pub pattern_bytes: usize,
     pub largest_regex_patterns: usize,
     pub largest_regex_pattern_bytes: usize,
@@ -227,7 +229,8 @@ impl Blocker {
 
         if manager.is_frozen() {
             let prepared = NetworkMatcherPreparation {
-                regexes: manager.compiled_regex_count(),
+                regexes: manager.compiled_regex_count() + manager.omitted_regex_count(),
+                omitted_regexes: manager.omitted_regex_count(),
                 pattern_bytes: manager.prepared_pattern_bytes(),
                 largest_regex_patterns: manager.largest_prepared_regex_patterns(),
                 largest_regex_pattern_bytes: manager.largest_prepared_regex_pattern_bytes(),
@@ -321,10 +324,12 @@ impl Blocker {
             limits.max_regex_dfa_size_bytes,
             limits.max_filter_checks_per_request,
         );
+        let omitted_regexes = prepared_manager.omitted_regex_count();
         prepared_manager.freeze();
         *manager = prepared_manager;
         Ok(NetworkMatcherPreparation {
             regexes,
+            omitted_regexes,
             pattern_bytes,
             largest_regex_patterns,
             largest_regex_pattern_bytes,

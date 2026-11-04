@@ -345,6 +345,7 @@ struct SourceGolden {
 #[serde(deny_unknown_fields)]
 struct RuntimeGolden {
     regexes: usize,
+    omitted_regexes: usize,
     regex_limit: usize,
     pattern_bytes: usize,
     pattern_bytes_limit: usize,
@@ -1823,6 +1824,7 @@ pub(crate) fn compile_hidden(
     #[cfg(feature = "blocker-seed-runtime")]
     let runtime = report.runtime().map(|coverage| RuntimeGolden {
         regexes: coverage.regexes(),
+        omitted_regexes: coverage.omitted_regexes(),
         regex_limit: coverage.regex_limit(),
         pattern_bytes: coverage.pattern_bytes(),
         pattern_bytes_limit: coverage.pattern_bytes_limit(),

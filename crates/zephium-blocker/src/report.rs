@@ -6,6 +6,7 @@ use crate::SourceId;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeCoverage {
     pub(crate) regexes: usize,
+    pub(crate) omitted_regexes: usize,
     pub(crate) regex_limit: usize,
     pub(crate) pattern_bytes: usize,
     pub(crate) pattern_bytes_limit: usize,
@@ -22,6 +23,12 @@ impl RuntimeCoverage {
     /// Returns eagerly compiled regular-expression objects.
     pub const fn regexes(self) -> usize {
         self.regexes
+    }
+
+    /// Returns regexes past the size limits, prepared as never matching; one
+    /// can stand for several rules the optimizer merged.
+    pub const fn omitted_regexes(self) -> usize {
+        self.omitted_regexes
     }
 
     /// Returns the hard regular-expression count ceiling.

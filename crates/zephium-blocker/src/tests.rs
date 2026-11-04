@@ -20,6 +20,45 @@ fn source_independent_request(url: &str) -> NetworkRequest<'_> {
     NetworkRequest::source_independent(url, ResourceType::Script, RequestMethod::Get)
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn a_regex_past_the_runtime_limits_is_left_out_and_the_rest_compiles() {
+    // One rule too large on its own is dropped at admission.
+    let alone = r"/^https?:\/\/big\.example\/[+\/0-9a-zA-Z]{400,1200}$/$script";
+    // Rules that each compile but that the optimizer merges into one regex
+    // set too large together; the merged set is prepared as never matching.
+    let merged: String = (0..8)
+        .map(|n| {
+            format!(
+                r"/^https?:\/\/ad{n}\.example\/[+\/0-9a-zA-Z]{{40,120}}$/$script{}",
+                "\n"
+            )
+        })
+        .collect();
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source(&format!("||ads.example^\n{alone}\n{merged}"))],
+        )
+        .unwrap();
+    let report = rules.report();
+    assert_eq!(
+        report.dropped_for(InputDropReason::UnsupportedRegularExpression),
+        1
+    );
+    assert!(report.runtime().unwrap().omitted_regexes() >= 1);
+    assert_eq!(
+        rules
+            .evaluate(request(
+                "https://ads.example/tracker.js",
+                "https://site.example/"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
+    );
+}
+
 #[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());
