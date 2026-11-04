@@ -22,6 +22,7 @@
     local_fonts: m.site_permission_local_fonts,
     automatic_downloads: m.permission_automatic_downloads,
     popups: m.permission_popups,
+    downloads: m.permission_downloads,
   };
 
   let view = $state<SitePermissionsView | null>(null);

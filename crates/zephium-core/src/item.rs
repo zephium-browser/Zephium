@@ -152,6 +152,8 @@ pub enum PageRequest {
     Popup { url: Option<Url> },
     /// The site or its proxy asks to sign in; the engine holds the request.
     HttpAuth(crate::http_auth::HttpAuthPrompt),
+    /// The site wants to save a file; the engine holds the download.
+    Download(crate::permissions::DownloadPermissionPrompt),
     /// The page stopped responding; the person may wait or end it.
     Unresponsive,
 }

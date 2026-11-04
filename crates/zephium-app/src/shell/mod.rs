@@ -258,6 +258,13 @@ pub struct Shell {
         ProfileId,
         std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
     >,
+    /// Whether each site may save files, per profile: true to allow, false to
+    /// block. Saved profiles read theirs from the store; a private profile
+    /// keeps what the person answers only until the session ends.
+    download_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeMap<zephium_core::permissions::PageOrigin, bool>,
+    >,
     /// Local https origins whose refused certificate the person continued
     /// past, for this run only; their pages never look secure.
     continued_certificates:
@@ -505,6 +512,7 @@ impl Shell {
             space_memory: spaces::SpaceMemory::default(),
             external_apps_allowed: std::collections::HashSet::new(),
             popup_sites: std::collections::HashMap::new(),
+            download_sites: std::collections::HashMap::new(),
             continued_certificates: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),

@@ -1785,6 +1785,37 @@ impl InnerWebView {
   }
 }
 
+#[cfg(target_os = "macos")]
+thread_local! {
+  static CONTEXT_MENU_DOWNLOAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the native download handler's call for a download the person
+/// started from WebKit's own context menu.
+#[cfg(target_os = "macos")]
+pub(crate) struct ContextMenuDownload(bool);
+
+#[cfg(target_os = "macos")]
+impl ContextMenuDownload {
+  pub(crate) fn begin() -> Self {
+    Self(CONTEXT_MENU_DOWNLOAD.with(|flag| flag.replace(true)))
+  }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ContextMenuDownload {
+  fn drop(&mut self) {
+    CONTEXT_MENU_DOWNLOAD.with(|flag| flag.set(self.0));
+  }
+}
+
+/// Whether the native download handler is running for a download the person
+/// started from WebKit's context menu rather than one a page started.
+#[cfg(target_os = "macos")]
+pub fn context_menu_download_in_progress() -> bool {
+  CONTEXT_MENU_DOWNLOAD.with(|flag| flag.get())
+}
+
 pub fn url_from_webview(webview: &WKWebView) -> Result<String> {
   let url = unsafe { webview.URL() }.ok_or_else(|| {
     Error::Io(std::io::Error::other(

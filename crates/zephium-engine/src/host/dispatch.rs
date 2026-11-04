@@ -458,6 +458,8 @@ pub(crate) fn install(
             blocker_sites: HashMap::new(),
             popup_sites: HashMap::new(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_tab_download_ask: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificate_exceptions: HashMap::new(),
             page_styles: HashMap::new(),
             picker: None,

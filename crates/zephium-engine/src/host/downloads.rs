@@ -9,8 +9,10 @@ mod platform;
 #[path = "downloads/platform_windows.rs"]
 mod platform;
 mod recovery;
+mod site;
 mod ui;
 use platform::{Delegate, DialogLease, DirectoryPanel, Native, SavePanel, Source, Timer};
+pub(in crate::host) use site::SiteAsk;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -78,6 +80,8 @@ enum DecisionPhase {
     /// A finished download of a type that must be confirmed, waiting to be
     /// kept or deleted.
     KeepDecision,
+    /// The site's question waits for the person under the address field.
+    SitePermission,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +103,7 @@ impl DecisionDeadline {
             DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
             DecisionPhase::UserPaused => Duration::from_secs(30 * 60),
             DecisionPhase::KeepDecision => Duration::from_secs(60 * 60),
+            DecisionPhase::SitePermission => zephium_core::permissions::DOWNLOAD_PERMISSION_TIMEOUT,
         };
         Self {
             phase,
@@ -168,6 +173,11 @@ struct Transfer {
     /// A continuing download will ask for its destination again.
     #[cfg(target_os = "macos")]
     resuming: bool,
+    /// Waits for the person before it may choose its destination.
+    site: Option<site::SiteHold>,
+    /// The person answered for this download on its card, which counts as
+    /// their click.
+    confirmed: bool,
     deadline: DecisionDeadline,
 }
 
@@ -236,6 +246,10 @@ pub(crate) struct Downloads {
     watch: RefCell<Option<Watch>>,
     #[cfg(target_os = "macos")]
     extension_admission: Cell<bool>,
+    /// What each profile keeps per site, true to allow and false to block.
+    sites: RefCell<HashMap<ProfileId, HashMap<PageOrigin, bool>>>,
+    prompts: RefCell<HashMap<u32, site::Prompt>>,
+    next_prompt: Cell<u32>,
 }
 
 impl Downloads {
@@ -310,6 +324,9 @@ impl Downloads {
             watch: RefCell::new(None),
             #[cfg(target_os = "macos")]
             extension_admission: Cell::new(false),
+            sites: RefCell::new(HashMap::new()),
+            prompts: RefCell::new(HashMap::new()),
+            next_prompt: Cell::new(1),
         });
         manager.initialize_recovery();
         manager
@@ -546,6 +563,7 @@ impl Downloads {
             let mut active = self.active.borrow_mut();
             let Some(transfer) = active.get_mut(&id) else {
                 return;
+        self.release_site(id);
             };
             if transfer.persisting_terminal {
                 return;
@@ -679,7 +697,14 @@ impl Downloads {
             }
         }
         for (id, transfer) in self.active.borrow().iter() {
-            if transfer.record.state == DownloadState::Pending
+            if Self::waits_for_site(transfer) {
+                // The card stays while the person looks at another tab; the
+                // page going away or the deadline ends it.
+                if transfer.deadline.expired(Instant::now()) || !Self::site_source_current(transfer)
+                {
+                    cancel.push((*id, DownloadError::Unavailable));
+                }
+            } else if transfer.record.state == DownloadState::Pending
                 && (transfer.deadline.expired(Instant::now())
                     || (!transfer.authorized
                         && !transfer.source.as_ref().is_some_and(Source::live)))
@@ -798,7 +823,7 @@ impl Downloads {
             #[cfg(target_os = "windows")]
             Message::RuntimeExited(clean) => self.runtime_exit_result(clean),
             Message::Preferences(id, DownloadStoreReply::Preferences(preferences)) => {
-                self.choose_destination(id, preferences)
+                self.decide(id, preferences)
             }
             Message::Preferences(id, _) => self.cancel(id, Some(DownloadError::Storage)),
             Message::Prepared(id, result) => match result {

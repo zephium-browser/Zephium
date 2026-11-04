@@ -1,8 +1,8 @@
 //! Site settings: what the focused profile decided for each site, from where
 //! each platform keeps it. macOS keeps camera, microphone and location in the
 //! page-permission catalog; Windows keeps every engine kind in its WebView2
-//! profile. Pop-ups are the browser's own list on both. Private profiles keep
-//! nothing and are never read or written.
+//! profile. Pop-ups and downloads are the browser's own lists on both.
+//! Private profiles show nothing here and are never read or written.
 
 use zephium_core::ids::PagePermissionGrantId;
 use zephium_core::permissions::{
@@ -36,6 +36,7 @@ fn kinds() -> Vec<SitePermissionKind> {
             Kind::LocalFonts,
             Kind::AutomaticDownloads,
             Kind::Popups,
+            Kind::Downloads,
         ]
     } else {
         vec![
@@ -43,6 +44,7 @@ fn kinds() -> Vec<SitePermissionKind> {
             Kind::Microphone,
             Kind::Geolocation,
             Kind::Popups,
+            Kind::Downloads,
         ]
     }
 }
@@ -61,6 +63,7 @@ pub(super) fn kind_view(kind: SitePermissionKind) -> SitePermissionKindView {
         Kind::LocalFonts => View::LocalFonts,
         Kind::AutomaticDownloads => View::AutomaticDownloads,
         Kind::Popups => View::Popups,
+        Kind::Downloads => View::Downloads,
     }
 }
 
@@ -136,6 +139,72 @@ impl Shell {
             .insert(profile, origins.into_iter().collect());
     }
 
+    /// Reads a profile's download decisions once and hands them to the
+    /// engine. A private profile starts with none.
+    pub(super) fn ensure_download_sites(&mut self, profile: ProfileId) {
+        if self.download_sites.contains_key(&profile) {
+            return;
+        }
+        let sites = if self.private_profile(profile) {
+            Vec::new()
+        } else {
+            let Some(sites) = self.store.download_sites(profile) else {
+                return;
+            };
+            sites
+        };
+        self.engine.set_download_sites(profile, sites.clone());
+        self.download_sites
+            .insert(profile, sites.into_iter().collect());
+    }
+
+    /// Keeps one site's download decision, or forgets it with None. A private
+    /// profile keeps it in memory only.
+    pub(super) fn set_download_site(
+        &mut self,
+        profile: ProfileId,
+        origin: PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        self.ensure_download_sites(profile);
+        let Some(current) = self.download_sites.get(&profile) else {
+            return false;
+        };
+        if current.get(&origin).copied() == allowed {
+            return true;
+        }
+        if allowed.is_some()
+            && !current.contains_key(&origin)
+            && current.len() >= zephium_core::permissions::MAX_DOWNLOAD_SITES
+        {
+            return false;
+        }
+        if !self.private_profile(profile)
+            && !self
+                .store
+                .set_download_site(profile, origin.clone(), allowed)
+        {
+            return false;
+        }
+        let Some(sites) = self.download_sites.get_mut(&profile) else {
+            return false;
+        };
+        match allowed {
+            Some(allowed) => {
+                sites.insert(origin, allowed);
+            }
+            None => {
+                sites.remove(&origin);
+            }
+        }
+        let sites = sites
+            .iter()
+            .map(|(origin, allowed)| (origin.clone(), *allowed))
+            .collect();
+        self.engine.set_download_sites(profile, sites);
+        true
+    }
+
     /// The site a tab's blocked pop-up would be allowed for, when its profile
     /// keeps such decisions.
     pub(super) fn popup_site(&self, id: ItemId) -> Option<(ProfileId, PageOrigin)> {
@@ -200,8 +269,10 @@ impl Shell {
             return;
         }
         self.ensure_popup_sites(profile);
+        self.ensure_download_sites(profile);
         let popups = self.popup_sites.get(&profile);
-        let popups_read = popups.is_some();
+        let downloads = self.download_sites.get(&profile);
+        let popups_read = popups.is_some() && downloads.is_some();
         let popups: Vec<SitePermission> = popups
             .into_iter()
             .flatten()
@@ -210,6 +281,20 @@ impl Shell {
                 kind: SitePermissionKind::Popups,
                 decision: RememberedPagePermission::Allow,
             })
+            .chain(
+                downloads
+                    .into_iter()
+                    .flatten()
+                    .map(|(origin, allowed)| SitePermission {
+                        origin: origin.clone(),
+                        kind: SitePermissionKind::Downloads,
+                        decision: if *allowed {
+                            RememberedPagePermission::Allow
+                        } else {
+                            RememberedPagePermission::Deny
+                        },
+                    }),
+            )
             .collect();
         let finish = move |native: Option<Vec<SitePermission>>| {
             let complete = popups_read && native.is_some();
@@ -280,6 +365,17 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::InvalidScope,
             ));
+        }
+        if kind == SitePermissionKind::Downloads {
+            let allowed = decision.map(|decision| decision == RememberedPagePermission::Allow);
+            return Some(if self.set_download_site(profile, origin, allowed) {
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+            } else {
+                operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                )
+            });
         }
         if kind == SitePermissionKind::Popups {
             // Blocking is the default for every site, so a block is a removal.

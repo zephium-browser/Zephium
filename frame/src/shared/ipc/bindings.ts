@@ -2488,6 +2488,11 @@ insecure: boolean; proxy: boolean;
 retry: boolean } |
 /**  The page stopped responding: wait for it, or reload it. */
 { kind: "unresponsive" };
+/**
+ *  The site wants to save a file. `allowed` says the site may already
+ *  download and only this unclicked download is asked about.
+ */
+{ kind: "download"; request: number; site: string; filename: string; allowed: boolean; unclicked: boolean } |
 
 /**  One site's styles, for the Settings manager. */
 export type PageSiteStylesV1 = {
@@ -3060,7 +3065,7 @@ export type SitePermissionDecisionView = "allow" | "block";
  *  A kind of decision Site settings lists. Which kinds a platform keeps is
  *  in `SitePermissionsView::kinds`.
  */
-export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups";
+export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups" | "downloads";
 
 export type SitePermissionView = {
 	/**  Canonical origin, such as `https://meet.example`. */

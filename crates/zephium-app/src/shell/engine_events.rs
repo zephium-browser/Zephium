@@ -420,6 +420,12 @@ impl Shell {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::DownloadPermissionRequested { id, prompt } => {
+                self.on_download_permission_requested(id, prompt)
+            }
+            EngineEvent::DownloadPermissionEnded { id, request } => {
+                self.on_download_permission_ended(id, request)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
@@ -809,6 +815,8 @@ impl Shell {
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::DownloadPermissionRequested { id, .. }
+            | EngineEvent::DownloadPermissionEnded { id, .. }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }

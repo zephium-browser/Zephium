@@ -66,6 +66,12 @@ pub(super) struct Source {
     ask_destination: bool,
 }
 impl Source {
+    /// The page that started the download is still the one in the view,
+    /// whether or not the person is looking at it.
+    pub(super) fn current(&self) -> bool {
+        self.permit.active_token().is_some() && self.navigation.matches_activity(self.activity)
+    }
+
     pub(super) fn live(&self) -> bool {
         let mut parent = HWND::default();
         self.permit.active_token().is_some()
@@ -377,11 +383,14 @@ impl Downloads {
         request: (
             &ICoreWebView2Controller,
             &ICoreWebView2DownloadStartingEventArgs,
-            bool,
+            Option<super::SiteAsk>,
         ),
         mut initial: Option<InitialDownload>,
     ) {
-        let (controller, args, ask_destination) = request;
+        // Only a download the person started from the browser's own menu
+        // comes without a site to ask; it asks where to save instead.
+        let (controller, args, ask) = request;
+        let ask_destination = ask.is_none();
         let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
@@ -426,6 +435,13 @@ impl Downloads {
         };
         let Some(origin) = source_origin(&uri, controller) else {
             return;
+        };
+        // DownloadStarting says neither who clicked nor which frame asked, so
+        // the site's own decision is what guards a download nobody started.
+        let site = match self.site_admission(partition.profile(), ask, &origin, true) {
+            super::site::SiteAdmission::Refuse => return,
+            super::site::SiteAdmission::Open => None,
+            super::site::SiteAdmission::Hold(hold) => Some(hold),
         };
         let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
             return;
@@ -578,14 +594,16 @@ impl Downloads {
                 user_pausing: false,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
+                site,
+                confirmed: false,
         );
         self.changed(partition.profile());
         self.ensure_recovery(partition);
         let cached = self.preferences.borrow().get(&partition.profile()).cloned();
         if let Some(preferences) = cached {
-            self.choose_destination(id, preferences);
+            self.decide(id, preferences);
         } else if matches!(partition, Partition::Ephemeral(_)) {
-            self.choose_destination(id, DownloadPreferences::default());
+            self.decide(id, DownloadPreferences::default());
         } else {
             self.work.set(self.work.get() + 1);
             let sender = self.sender.clone();
@@ -637,8 +655,8 @@ impl Downloads {
             .clone()
             .map(PathBuf::from)
             .or_else(dirs::download_dir);
-        // Admission pins the foreground document; WebView2's automatic-download
-        // permission remains denied, so a page cannot authorize a download flood.
+        // Admission pins the foreground document; a page's further automatic
+        // downloads ask through WebView2's own prompt first.
         if !ask_destination
             && !preferences.ask_destination
             && (preferences.directory.is_none() || preferences.directory_identity.is_some())

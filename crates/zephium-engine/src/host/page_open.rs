@@ -184,6 +184,15 @@ impl EngineHost {
         };
         let adoption = self.native_open_authority.adoption(child, active.clone());
         let foreground = features.foreground;
+        self.native_tab_download_ask =
+            self.views
+                .get(&source)
+                .map(|view| super::downloads::SiteAsk {
+                    item: Rc::new(Cell::new(source)),
+                    permit: view.event_permit.clone(),
+                    sink: self.sink.clone(),
+                    site: super::construction::committed_origin(&view.navigation),
+                });
         let built = self.build_view(
             Rc::new(Cell::new(child)),
             partition,
@@ -192,6 +201,7 @@ impl EngineHost {
             EventPermit::bound(&active),
             NativeViewPurpose::NativeTab(features.opener),
         );
+        self.native_tab_download_ask = None;
         let Some(view) = built else {
             self.native_open_authority.release_failed(child, &active);
             return NewWindowResponse::Deny;

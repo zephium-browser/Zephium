@@ -3527,6 +3527,7 @@ fn site_permission_set(
         View::LocalFonts => Kind::LocalFonts,
         View::AutomaticDownloads => Kind::AutomaticDownloads,
         View::Popups => Kind::Popups,
+        View::Downloads => Kind::Downloads,
     };
     let decision = decision.map(|decision| match decision {
         zephium_ipc::SitePermissionDecisionView::Allow => RememberedPagePermission::Allow,

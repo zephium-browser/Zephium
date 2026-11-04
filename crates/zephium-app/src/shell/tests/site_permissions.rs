@@ -320,3 +320,294 @@ mod catalog {
         );
     }
 }
+
+mod downloads {
+    use super::*;
+    use zephium_core::permissions::DownloadPermissionPrompt;
+    use zephium_ipc::{PageRequestView, SitePermissionKindView};
+
+    fn prompt(
+        request: u32,
+        site: &str,
+        allowed: bool,
+        unclicked: bool,
+    ) -> DownloadPermissionPrompt {
+        DownloadPermissionPrompt {
+            request,
+            site: origin(site),
+            filename: "report.pdf".into(),
+            allowed,
+            unclicked,
+        }
+    }
+
+    fn shown(screen: &Screen, id: ItemId) -> Option<PageRequestView> {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.page_request)
+    }
+
+    fn answers(engine: &FakeEngine) -> Vec<String> {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("download-permission "))
+            .collect()
+    }
+
+    fn answer(shell: &mut Shell, id: ItemId, decision: crate::PageRequestDecision) {
+        shell.handle(Command::AnswerPageRequest { id, decision });
+    }
+
+    #[test]
+    fn allowing_a_site_keeps_it_and_lets_the_download_continue() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(3, "https://files.example", false, false),
+        }));
+        assert_eq!(
+            shown(&screen, id),
+            Some(PageRequestView::Download {
+                request: 3,
+                site: "files.example".into(),
+                filename: "report.pdf".into(),
+                allowed: false,
+                unclicked: false,
+            })
+        );
+        assert!(
+            answers(&engine).is_empty(),
+            "nothing continues before the answer"
+        );
+
+        answer(&mut shell, id, crate::PageRequestDecision::Allow);
+        assert_eq!(shown(&screen, id), None);
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 3 allow")]
+        );
+        assert_eq!(
+            store.download_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(origin("https://files.example"), true)])
+        );
+        assert_eq!(
+            engine.download_sites.lock().unwrap().last().cloned(),
+            Some((profile, vec![("https://files.example".to_owned(), true)]))
+        );
+    }
+
+    #[test]
+    fn not_now_refuses_this_download_only() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(4, "https://files.example", false, false),
+        }));
+        answer(&mut shell, id, crate::PageRequestDecision::Dismiss);
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 4 refuse")]
+        );
+        assert!(store
+            .download_sites
+            .lock()
+            .unwrap()
+            .get(&profile)
+            .is_none_or(Vec::is_empty));
+    }
+
+    #[test]
+    fn an_unclicked_download_on_an_allowed_site_is_let_through_once() {
+        let store = Arc::new(FakeStore::default());
+        let profile_sites = vec![(origin("https://files.example"), true)];
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        store
+            .download_sites
+            .lock()
+            .unwrap()
+            .insert(profile, profile_sites.clone());
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(5, "https://files.example", true, true),
+        }));
+        answer(&mut shell, id, crate::PageRequestDecision::Allow);
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 5 allow")]
+        );
+        assert_eq!(
+            store.download_sites.lock().unwrap().get(&profile).cloned(),
+            Some(profile_sites),
+            "a one-time confirmation changes nothing kept"
+        );
+    }
+
+    #[test]
+    fn the_card_goes_when_the_engine_gives_up_and_a_sign_in_refuses_it() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(6, "https://files.example", false, false),
+        }));
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionEnded {
+            id,
+            request: 5,
+        }));
+        assert!(
+            matches!(shown(&screen, id), Some(PageRequestView::Download { .. })),
+            "a stale end leaves the card"
+        );
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionEnded {
+            id,
+            request: 6,
+        }));
+        assert_eq!(shown(&screen, id), None);
+        assert!(answers(&engine).is_empty());
+
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(7, "https://files.example", false, false),
+        }));
+        shell.handle(Command::Engine(EngineEvent::HttpAuthRequested {
+            id,
+            prompt: zephium_core::http_auth::HttpAuthPrompt {
+                request: 1,
+                host: "files.example".into(),
+                insecure: false,
+                proxy: false,
+                retry: false,
+            },
+        }));
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::HttpAuth { .. })
+        ));
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 7 refuse")]
+        );
+
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(8, "https://files.example", false, false),
+        }));
+        assert!(
+            matches!(shown(&screen, id), Some(PageRequestView::HttpAuth { .. })),
+            "a waiting sign-in is never hidden"
+        );
+        assert_eq!(
+            answers(&engine).last().cloned(),
+            Some(format!("download-permission {id} 8 refuse"))
+        );
+    }
+
+    #[test]
+    fn site_settings_list_and_change_download_decisions() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, _screen, operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let set = |shell: &mut Shell, site: &str, decision: Option<RememberedPagePermission>| {
+            shell.handle(Command::Operation {
+                operation_id: site.into(),
+                command: Box::new(Command::SetSitePermission {
+                    origin: origin(site),
+                    kind: SitePermissionKind::Downloads,
+                    decision,
+                }),
+            });
+        };
+        set(
+            &mut shell,
+            "https://files.example",
+            Some(RememberedPagePermission::Allow),
+        );
+        set(
+            &mut shell,
+            "https://ads.example",
+            Some(RememberedPagePermission::Deny),
+        );
+        let view = query(&mut shell, None);
+        assert!(view.kinds.contains(&SitePermissionKindView::Downloads));
+        let downloads: Vec<_> = view
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == SitePermissionKindView::Downloads)
+            .map(|entry| (entry.origin.clone(), entry.decision))
+            .collect();
+        assert_eq!(
+            downloads,
+            vec![
+                (
+                    "https://ads.example".to_owned(),
+                    zephium_ipc::SitePermissionDecisionView::Block
+                ),
+                (
+                    "https://files.example".to_owned(),
+                    zephium_ipc::SitePermissionDecisionView::Allow
+                ),
+            ]
+        );
+
+        set(
+            &mut shell,
+            "https://files.example",
+            Some(RememberedPagePermission::Deny),
+        );
+        set(&mut shell, "https://ads.example", None);
+        let outcomes: Vec<_> = operations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|op| op.outcome)
+            .collect();
+        assert_eq!(outcomes, vec![OperationOutcome::Applied; 4]);
+        assert_eq!(
+            store.download_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(origin("https://files.example"), false)])
+        );
+        assert_eq!(
+            engine.download_sites.lock().unwrap().last().cloned(),
+            Some((profile, vec![("https://files.example".to_owned(), false)]))
+        );
+    }
+
+    #[test]
+    fn a_private_profile_keeps_an_allowed_site_in_memory_only() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = make_private(&mut shell);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(9, "https://files.example", false, false),
+        }));
+        answer(&mut shell, id, crate::PageRequestDecision::Allow);
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 9 allow")]
+        );
+        assert!(store.download_sites.lock().unwrap().get(&profile).is_none());
+        assert_eq!(
+            engine.download_sites.lock().unwrap().last().cloned(),
+            Some((profile, vec![("https://files.example".to_owned(), true)]))
+        );
+    }
+}

@@ -717,6 +717,20 @@ fn tab_view(
                     retry: prompt.retry,
                 }
             }
+            zephium_core::item::PageRequest::Download(prompt) => {
+                zephium_ipc::PageRequestView::Download {
+                    request: prompt.request,
+                    site: prompt
+                        .site
+                        .as_str()
+                        .split_once("://")
+                        .map_or(prompt.site.as_str(), |(_, host)| host)
+                        .to_owned(),
+                    filename: prompt.filename.clone(),
+                    allowed: prompt.allowed,
+                    unclicked: prompt.unclicked,
+                }
+            }
             zephium_core::item::PageRequest::Unresponsive => {
                 zephium_ipc::PageRequestView::Unresponsive
             }

@@ -1,7 +1,7 @@
 //! What a person decided for one site, as Site settings lists and changes it.
 //! macOS keeps camera, microphone and location in the profile's page-permission
 //! catalog; Windows keeps every engine kind in the WebView2 profile. Pop-ups
-//! are the browser's own on both.
+//! and downloads are the browser's own on both.
 
 use super::{PageOrigin, PagePermissionKind, RememberedPagePermission};
 
@@ -20,6 +20,8 @@ pub enum SitePermissionKind {
     LocalFonts,
     AutomaticDownloads,
     Popups,
+    /// Whether the site may save files at all; Zephium's own on both.
+    Downloads,
 }
 
 impl SitePermissionKind {
@@ -77,6 +79,7 @@ mod tests {
             SitePermissionKind::LocalFonts,
             SitePermissionKind::AutomaticDownloads,
             SitePermissionKind::Popups,
+            SitePermissionKind::Downloads,
         ] {
             assert_eq!(kind.page(), None);
         }

@@ -1,6 +1,6 @@
 //! What a page asks for that only the person can let through: opening a link
-//! in another application, a new tab the browser refused, or signing in to
-//! the site; and a page that stopped responding. Each waits on its tab, in
+//! in another application, a new tab the browser refused, saving a file, or
+//! signing in to the site; and a page that stopped responding. Each waits on its tab, in
 //! chrome the page cannot draw over, until answered or until the tab commits
 //! another document.
 
@@ -8,6 +8,7 @@ use super::*;
 use crate::PageRequestDecision;
 use zephium_core::http_auth::{HttpAuthPrompt, HttpCredentials};
 use zephium_core::item::PageRequest;
+use zephium_core::permissions::DownloadPermissionPrompt;
 
 /// After the person chooses to wait, a page still hung this long later is
 /// asked about again.
@@ -83,6 +84,7 @@ impl Shell {
 
     pub(super) fn on_http_auth_requested(&mut self, id: ItemId, prompt: HttpAuthPrompt) {
         let request = prompt.request;
+        self.withdraw_download_prompt(id);
         if self
             .items
             .set_page_request(id, PageRequest::HttpAuth(prompt))
@@ -90,6 +92,56 @@ impl Shell {
             self.project_tab(id);
         } else {
             let _ = self.engine.answer_http_auth(id, request, None);
+        }
+    }
+
+    /// A download waits on this tab for the person to answer.
+    pub(super) fn on_download_permission_requested(
+        &mut self,
+        id: ItemId,
+        prompt: DownloadPermissionPrompt,
+    ) {
+        let request = prompt.request;
+        let shown = matches!(
+            self.items
+                .tab(id)
+                .and_then(|tab| tab.page_request.as_deref()),
+            None | Some(PageRequest::Popup { .. } | PageRequest::ExternalApp { .. })
+        ) || self.download_prompt(id).is_some();
+        if shown {
+            self.withdraw_download_prompt(id);
+        }
+        if shown
+            && self
+                .items
+                .set_page_request(id, PageRequest::Download(prompt))
+        {
+            self.project_tab(id);
+        } else {
+            let _ = self.engine.answer_download_permission(id, request, false);
+        }
+    }
+
+    pub(super) fn on_download_permission_ended(&mut self, id: ItemId, request: u32) {
+        if self.download_prompt(id) == Some(request) {
+            let _ = self.items.take_page_request(id);
+            self.project_tab(id);
+        }
+    }
+
+    fn download_prompt(&self, id: ItemId) -> Option<u32> {
+        match self.items.tab(id)?.page_request.as_deref()? {
+            PageRequest::Download(prompt) => Some(prompt.request),
+            _ => None,
+        }
+    }
+
+    /// Something else takes the tab's card: the download it showed is
+    /// refused rather than left waiting unseen.
+    fn withdraw_download_prompt(&mut self, id: ItemId) {
+        if let Some(request) = self.download_prompt(id) {
+            let _ = self.items.take_page_request(id);
+            let _ = self.engine.answer_download_permission(id, request, false);
         }
     }
 
@@ -156,6 +208,9 @@ impl Shell {
                 let _ = self.engine.answer_http_auth(id, prompt.request, None);
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
+            (PageRequest::Download(prompt), decision) => {
+                self.answer_download_prompt(id, prompt, decision)
+            }
             (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => {
                 if !self.allow_popups_for_tab(id) {
                     return operation_result(
@@ -215,6 +270,37 @@ impl Shell {
             (PageRequest::Popup { url: Some(url) }, _) => {
                 self.operation_open_url(url.to_string(), true)
             }
+        }
+    }
+
+    /// Allow keeps the site allowed, except for a download nobody clicked,
+    /// which is let through once; anything else refuses this download only.
+    fn answer_download_prompt(
+        &mut self,
+        id: ItemId,
+        prompt: DownloadPermissionPrompt,
+        decision: PageRequestDecision,
+    ) -> OperationDisposition {
+        let allow = matches!(
+            decision,
+            PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
+        );
+        if allow && !prompt.allowed {
+            if let Some(profile) = self.profile_of_item(id) {
+                if !self.set_download_site(profile, prompt.site.clone(), Some(true)) {
+                    crate::diagnostic!("downloads: the site's answer could not be kept");
+                }
+            }
+        }
+        match self
+            .engine
+            .answer_download_permission(id, prompt.request, allow)
+        {
+            NativeDispatch::Rejected | NativeDispatch::Unsupported => operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::NativeDispatchRejected,
+            ),
+            _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
         }
     }
 

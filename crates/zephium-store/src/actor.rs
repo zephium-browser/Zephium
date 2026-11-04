@@ -435,6 +435,16 @@ enum Cmd {
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
     ),
+    DownloadSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, bool)>>>,
+    ),
+    SetDownloadSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        Option<bool>,
+        Sender<bool>,
+    ),
     SetPopupSite(
         ProfileId,
         zephium_core::permissions::PageOrigin,
@@ -1633,6 +1643,24 @@ impl Store for SqliteStore {
             .unwrap_or(false)
     }
 
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.ask(|reply| Cmd::DownloadSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetDownloadSite(profile, origin, allowed, reply))
+            .unwrap_or(false)
+    }
+
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
         if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
             return false;
@@ -2202,6 +2230,14 @@ fn actor(
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
+            }
+            Some(Cmd::DownloadSites(profile, reply)) => {
+                let _ = reply.send(hub.download_sites(profile));
+            }
+            Some(Cmd::SetDownloadSite(profile, origin, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_download_site(profile, &origin, allowed);
+                let _ = reply.send(stored);
             }
             Some(Cmd::SetPopupSite(profile, origin, allowed, reply)) => {
                 let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))

@@ -611,6 +611,14 @@ impl EngineHost {
         let initial_download_window = popup_opener
             .as_ref()
             .and_then(|opener| opener.webview.window());
+        // A download a new tab starts before showing anything is asked about
+        // on the tab that opened it.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let opener_download_ask = if native_popup {
+            self.native_tab_download_ask.take()
+        } else {
+            None
+        };
         if self.erasure_tombstones.contains(&partition.profile()) {
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
@@ -1497,16 +1505,23 @@ impl EngineHost {
                                     )
                                 }) as Box<dyn FnOnce()>
                             });
+                            let menu = resource_save.take_download(&download_navigation);
+                            let ask = (!menu).then(|| {
+                                download_ask(
+                                    initial,
+                                    &opener_download_ask,
+                                    &download_item,
+                                    &download_permit,
+                                    &download_sink,
+                                    &download_navigation,
+                                )
+                            });
                             manager.admit(
                                 partition,
                                 download_permit.clone(),
                                 download_intent.clone(),
                                 download_navigation.clone(),
-                                (
-                                    controller,
-                                    event,
-                                    resource_save.take_download(&download_navigation),
-                                ),
+                                (controller, event, ask),
                                 started.map(|on_started| super::downloads::InitialDownload {
                                     on_started: Some(on_started),
                                 }),
@@ -1655,12 +1670,23 @@ impl EngineHost {
                                     )
                                 }) as Box<dyn FnOnce()>
                             });
+                            // The person chose WebKit's own menu item.
+                            let ask = (!wry::context_menu_download_in_progress()).then(|| {
+                                download_ask(
+                                    initial,
+                                    &opener_download_ask,
+                                    &download_item,
+                                    &download_permit,
+                                    &download_sink,
+                                    &download_navigation,
+                                )
+                            });
                             downloads.admit(
                                 partition,
                                 download_permit.clone(),
                                 download_intent.clone(),
                                 download_navigation.clone(),
-                                native,
+                                (native, ask),
                                 started.and_then(|on_started| {
                                     initial_download_window.clone().map(|window| {
                                         super::downloads::InitialDownload {
@@ -3059,6 +3085,39 @@ fn to_wry(r: Rect) -> wry::Rect {
         position: Position::Logical(LogicalPosition::new(r.x, r.y)),
         size: Size::Logical(LogicalSize::new(r.width, r.height)),
     }
+}
+
+/// Where a page's download is asked about: the tab itself, or, for a new tab
+/// whose first load is the download, the tab that opened it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn download_ask(
+    initial: bool,
+    opener: &Option<super::downloads::SiteAsk>,
+    item: &Rc<Cell<ItemId>>,
+    permit: &EventPermit,
+    sink: &super::permits::Sink,
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> super::downloads::SiteAsk {
+    if let Some(opener) = opener.as_ref().filter(|_| initial) {
+        return opener.clone();
+    }
+    super::downloads::SiteAsk {
+        item: item.clone(),
+        permit: permit.clone(),
+        sink: sink.clone(),
+        site: committed_origin(navigation),
+    }
+}
+
+/// The origin of the document the view has committed, if any.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn committed_origin(
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> Option<zephium_core::permissions::PageOrigin> {
+    navigation
+        .committed_snapshot()
+        .and_then(|(_, url)| url::Url::parse(&url).ok())
+        .and_then(|url| zephium_core::permissions::PageOrigin::from_url(&url).ok())
 }
 
 pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::PermissionResponse {

@@ -323,6 +323,7 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
@@ -516,6 +517,19 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, origins.iter().map(ToString::to_string).collect()));
+    }
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        self.download_sites.lock().unwrap().push((
+            profile,
+            sites
+                .iter()
+                .map(|(origin, allowed)| (origin.to_string(), *allowed))
+                .collect(),
+        ));
     }
     fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
         self.automatic_pip
@@ -973,6 +987,16 @@ impl Engine for FakeEngine {
         self.log(format!("http-auth {item} {request} {answer}"));
         self.native_admission()
     }
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        let answer = if allow { "allow" } else { "refuse" };
+        self.log(format!("download-permission {item} {request} {answer}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -1123,6 +1147,9 @@ pub(crate) struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
     pub(crate) popup_sites:
         Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::permissions::PageOrigin>>>,
+    pub(crate) download_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
+    >,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1147,6 +1174,9 @@ pub(crate) struct FakeStore {
     >,
     pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+/// One list of download decisions the shell handed the engine.
+type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 
 type AvatarWrite = (
     ProfileId,
@@ -1201,6 +1231,33 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        Some(
+            self.download_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        let mut sites = self.download_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|(site, _)| *site != origin);
+        if let Some(allowed) = allowed {
+            list.push((origin, allowed));
         }
         true
     }

@@ -12,6 +12,7 @@ mod bookmarks;
 mod chats;
 mod compatibility;
 mod deletion;
+mod download_sites;
 mod downloads;
 mod favicons;
 mod filesystem;

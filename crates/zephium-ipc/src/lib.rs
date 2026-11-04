@@ -137,6 +137,15 @@ pub enum PageRequestView {
         /// The last username or password was wrong.
         retry: bool,
     },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
+    },
     /// The page stopped responding: wait for it, or reload it.
     Unresponsive,
 }
@@ -414,6 +423,7 @@ pub enum SitePermissionKindView {
     LocalFonts,
     AutomaticDownloads,
     Popups,
+    Downloads,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

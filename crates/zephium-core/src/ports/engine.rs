@@ -728,6 +728,14 @@ pub trait Engine {
     /// Replaces the sites in `profile` whose pages may open a new tab
     /// without a click.
     fn set_popup_sites(&self, _profile: ProfileId, _origins: Vec<crate::permissions::PageOrigin>) {}
+    /// Replaces the download decision `profile` keeps per site: true lets a
+    /// site save files without asking, false refuses them.
+    fn set_download_sites(
+        &self,
+        _profile: ProfileId,
+        _sites: Vec<(crate::permissions::PageOrigin, bool)>,
+    ) {
+    }
     /// The decisions the engine itself saved in `profile`. None when it keeps
     /// none of its own, as on macOS, or cannot read them now.
     fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
@@ -1102,6 +1110,17 @@ pub trait Engine {
         _item: ItemId,
         _request: u32,
         _credentials: Option<crate::http_auth::HttpCredentials>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Answers the download prompt `request` on `item`: true lets every
+    /// download it holds continue, false cancels them. A stale or unknown
+    /// request is ignored.
+    fn answer_download_permission(
+        &self,
+        _item: ItemId,
+        _request: u32,
+        _allow: bool,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -1761,6 +1780,18 @@ pub enum EngineEvent {
     /// The engine cancelled this prompt itself: the tab navigated, a newer
     /// challenge replaced it, or it waited too long.
     HttpAuthEnded {
+        id: ItemId,
+        request: u32,
+    },
+    /// A download waits for the person on this tab, until
+    /// [`Engine::answer_download_permission`] or until the engine gives up on
+    /// it, which [`EngineEvent::DownloadPermissionEnded`] reports.
+    DownloadPermissionRequested {
+        id: ItemId,
+        prompt: crate::permissions::DownloadPermissionPrompt,
+    },
+    /// Every download this prompt held has ended without an answer.
+    DownloadPermissionEnded {
         id: ItemId,
         request: u32,
     },
