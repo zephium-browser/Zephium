@@ -705,21 +705,27 @@ impl Items {
             _ => false,
         }
     }
-    pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
-        if let Some(tab) = self.tab_mut(id) {
-            if tab.content != TabContent::Web {
-                return false;
-            }
-            // A refused first page is built on a blank one, which never
-            // replaces the explanation.
-            if url.as_str() == "about:blank"
-                && tab.failure.as_deref().is_some_and(|failure| {
+    /// Whether `url` is the blank page a refused first page is built on,
+    /// which never replaces the explanation.
+    pub fn is_refused_stand_in(&self, id: ItemId, url: &Url) -> bool {
+        url.as_str() == "about:blank"
+            && self
+                .tab(id)
+                .and_then(|tab| tab.failure.as_deref())
+                .is_some_and(|failure| {
                     matches!(
                         failure.reason,
                         crate::ports::engine::NavigationFailureReason::Blocked(_)
                     )
                 })
-            {
+    }
+
+    pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
+        if self.is_refused_stand_in(id, &url) {
+            return false;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            if tab.content != TabContent::Web {
                 return false;
             }
             tab.url = Some(url);
@@ -1208,6 +1214,30 @@ mod tests {
         assert!(items.navigation_failed(id(1), request));
         assert_eq!(items.pending_navigation(id(1)), None);
         assert!(items.tab(id(1)).unwrap().url.is_none());
+    }
+
+    #[test]
+    fn a_refused_first_page_s_blank_stand_in_is_expected_and_never_commits() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        let blank = Url::parse("about:blank").unwrap();
+        // Before any refusal a blank page is an ordinary commit.
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        assert!(items.is_refused_stand_in(id(1), &blank));
+        assert!(!items.set_committed_url(id(1), blank));
+        assert!(items.tab(id(1)).unwrap().failure.is_some());
+        // A real page the person then opens commits as usual.
+        let page = Url::parse("https://news.example/").unwrap();
+        assert!(!items.is_refused_stand_in(id(1), &page));
+        assert!(items.set_committed_url(id(1), page));
     }
 
     #[test]

@@ -680,6 +680,10 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                // Expected, not rejected: the view under a refused first page.
+                if self.items.is_refused_stand_in(id, &committed_url) {
+                    return;
+                }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
                 let uncovered = self
                     .items
