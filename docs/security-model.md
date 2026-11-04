@@ -729,12 +729,13 @@ are kept apart and never shared with a private one.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
-guarantee on Windows or, for paused sites, on macOS. Crash, power loss, swap, filesystem
-snapshots, and engine defects remain relevant to private data on every OS. Windows does
-not provide the Unix directory fsync durability used by Zephium's deletion journal. The
-cross-restart completed tombstone prevents the application from forgetting cleanup
-authorization after a single acknowledged unlink, but packaged NTFS power-cut erasure
-testing remains a release gate rather than an asserted guarantee.
+guarantee on Windows or, for a private window's scriptlet program, on macOS. Crash,
+power loss, swap, filesystem snapshots, and engine defects remain relevant to private
+data on every OS. Windows does not provide the Unix directory fsync durability used by
+Zephium's deletion journal. The cross-restart completed tombstone prevents the
+application from forgetting cleanup authorization after a single acknowledged unlink,
+but packaged NTFS power-cut erasure testing remains a release gate rather than an
+asserted guarantee.
 
 The engine now exposes a narrow, asynchronous profile-retirement primitive. It
 tombstones the profile before teardown, rejects later view/navigation/spare work, drops
