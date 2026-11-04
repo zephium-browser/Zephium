@@ -9,6 +9,23 @@ use thiserror::Error;
 
 use crate::{CompilationReport, CompileLimits, CompileTarget};
 
+/// A page no official list names, standing in for any site.
+#[cfg(feature = "runtime-exact")]
+const NEUTRAL_PAGE: &str = "https://example.com/";
+/// Requests and the official list whose rule blocks each; the last must stay
+/// allowed.
+const OFFICIAL_CANARY: [(&str, Option<&str>); 3] = [
+    (
+        "https://ad.doubleclick.com/activity;src=1",
+        Some("easylist"),
+    ),
+    (
+        "https://www.googletagmanager.com/zephium-blocker-smoke.js",
+        Some("easyprivacy"),
+    ),
+    ("https://example.com/app.js", None),
+];
+
 /// Stable SHA-256 identity of a canonical effective policy.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PolicyDigest(pub(crate) [u8; 32]);
@@ -184,6 +201,65 @@ impl CompiledRules {
         request: NetworkRequest<'_>,
     ) -> Result<NetworkDecision, MatchError> {
         self.evaluate_inner(request, true)
+    }
+
+    /// Whether a runtime policy still decides the known requests as its
+    /// official lists must, on a neutral page and with no page known, so a
+    /// list update that silently stops blocking is refused instead of used.
+    /// Each blocked request is checked only when the list that blocks it is
+    /// part of the policy.
+    pub fn verify_official_canary(&self) -> Result<(), String> {
+        if self.target() != CompileTarget::Runtime {
+            return Ok(());
+        }
+        let present = |list: &str| {
+            self.report()
+                .sources()
+                .iter()
+                .any(|source| source.id().as_str() == list)
+        };
+        for (url, list) in OFFICIAL_CANARY {
+            if list.is_some_and(|list| !present(list)) {
+                continue;
+            }
+            let expected = if list.is_some() {
+                NetworkAction::Block
+            } else {
+                NetworkAction::Allow
+            };
+            let decisions = [
+                // Exact attribution exists only where the matcher has it.
+                #[cfg(feature = "runtime-exact")]
+                (
+                    "on a neutral page",
+                    self.evaluate(NetworkRequest::new(
+                        url,
+                        NEUTRAL_PAGE,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                ),
+                (
+                    "with no page known",
+                    self.evaluate_source_independent(NetworkRequest::source_independent(
+                        url,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                ),
+            ];
+            for (mode, decision) in decisions {
+                let action = decision
+                    .map_err(|error| format!("official canary {url} {mode} failed: {error:?}"))?
+                    .action();
+                if action != expected {
+                    return Err(format!(
+                        "official canary {url} {mode} returned {action:?}, expected {expected:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn evaluate_inner(

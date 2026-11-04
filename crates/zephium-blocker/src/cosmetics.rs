@@ -15,7 +15,7 @@ const MAX_SCOPE_DOMAINS: usize = 1_024;
 const MAX_SCOPE_PREDICATES: usize = 100_000;
 const MAX_POLICY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STYLESHEET_BYTES: usize = 1024 * 1024;
-const MAX_CONTROLS: usize = 1_024;
+const MAX_CONTROLS: usize = 4_096;
 
 /// Static cosmetic admission statistics, separate from network rule coverage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -1044,5 +1044,21 @@ mod tests {
         assert!(!program.contains(&crate::scriptlets::key_hash("only-unknown.example").to_string()));
         let encoded = String::from_utf8_lossy(&policy.encode().unwrap()).into_owned();
         assert!(!encoded.contains("no-such-scriptlet"));
+    }
+
+    #[test]
+    fn generic_hide_controls_are_admitted_up_to_their_limit() {
+        let controls = |count: usize| -> String {
+            (0..count)
+                .map(|n| format!("@@||c{n}.example^$generichide\n"))
+                .collect()
+        };
+        let policy = CosmeticPolicy::compile([controls(MAX_CONTROLS).as_str()]).unwrap();
+        assert_eq!(policy.report().generic_controls, MAX_CONTROLS);
+        assert!(CosmeticPolicy::decode(&policy.encode().unwrap()).is_ok());
+        assert_eq!(
+            CosmeticPolicy::compile([controls(MAX_CONTROLS + 1).as_str()]).err(),
+            Some(CosmeticError::ResourceLimit)
+        );
     }
 }
