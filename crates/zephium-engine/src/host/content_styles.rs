@@ -42,11 +42,11 @@ pub(super) struct NavigationGuard {
 /// lists refuse that, a blank page under the explanation, with the reason.
 /// The view is then never built on a navigation it must cancel.
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-pub(super) fn first_navigation<'a>(
+pub(super) fn first_navigation(
     preferences: SitePreferencesSlot,
     navigation: NavigationSlot,
-    url: &'a str,
-) -> (&'a str, Option<NavigationBlockReason>) {
+    url: &str,
+) -> (&str, Option<NavigationBlockReason>) {
     match ViewSiteScope::new(preferences, navigation, url).blocks_navigation(url, false) {
         Some(reason) => ("about:blank", Some(reason)),
         None => (url, None),
