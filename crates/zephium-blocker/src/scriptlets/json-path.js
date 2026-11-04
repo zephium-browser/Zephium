@@ -1,6 +1,6 @@
 // Shared by the edit scriptlets: the query and assignment syntax uBlock Origin's wiki documents in "uBO flavored JSONPath".
 function zephiumJsonPath(query, trusted) {
-    const never = { edit: () => false };
+    const never = { edit: () => false, matches: () => false };
     if (typeof query !== 'string' || query === '') {
         return never;
     }
@@ -220,10 +220,17 @@ function zephiumJsonPath(query, trusted) {
     };
     // Each match is the value reached and where it sits: [owner, key, value].
     const children = (node) => (isObject(node) ? Object.keys(node).map((key) => [node, key, node[key]]) : []);
-    const descendants = (match, out) => {
+    // Arguments a method receives may be cyclic or deep; each object is
+    // walked once, to a fixed depth.
+    const descendants = (match, out, seen = new WeakSet(), depth = 0) => {
         out.push(match);
-        for (const child of children(match[2])) {
-            descendants(child, out);
+        const node = match[2];
+        if (!isObject(node) || seen.has(node) || depth >= 64) {
+            return out;
+        }
+        seen.add(node);
+        for (const child of children(node)) {
+            descendants(child, out, seen, depth + 1);
         }
         return out;
     };
@@ -276,12 +283,10 @@ function zephiumJsonPath(query, trusted) {
         }
         return isObject(value) ? JSON.parse(JSON.stringify(value)) : value;
     };
+    const find = (root) => (isObject(root) ? segments.reduce(step, [[null, null, root]]) : []);
     // Edits `root` in place and says whether anything changed.
     const edit = (root) => {
-        if (!isObject(root)) {
-            return false;
-        }
-        const matches = segments.reduce(step, [[null, null, root]]);
+        const matches = find(root);
         if (matches.length === 0) {
             return false;
         }
@@ -317,5 +322,5 @@ function zephiumJsonPath(query, trusted) {
         }
         return changed;
     };
-    return { edit };
+    return { edit, matches: (root) => find(root).length > 0 };
 }

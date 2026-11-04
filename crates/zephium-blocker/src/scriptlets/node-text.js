@@ -16,6 +16,7 @@ function zephiumNodeText(nodeName, pattern, edit, tokens) {
     const quitAfter = Math.max(0, parseInt(settings.quitAfter, 10) || 0);
     const seen = new WeakSet();
     let count = 0;
+    let failures = 0;
     let observer = null;
     // Pages that require Trusted Types refuse plain script text, so script
     // text goes through a policy of the scriptlet's own.
@@ -44,10 +45,20 @@ function zephiumNodeText(nodeName, pattern, edit, tokens) {
         if (after === before) {
             return;
         }
-        if (node.nodeType === Node.TEXT_NODE) {
-            node.nodeValue = after;
-        } else {
-            node.textContent = name === 'SCRIPT' ? scriptText(after) : after;
+        // A write the page refuses, such as script text without a policy,
+        // leaves the node as it was; repeated refusals end the scriptlet.
+        try {
+            if (node.nodeType === Node.TEXT_NODE) {
+                node.nodeValue = after;
+            } else {
+                node.textContent = name === 'SCRIPT' ? scriptText(after) : after;
+            }
+        } catch (e) {
+            failures += 1;
+            if (failures >= 3) {
+                stop();
+            }
+            return;
         }
         count += 1;
         if (limit !== 0 && count >= limit) {

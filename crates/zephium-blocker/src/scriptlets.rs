@@ -45,6 +45,8 @@ const PAGE_CODE_SITES: &[&str] = &[
     "music.youtube.com",
     "www.youtube-nocookie.com",
 ];
+/// The library functions that PAGE_CODE rules call.
+const PAGE_CODE_FUNCTIONS: &[&str] = &["zephiumReplaceNodeText", "zephiumTrustedEditInboundObject"];
 const MAX_PAGE_CODE_RULE_BYTES: usize = 16 * 1024;
 const MAX_PAGE_CODE_SITE_BYTES: usize = 64 * 1024;
 
@@ -106,6 +108,13 @@ const HELPERS: &[Scriptlet] = &[
         trusted: false,
         dependencies: &["zephium-json-path.fn"],
         source: include_str!("scriptlets/inbound-object.js"),
+    },
+    Scriptlet {
+        name: "zephium-page-code-site.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/page-code-site.js"),
     },
     Scriptlet {
         name: "zephium-request-matcher.fn",
@@ -481,6 +490,36 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
             continue;
         }
         blocks.sort_unstable();
+        // Page code runs only where the page's real host, not the hash that
+        // found this entry, is under one of the sites it was admitted for.
+        let (page_code, mut blocks): (Vec<&str>, Vec<&str>) =
+            blocks.into_iter().partition(|block| {
+                PAGE_CODE_FUNCTIONS
+                    .iter()
+                    .any(|function| block.contains(&format!("{function}(")))
+            });
+        let sites: Vec<&str> = PAGE_CODE_SITES
+            .iter()
+            .copied()
+            .filter(|site| {
+                key == site
+                    || key
+                        .strip_suffix(site)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
+            .collect();
+        let guarded;
+        if !page_code.is_empty() && !sites.is_empty() {
+            guarded = format!(
+                "if (zephiumPageCodeSite({})) {{\n{}\n}}",
+                serde_json::to_string(&sites).map_err(|_| crate::CosmeticError::InvalidPolicy)?,
+                page_code.join("\n")
+            );
+            blocks.push(&guarded);
+        }
+        if blocks.is_empty() {
+            continue;
+        }
         let invocations = blocks.join("\n");
         let next = calls.len();
         let index = *calls.entry(invocations).or_insert(next);
@@ -764,5 +803,23 @@ mod tests {
         );
         let program = build(&[rule(youtube, true)]).unwrap().unwrap();
         assert!(program.script.contains("function zephiumReplaceNodeText("));
+    }
+
+    #[test]
+    fn page_code_calls_run_only_behind_the_text_host_check() {
+        let program = build(&[
+            rule("www.youtube.com##+js(rpnt, script, a, b)", true),
+            rule("www.youtube.com##+js(set, a.b, true)", false),
+        ])
+        .unwrap()
+        .unwrap();
+        let script = program.script.as_ref();
+        let guard = script
+            .find("if (zephiumPageCodeSite([\"youtube.com\"])) {\n")
+            .expect("guard");
+        let page_code = script.find("zephiumReplaceNodeText(\"script\"").unwrap();
+        let plain = script.find("zephiumSetConstant(\"a.b\"").unwrap();
+        assert!(plain < guard && guard < page_code);
+        assert_eq!(script.matches("zephiumReplaceNodeText(\"").count(), 1);
     }
 }

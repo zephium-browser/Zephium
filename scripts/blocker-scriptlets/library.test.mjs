@@ -282,6 +282,21 @@ const player = () => ({
     assert.equal(page.script('a(); Object.defineProperty(window,"fetch",{})').textContent, '');
     assert.equal(page.script('b();').textContent, 'b();');
   }
+  // rpnt's replacement is a replace pattern; a refused write skips the node.
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', '/(start\\(\\))/', 'cost = 5$; total = "$&"; $1');
+    assert.equal(page.script('start()').textContent, 'cost = 5$; total = "start()"; start()');
+  }
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', 'ad', 'x');
+    const refusing = page.root.append(new page.FakeNode(1, 'SCRIPT'));
+    Object.defineProperty(refusing, 'textContent', { get: () => 'ad=1', set: () => { throw new TypeError('refused'); } });
+    refusing.append(new page.FakeNode(3, '#text', 'ad=1'));
+    assert.doesNotThrow(() => page.flush());
+    assert.equal(page.script('ad=2').textContent, 'x=2');
+  }
 }
 
 // The JSONPath editor: the older form, v2 queries, assignments and trust.
@@ -324,6 +339,49 @@ const player = () => ({
   for (const query of ['bad[[', '[?.a', '.a=repl({"regex":"("})', '.a+=[1]', '']) {
     assert.equal(edit(query, { a: 1 })[0], false, query);
   }
+}
+
+// Page code is bound to the real host: frame and top-level page, as text.
+{
+  const run = (hostname, ancestors = []) => {
+    const context = { location: { hostname, ancestorOrigins: ancestors }, URL };
+    vm.createContext(context);
+    vm.runInContext(source('page-code-site.js'), context);
+    return context.zephiumPageCodeSite(['youtube.com']);
+  };
+  assert.equal(run('www.youtube.com'), true);
+  assert.equal(run('youtube.com.'), true);
+  // A host whose table key collides with YouTube's still fails the text check.
+  assert.equal(run('collides.example'), false);
+  assert.equal(run('evilyoutube.com'), false);
+  assert.equal(run('www.youtube.com', ['https://elsewhere.example']), false);
+  assert.equal(run('www.youtube.com', ['https://www.youtube.com']), true);
+  assert.equal(run('www.youtube.com', ['not a url']), false);
+}
+
+// Edits never loop on cyclic arguments, and JSON.stringify gets a copy.
+{
+  const context = { Date, JSON, window: {} };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(['json-path.js', 'inbound-object.js', 'trusted-edit-inbound-object.js'].map(source).join('\n'), context);
+  let seed = 7;
+  const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let round = 0; round < 200; round++) {
+    const nodes = Array.from({ length: 1 + Math.floor(random() * 8) }, (_, i) => ({ id: i, ad: random() < 0.5 }));
+    for (const node of nodes) {
+      node.next = nodes[Math.floor(random() * nodes.length)];
+      node.list = [nodes[Math.floor(random() * nodes.length)], node];
+    }
+    for (const query of ['..ad', '$..next.ad', '..[?.ad==true].id=1', '..list.*.ad']) {
+      assert.doesNotThrow(() => context.zephiumJsonPath(query, true).edit(nodes[0]), query);
+    }
+  }
+  vm.runInContext(`zephiumTrustedEditInboundObject('JSON.stringify', '0', '[?.signedRequest].context+={"screen":"FULL"}')`, context);
+  const request = { signedRequest: {}, context: { id: 1 } };
+  assert.equal(vm.runInContext('JSON.stringify', context)(request), '{"signedRequest":{},"context":{"id":1,"screen":"FULL"}}');
+  assert.deepEqual(request.context, { id: 1 });
+  assert.equal(vm.runInContext('JSON.stringify', context)({ other: 1 }), '{"other":1}');
 }
 
 console.log('scriptlet library: all checks passed');

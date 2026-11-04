@@ -9,6 +9,8 @@ function zephiumReplaceNodeText(nodeName = '', pattern = '', replacement = '', .
             return;
         }
     }
+    // The replacement is a String.prototype.replace pattern: uBO's rules
+    // rely on `$1` to keep the matched text.
     const text = typeof replacement === 'string' ? replacement : '';
     zephiumNodeText(nodeName, pattern, (before) => before.replace(find, text), tokens);
 }
