@@ -250,13 +250,27 @@ fn domain_keys(domains: &str) -> Option<Vec<String>> {
 
 /// Two 32-bit FNV-1a hashes of a hostname key, combined into 53 bits so the
 /// page can compare them as one exact number.
-fn key_hash(key: &str) -> u64 {
+pub(crate) fn key_hash(key: &str) -> u64 {
     let fnv = |offset: u32| {
         key.bytes().fold(offset, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
         })
     };
     (u64::from(fnv(2_166_136_261)) << 21) | u64::from(fnv(0x8422_2325) >> 11)
+}
+
+/// Whether a page on `key` would reach another entry with calls once past
+/// `key`'s own: a parent domain, or an entity named by one of its labels.
+fn shadows_calls(key: &str, with_calls: &BTreeSet<&str>) -> bool {
+    let labels: Vec<&str> = key.split('.').collect();
+    if key.ends_with(".*") {
+        return with_calls
+            .iter()
+            .any(|other| other.ends_with(".*") && *other != key);
+    }
+    (1..labels.len()).any(|i| with_calls.contains(labels[i..].join(".").as_str()))
+        || (0..labels.len().saturating_sub(1))
+            .any(|i| with_calls.contains(format!("{}.*", labels[i]).as_str()))
 }
 
 /// The same hash, in the page.
@@ -321,6 +335,7 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
     let mut table = Vec::new();
     let mut hosts = 0;
+    let mut found: Vec<(&String, String)> = Vec::with_capacity(keys.len());
     for key in &keys {
         let host = match key.strip_suffix(".*") {
             Some(name) => format!("{name}.invalid"),
@@ -339,17 +354,27 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
             .map(str::trim)
             .filter(|block| !block.is_empty())
             .collect();
-        // A host whose calls are all excepted still gets an entry, an empty
-        // one, so the page stops there instead of taking its parent's.
-        hosts += usize::from(!blocks.is_empty());
         blocks.sort_unstable();
-        let invocations = blocks.join("\n");
+        found.push((key, blocks.join("\n")));
+    }
+    let with_calls: BTreeSet<&str> = found
+        .iter()
+        .filter(|(_, invocations)| !invocations.is_empty())
+        .map(|(key, _)| key.as_str())
+        .collect();
+    if with_calls.is_empty() {
+        return Ok(None);
+    }
+    for (key, invocations) in found {
+        // A host whose calls are all excepted keeps an empty entry only where
+        // the page would otherwise go on to a parent's calls.
+        if invocations.is_empty() && !shadows_calls(key, &with_calls) {
+            continue;
+        }
+        hosts += usize::from(!invocations.is_empty());
         let next = calls.len();
         let index = *calls.entry(invocations).or_insert(next);
         table.push((key_hash(key), index));
-    }
-    if hosts == 0 {
-        return Ok(None);
     }
     let mut ordered: Vec<(&String, &usize)> = calls.iter().collect();
     ordered.sort_unstable_by_key(|(_, index)| **index);
@@ -582,5 +607,19 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_entry_is_kept_only_where_it_shadows_calls() {
+        let program = build(&[
+            rule("youtube.com##+js(set, a.b, true)", false),
+            rule("example.com#@#+js()", false),
+            rule("m.youtube.com#@#+js()", false),
+        ])
+        .unwrap()
+        .unwrap();
+        let has_entry = |key: &str| program.table.iter().any(|(hash, _)| *hash == key_hash(key));
+        assert!(has_entry("youtube.com") && has_entry("m.youtube.com"));
+        assert!(!has_entry("example.com"));
     }
 }
