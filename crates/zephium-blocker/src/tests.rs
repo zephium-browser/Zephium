@@ -1333,7 +1333,7 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
             assert!(!filter.is_match(&format!("{probe}x")));
             // The probe's fetch, never the tag as a script.
             let types = rule["trigger"]["resource-type"].as_array().unwrap();
-            assert!(!types.iter().any(|kind| kind == "script"), "{types:?}");
+            assert_eq!(types, &["fetch"], "{types:?}");
             probe_sites.extend(sites);
         }
     }

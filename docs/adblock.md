@@ -160,17 +160,18 @@ frame. A frame's requests are therefore third party to the page that embeds it
 whenever their host's site differs from the page's.
 
 The source changes at commit (WebView2 `ContentLoading`, which runs before the
-new document's scripts), not when a navigation starts. The old document keeps its
-own source until then, so its requests during the navigation are not judged
+new document's scripts), not when a navigation starts. The old document keeps
+its own source until then, so its requests during the navigation are not judged
 against the incoming site, and a redirect, failed navigation or download changes
 nothing. Requests it sends while unloading, such as beacons, can arrive after
-the commit and are judged against the new document. A request the new document makes before its commit, such as an Early
-Hints preload, is judged against the previous document. Before a view's first
-HTTP(S) commit, and after a commit to any other scheme, matching is
-source-independent: domain- and party-scoped rules are skipped, and a block that
-such an exception could cancel fails open. Service- and shared-worker requests
-are not intercepted, so they have no main-document source either. The report
-still counts attribution-sensitive rules separately from resource-type losses.
+the commit and are judged against the new document. A request the new document
+makes before its commit, such as an Early Hints preload, is judged against the
+previous document. Before a view's first HTTP(S) commit, and after a commit to
+any other scheme or to a URL over 32 KiB, matching is source-independent:
+domain- and party-scoped rules are skipped, and a block that such an exception
+could cancel fails open. Service- and shared-worker requests are not
+intercepted, so they have no main-document source either. The report still
+counts attribution-sensitive rules separately from resource-type losses.
 
 Document-created fixed scripts and constructed sheets provide main-document
 cosmetics and personal hides. Live updates use `ExecuteScript`, with exact

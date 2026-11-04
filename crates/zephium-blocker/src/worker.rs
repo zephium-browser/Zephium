@@ -2971,6 +2971,31 @@ mod tests {
 
     #[cfg(feature = "runtime-exact")]
     #[test]
+    fn a_source_document_too_long_or_unparsable_is_refused() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let limit = crate::CompileLimits::default().max_source_url_bytes();
+        let long = format!("https://a.example/{}", "x".repeat(limit));
+        assert!(matches!(
+            rules.source_document(&long),
+            Err(crate::MatchError::SourceUrlTooLong { .. })
+        ));
+        assert!(matches!(
+            rules.source_document("not a url"),
+            Err(crate::MatchError::InvalidRequest)
+        ));
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
     fn recent_documents_are_parsed_once_and_bounded() {
         let rules = Compiler::default()
             .compile(
