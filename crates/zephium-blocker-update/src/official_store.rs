@@ -299,6 +299,9 @@ fn migrate(old: v1::Record, now: u64, intact: impl Fn(&Source) -> bool) -> Optio
 /// Whether a source's object is present with exactly its bytes.
 fn source_intact(root: &Path, source: &Source) -> bool {
     use std::io::Read;
+    if source.bytes > MAX_SOURCE {
+        return false;
+    }
     let Some(mut file) =
         crate::file_identity::open_verified_regular(&root.join(object_name(&source.sha256)))
     else {
