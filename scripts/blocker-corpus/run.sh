@@ -40,7 +40,8 @@ for list in "$here"/pages/*.txt "$out/rulehosts.txt"; do
     --output "$out/admitted-$name.txt"
   echo "recording $name ($(grep -c . "$out/admitted-$name.txt") pages)"
   "$out/record" "$out/admitted-$name.txt" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 \
-    "$out/consent.js" 2> "$out/record-$name.log"
+    "$out/consent.js" "$here/hosts-allowed.txt" 2> "$out/record-$name.log"
+  grep '^refused ' "$out/record-$name.log" > "$out/refused-$name.txt" || true
   corpora+=("$out/corpus-$name.jsonl") visits+=("$out/visits-$name.jsonl")
   pages=$(( pages + $(grep -c . "$out/admitted-$name.txt") ))
 done

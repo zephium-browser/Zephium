@@ -360,9 +360,12 @@ unsupported.
   those hosts the wildcard rules name that are on the reviewed list. Only hosts
   listed exactly in `scripts/blocker-corpus/hosts-allowed.txt`, which holds
   well-known sites alone, are loaded: `cargo xtask blocker-prune admit`
-  withholds every other page of every list and prints it for review. Piracy and
-  streaming, link shortener, warez and free-download, adult, gambling and scam
-  sites are never added to it.
+  withholds every other page of every list and prints it for review, and the
+  recorder cancels every navigation and redirect, in the page or in a frame, to
+  any other host and logs it. Never added: piracy or unlicensed streaming;
+  cracks, warez or free downloads; link shorteners; adult sites; gambling and
+  betting, including odds sites; scams. Licensed services such as Netflix,
+  Spotify, Twitch, Vimeo, Crunchyroll and YouTube are fine.
 - A rule is listed only when the replay could test it and nothing matched. A
   load WebKit did not check as its recorded type keeps every rule of that type
   whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
