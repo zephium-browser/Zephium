@@ -545,3 +545,31 @@ fn a_reused_environment_whose_browser_exited_expects_a_new_one() {
     assert!(bootstrap_starts_browser(true, false));
     assert!(!bootstrap_starts_browser(true, true));
 }
+
+#[test]
+fn a_failed_provenance_check_is_named_without_process_details() {
+    let all = || ProvenanceCheck {
+        same_process: true,
+        observer_for_process: true,
+        exit_unobserved: true,
+        process_running: true,
+        same_environment: true,
+        version_observed: true,
+    };
+    assert_eq!(failed_provenance(all()), "no single check failed");
+    assert_eq!(
+        failed_provenance(ProvenanceCheck {
+            same_process: false,
+            process_running: false,
+            ..all()
+        }),
+        "the browser process changed, the browser process is no longer running"
+    );
+    assert_eq!(
+        failed_provenance(ProvenanceCheck {
+            version_observed: false,
+            ..all()
+        }),
+        "no runtime version observer"
+    );
+}

@@ -1099,6 +1099,7 @@ impl RetirementGate {
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
             }
+            event @ EngineEvent::ProfileRestartRequired { .. } => Some(event),
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }

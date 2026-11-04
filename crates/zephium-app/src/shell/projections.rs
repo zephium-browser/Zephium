@@ -504,6 +504,25 @@ impl Shell {
                 covers_page: false,
             });
         }
+        // A profile only a restart can trust again says so on every tab, in
+        // place of whatever its views last failed with.
+        if self
+            .profile_of_item(id)
+            .is_some_and(|profile| self.restart_profiles.contains(&profile))
+        {
+            view.failure = Some(zephium_ipc::TabFailure {
+                url: view
+                    .failure
+                    .take()
+                    .map(|failure| failure.url)
+                    .or_else(|| view.url.clone())
+                    .unwrap_or_default(),
+                reason: zephium_ipc::TabFailureReason::RestartRequired,
+                certificate: None,
+                can_continue: false,
+                covers_page: true,
+            });
+        }
         view.certificate_exception = self.under_certificate_exception(id, tab);
         if let Some(zephium_ipc::PageRequestView::Popup { site, .. }) = view.page_request.as_mut() {
             *site = self.popup_site(id).and_then(|(_, origin)| {

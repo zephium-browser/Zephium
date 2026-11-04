@@ -131,6 +131,15 @@ impl Shell {
                     self.project_runtime_status();
                 }
             }
+            EngineEvent::ProfileRestartRequired { profile } => {
+                if !self.runtime_restart_required {
+                    self.runtime_restart_required = true;
+                    self.project_runtime_status();
+                }
+                if self.restart_profiles.insert(profile) {
+                    self.project_items();
+                }
+            }
             EngineEvent::ContentRulesSettled {
                 profile,
                 requested,
@@ -756,7 +765,8 @@ impl Shell {
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
-            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            | EngineEvent::ProfileProcessExited { profile, .. }
+            | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),
                 ..

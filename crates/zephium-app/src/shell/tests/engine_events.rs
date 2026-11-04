@@ -297,3 +297,31 @@ fn page_permission_completion_is_explicitly_denied_before_and_after_bootstrap() 
         ]
     );
 }
+
+#[test]
+fn a_profile_only_a_restart_can_trust_says_so_on_its_tabs() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "news.example");
+    let profile = shell.profile_of_item(id).unwrap();
+    shell.handle(Command::Engine(EngineEvent::ProfileRestartRequired {
+        profile,
+    }));
+    // The engine refuses every later view in the profile; that refusal is
+    // still explained as the restart, not a generic failure.
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    let failure = tab.failure.expect("the restart is explained");
+    assert_eq!(
+        failure.reason,
+        zephium_ipc::TabFailureReason::RestartRequired
+    );
+    assert!(failure.covers_page);
+    assert_eq!(failure.url, "https://news.example/");
+    assert!(shell.runtime_restart_required);
+}

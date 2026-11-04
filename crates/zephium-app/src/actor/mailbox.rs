@@ -1340,6 +1340,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }
                     | EngineEvent::ProfileProcessExited { .. }
+                    | EngineEvent::ProfileRestartRequired { .. }
                     | EngineEvent::Crashed { .. }
                     | EngineEvent::ViewDiscarded { .. }
                     | EngineEvent::ViewDiscardRefused { .. }

@@ -212,6 +212,9 @@ pub enum TabFailureReason {
     Insecure,
     /// The page's process ended and it could not be brought back on its own.
     Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
     Other,
 }
 

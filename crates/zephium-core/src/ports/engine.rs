@@ -1417,6 +1417,12 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// The engine can no longer prove which browser process owns this
+    /// profile's data, so it retired the profile's views and refuses new ones
+    /// until Zephium restarts. Sticky for the life of the process.
+    ProfileRestartRequired {
+        profile: ProfileId,
+    },
     /// One exact native content-policy installation attempt settled.
     ///
     /// Replacement failure reports `Retained` with the prior known-good

@@ -6,13 +6,20 @@ import { tabFixture } from "$shared/testing/fixtures";
 import NavigationError from "../components/NavigationError.svelte";
 
 const continued = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const relaunched = vi.hoisted(() => vi.fn(async () => true));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ tabsContinuePastCertificate: continued as never });
+  return mockBindings({
+    tabsContinuePastCertificate: continued as never,
+    appRelaunch: relaunched,
+  });
 });
 
-afterEach(() => continued.mockClear());
+afterEach(() => {
+  continued.mockClear();
+  relaunched.mockClear();
+});
 
 function show(failure: TabFailure) {
   const tab = tabFixture({ id: "tab-7", url: null, failure });
@@ -55,4 +62,15 @@ test("a secure-connection failure without a certificate has no way past", async 
   show({ url: "https://nas.local/", reason: "insecure", can_continue: true });
   await expect.element(page.getByRole("button", { name: "Show details" })).not.toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
+
+test("a profile only a restart can trust offers the restart, never the address", async () => {
+  show({ url: "https://example.com/", reason: "restart_required", covers_page: true });
+  await expect.element(page.getByRole("heading")).toHaveTextContent("Zephium needs to restart");
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("keep browsing safely in this profile");
+  await expect.element(page.getByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Restart Zephium" }).click();
+  expect(relaunched).toHaveBeenCalledOnce();
 });

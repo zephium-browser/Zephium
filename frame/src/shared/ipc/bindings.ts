@@ -587,6 +587,8 @@ export const commands = {
 	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  Closes Zephium as a quit does, then starts it again. */
+	appRelaunch: () => __TAURI_INVOKE<boolean>("app_relaunch"),
 	/**  What the release now running brought, when it arrived as an update. */
 	updateHighlights: () => __TAURI_INVOKE<{
 	version: string,
@@ -3199,7 +3201,12 @@ export type TabFailure = {
 
 export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" |
 /**  The page's process ended and it could not be brought back on its own. */
-"crashed" | "other";
+"crashed" |
+/**
+ *  The profile's browser engine can be trusted again only after Zephium
+ *  restarts; every tab in it says so.
+ */
+"restart_required" | "other";
 
 /**
  *  What the tab menu can offer for the tab it opens on, as the sidebar sees
