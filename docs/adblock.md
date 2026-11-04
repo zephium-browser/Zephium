@@ -24,7 +24,9 @@ Procedural cosmetics, resource replacement, response-CSP mutation and
 URL-parameter rewriting are out of scope. On macOS 15.4+ and Windows,
 `##+js(...)` rules run scriptlets from a library built into the app, never
 fetched; lists only choose the scriptlet and its arguments, and only uBlock
-Origin's two lists may call `trusted-*` ones.
+Origin's two lists may call `trusted-*` ones. The two that replace response
+text, `trusted-replace-fetch-response` and `trusted-replace-xhr-response`, run
+only on YouTube's hosts; their rules for any other site are dropped.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in

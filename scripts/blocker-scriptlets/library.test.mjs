@@ -7,9 +7,9 @@ import vm from 'node:vm';
 const library = new URL('../../crates/zephium-blocker/src/scriptlets/', import.meta.url);
 const source = (name) => readFileSync(new URL(name, library), 'utf8')
   .split('\n').filter((line) => !line.startsWith('//')).join('\n');
-const files = ['pattern.js', 'json-pruner.js', 'request-matcher.js', 'timer-booster.js', 'json-prune.js',
-  'json-prune-fetch-response.js', 'json-prune-xhr-response.js', 'nano-settimeout-booster.js',
-  'nano-setinterval-booster.js'];
+const files = ['pattern.js', 'json-pruner.js', 'request-matcher.js', 'timer-booster.js', 'text-replacer.js',
+  'json-prune.js', 'json-prune-fetch-response.js', 'json-prune-xhr-response.js', 'nano-settimeout-booster.js',
+  'nano-setinterval-booster.js', 'trusted-replace-fetch-response.js', 'trusted-replace-xhr-response.js'];
 
 const page = (fetchBody) => {
   class FakeXhr {
@@ -131,6 +131,96 @@ const player = () => ({
   const early = request('https://www.youtube.com/youtubei/v1/player', '');
   early.readyState = 3;
   assert.ok(JSON.parse(early.responseText).adPlacements);
+}
+
+// The text replacer: `*`, strings and regular expressions as String.prototype.replace, and `includes`.
+{
+  const context = page('{}');
+  const edit = (pattern, replacement, text, ...options) => context.zephiumTextReplacer(pattern, replacement, options)(text);
+  assert.equal(edit('*', '', 'anything'), '');
+  assert.equal(edit('*', '{}', 'anything'), '{}');
+  assert.equal(edit('"adSlots"', '"no_ads"', '{"adSlots":[],"x":{"adSlots":1}}'), '{"no_ads":[],"x":{"adSlots":1}}');
+  assert.equal(edit('/"ad\\w+"/g', '"no_ads"', '{"adSlots":1,"adPlacements":2}'), '{"no_ads":1,"no_ads":2}');
+  assert.equal(edit('/A(b)/i', '$1$1', 'xaby'), 'xbby');
+  assert.equal(edit('absent', 'x', 'text'), null);
+  assert.equal(edit('a', 'b', 'a', 'includes', 'zzz'), null);
+  assert.equal(edit('a', 'b', 'a z', 'includes', '/z$/'), 'b z');
+  assert.equal(context.zephiumTextReplacer('', 'x', []), null);
+  assert.equal(context.zephiumTextReplacer('/(/', 'x', []), null);
+}
+
+// A player response shaped like YouTube's, as text, for the replace scriptlets.
+const playerText = () => JSON.stringify({
+  responseContext: { serviceTrackingParams: [] },
+  playabilityStatus: { status: 'OK' },
+  streamingData: { formats: [{ itag: 18 }] },
+  adPlacements: [{ adPlacementRenderer: { config: { adPlacementConfig: { kind: 'AD_PLACEMENT_KIND_START' } }, adSlotLoggingData: { serializedSlotAdServingDataEntry: 'EAE' } } }],
+  adSlots: [{ adSlotRenderer: { adSlotMetadata: { slotType: 'SLOT_TYPE_PLAYER_BYTES' } } }],
+  adBreakHeartbeatParams: 'Q0FB',
+  videoDetails: { videoId: 'dQw0000000A', title: 'A' },
+});
+
+// trusted-replace-fetch-response: the rules' own patterns, only on matching requests, keeping the address.
+{
+  const context = page(playerText());
+  context.zephiumTrustedReplaceFetchResponse('"adPlacements"', '"no_ads"', 'player?');
+  const edited = await context.fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', { method: 'POST' });
+  assert.equal(edited.url, 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false');
+  assert.equal(edited.status, 200);
+  const body = await edited.json();
+  assert.equal(body.adPlacements, undefined);
+  assert.ok(body.no_ads && body.adSlots && body.streamingData);
+  assert.ok((await (await context.fetch('https://www.youtube.com/youtubei/v1/next')).json()).adPlacements);
+  const both = page(playerText());
+  both.zephiumTrustedReplaceFetchResponse('"adPlacements"', '"no_ads"', 'player?');
+  both.zephiumTrustedReplaceFetchResponse('"adSlots"', '"no_ads"', 'player?');
+  const keys = Object.keys(await (await both.fetch('/youtubei/v1/player?key=1')).json());
+  assert.ok(!keys.includes('adPlacements') && !keys.includes('adSlots') && keys.includes('videoDetails'));
+  const named = page(playerText());
+  named.zephiumTrustedReplaceFetchResponse('*', '', 'method:/GET|HEAD/');
+  assert.equal(await (await named.fetch('/x', { method: 'GET' })).text(), '');
+  assert.ok((await (await named.fetch('/x', { method: 'POST' })).json()).adSlots);
+  const gated = page(playerText());
+  gated.zephiumTrustedReplaceFetchResponse('"adSlots"', '"no_ads"', '', 'includes', 'notInThisBody');
+  assert.ok((await (await gated.fetch('/player')).json()).adSlots);
+  const untouched = page(playerText());
+  untouched.zephiumTrustedReplaceFetchResponse('', 'x', 'player');
+  assert.ok((await (await untouched.fetch('/player')).json()).adSlots);
+}
+
+// trusted-replace-xhr-response: the rules' regular expressions on text and json responses.
+{
+  const request = (context, url, responseType) => {
+    const xhr = new context.XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.responseType = responseType;
+    xhr.readyState = 4;
+    xhr.body = playerText();
+    return xhr;
+  };
+  const cut = page('{}');
+  cut.zephiumTrustedReplaceXhrResponse('/"adPlacements.*?("adSlots"|"adBreakHeartbeatParams")/gms', '$1', '/\\/player(?:\\?.+)?$/');
+  const textual = request(cut, 'https://www.youtube.com/youtubei/v1/player?key=1', '');
+  assert.deepEqual(Object.keys(JSON.parse(textual.responseText)),
+    ['responseContext', 'playabilityStatus', 'streamingData', 'adSlots', 'adBreakHeartbeatParams', 'videoDetails']);
+  assert.equal(textual.response, textual.responseText);
+  const json = request(cut, 'https://www.youtube.com/youtubei/v1/player', 'json');
+  assert.equal(json.response.adPlacements, undefined);
+  assert.equal(json.response.videoDetails.videoId, 'dQw0000000A');
+  assert.ok(JSON.parse(request(cut, 'https://www.youtube.com/youtubei/v1/next', '').responseText).adPlacements);
+  const early = request(cut, 'https://www.youtube.com/youtubei/v1/player', '');
+  early.readyState = 3;
+  assert.ok(JSON.parse(early.responseText).adPlacements);
+  // The other rule takes the placements out with what follows them, up to the closing bracket.
+  const whole = page('{}');
+  whole.zephiumTrustedReplaceXhrResponse('/"adPlacements.*?([A-Z]"\\}|"\\}{2,4})\\}\\],/', '', '/playlist\\?list=|\\/player(?:\\?.+)?$|watch\\?[tv]=/');
+  const pruned = JSON.parse(request(whole, 'https://www.youtube.com/youtubei/v1/player', '').responseText);
+  assert.equal(pruned.adPlacements, undefined);
+  assert.ok(pruned.adSlots && pruned.videoDetails);
+  // An edit that leaves a json response unparsable keeps the original.
+  const broken = page('{}');
+  broken.zephiumTrustedReplaceXhrResponse('*', '{', '');
+  assert.ok(request(broken, '/player', 'json').response.adSlots);
 }
 
 // Timer boosters: the needle, the exact delay or `*`, and the 50x bound.

@@ -6,6 +6,10 @@
 //! from hashed hostnames to the calls for that host, and the library, which
 //! runs only when the frame's host has an entry. The library is reviewed code
 //! shipped in the app and never fetched.
+//!
+//! The owner approved replacing response text with text from uBO's lists on
+//! YouTube's hosts only: those rules are `trusted-*`, so only uBO's lists can
+//! run them, and a rule naming any other host is not admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,6 +28,14 @@ const CALL_END: &str = "} catch ( e ) { }";
 const MAX_RULES: usize = 20_000;
 const MAX_RULE_BYTES: usize = 8 * 1024;
 const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
+/// Scriptlets that replace response text, and the only sites, each with its
+/// subdomains, they run on.
+const RESPONSE_TEXT: &[&str] = &[
+    "trusted-replace-fetch-response",
+    "trusted-rpfr",
+    "trusted-replace-xhr-response",
+];
+const RESPONSE_TEXT_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
 
 struct Scriptlet {
     name: &'static str,
@@ -70,6 +82,13 @@ const HELPERS: &[Scriptlet] = &[
         dependencies: &["zephium-pattern.fn"],
         source: include_str!("scriptlets/request-matcher.js"),
     },
+    Scriptlet {
+        name: "zephium-text-replacer.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/text-replacer.js"),
+    },
 ];
 
 const SCRIPTLETS: &[Scriptlet] = &[
@@ -108,6 +127,28 @@ const SCRIPTLETS: &[Scriptlet] = &[
             "zephium-request-matcher.fn",
         ],
         source: include_str!("scriptlets/json-prune-xhr-response.js"),
+    },
+    Scriptlet {
+        name: "trusted-replace-fetch-response.js",
+        aliases: &["trusted-rpfr.js"],
+        trusted: true,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-request-matcher.fn",
+            "zephium-text-replacer.fn",
+        ],
+        source: include_str!("scriptlets/trusted-replace-fetch-response.js"),
+    },
+    Scriptlet {
+        name: "trusted-replace-xhr-response.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-request-matcher.fn",
+            "zephium-text-replacer.fn",
+        ],
+        source: include_str!("scriptlets/trusted-replace-xhr-response.js"),
     },
     Scriptlet {
         name: "nano-setTimeout-booster.js",
@@ -217,6 +258,25 @@ pub(crate) fn classify(line: &str) -> Kind {
         .unwrap_or_default()
         .trim()
         .trim_matches(|c| c == '"' || c == '\'');
+    if !exception && RESPONSE_TEXT.contains(&name.strip_suffix(".js").unwrap_or(name)) {
+        let mut named = domains
+            .split(',')
+            .filter(|domain| !domain.is_empty() && !domain.starts_with('~'))
+            .map(str::to_ascii_lowercase)
+            .peekable();
+        let on_sites = named.peek().is_some()
+            && named.all(|domain| {
+                RESPONSE_TEXT_SITES.iter().any(|site| {
+                    domain == *site
+                        || domain
+                            .strip_suffix(site)
+                            .is_some_and(|sub| sub.ends_with('.'))
+                })
+            });
+        if !on_sites {
+            return Kind::Unsupported;
+        }
+    }
     Kind::Rule {
         unknown: !exception && !known(name),
     }
@@ -586,6 +646,56 @@ mod tests {
     }
 
     #[test]
+    fn response_text_is_replaced_only_on_youtube_s_hosts() {
+        for line in [
+            "www.youtube.com##+js(trusted-rpfr, '\"adSlots\"', '\"no_ads\"', player?)",
+            "youtube.com,~m.youtube.com##+js(trusted-replace-fetch-response.js, *, , x)",
+            "www.youtube-nocookie.com##+js(trusted-replace-xhr-response, a, b)",
+            "example.com#@#+js(trusted-rpfr, a, b)",
+        ] {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false }),
+                "{line}"
+            );
+        }
+        for line in [
+            "example.com##+js(trusted-rpfr, a, b)",
+            "youtube.com,example.com##+js(trusted-replace-fetch-response, a, b)",
+            "youtube.*##+js(trusted-replace-xhr-response, a, b)",
+            "notyoutube.com##+js(trusted-rpfr, a, b)",
+            "~example.com##+js(trusted-rpfr, a, b)",
+        ] {
+            assert!(matches!(classify(line), Kind::Unsupported), "{line}");
+        }
+    }
+
+    #[test]
+    fn response_text_rules_run_only_from_trusted_lists_with_their_arguments_intact() {
+        let line = r#"www.youtube.com##+js(trusted-replace-xhr-response, /"adPlacements.*?("adSlots"|"adBreakHeartbeatParams")/gms, $1, /\/player(?:\?.+)?$/)"#;
+        assert!(build(&[rule(line, false)]).unwrap().is_none());
+        let program = build(&[
+            rule(line, true),
+            rule(
+                "www.youtube.com##+js(trusted-rpfr, '\"adPlacements\"', '\"no_ads\"', player?)",
+                true,
+            ),
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(program.script.contains(r#"zephiumTrustedReplaceXhrResponse("/\"adPlacements.*?(\"adSlots\"|\"adBreakHeartbeatParams\")/gms", "$1", "/\\/player(?:\\?.+)?$/")"#));
+        assert!(program.script.contains(
+            r#"zephiumTrustedReplaceFetchResponse("\"adPlacements\"", "\"no_ads\"", "player?")"#
+        ));
+        assert_eq!(
+            program
+                .script
+                .matches("function zephiumTextReplacer(")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn rules_whose_hosts_get_no_calls_build_no_program() {
         assert!(build(&[rule("a.com##+js(no-such-scriptlet, x)", false)])
             .unwrap()
@@ -631,6 +741,7 @@ mod tests {
         for line in [
             "##+js(set, a, 1)",
             "a.b.*##+js(set, a, 1)",
+            "example.com##+js(trusted-rpfr, a, b)",
             "a.com##.ad",
             &format!("a.com##+js(set, a, {})", "x".repeat(9 * 1024)),
         ] {
