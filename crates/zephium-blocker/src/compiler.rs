@@ -903,27 +903,21 @@ pub(crate) fn looks_like_cosmetic_rule(line: &str) -> bool {
 }
 
 #[cfg(feature = "runtime")]
-/// Whether a `/regex/` rule compiles the way the runtime matcher compiles it,
-/// so one rule the regex engine refuses cannot fail the whole policy.
+/// Whether a regex-backed rule compiles the way the runtime matcher compiles
+/// it, so one rule the regex engine refuses cannot fail the whole policy.
 fn runtime_regex_compiles(filter: &adblock::filters::network::NetworkFilter) -> bool {
-    if !filter.mask.contains(NetworkFilterMask::IS_COMPLETE_REGEX) {
-        return true;
-    }
-    let adblock::filters::network::FilterPart::Simple(pattern) = &filter.filter else {
-        return true;
+    use adblock::filters::network::FilterPart;
+    let patterns: Vec<&str> = match &filter.filter {
+        FilterPart::Empty => Vec::new(),
+        FilterPart::Simple(pattern) => vec![pattern.as_ref()],
+        FilterPart::AnyOf(patterns) => patterns.iter().map(AsRef::as_ref).collect(),
     };
-    let Some(inner) = pattern
-        .strip_prefix('/')
-        .and_then(|rest| rest.strip_suffix('/'))
-    else {
-        return true;
-    };
-    regex::bytes::RegexBuilder::new(&inner.replace("\\/", "/").replace("\\:", ":"))
-        .unicode(false)
-        .size_limit(MAX_RUNTIME_REGEX_SIZE_BYTES)
-        .dfa_size_limit(MAX_RUNTIME_REGEX_DFA_SIZE_BYTES)
-        .build()
-        .is_ok()
+    adblock::regex_manager::regex_compiles_within(
+        filter.mask,
+        &patterns,
+        MAX_RUNTIME_REGEX_SIZE_BYTES,
+        MAX_RUNTIME_REGEX_DFA_SIZE_BYTES,
+    )
 }
 
 fn has_named_option(line: &str, expected: &str) -> bool {
@@ -1040,6 +1034,7 @@ pub(crate) fn prepare_and_validate_runtime_engine(
         blocking_entries,
         RuntimeCoverage {
             regexes: preparation.regexes,
+            omitted_regexes: preparation.omitted_regexes,
             regex_limit: preparation_limits.max_regexes,
             pattern_bytes: preparation.pattern_bytes,
             pattern_bytes_limit: preparation_limits.max_pattern_bytes,
