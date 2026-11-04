@@ -138,6 +138,11 @@ impl Scriptlets {
         } else {
             self.root.join(name)
         };
+        // A package left with other contents, by a crash or a hand, is
+        // written again rather than trusted for its name.
+        if dir.is_dir() && !PageScript::holds(&dir, program) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         if !dir.is_dir() {
             use std::os::unix::fs::DirBuilderExt;
             let written = dir
@@ -276,7 +281,12 @@ impl EngineHost {
         let before = self.scriptlets.packages.get(&profile).cloned();
         let private = self.scriptlets.private.contains_key(&profile);
         let dir = match &program {
-            Some(program) => self.scriptlets.package(profile, private, program),
+            // A package that cannot be written leaves the running program in
+            // place; the next refresh tries again.
+            Some(program) => match self.scriptlets.package(profile, private, program) {
+                Some(dir) => Some(dir),
+                None => return false,
+            },
             None => {
                 self.scriptlets.packages.remove(&profile);
                 None
@@ -399,6 +409,31 @@ mod tests {
         assert!(a.is_dir(), "a running package stays until it is replaced");
         scriptlets.sweep(std::iter::empty());
         assert!(!a.exists() && b.is_dir());
+    }
+
+    #[test]
+    fn a_package_with_other_contents_is_written_again() {
+        let (_temp, mut scriptlets) = scriptlets();
+        let profile = ProfileId::generate();
+        let dir = scriptlets
+            .package(profile, false, "globalThis.a = 1;")
+            .unwrap();
+        std::fs::write(dir.join("program.js"), "globalThis.a = 2;").unwrap();
+        assert_eq!(
+            scriptlets
+                .package(profile, false, "globalThis.a = 1;")
+                .unwrap(),
+            dir
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("program.js")).unwrap(),
+            "globalThis.a = 1;"
+        );
+        std::fs::write(dir.join("manifest.json"), "{}").unwrap();
+        scriptlets
+            .package(profile, false, "globalThis.a = 1;")
+            .unwrap();
+        assert!(PageScript::holds(&dir, "globalThis.a = 1;"));
     }
 
     #[test]
