@@ -946,8 +946,14 @@ const fn payload_limit(target: CompileTarget) -> usize {
     }
 }
 
+/// The largest record of `target` the reader admits: every section the
+/// writer may store, the badware matcher's included.
 const fn max_record_bytes(target: CompileTarget) -> usize {
-    RECORD_HEADER_BYTES + payload_limit(target) + MAX_COSMETIC_PAYLOAD_BYTES + RECORD_CHECKSUM_BYTES
+    RECORD_HEADER_BYTES
+        + payload_limit(target)
+        + MAX_COSMETIC_PAYLOAD_BYTES
+        + MAX_NAVIGATION_PAYLOAD_BYTES
+        + RECORD_CHECKSUM_BYTES
 }
 
 const fn target_for_payload(payload: &ContentRulesPayload) -> CompileTarget {
@@ -1761,6 +1767,18 @@ pub(crate) fn private_test_root() -> tempfile::TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_record_the_writer_accepts_is_one_the_reader_admits() {
+        for target in [CompileTarget::Runtime, CompileTarget::WebKit] {
+            let fullest = RECORD_HEADER_BYTES
+                + payload_limit(target)
+                + MAX_COSMETIC_PAYLOAD_BYTES
+                + MAX_NAVIGATION_PAYLOAD_BYTES
+                + RECORD_CHECKSUM_BYTES;
+            assert!(fullest <= max_record_bytes(target), "{target:?}");
+        }
+    }
 
     pub(super) fn private_root() -> tempfile::TempDir {
         // macOS exposes `/var` through an OS-managed symlink; cache admission
