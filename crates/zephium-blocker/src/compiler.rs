@@ -344,7 +344,10 @@ impl Compiler {
                 .map(|source| (source.cosmetics.as_str(), source.trusted)),
         )
         .map_err(CompileError::Cosmetics)?;
-        let cosmetics = if cosmetic_policy.report().accepted == 0 {
+        // A policy with only scriptlets still has a program to run.
+        let cosmetics = if cosmetic_policy.report().accepted == 0
+            && cosmetic_policy.scriptlet_program().is_none()
+        {
             None
         } else {
             Some(
