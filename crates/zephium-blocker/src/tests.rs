@@ -1374,11 +1374,15 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
     let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
     let (mut loader_sites, mut probe_sites) = (Vec::new(), Vec::new());
+    // A trailing `^` emits a pair of rules, so each exception is judged by
+    // what its rules match together.
+    let (mut loader_filters, mut probe_filters) = (Vec::new(), Vec::new());
     for rule in emitted
         .iter()
         .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
     {
-        let filter = regex::RegexBuilder::new(rule["trigger"]["url-filter"].as_str().unwrap())
+        let pattern = rule["trigger"]["url-filter"].as_str().unwrap();
+        let filter = regex::RegexBuilder::new(pattern)
             .case_insensitive(true)
             .build()
             .unwrap();
@@ -1387,21 +1391,28 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
             .unwrap()
             .iter()
             .map(|domain| domain.as_str().unwrap());
-        if filter.is_match(loader) {
-            assert!(filter.is_match(&format!("{loader}?client=ca-pub-1")));
-            assert!(!filter.is_match(&format!("{loader}x")));
+        if pattern.contains("adsbygoogle") {
+            loader_filters.push(filter);
             loader_sites.extend(sites);
         } else {
-            assert!(filter.is_match(probe));
-            assert!(!filter.is_match(&format!("{probe}x")));
             // The probe's fetch, never the tag as a script.
             let types = rule["trigger"]["resource-type"].as_array().unwrap();
             assert_eq!(types, &["fetch"], "{types:?}");
+            probe_filters.push(filter);
             probe_sites.extend(sites);
         }
     }
+    let any =
+        |filters: &[regex::Regex], url: &str| filters.iter().any(|filter| filter.is_match(url));
+    assert!(any(&loader_filters, loader));
+    assert!(any(&loader_filters, &format!("{loader}?client=ca-pub-1")));
+    assert!(!any(&loader_filters, &format!("{loader}x")));
+    assert!(any(&probe_filters, probe));
+    assert!(!any(&probe_filters, &format!("{probe}x")));
     loader_sites.sort_unstable();
+    loader_sites.dedup();
     probe_sites.sort_unstable();
+    probe_sites.dedup();
     // A leading `*` makes WebKit apply the exception on every subdomain too.
     assert_eq!(
         loader_sites,

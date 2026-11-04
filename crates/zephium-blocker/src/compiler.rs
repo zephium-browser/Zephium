@@ -1142,12 +1142,22 @@ fn compile_webkit(
             }
             let equivalent = webkit_equivalent_without_resource_semantics(filter)
                 .map_err(|_| CompileError::UpstreamInvariant)?;
-            let mut native_rules: Vec<_> = equivalent.into_iter().collect();
-            for native in &mut native_rules {
+            let mut native_rules = Vec::new();
+            for mut native in equivalent {
                 if let Some(pattern) =
                     crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
                 {
                     native.trigger.url_filter = pattern;
+                }
+                match crate::webkit::split_separator_end(&native.trigger.url_filter) {
+                    Some([at_end, before_separator]) => {
+                        let mut second = native.clone();
+                        native.trigger.url_filter = at_end;
+                        second.trigger.url_filter = before_separator;
+                        native_rules.push(native);
+                        native_rules.push(second);
+                    }
+                    None => native_rules.push(native),
                 }
             }
             if native_rules.is_empty() {
