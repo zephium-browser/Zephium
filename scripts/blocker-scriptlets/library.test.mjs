@@ -9,10 +9,11 @@ const source = (name) => readFileSync(new URL(name, library), 'utf8')
   .split('\n').filter((line) => !line.startsWith('//')).join('\n');
 const files = ['pattern.js', 'json-pruner.js', 'request-matcher.js', 'timer-booster.js', 'text-replacer.js',
   'json-prune.js', 'json-prune-fetch-response.js', 'json-prune-xhr-response.js', 'nano-settimeout-booster.js',
-  'nano-setinterval-booster.js', 'trusted-replace-fetch-response.js', 'trusted-replace-xhr-response.js'];
+  'nano-setinterval-booster.js', 'trusted-replace-fetch-response.js', 'trusted-replace-xhr-response.js',
+  'trusted-prevent-dom-bypass.js', 'no-xhr-if.js'];
 
 const page = (fetchBody) => {
-  class FakeXhr {
+  class FakeXhr extends EventTarget {
     open(method, url) { this.method = method; this.url = url; }
     send() {}
   }
@@ -27,7 +28,7 @@ const page = (fetchBody) => {
   const PageResponse = class Response extends globalThis.Response {};
   const timers = [];
   const context = {
-    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, console, timers,
+    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, Event, TextEncoder, Blob, console, timers,
     setTimeout: (handler, delay) => timers.push(['timeout', delay]),
     setInterval: (handler, delay) => timers.push(['interval', delay]),
   };
@@ -221,6 +222,113 @@ const playerText = () => JSON.stringify({
   const broken = page('{}');
   broken.zephiumTrustedReplaceXhrResponse('*', '{', '');
   assert.ok(request(broken, '/player', 'json').response.adSlots);
+}
+
+// no-xhr-if: matching requests never leave and complete with the directive's body.
+{
+  const context = page('{}');
+  context.zephiumNoXhrIf('/\\/api\\/stats\\/atr\\?.+&docid=/ method:POST');
+  const sent = [];
+  context.XMLHttpRequest.prototype.send = new Proxy(context.XMLHttpRequest.prototype.send, {});
+  const open = (method, url, responseType = '') => {
+    const xhr = new context.XMLHttpRequest();
+    xhr.responseType = responseType;
+    xhr.addEventListener('load', () => sent.push(['load', url]));
+    xhr.open(method, url);
+    return xhr;
+  };
+  const atr = open('POST', 'https://www.youtube.com/api/stats/atr?ns=yt&rt=1.0&docid=abc');
+  const events = [];
+  for (const type of ['readystatechange', 'load', 'loadend']) {
+    atr.addEventListener(type, () => events.push(type));
+  }
+  atr.send('body');
+  assert.deepEqual(events, []);
+  await Promise.resolve();
+  assert.deepEqual(events, ['readystatechange', 'load', 'loadend']);
+  assert.equal(atr.readyState, 4);
+  assert.equal(atr.status, 200);
+  assert.equal(atr.responseText, '');
+  assert.equal(atr.responseURL, 'https://www.youtube.com/api/stats/atr?ns=yt&rt=1.0&docid=abc');
+  const get = open('GET', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
+  get.send();
+  await Promise.resolve();
+  assert.equal(get.readyState, undefined);
+  const directive = (value, responseType = '') => {
+    const other = page('{}');
+    other.zephiumNoXhrIf('ads.js !example.com', value);
+    const xhr = new other.XMLHttpRequest();
+    xhr.responseType = responseType;
+    xhr.open('GET', 'https://cdn.test/ads.js', false);
+    xhr.send();
+    return xhr.response;
+  };
+  assert.equal(directive(''), '');
+  assert.equal(directive('true').length, 10);
+  assert.equal(directive('emptyObj'), '{}');
+  assert.equal(JSON.stringify(directive('emptyArr', 'json')), '[]');
+  assert.equal(directive('length:5-7').length >= 5, true);
+  assert.equal(directive('war:noop-vast3.xml'), '');
+  const negated = page('{}');
+  negated.zephiumNoXhrIf('ads.js !example.com');
+  const kept = new negated.XMLHttpRequest();
+  kept.open('GET', 'https://example.com/ads.js', false);
+  kept.send();
+  assert.equal(kept.readyState, undefined);
+  const silent = page('{}');
+  silent.zephiumNoXhrIf();
+  assert.equal(Object.getOwnPropertyDescriptor(silent.XMLHttpRequest.prototype, 'status'), undefined);
+}
+
+// trusted-prevent-dom-bypass: a frame inserted by the named method uses the parent's patched function.
+{
+  const parent = page('{}');
+  const frameWindow = vm.createContext({ fetch: async () => 'frame', JSON });
+  vm.runInContext('this.fetch = fetch; this.JSON = JSON;', frameWindow);
+  class FakeElement {
+    constructor(children = []) { this.children = children; }
+    querySelectorAll() { return this.children; }
+  }
+  class FakeFrame extends FakeElement {
+    constructor(view) { super(); this.contentWindow = null; this.view = view; }
+  }
+  const makeNode = () => {
+    const Node = function Node() {};
+    Node.prototype.appendChild = function appendChild(child) {
+      for (const frame of [child, ...child.querySelectorAll()]) {
+        if (frame instanceof FakeFrame) { frame.contentWindow = frame.view; }
+      }
+      return child;
+    };
+    return Node;
+  };
+  const Node = makeNode();
+  Object.assign(parent, { Node, HTMLElement: FakeElement });
+  parent.fetch = new Proxy(parent.fetch, { apply: () => Promise.resolve('patched') });
+  parent.zephiumTrustedPreventDomBypass('Node.prototype.appendChild', 'fetch');
+  const frame = new FakeFrame(frameWindow);
+  new Node().appendChild(frame);
+  assert.equal(await frameWindow.fetch('/youtubei/v1/player'), 'patched');
+  // A dotted target, on a frame inside the inserted element.
+  const parsing = page('{}');
+  const ParsingNode = makeNode();
+  Object.assign(parsing, { Node: ParsingNode, HTMLElement: FakeElement });
+  vm.runInContext('JSON.parse = new Proxy(JSON.parse, { apply: () => "parent" });', parsing);
+  parsing.zephiumTrustedPreventDomBypass('Node.prototype.appendChild', 'JSON.parse');
+  const nestedWindow = vm.createContext({});
+  const nested = new FakeFrame(vm.runInContext('globalThis', nestedWindow));
+  new ParsingNode().appendChild(new FakeElement([nested]));
+  assert.equal(vm.runInContext('JSON.parse("1")', nestedWindow), 'parent');
+  const whole = page('{}');
+  const WholeNode = makeNode();
+  Object.assign(whole, { Node: WholeNode, HTMLElement: FakeElement, document: {} });
+  whole.zephiumTrustedPreventDomBypass('Node.prototype.appendChild');
+  const replaced = new FakeFrame(vm.createContext({}));
+  new WholeNode().appendChild(replaced);
+  assert.equal(replaced.contentWindow, vm.runInContext('globalThis', whole));
+  assert.equal(replaced.contentDocument, whole.document);
+  const missing = page('{}');
+  missing.zephiumTrustedPreventDomBypass('No.such.method', 'fetch');
 }
 
 // Timer boosters: the needle, the exact delay or `*`, and the 50x bound.
