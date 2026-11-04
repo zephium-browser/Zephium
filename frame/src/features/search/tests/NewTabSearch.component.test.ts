@@ -203,13 +203,20 @@ test("an Enter that commits a composition does not run the row", async () => {
   );
 });
 
-test("selection moves without wrapping and returns to the typed action", async () => {
+test("upward selection wraps through the suggestions and the typed action", async () => {
   const screen = await mount({ tabId: "tab" });
   await screen.getByRole("combobox").fill("rust");
   const context = await reply("rust", [search("rust"), tab("Rust docs"), tab("Rust book", "two")]);
 
   await userEvent.keyboard("{ArrowUp}");
-  // Already at the top: nothing below may be selected by pressing up.
+  await expect
+    .element(screen.getByRole("option", { name: /Rust book/u }))
+    .toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{ArrowUp}");
+  await expect
+    .element(screen.getByRole("option", { name: /Rust docs/u }))
+    .toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{ArrowUp}");
   await expect
     .element(screen.getByRole("option", { name: /^rust/u }))
     .toHaveAttribute("aria-selected", "true");

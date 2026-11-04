@@ -288,14 +288,9 @@ export function createSearchSurface(options: {
   async function move(offset: number) {
     if (!rows.length) return;
     const at = rows.findIndex((row) => row.id === selectedId);
-    const next = at + offset;
-    // No wrap. Past the top the selection returns to the typed action; past
-    // the bottom it stays put, so holding a key never cycles the list.
-    if (next < 0) {
-      moved = false;
-      selected = null;
-      return;
-    }
+    let next = at + offset;
+    // Up from the first row reaches the last; Down still stops at the end.
+    if (next < 0) next = rows.length - 1;
     if (next >= rows.length) return;
     moved = true;
     selected = rows[next]!.id;
