@@ -146,8 +146,19 @@ impl ViewSiteScope {
         if self.explicitly_paused_at(source) {
             return None;
         }
-        let request =
-            NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)?;
+        // A frame is judged against the top page, which need not be the
+        // document that embeds it: that is an approximation, never exact.
+        let request = if frame {
+            NetworkRequest::top_level_approximation(
+                url,
+                source,
+                "GET",
+                kind,
+                NetworkRequestSourceKind::Document,
+            )?
+        } else {
+            NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)?
+        };
         let refuses = |policy: &Option<Policy>| {
             policy
                 .as_ref()
@@ -799,7 +810,13 @@ fn decode_identity(text: &str) -> Option<DocumentIdentity> {
 mod tests {
     use super::*;
 
-    struct Refuses(Mutex<Vec<(String, Option<String>, NetworkResourceType)>>);
+    type Judged = (
+        String,
+        Option<String>,
+        NetworkResourceType,
+        zephium_core::blocker::NetworkAttribution,
+    );
+    struct Refuses(Mutex<Vec<Judged>>);
 
     impl NetworkRequestPolicy for Refuses {
         fn decide(&self, request: &NetworkRequest<'_>) -> NetworkDecision {
@@ -807,6 +824,7 @@ mod tests {
                 request.url().to_owned(),
                 request.source_url().map(str::to_owned),
                 request.resource_type(),
+                request.attribution(),
             ));
             if request.url().contains("scam") {
                 NetworkDecision::Block
@@ -850,11 +868,13 @@ mod tests {
                     "https://scam.example/".to_owned(),
                     Some("https://scam.example/".to_owned()),
                     NetworkResourceType::Document,
+                    zephium_core::blocker::NetworkAttribution::Exact,
                 ),
                 (
                     "https://scam.example/ad".to_owned(),
                     Some("https://news.example/".to_owned()),
                     NetworkResourceType::Subdocument,
+                    zephium_core::blocker::NetworkAttribution::TopLevelApproximation,
                 ),
             ]
         );
