@@ -1,9 +1,16 @@
-import type { RuntimeSecurityAdvisory, UpdateStatus } from "$shared/ipc/bindings";
+import type {
+  RuntimeRestartReason,
+  RuntimeSecurityAdvisory,
+  UpdateStatus,
+} from "$shared/ipc/bindings";
 import { compareVersions, systemUpdateTarget, type SystemUpdateTarget } from "$domain/updates";
 
-/** The update itself, waiting on a relaunch; never dismissed. */
+/** The update itself, or a restart the runtime waits on; never dismissed. */
 export type UpdatePill =
-  { kind: "ready"; version: string } | { kind: "manual"; version: string } | { kind: "installing" };
+  | { kind: "ready"; version: string }
+  | { kind: "manual"; version: string }
+  | { kind: "installing" }
+  | { kind: "restart"; reason: RuntimeRestartReason; pending: boolean };
 /** A notice to read once. */
 export type UpdateCard =
   | { kind: "session" }
@@ -24,6 +31,9 @@ export type NoticeFacts = {
   sessionSetAside: boolean;
   /** Earlier runtime data waits for a reboot, and was not yet dismissed this launch. */
   cleanupDismissed: boolean;
+  /** Why the runtime waits on a restart; null while it does not. */
+  restart: RuntimeRestartReason | null;
+  restarting: boolean;
 };
 
 export type Notices = { pill: UpdatePill | null; card: UpdateCard | null };
@@ -52,9 +62,15 @@ export function selectNotices(facts: NoticeFacts): Notices {
       ? { kind: "cleanup" }
       : null;
   const first = session ?? cleanup;
+  // A restart the runtime waits on is due in every build, even one that
+  // cannot update Zephium itself.
+  const restart: UpdatePill | null = facts.restart
+    ? { kind: "restart", reason: facts.restart, pending: facts.restarting }
+    : null;
   // A build that cannot update (development, unsupported) shows none of the rest.
-  if (facts.status.state === "unavailable") return { pill: null, card: first };
-  const pill = pillFor(facts.status, facts.relaunching);
+  if (facts.status.state === "unavailable") return { pill: restart, card: first };
+  // A waiting update's relaunch restarts the runtime too, so it comes first.
+  const pill = pillFor(facts.status, facts.relaunching) ?? restart;
   if (first) return { pill, card: first };
   const { version, seen, securityDismissed } = facts;
   if (version === null) return { pill, card: null };

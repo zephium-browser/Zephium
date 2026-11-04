@@ -2918,6 +2918,12 @@ export type ResourceSummary = {
 	work: string | null,
 };
 
+export type RuntimeRestartReason =
+/**  A newer browser runtime is installed; only a restart adopts it. */
+"runtime_update" |
+/**  A profile's browser engine can be trusted again only after a restart. */
+"profile";
+
 /**  Sanitized advisory delivered only to privileged main chrome. */
 export type RuntimeSecurityAdvisory = {
 	kind: RuntimeSecurityAdvisoryKind,
@@ -2943,6 +2949,8 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
  */
 export type RuntimeStatus = {
 	restart_required: boolean,
+	/**  Why a restart is required; none while it is not. */
+	restart_reason: RuntimeRestartReason | null,
 	/**
 	 *  The saved session could not be restored this launch: its bytes were
 	 *  kept in a file and the browser started with fresh tabs.

@@ -10,11 +10,35 @@ const facts = (overrides: Partial<NoticeFacts> = {}): NoticeFacts => ({
   advisories: [],
   sessionSetAside: false,
   cleanupDismissed: false,
+  restart: null,
+  restarting: false,
   ...overrides,
 });
 const behind = [{ kind: "update_recommended", update_target: "operating_system" }] as const;
 
 describe("update notices", () => {
+  it("asks for the restart the runtime waits on, in every build, and never as a card", () => {
+    const restart = { kind: "restart", reason: "runtime_update", pending: false };
+    expect(selectNotices(facts({ restart: "runtime_update" }))).toEqual({
+      pill: restart,
+      card: null,
+    });
+    expect(
+      selectNotices(facts({ restart: "profile", status: { state: "unavailable" } })).pill,
+    ).toEqual({ ...restart, reason: "profile" });
+    expect(selectNotices(facts({ restart: "runtime_update", restarting: true })).pill).toEqual({
+      ...restart,
+      pending: true,
+    });
+  });
+
+  it("lets a waiting update's relaunch stand for the restart too", () => {
+    expect(
+      selectNotices(facts({ restart: "runtime_update", status: { state: "ready", version: "1.0.2" } }))
+        .pill,
+    ).toEqual({ kind: "ready", version: "1.0.2" });
+  });
+
   it("is quiet when there is nothing to say", () => {
     expect(selectNotices(facts())).toEqual({ pill: null, card: null });
   });
