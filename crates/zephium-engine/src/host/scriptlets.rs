@@ -140,8 +140,13 @@ impl Scriptlets {
         };
         // A package left with other contents, by a crash or a hand, is
         // written again rather than trusted for its name.
-        if dir.is_dir() && !PageScript::holds(&dir, program) {
-            let _ = std::fs::remove_dir_all(&dir);
+        if dir.is_dir()
+            && !PageScript::holds(&dir, program)
+            && std::fs::remove_dir_all(&dir).is_err()
+        {
+            eprintln!("content blocker: cannot replace a damaged scriptlet package");
+            self.packages.remove(&profile);
+            return None;
         }
         if !dir.is_dir() {
             use std::os::unix::fs::DirBuilderExt;
