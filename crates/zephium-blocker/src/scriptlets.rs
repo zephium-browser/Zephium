@@ -280,6 +280,11 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     let mut keys = BTreeSet::new();
     let (mut trusted, mut untrusted) = (Vec::new(), Vec::new());
     for rule in rules {
+        // A stored policy is admitted again, so it cannot run what compiling
+        // it would have left out.
+        if !matches!(classify(&rule.line), Kind::Rule { .. }) {
+            return Err(crate::CosmeticError::InvalidPolicy);
+        }
         let Some((domains, _)) = rule
             .line
             .split_once("##+js(")
@@ -561,5 +566,21 @@ mod tests {
         assert!(!mobile.contains("\"a.b\"") && mobile.contains("\"c.d\""));
         assert_eq!(calls_for(&program, "music.youtube.com"), Some(""));
         assert_eq!(calls_for(&program, "example.com"), None);
+    }
+
+    #[test]
+    fn a_stored_rule_admission_would_refuse_is_invalid() {
+        for line in [
+            "##+js(set, a, 1)",
+            "a.b.*##+js(set, a, 1)",
+            "a.com##.ad",
+            &format!("a.com##+js(set, a, {})", "x".repeat(9 * 1024)),
+        ] {
+            assert_eq!(
+                build(&[rule(line, false)]).err(),
+                Some(crate::CosmeticError::InvalidPolicy),
+                "{line}"
+            );
+        }
     }
 }
