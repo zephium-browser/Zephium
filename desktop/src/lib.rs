@@ -117,6 +117,7 @@ mod private_window;
 mod privileged_runtime_windows;
 mod profiles;
 mod recently_closed;
+mod relaunch;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod renderer_recovery;
 mod resource_close;
@@ -1867,6 +1868,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             updates::update_status,
             updates::update_check,
             updates::update_relaunch,
+            relaunch::app_relaunch,
             updates::update_highlights,
             updates::open_software_update,
             browser_open_url,
@@ -6320,6 +6322,9 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     #[cfg(target_os = "macos")]
     if matches!(&event, tauri::RunEvent::Exit) {
         updates::finish_on_exit(app);
+    }
+    if matches!(&event, tauri::RunEvent::Exit) {
+        relaunch::finish_on_exit(app);
     }
     #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Opened { urls } = &event {
