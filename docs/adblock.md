@@ -346,6 +346,9 @@ the wildcard block rules a recorded page corpus never matched, and the WebKit
 compiler leaves them out. The compile report counts them as pruned, not as
 unsupported.
 
+- A rule whose only `.*` comes from a trailing `^`, `x([^A-Za-z0-9_.%-].*)?$`,
+  is emitted as two rules without one, `x$` and `x[^A-Za-z0-9_.%-]`, which match
+  the same URLs, so it gets no automaton of its own and is never pruned.
 - Only block rules with `.*` are pruned; exceptions never are. Each entry is the
   SHA-256 of one rule exactly as emitted for WebKit, one per line, sorted, with
   no rule text. A new upstream rule, or an edit that changes the emitted rule,
