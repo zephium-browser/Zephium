@@ -1,9 +1,12 @@
 # Hosts the page corpus may load: reviewed, well-known sites only, matched
 # exactly (a listed host admits none of its subdomains). Any other host,
 # including every host a filter rule names, is withheld by
-# `cargo xtask blocker-prune admit` and printed for review instead of loaded.
-# Never add piracy or streaming, link shorteners, warez or free-download,
-# adult, gambling or scam sites. See docs/adblock.md.
+# `cargo xtask blocker-prune admit` and printed for review instead of loaded,
+# and the recorder cancels any navigation or redirect to one.
+# Never add: piracy or unlicensed streaming; cracks, warez or free downloads;
+# link shorteners; adult sites; gambling and betting, including odds sites;
+# scams. Licensed services such as Netflix, Spotify, Twitch, Vimeo,
+# Crunchyroll and YouTube are fine. See docs/adblock.md.
 3voor12.vpro.nl
 47news.jp
 abcmouse.com
@@ -515,6 +518,7 @@ www.bsky.app
 www.buzzfeed.com
 www.canva.com
 www.cbsnews.com
+www.cbssports.com
 www.cdc.gov
 www.chatgpt.com
 www.checkpoint.com
@@ -670,7 +674,6 @@ www.nih.gov
 www.nist.gov
 www.nvidia.com
 www.nytimes.com
-www.oddschecker.com
 www.office.com
 www.office365.com
 www.ok.ru
