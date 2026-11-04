@@ -37,6 +37,15 @@ pub struct CosmeticReport {
     /// Scriptlet rules left out: generic, overlong, or a hostname form the
     /// program cannot key.
     pub unsupported_scriptlet_rules: usize,
+    /// Admitted rules carrying page code from uBO's lists for YouTube.
+    pub page_code_rules: usize,
+    /// The bytes of page code those rules carry.
+    pub page_code_bytes: usize,
+    /// Page-code rules dropped: an untrusted list, a site outside YouTube's,
+    /// or over a size limit.
+    pub refused_page_code_rules: usize,
+    /// Admitted page-code rules this platform does not run.
+    pub withheld_page_code_rules: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -79,7 +88,7 @@ struct Data {
     report: CosmeticReport,
 }
 
-const DATA_VERSION: u32 = 2;
+const DATA_VERSION: u32 = 3;
 
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
@@ -129,6 +138,15 @@ impl CosmeticPolicy {
     pub fn compile_with_trust<'a>(
         sources: impl IntoIterator<Item = (&'a str, bool)>,
     ) -> Result<Arc<Self>, CosmeticError> {
+        Self::compile_for(sources, true)
+    }
+
+    /// As [`Self::compile_with_trust`], running admitted page-code rules only
+    /// when `page_code_runs` is set; otherwise they are withheld and counted.
+    pub fn compile_for<'a>(
+        sources: impl IntoIterator<Item = (&'a str, bool)>,
+        page_code_runs: bool,
+    ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
             version: DATA_VERSION,
             rules: Vec::new(),
@@ -139,6 +157,7 @@ impl CosmeticPolicy {
         let mut bytes = 0usize;
         let mut lines = 0usize;
         let mut predicates = 0usize;
+        let mut page_code = crate::scriptlets::PageCodeBudget::default();
         for (source_index, (source, trusted)) in sources.into_iter().enumerate() {
             if source_index >= 32 {
                 return Err(CosmeticError::ResourceLimit);
@@ -157,13 +176,36 @@ impl CosmeticPolicy {
                 if line.starts_with('!') || line.starts_with('[') || line.is_empty() {
                     continue;
                 }
-                match crate::scriptlets::classify(line) {
+                match crate::scriptlets::classify(line, trusted) {
                     crate::scriptlets::Kind::None => {}
                     crate::scriptlets::Kind::Unsupported => {
                         data.report.unsupported_scriptlet_rules += 1;
                         continue;
                     }
-                    crate::scriptlets::Kind::Rule { unknown } => {
+                    crate::scriptlets::Kind::RefusedPageCode => {
+                        data.report.refused_page_code_rules += 1;
+                        continue;
+                    }
+                    crate::scriptlets::Kind::Rule {
+                        page_code: bytes, ..
+                    } if bytes != 0 && !page_code.admit(line, bytes) => {
+                        data.report.refused_page_code_rules += 1;
+                        continue;
+                    }
+                    crate::scriptlets::Kind::Rule {
+                        page_code: bytes, ..
+                    } if bytes != 0 && !page_code_runs => {
+                        data.report.withheld_page_code_rules += 1;
+                        continue;
+                    }
+                    crate::scriptlets::Kind::Rule {
+                        unknown,
+                        page_code: bytes,
+                    } => {
+                        if bytes != 0 {
+                            data.report.page_code_rules += 1;
+                            data.report.page_code_bytes += bytes;
+                        }
                         // A scriptlet the library lacks runs nowhere, so it
                         // is counted and never reaches the program.
                         if !unknown {
@@ -269,6 +311,7 @@ impl CosmeticPolicy {
         if data.version != DATA_VERSION
             || data.scriptlets.len() > data.report.scriptlet_rules
             || data.report.unknown_scriptlet_rules > data.report.scriptlet_rules
+            || data.report.page_code_rules > data.report.scriptlet_rules
             || data.scriptlets.windows(2).any(|pair| pair[0] >= pair[1])
             || data.rules.len() > MAX_RULES
             || data.controls.len() > MAX_CONTROLS
@@ -1100,5 +1143,22 @@ mod tests {
             CosmeticPolicy::compile([controls(MAX_CONTROLS + 1).as_str()]).err(),
             Some(CosmeticError::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn a_platform_without_page_code_withholds_and_counts_it() {
+        let list = "www.youtube.com##+js(rpnt, script, a, b)\nwww.youtube.com##+js(set, a.b, true)";
+        let running = CosmeticPolicy::compile_for([(list, true)], true).unwrap();
+        assert_eq!(running.report().page_code_rules, 1);
+        assert!(running
+            .scriptlet_program()
+            .unwrap()
+            .contains("zephiumReplaceNodeText(\"script\""));
+        let withheld = CosmeticPolicy::compile_for([(list, true)], false).unwrap();
+        assert_eq!(withheld.report().page_code_rules, 0);
+        assert_eq!(withheld.report().withheld_page_code_rules, 1);
+        let program = withheld.scriptlet_program().unwrap();
+        assert!(!program.contains("zephiumReplaceNodeText(\"script\""));
+        assert!(program.contains("zephiumSetConstant(\"a.b\""));
     }
 }

@@ -35,7 +35,7 @@ use crate::{
 };
 
 const CACHE_MAGIC: &[u8; 8] = b"ZPHBLK01";
-const CACHE_FORMAT_VERSION: u32 = 3;
+const CACHE_FORMAT_VERSION: u32 = 4;
 const CACHE_KEY_DOMAIN: &[u8] = b"zephium-compiled-blocker-cache-key";
 #[cfg(feature = "webkit")]
 const WEBKIT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
@@ -47,8 +47,8 @@ const MAX_CACHE_DIRECTORY_ENTRIES: usize = 4;
 const MAX_RUNTIME_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBKIT_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COSMETIC_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-const COVERAGE_FIELD_COUNT: usize = 9;
-const RECORD_HEADER_BYTES: usize = 280;
+const COVERAGE_FIELD_COUNT: usize = 11;
+const RECORD_HEADER_BYTES: usize = 296;
 const RECORD_CHECKSUM_BYTES: usize = 32;
 const MAX_RECORD_BYTES: usize = RECORD_HEADER_BYTES
     + MAX_RUNTIME_PAYLOAD_BYTES
@@ -826,6 +826,8 @@ fn coverage_values(coverage: ContentRuleCoverage) -> [u64; COVERAGE_FIELD_COUNT]
         coverage.platform_source_kind_approximated_rules,
         coverage.platform_attribution_approximated_rules,
         coverage.blocking_rule_entries,
+        coverage.page_code_rules,
+        coverage.page_code_bytes,
     ]
 }
 
@@ -840,6 +842,8 @@ fn coverage_from_values(values: [u64; COVERAGE_FIELD_COUNT]) -> Option<ContentRu
         platform_source_kind_approximated_rules: values[6],
         platform_attribution_approximated_rules: values[7],
         blocking_rule_entries: values[8],
+        page_code_rules: values[9],
+        page_code_bytes: values[10],
     };
     (coverage.is_consistent() && coverage.has_blocking_entries()).then_some(coverage)
 }
@@ -1908,6 +1912,8 @@ mod tests {
             platform_source_kind_approximated_rules: 0,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: 1,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         }
     }
 
@@ -2022,6 +2028,8 @@ mod tests {
                 as u64,
             platform_attribution_approximated_rules: 0,
             blocking_rule_entries: report.native_blocking_rule_entries() as u64,
+            page_code_rules: 0,
+            page_code_bytes: 0,
         };
         let payload = compiled.serialize_runtime_engine().unwrap();
         (

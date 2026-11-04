@@ -1039,6 +1039,8 @@ export type BlockerRuleCoverage = {
 	platform_source_kind_approximated_rules: number,
 	platform_attribution_approximated_rules: number,
 	blocking_rule_entries: number,
+	page_code_rules: number,
+	page_code_bytes: number,
 };
 
 /**

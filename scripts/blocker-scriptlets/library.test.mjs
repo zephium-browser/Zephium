@@ -245,4 +245,233 @@ const playerText = () => JSON.stringify({
   assert.deepEqual(slower.timers, [['timeout', 500]]);
 }
 
+
+// The node-text scriptlets, on a minimal document: inserted nodes are
+// delivered to the observer the way a parser inserts a script and then its text.
+{
+  const dom = () => {
+    const observers = [];
+    const listeners = {};
+    class FakeNode {
+      constructor(nodeType, nodeName, value = null) {
+        this.nodeType = nodeType;
+        this.nodeName = nodeName;
+        this.nodeValue = value;
+        this.childNodes = [];
+        this.parentNode = null;
+      }
+      get firstChild() { return this.childNodes[0] ?? null; }
+      get textContent() {
+        return this.nodeType === 3 ? this.nodeValue : this.childNodes.map((child) => child.textContent).join('');
+      }
+      set textContent(value) {
+        this.childNodes = [];
+        const text = new FakeNode(3, '#text', value);
+        text.parentNode = this;
+        this.childNodes.push(text);
+        for (const observer of observers) observer.pending.push({ addedNodes: [text] });
+      }
+      append(child) {
+        child.parentNode = this;
+        this.childNodes.push(child);
+        for (const observer of observers) observer.pending.push({ addedNodes: [child] });
+        return child;
+      }
+    }
+    const root = new FakeNode(1, 'HTML');
+    const document = {
+      readyState: 'loading',
+      documentElement: root,
+      addEventListener: (type, handler) => { listeners[type] = handler; },
+      createTreeWalker: (node) => {
+        const all = [];
+        const walk = (n) => { for (const child of n.childNodes) { all.push(child); walk(child); } };
+        walk(node);
+        let i = -1;
+        return { get currentNode() { return all[i]; }, nextNode: () => (++i < all.length ? all[i] : null) };
+      },
+    };
+    class MutationObserver {
+      constructor(callback) { this.callback = callback; this.pending = []; this.on = false; }
+      observe() { this.on = true; observers.push(this); }
+      disconnect() { this.on = false; observers.splice(observers.indexOf(this), 1); }
+    }
+    // Delivers queued records, as the checkpoint before a parser-inserted script runs.
+    const flush = () => {
+      for (const observer of [...observers]) {
+        const records = observer.pending.splice(0);
+        if (records.length > 0) observer.callback(records);
+      }
+    };
+    const context = {
+      document, MutationObserver, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 }, NodeFilter: { SHOW_ELEMENT: 1, SHOW_TEXT: 4 },
+      setTimeout: (handler) => handler(), console,
+    };
+    vm.createContext(context);
+    vm.runInContext(['pattern.js', 'node-text.js', 'replace-node-text.js', 'remove-node-text.js'].map(source).join('\n'), context);
+    const script = (text) => {
+      const element = root.append(new FakeNode(1, 'SCRIPT'));
+      element.append(new FakeNode(3, '#text', text));
+      flush();
+      return element;
+    };
+    return { context, script, root, FakeNode, flush, loaded: () => listeners.DOMContentLoaded?.(), observers };
+  };
+
+  // Captured groups and the includes/excludes tokens.
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', '/(function startPlayer\\(\\))/', 'prepare();$1', 'condition', '/startPlayer|bootstrap/', 'excludes', 'prepare();');
+    assert.equal(page.script('function startPlayer() {}').textContent, 'prepare();function startPlayer() {}');
+    assert.equal(page.script('function other() {}').textContent, 'function other() {}');
+    assert.equal(page.script('prepare();function startPlayer() {}').textContent, 'prepare();function startPlayer() {}');
+  }
+  // sedCount stops after that many replacements.
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', 'ad', 'x', 'sedCount', '1');
+    assert.equal(page.script('ad=1').textContent, 'x=1');
+    assert.equal(page.observers.length, 0);
+    assert.equal(page.script('ad=2').textContent, 'ad=2');
+  }
+  // It quits at DOMContentLoaded unless told to stay.
+  {
+    const leaving = dom();
+    leaving.context.zephiumReplaceNodeText('script', 'ad', 'x');
+    leaving.loaded();
+    assert.equal(leaving.script('ad=1').textContent, 'ad=1');
+    const staying = dom();
+    staying.context.zephiumReplaceNodeText('script', 'ad', 'x', 'stay', '1');
+    staying.loaded();
+    assert.equal(staying.script('ad=1').textContent, 'x=1');
+  }
+  // Text nodes by their own name; other node types are left alone.
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('#text', '/^Advertisement$/', '');
+    const label = page.root.append(new page.FakeNode(3, '#text', 'Advertisement'));
+    page.flush();
+    assert.equal(label.nodeValue, '');
+    const note = page.root.append(new page.FakeNode(8, '#comment', 'Advertisement'));
+    page.flush();
+    assert.equal(note.nodeValue, 'Advertisement');
+  }
+  // Script text goes through the scriptlet's own Trusted Types policy.
+  {
+    const page = dom();
+    const made = [];
+    page.context.window = { trustedTypes: { createPolicy: (name, rules) => { made.push(name); return { createScript: (text) => `trusted:${rules.createScript(text)}` }; } } };
+    page.context.zephiumReplaceNodeText('script', 'ad', 'x');
+    assert.equal(page.script('ad=1').textContent, 'trusted:x=1');
+    assert.deepEqual(made, ['zephium-node-text']);
+  }
+  // remove-node-text empties the whole node.
+  {
+    const page = dom();
+    page.context.zephiumRemoveNodeText('script', 'window,"fetch"');
+    assert.equal(page.script('a(); Object.defineProperty(window,"fetch",{})').textContent, '');
+    assert.equal(page.script('b();').textContent, 'b();');
+  }
+  // rpnt's replacement is a replace pattern; a refused write skips the node.
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', '/(start\\(\\))/', 'cost = 5$; total = "$&"; $1');
+    assert.equal(page.script('start()').textContent, 'cost = 5$; total = "start()"; start()');
+  }
+  {
+    const page = dom();
+    page.context.zephiumReplaceNodeText('script', 'ad', 'x');
+    const refusing = page.root.append(new page.FakeNode(1, 'SCRIPT'));
+    Object.defineProperty(refusing, 'textContent', { get: () => 'ad=1', set: () => { throw new TypeError('refused'); } });
+    refusing.append(new page.FakeNode(3, '#text', 'ad=1'));
+    assert.doesNotThrow(() => page.flush());
+    assert.equal(page.script('ad=2').textContent, 'x=2');
+  }
+}
+
+// The JSONPath editor: the older form, v2 queries, assignments and trust.
+{
+  const context = { Date };
+  vm.createContext(context);
+  vm.runInContext(['json-path.js'].map(source).join('\n'), context);
+  const edit = (query, value, trusted = true) => [context.zephiumJsonPath(query, trusted).edit(value), value];
+  const request = (agent) => ({
+    signedRequest: {},
+    context: { client: { clientName: 'DESKTOP', agent } },
+    playback: { options: { origin: 'https://example.test/view' } },
+  });
+  // Older form: filters test the node they follow.
+  assert.deepEqual(
+    edit('[?.signedRequest][?.context.client.agent*="tag"].context.client[?.clientName=="DESKTOP"]+={"screen":"FULL"}', request('a; tag'))[1].context.client,
+    { clientName: 'DESKTOP', agent: 'a; tag', screen: 'FULL' },
+  );
+  assert.equal(edit('[?.signedRequest][?.context.client.agent*="tag"]+={"x":1}', request('plain'))[0], false);
+  assert.match(edit('[?.signedRequest][?.context.client.agent=/tag|mark/].playback.options.origin="${now}"', request('mark'))[1].playback.options.origin, /^\d{13}$/);
+  assert.equal(edit('[?.signedRequest][?.context.client.agent=/tag|mark/].playback.options.origin="${now}"', request('none'))[0], false);
+  assert.equal(
+    edit('[?.signedRequest].playback.options.origin=repl({"regex":"(?:#again)?$","replacement":"#again"})', request('x'))[1].playback.options.origin,
+    'https://example.test/view#again',
+  );
+  assert.equal(
+    edit('.context.client.agent=repl({"pattern":"; tag","replacement":""})', request('a; tag'))[1].context.client.agent,
+    'a',
+  );
+  assert.equal(edit('[?!.signedRequest].context', request('x'))[0], false);
+  // Untrusted queries only remove; an assignment does nothing.
+  assert.deepEqual(edit('[?.signedRequest].context', request('x'), false)[1].context, undefined);
+  assert.equal(edit('[?.signedRequest].context.client.agent="b"', request('x'), false)[0], false);
+  // v2 filters select children.
+  assert.deepEqual(edit('v2:$.shelf.items[?@.price>10]', { shelf: { items: [{ price: 5 }, { price: 20 }] } }, false)[1], { shelf: { items: [{ price: 5 }] } });
+  assert.deepEqual(edit('$..items[?@.name^="E"].price=0', { shelf: { items: [{ name: 'Eve', price: 5 }, { name: 'Bo', price: 9 }] } })[1].shelf.items, [{ name: 'Eve', price: 0 }, { name: 'Bo', price: 9 }]);
+  assert.deepEqual(edit('..section.contents.*[?.promoted]', { a: { section: { contents: [{ promoted: 1 }, { video: 1 }] } } }, false)[1], { a: { section: { contents: [{ video: 1 }] } } });
+  assert.deepEqual(edit('$.list[-1]', { list: [1, 2, 3] }, false)[1], { list: [1, 2] });
+  // Malformed queries edit nothing.
+  for (const query of ['bad[[', '[?.a', '.a=repl({"regex":"("})', '.a+=[1]', '']) {
+    assert.equal(edit(query, { a: 1 })[0], false, query);
+  }
+}
+
+// Page code is bound to the real host: frame and top-level page, as text.
+{
+  const run = (hostname, ancestors = []) => {
+    const context = { location: { hostname, ancestorOrigins: ancestors }, URL };
+    vm.createContext(context);
+    vm.runInContext(source('page-code-site.js'), context);
+    return context.zephiumPageCodeSite(['youtube.com']);
+  };
+  assert.equal(run('www.youtube.com'), true);
+  assert.equal(run('youtube.com.'), true);
+  // A host whose table key collides with YouTube's still fails the text check.
+  assert.equal(run('collides.example'), false);
+  assert.equal(run('evilyoutube.com'), false);
+  assert.equal(run('www.youtube.com', ['https://elsewhere.example']), false);
+  assert.equal(run('www.youtube.com', ['https://www.youtube.com']), true);
+  assert.equal(run('www.youtube.com', ['not a url']), false);
+}
+
+// Edits never loop on cyclic arguments, and JSON.stringify gets a copy.
+{
+  const context = { Date, JSON, window: {} };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(['json-path.js', 'inbound-object.js', 'trusted-edit-inbound-object.js'].map(source).join('\n'), context);
+  let seed = 7;
+  const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let round = 0; round < 200; round++) {
+    const nodes = Array.from({ length: 1 + Math.floor(random() * 8) }, (_, i) => ({ id: i, ad: random() < 0.5 }));
+    for (const node of nodes) {
+      node.next = nodes[Math.floor(random() * nodes.length)];
+      node.list = [nodes[Math.floor(random() * nodes.length)], node];
+    }
+    for (const query of ['..ad', '$..next.ad', '..[?.ad==true].id=1', '..list.*.ad']) {
+      assert.doesNotThrow(() => context.zephiumJsonPath(query, true).edit(nodes[0]), query);
+    }
+  }
+  vm.runInContext(`zephiumTrustedEditInboundObject('JSON.stringify', '0', '[?.signedRequest].context+={"screen":"FULL"}')`, context);
+  const request = { signedRequest: {}, context: { id: 1 } };
+  assert.equal(vm.runInContext('JSON.stringify', context)(request), '{"signedRequest":{},"context":{"id":1,"screen":"FULL"}}');
+  assert.deepEqual(request.context, { id: 1 });
+  assert.equal(vm.runInContext('JSON.stringify', context)({ other: 1 }), '{"other":1}');
+}
+
 console.log('scriptlet library: all checks passed');

@@ -1394,6 +1394,10 @@ pub(crate) fn adapt_rules(
             )
         }
     };
+    let page_code = rules
+        .cosmetic_policy()
+        .map(|policy| policy.report())
+        .unwrap_or_default();
     let coverage = ContentRuleCoverage {
         source_rules: u64::try_from(report.candidate_rules())
             .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
@@ -1416,6 +1420,10 @@ pub(crate) fn adapt_rules(
         )
         .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
         blocking_rule_entries: u64::try_from(report.native_blocking_rule_entries())
+            .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
+        page_code_rules: u64::try_from(page_code.page_code_rules)
+            .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
+        page_code_bytes: u64::try_from(page_code.page_code_bytes)
             .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
     };
     let result = match rules.target() {

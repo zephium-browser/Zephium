@@ -159,6 +159,16 @@ pub enum CompileTarget {
     WebKit,
 }
 
+impl CompileTarget {
+    /// Whether YouTube's page-code rules run on this target. Neither engine
+    /// is served the ad path they shorten, so both withhold them for now.
+    pub const fn runs_page_code(self) -> bool {
+        match self {
+            Self::Runtime | Self::WebKit => false,
+        }
+    }
+}
+
 impl SourceFormat {
     const fn adblock(self) -> FilterFormat {
         match self {
@@ -350,10 +360,11 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
+        let cosmetic_policy = crate::CosmeticPolicy::compile_for(
             prepared
                 .iter()
                 .map(|source| (source.cosmetics.as_str(), source.trusted)),
+            target.runs_page_code(),
         )
         .map_err(CompileError::Cosmetics)?;
         // A policy with only scriptlets still has a program to run.

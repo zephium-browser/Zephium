@@ -191,6 +191,10 @@ fn publish_store_result(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Copied per projection comparison; keeping the status inline avoids an allocation on the hot path"
+)]
 enum FocusedBlockerStatus {
     Unavailable {
         catalog: BlockerCatalogSnapshot,
@@ -3649,6 +3653,8 @@ fn blocker_coverage_view(coverage: ContentRuleCoverage) -> Option<BlockerRuleCov
         )
         .ok()?,
         blocking_rule_entries: u32::try_from(coverage.blocking_rule_entries).ok()?,
+        page_code_rules: u32::try_from(coverage.page_code_rules).ok()?,
+        page_code_bytes: u32::try_from(coverage.page_code_bytes).ok()?,
     })
 }
 
