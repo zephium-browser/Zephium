@@ -250,13 +250,48 @@ fn domain_keys(domains: &str) -> Option<Vec<String>> {
 
 /// Two 32-bit FNV-1a hashes of a hostname key, combined into 53 bits so the
 /// page can compare them as one exact number.
-fn key_hash(key: &str) -> u64 {
+pub(crate) fn key_hash(key: &str) -> u64 {
     let fnv = |offset: u32| {
         key.bytes().fold(offset, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
         })
     };
     (u64::from(fnv(2_166_136_261)) << 21) | u64::from(fnv(0x8422_2325) >> 11)
+}
+
+/// Whether a page on `key` would reach another entry with calls once past
+/// `key`'s own: a parent domain, or an entity named by one of its labels.
+fn shadows_calls(key: &str, with_calls: &BTreeSet<&str>) -> bool {
+    let labels: Vec<&str> = key.split('.').collect();
+    if key.ends_with(".*") {
+        return with_calls
+            .iter()
+            .any(|other| other.ends_with(".*") && *other != key);
+    }
+    (1..labels.len()).any(|i| with_calls.contains(labels[i..].join(".").as_str()))
+        || entity_keys(&labels)
+            .iter()
+            .any(|entity| with_calls.contains(entity.as_str()))
+}
+
+/// Second-level labels taken as part of a public suffix, as in `co.uk`.
+const SUFFIX_SECOND_LABELS: &[&str] = &[
+    "ac", "biz", "co", "com", "edu", "go", "gob", "gouv", "gov", "info", "ltd", "mil", "ne", "net",
+    "nic", "nom", "or", "org", "plc", "sch",
+];
+
+/// The entity keys a host's page looks up, most specific first: as in
+/// adblock-rust, an entity is the label just before the public suffix,
+/// approximated here as the last label or a known second level under it,
+/// since the page has no public suffix list.
+fn entity_keys(labels: &[&str]) -> Vec<String> {
+    (0..labels.len().saturating_sub(1))
+        .filter(|&i| {
+            let rest = &labels[i + 1..];
+            rest.len() == 1 || (rest.len() == 2 && SUFFIX_SECOND_LABELS.contains(&rest[0]))
+        })
+        .map(|i| format!("{}.*", labels[i]))
+        .collect()
 }
 
 /// The same hash, in the page.
@@ -321,6 +356,8 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
     let mut table = Vec::new();
     let mut hosts = 0;
+    // Each key's call set, by its index in `calls`; None when it has none.
+    let mut found: Vec<(&String, Option<usize>)> = Vec::with_capacity(keys.len());
     for key in &keys {
         let host = match key.strip_suffix(".*") {
             Some(name) => format!("{name}.invalid"),
@@ -339,17 +376,36 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
             .map(str::trim)
             .filter(|block| !block.is_empty())
             .collect();
-        // A host whose calls are all excepted still gets an entry, an empty
-        // one, so the page stops there instead of taking its parent's.
-        hosts += usize::from(!blocks.is_empty());
         blocks.sort_unstable();
-        let invocations = blocks.join("\n");
-        let next = calls.len();
-        let index = *calls.entry(invocations).or_insert(next);
-        table.push((key_hash(key), index));
+        let index = (!blocks.is_empty()).then(|| {
+            let next = calls.len();
+            *calls.entry(blocks.join("\n")).or_insert(next)
+        });
+        found.push((key, index));
     }
-    if hosts == 0 {
+    let with_calls: BTreeSet<&str> = found
+        .iter()
+        .filter(|(_, index)| index.is_some())
+        .map(|(key, _)| key.as_str())
+        .collect();
+    if with_calls.is_empty() {
         return Ok(None);
+    }
+    for (key, index) in found {
+        let index = match index {
+            Some(index) => {
+                hosts += 1;
+                index
+            }
+            // A host whose calls are all excepted keeps an empty entry only
+            // where the page would otherwise go on to a parent's calls.
+            None if shadows_calls(key, &with_calls) => {
+                let next = calls.len();
+                *calls.entry(String::new()).or_insert(next)
+            }
+            None => continue,
+        };
+        table.push((key_hash(key), index));
     }
     let mut ordered: Vec<(&String, &usize)> = calls.iter().collect();
     ordered.sort_unstable_by_key(|(_, index)| **index);
@@ -366,8 +422,10 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
         .iter()
         .map(|(invocations, _)| format!("function () {{\n{invocations}\n}}"))
         .collect();
+    let second = serde_json::to_string(SUFFIX_SECOND_LABELS)
+        .map_err(|_| crate::CosmeticError::InvalidPolicy)?;
     let script = format!(
-        "(() => {{\n{PAGE_HASH}\nconst table = new Map([{}]);\nconst host = location.hostname.replace(/\\.$/, '');\nif (host === '') {{ return; }}\nconst labels = host.split('.');\nlet entry;\nfor (let i = 0; i < labels.length && entry === undefined; i++) {{ entry = table.get(hash(labels.slice(i).join('.'))); }}\nfor (let i = 0; i < labels.length - 1 && entry === undefined; i++) {{ entry = table.get(hash(labels[i] + '.*')); }}\nif (entry === undefined) {{ return; }}\n(function () {{\n{}\nconst runs = [{}];\nruns[entry]();\n}})();\n}})();\n",
+        "(() => {{\n{PAGE_HASH}\nconst table = new Map([{}]);\nconst host = location.hostname.replace(/\\.$/, '');\nif (host === '') {{ return; }}\nconst labels = host.split('.');\nlet entry;\nfor (let i = 0; i < labels.length && entry === undefined; i++) {{ entry = table.get(hash(labels.slice(i).join('.'))); }}\nconst second = new Set({second});\nconst suffix = (rest) => rest.length === 1 || (rest.length === 2 && second.has(rest[0]));\nfor (let i = 0; i < labels.length - 1 && entry === undefined; i++) {{ if (suffix(labels.slice(i + 1))) {{ entry = table.get(hash(labels[i] + '.*')); }} }}\nif (entry === undefined) {{ return; }}\n(function () {{\n{}\nconst runs = [{}];\nruns[entry]();\n}})();\n}})();\n",
         entries.join(","),
         library.join("\n"),
         runs.join(",\n"),
@@ -539,7 +597,7 @@ mod tests {
         let labels: Vec<&str> = host.split('.').collect();
         let entry = (0..labels.len())
             .map(|i| labels[i..].join("."))
-            .chain((0..labels.len().saturating_sub(1)).map(|i| format!("{}.*", labels[i])))
+            .chain(entity_keys(&labels))
             .find_map(|key| {
                 program
                     .table
@@ -582,5 +640,45 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn an_empty_entry_is_kept_only_where_it_shadows_calls() {
+        let program = build(&[
+            rule("youtube.com##+js(set, a.b, true)", false),
+            rule("example.com#@#+js()", false),
+            rule("m.youtube.com#@#+js()", false),
+        ])
+        .unwrap()
+        .unwrap();
+        let has_entry = |key: &str| program.table.iter().any(|(hash, _)| *hash == key_hash(key));
+        assert!(has_entry("youtube.com") && has_entry("m.youtube.com"));
+        assert!(!has_entry("example.com"));
+    }
+
+    #[test]
+    fn entities_are_the_label_before_the_public_suffix() {
+        let program = build(&[
+            rule("youtube.*##+js(set, a.b, true)", false),
+            rule("example.*##+js(set, c.d, true)", false),
+            rule("example.com#@#+js()", false),
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(calls_for(&program, "www.youtube.co.uk")
+            .unwrap()
+            .contains("\"a.b\""));
+        assert!(calls_for(&program, "youtube.de")
+            .unwrap()
+            .contains("\"a.b\""));
+        // youtube is not this host's entity: example is.
+        assert!(!calls_for(&program, "youtube.example.org")
+            .unwrap()
+            .contains("\"a.b\""));
+        // The excepted domain stops its subdomains before the entity's calls.
+        assert_eq!(calls_for(&program, "m.example.com"), Some(""));
+        assert!(calls_for(&program, "example.net")
+            .unwrap()
+            .contains("\"c.d\""));
     }
 }
