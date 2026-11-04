@@ -104,5 +104,9 @@ name = "extension-independent retained-controller initialization"
 paths = ["src/lib.rs", "src/native_controller_init.rs", "src/webview2/mod.rs"]
 
 [[patch_sets]]
+name = "content-rule refusal category and refused address"
+paths = ["src/lib.rs", "src/wkwebview/navigation.rs"]
+
+[[patch_sets]]
 name = "MSRV-compatible native class bundle identity"
 paths = ["src/wkwebview/class/wry_web_view.rs"]
