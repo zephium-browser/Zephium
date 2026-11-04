@@ -710,6 +710,18 @@ impl Items {
             if tab.content != TabContent::Web {
                 return false;
             }
+            // A refused first page is built on a blank one, which never
+            // replaces the explanation.
+            if url.as_str() == "about:blank"
+                && tab.failure.as_deref().is_some_and(|failure| {
+                    matches!(
+                        failure.reason,
+                        crate::ports::engine::NavigationFailureReason::Blocked(_)
+                    )
+                })
+            {
+                return false;
+            }
             tab.url = Some(url);
             tab.page_request = None;
             tab.failure = None;

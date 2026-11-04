@@ -38,6 +38,21 @@ pub(super) struct NavigationGuard {
     pub(super) allowed: std::collections::HashSet<String>,
 }
 
+/// Where a new view first goes: the address it was opened for or, when the
+/// lists refuse that, a blank page under the explanation, with the reason.
+/// The view is then never built on a navigation it must cancel.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(super) fn first_navigation<'a>(
+    preferences: SitePreferencesSlot,
+    navigation: NavigationSlot,
+    url: &'a str,
+) -> (&'a str, Option<NavigationBlockReason>) {
+    match ViewSiteScope::new(preferences, navigation, url).blocks_navigation(url, false) {
+        Some(reason) => ("about:blank", Some(reason)),
+        None => (url, None),
+    }
+}
+
 pub(super) struct ViewSiteScope {
     preferences: SitePreferencesSlot,
     navigation: NavigationSlot,
@@ -866,6 +881,37 @@ mod tests {
         assert_eq!(
             scope.blocks_navigation("https://scam.example/", false),
             None
+        );
+    }
+
+    #[test]
+    fn a_view_opened_at_a_refused_address_starts_blank_and_says_why() {
+        let preferences: SitePreferencesSlot = Rc::new(RefCell::new(
+            zephium_core::blocker::PreparedBlockerSites::new(1, std::iter::empty()),
+        ));
+        let navigation: NavigationSlot = Rc::default();
+        let first = |url| first_navigation(preferences.clone(), navigation.clone(), url);
+        assert_eq!(
+            first("https://scam.example/"),
+            ("https://scam.example/", None)
+        );
+        navigation.borrow_mut().badware = Some(Arc::new(Refuses(Mutex::default())));
+        assert_eq!(
+            first("https://scam.example/"),
+            ("about:blank", Some(NavigationBlockReason::Badware))
+        );
+        assert_eq!(
+            first("https://fine.example/"),
+            ("https://fine.example/", None)
+        );
+        // Opened anyway: the host loads as asked.
+        navigation
+            .borrow_mut()
+            .allowed
+            .insert("scam.example".to_owned());
+        assert_eq!(
+            first("https://scam.example/"),
+            ("https://scam.example/", None)
         );
     }
 

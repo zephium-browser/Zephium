@@ -156,6 +156,29 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
+        // A first address the lists refuse is explained, not loaded: the view
+        // is built, or a spare adopted, on a blank page, so no navigation is
+        // cancelled while native construction is under way.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let url = {
+            let profile = partition.profile();
+            let (first, refused) = super::content_styles::first_navigation(
+                self.blocker_sites.entry(profile).or_default().clone(),
+                self.blocker_navigation.entry(profile).or_default().clone(),
+                url,
+            );
+            if let Some(reason) = refused {
+                self.sink.emit_for(
+                    event_token.clone(),
+                    EngineEvent::NavigationBlocked {
+                        id,
+                        url: url.to_owned(),
+                        reason,
+                    },
+                );
+            }
+            first
+        };
         #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
         if let Some(mut spare) = self.spare.take_if(|s| s.partition == partition) {
             if let Err(error) = spare

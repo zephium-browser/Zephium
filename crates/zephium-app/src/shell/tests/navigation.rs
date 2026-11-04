@@ -713,6 +713,44 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
 }
 
 #[test]
+fn a_tab_opened_at_a_refused_address_shows_why_over_its_blank_page() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    use zephium_ipc::TabBlockReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://scam.example/win".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("create {id}"))));
+    // The engine names the refusal before it builds the view, then builds
+    // it on a blank page.
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+    }));
+    commit_url(&mut shell, id, "about:blank");
+    present_committed(&mut shell, id, "about:blank");
+    let shown = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    let failure = shown.failure.expect("the refusal is explained");
+    assert_eq!(failure.blocked, Some(TabBlockReason::Badware));
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.covers_page);
+    assert_eq!(shown.title, "scam.example");
+    assert_eq!(shown.url, None);
+    assert!(!shown.loading);
+}
+
+#[test]
 fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
     use zephium_core::ports::engine::NavigationBlockReason;
     use zephium_ipc::{TabBlockReason, TabFailureReason};

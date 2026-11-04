@@ -273,6 +273,10 @@ one the lists refuse:
   ad or tracking redirect. Go back returns to the page that was showing, or
   back in history; Continue anyway opens it and allows its host in that profile
   until the app quits. A refused frame is only left empty.
+- A tab opened straight at a refused address is judged before its view is
+  built: the view starts on a blank page under the blocked page, so no
+  navigation is cancelled during construction. The address bar shows the
+  refused address and the tab is titled with its host.
 - A site with protection paused is not judged. Site choices that have not
   loaded yet pause nothing.
 
