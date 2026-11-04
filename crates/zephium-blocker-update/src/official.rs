@@ -677,8 +677,7 @@ fn commit_candidate(next: &mut Record) {
     next.due = next_due(next);
 }
 
-/// A list checked past its rejected copy no longer holds the rejection; it
-/// is forgotten once no list does.
+/// A list checked past its rejected copy forgets that copy.
 fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
     for &index in &fetched.checked {
         let interval = fetched.sources[index].interval;
@@ -690,9 +689,6 @@ fn reschedule(next: &mut Record, fetched: &Fetched, now: u64) {
             checked: Some(now),
             ..Schedule::default()
         };
-    }
-    if next.schedule.iter().all(|schedule| !schedule.rejected) {
-        next.rejected = None;
     }
     for &(index, sha256, seen) in &fetched.stale {
         let schedule = &mut next.schedule[index];
@@ -785,18 +781,13 @@ where
             continue;
         }
         match fetch_one(store, fetch, cancelled, filter, old, cached.is_some()).await {
-            // The exact copy a rejected package held fails again, older or
-            // not: keeping the current one lets the other lists' updates
-            // through, and a revert to it is never restaged.
+            // The exact copy that was rejected fails again, older or not:
+            // keeping the current one lets the other lists' updates through,
+            // and a revert to it is never restaged.
             Ok(source)
                 if cached.is_some()
                     && old.is_some_and(|old| old.sha256 != source.sha256)
-                    && store.record.rejected.as_ref().is_some_and(|rejected| {
-                        rejected
-                            .sources
-                            .iter()
-                            .any(|s| s.id == source.id && s.sha256 == source.sha256)
-                    }) =>
+                    && store.record.schedule[index].rejected == Some(source.sha256) =>
             {
                 fetched
                     .sources
@@ -1576,8 +1567,7 @@ mod tests {
         let mut next = store.record.clone();
         commit_candidate(&mut next);
         store.persist(next).unwrap();
-        assert!(store.record.rejected.is_some());
-        assert!(store.record.schedule[0].rejected);
+        assert!(store.record.schedule[0].rejected.is_some());
 
         let mut fetch = serve_bad_easylist_and(&bad, Some(&newer));
         let fetched = runtime()
@@ -1621,7 +1611,7 @@ mod tests {
         assert_eq!(next.schedule[1].failure_streak, 0);
         // The other list keeps its own time instead of the withheld one's backoff.
         assert_eq!(next.due, started + 1_800);
-        assert!(next.rejected.is_some() && next.schedule[0].rejected);
+        assert!(next.schedule[0].rejected.is_some());
     }
 
     #[test]
@@ -1635,9 +1625,8 @@ mod tests {
             "||new.example.invalid^\n",
         );
         check_quick_fixes(&mut store, &changed);
-        assert!(store.record.rejected.is_some());
-        assert!(store.record.schedule[0].rejected);
-        assert!(!store.record.schedule[3].rejected);
+        assert!(store.record.schedule[0].rejected.is_some());
+        assert!(store.record.schedule[3].rejected.is_none());
     }
 
     #[test]
@@ -1685,7 +1674,7 @@ mod tests {
         };
         let mut next = store.record.clone();
         keep_current(&mut next, withheld, now());
-        assert!(next.rejected.is_some());
+        assert!(next.schedule[0].rejected.is_some());
         let clean = Fetched {
             sources: package.sources.clone(),
             checked: vec![0, 1, 2, 3],
@@ -1693,7 +1682,30 @@ mod tests {
             stale: Vec::new(),
         };
         keep_current(&mut next, clean, now());
-        assert!(next.rejected.is_none());
+        assert!(next.schedule[0].rejected.is_none());
+    }
+
+    #[test]
+    fn a_second_rejection_keeps_the_first_lists_rejected_copy() {
+        let (_dir, mut store, package) = fixture();
+        let mut bad = test_list(OfficialFilter::EasyList);
+        bad.extend_from_slice(b"||rejected.example.invalid^\n");
+        reject(&mut store, &package, 0, &bad);
+        let other = quick_fixes_dated(
+            "Wed, 30 Sep 2026 00:01:00 +0000",
+            "||also-rejected.example.invalid^\n",
+        );
+        reject(&mut store, &package, 3, &other);
+        assert!(store.record.schedule[0].rejected.is_some());
+        assert!(store.record.schedule[3].rejected.is_some());
+
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut fetch = serve_bad_easylist_and(&bad, None);
+        let fetched = runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(fetched.sources[0], package.sources[0]);
+        assert_eq!(fetched.failed, [(0, (FailureKind::Target, None))]);
     }
 
     #[test]

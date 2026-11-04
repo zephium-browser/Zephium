@@ -125,10 +125,10 @@ pub(crate) struct Schedule {
     /// When this list was last checked successfully.
     #[serde(default)]
     pub checked: Option<u64>,
-    /// The rejected package holds a copy of this list that the list has not
-    /// been checked past since.
+    /// A rejected copy of this list that the list has not been checked past
+    /// since.
     #[serde(default)]
-    pub rejected: bool,
+    pub rejected: Option<[u8; 32]>,
 }
 
 /// An older copy returned this many checks in a row is upstream's own revert,
@@ -149,7 +149,6 @@ pub(crate) struct Record {
     pub current: Option<Package>,
     pub previous: Option<Package>,
     pub candidate: Option<Package>,
-    pub rejected: Option<Package>,
     /// One per official list, in `OfficialFilter::ALL` order.
     pub schedule: Vec<Schedule>,
     /// Downloaded lists kept from an older schema, reused while their bytes
@@ -171,7 +170,6 @@ impl Record {
             current: None,
             previous: None,
             candidate: None,
-            rejected: None,
             schedule: vec![
                 Schedule {
                     due: now,
@@ -183,15 +181,12 @@ impl Record {
         }
     }
 
-    /// Remembers the candidate as rejected; each list it changed must be
-    /// checked past that copy before the rejection is forgotten.
+    /// Remembers the copy of each list the candidate changed as rejected,
+    /// until that list is checked past it.
     pub fn reject_candidate(&mut self) {
         let Some(rejected) = self.candidate.take() else {
             return;
         };
-        for schedule in &mut self.schedule {
-            schedule.rejected = false;
-        }
         for (index, source) in rejected.sources.iter().enumerate() {
             let kept = self
                 .current
@@ -199,14 +194,13 @@ impl Record {
                 .and_then(|current| current.sources.get(index))
                 .is_some_and(|current| current.sha256 == source.sha256);
             if !kept {
-                self.schedule[index].rejected = true;
+                self.schedule[index].rejected = Some(source.sha256);
             }
         }
-        self.rejected = Some(rejected);
     }
 
     /// The newest descriptor of `filter` this record holds.
-    /// A rejected package is never a list's prior copy: reusing it would stage
+    /// A rejected copy is never a list's prior copy: reusing it would stage
     /// the same rejected bytes again.
     pub fn prior(&self, filter: OfficialFilter) -> Option<&Source> {
         [&self.candidate, &self.current]
@@ -530,7 +524,6 @@ impl OfficialStore {
             self.record.current.as_ref(),
             self.record.previous.as_ref(),
             self.record.candidate.as_ref(),
-            self.record.rejected.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -617,7 +610,6 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
                 || s.stale
                     .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
                 || s.checked.is_some_and(|t| t > now.saturating_add(31 * DAY))
-                || (s.rejected && record.rejected.is_none())
         })
         || record.retained.len() > OfficialFilter::ALL.len()
         || record
@@ -633,7 +625,6 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
         record.current.as_ref(),
         record.previous.as_ref(),
         record.candidate.as_ref(),
-        record.rejected.as_ref(),
     ]
     .into_iter()
     .flatten()
