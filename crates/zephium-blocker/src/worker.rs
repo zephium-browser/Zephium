@@ -1275,7 +1275,17 @@ impl ArtifactCache {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
-                            let navigation = compile_navigation(&catalog, compiler);
+                            // Badware in the catalog that cannot be compiled
+                            // fails the generation: the policy applied before
+                            // stays, never one without the navigation check.
+                            let navigation = match compile_navigation(&catalog, compiler) {
+                                Ok(navigation) => navigation,
+                                Err(failure) => {
+                                    self.artifact = Some(CachedArtifact::Failed(failure));
+                                    self.catalog = None;
+                                    return BlockerCompileOutcome::Failed(failure);
+                                }
+                            };
                             let rules = with_navigation(rules, navigation.clone());
                             let durably_cached = match persistent.as_ref() {
                                 Some(cache)
@@ -1352,8 +1362,13 @@ fn complete_job(
 const NAVIGATION_SOURCE: &str = "ublock-badware";
 
 /// The badware list alone, compiled for the runtime matcher.
+/// The badware list's own matcher: none when the catalog has no badware list,
+/// an error when it has one that does not compile.
 #[cfg(feature = "runtime")]
-fn compile_navigation(catalog: &StaticPolicyCatalog, compiler: Compiler) -> Option<CompiledRules> {
+fn compile_navigation(
+    catalog: &StaticPolicyCatalog,
+    compiler: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
     #[allow(unused_mut)]
     let mut sources: Vec<_> = catalog
         .instantiate()
@@ -1367,17 +1382,23 @@ fn compile_navigation(catalog: &StaticPolicyCatalog, compiler: Compiler) -> Opti
         crate::builtin::QA_BADWARE_RULES.to_owned(),
     ));
     if sources.is_empty() {
-        return None;
+        return Ok(None);
     }
     compiler
         .compile(CompileTarget::Runtime, sources)
-        .map_err(|error| eprintln!("content blocker: navigation check unavailable: {error}"))
-        .ok()
+        .map(Some)
+        .map_err(|error| {
+            eprintln!("content blocker: navigation check unavailable: {error}");
+            map_compile_error(&error)
+        })
 }
 
 #[cfg(not(feature = "runtime"))]
-fn compile_navigation(_: &StaticPolicyCatalog, _: Compiler) -> Option<CompiledRules> {
-    None
+fn compile_navigation(
+    _: &StaticPolicyCatalog,
+    _: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+    Ok(None)
 }
 
 #[cfg(feature = "runtime")]
@@ -1910,7 +1931,9 @@ mod tests {
         )])
         .unwrap();
         let navigation = RuntimePolicy::compiled(
-            compile_navigation(&catalog, Compiler::default()).expect("the QA host"),
+            compile_navigation(&catalog, Compiler::default())
+                .expect("the QA host compiles")
+                .expect("the QA host"),
         );
         let url = "https://blocked-badware.test/";
         let request = CoreRequest::exact(
@@ -1922,6 +1945,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(navigation.decide(&request), NetworkDecision::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "qa-test-hosts")))]
+    #[test]
+    fn a_badware_list_that_does_not_compile_fails_the_generation_closed() {
+        let catalog = |rules: &str| {
+            StaticPolicyCatalog::new(vec![
+                PolicySource::new(
+                    SourceId::new("easylist").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example^"),
+                ),
+                PolicySource::new(
+                    SourceId::new(NAVIGATION_SOURCE).unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(rules),
+                ),
+            ])
+            .unwrap()
+        };
+        assert!(
+            compile_navigation(&catalog("||scam.example^"), Compiler::default())
+                .unwrap()
+                .is_some()
+        );
+        // A list with nothing usable in it is an error, not "no check".
+        assert!(compile_navigation(&catalog("! nothing usable"), Compiler::default()).is_err());
+        let no_badware = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        assert!(compile_navigation(&no_badware, Compiler::default())
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
@@ -1982,7 +2041,7 @@ mod tests {
                 .unwrap();
             with_navigation(
                 adapt_rules(compiled).unwrap(),
-                compile_navigation(catalog, compiler),
+                compile_navigation(catalog, compiler).unwrap(),
             )
         };
         let page = |url| {
