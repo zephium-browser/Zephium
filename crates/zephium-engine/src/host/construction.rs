@@ -779,41 +779,54 @@ impl EngineHost {
             let item = id.clone();
             let last = Cell::new(None::<std::time::Instant>);
             let page_asked = page_asked.clone();
-            Rc::new(move |target: &str, user_gesture: bool| -> bool {
-                use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
-                let Some(link) = zephium_core::navigation::external_app_link(target) else {
-                    return false;
-                };
-                // A page acting alone is heard once per kind of link until
-                // the person follows one themselves; checked before the app
-                // lookup so a looping script costs nothing.
-                if user_gesture {
-                    page_asked.borrow_mut().clear();
-                } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
-                    return true;
-                }
-                let app = crate::platform::imp::external_app_name(target);
-                if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
-                    return true;
-                }
-                let now = std::time::Instant::now();
-                if last
-                    .get()
-                    .is_none_or(|old| now.duration_since(old) >= std::time::Duration::from_secs(1))
-                {
-                    last.set(Some(now));
-                    permit.emit(
-                        &sink,
-                        EngineEvent::ExternalAppRequested {
-                            id: item.get(),
-                            url: target.to_owned(),
-                            app,
-                            user_gesture,
-                        },
-                    );
-                }
-                true
-            })
+            let app_link_navigation = navigation.clone();
+            Rc::new(
+                move |target: &str,
+                      user_gesture: bool,
+                      initiator: Option<zephium_core::permissions::PageOrigin>|
+                      -> bool {
+                    use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
+                    let Some(link) = zephium_core::navigation::external_app_link(target) else {
+                        return false;
+                    };
+                    // A frame from another site, such as an ad, is heard only
+                    // when the person clicked in it, and is named on the card.
+                    let committed = committed_origin(&app_link_navigation);
+                    let initiator = initiator.filter(|origin| committed.as_ref() != Some(origin));
+                    if initiator.is_some() && !user_gesture {
+                        return true;
+                    }
+                    // A page acting alone is heard once per kind of link until
+                    // the person follows one themselves; checked before the app
+                    // lookup so a looping script costs nothing.
+                    if user_gesture {
+                        page_asked.borrow_mut().clear();
+                    } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
+                        return true;
+                    }
+                    let app = crate::platform::imp::external_app_name(target);
+                    if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
+                        return true;
+                    }
+                    let now = std::time::Instant::now();
+                    if last.get().is_none_or(|old| {
+                        now.duration_since(old) >= std::time::Duration::from_secs(1)
+                    }) {
+                        last.set(Some(now));
+                        permit.emit(
+                            &sink,
+                            EngineEvent::ExternalAppRequested {
+                                id: item.get(),
+                                url: target.to_owned(),
+                                app,
+                                user_gesture,
+                                initiator,
+                            },
+                        );
+                    }
+                    true
+                },
+            )
         };
         let focus_shuts = {
             let gate = self.focus_gate.clone();
@@ -1151,7 +1164,7 @@ impl EngineHost {
                 // shared one-per-second limit keeps that to one request.
                 #[cfg(target_os = "windows")]
                 if !admitted {
-                    navigation_app_link(&target, false);
+                    navigation_app_link(&target, false, None);
                 }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
@@ -1242,7 +1255,15 @@ impl EngineHost {
                     action.navigation_type,
                     wry::AppleNavigationType::LinkActivated
                 );
-                if !admitted && action_app_link(&target, gesture) {
+                let initiator = action.source.as_ref().and_then(|source| {
+                    zephium_core::permissions::PageOrigin::from_native_components(
+                        &source.scheme,
+                        &source.host,
+                        (source.port != 0).then_some(source.port),
+                    )
+                    .ok()
+                });
+                if !admitted && action_app_link(&target, gesture, initiator) {
                     return false;
                 }
                 if admitted
@@ -1258,7 +1279,7 @@ impl EngineHost {
                     return false;
                 }
                 if admitted {
-                    super::webext::note_auth_native_navigation(&frame_navigation, action);
+                    super::webext::note_auth_native_navigation(&frame_navigation, action.clone());
                 }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
@@ -1271,7 +1292,7 @@ impl EngineHost {
                     );
                 }
                 if admitted {
-                    replay.observe(&target, action);
+                    replay.observe(&target, action.clone());
                     if action.navigation_type == wry::AppleNavigationType::BackForward
                         && action.target_is_main_frame == Some(true)
                         && frame_navigation.current_committed().is_some()
@@ -1328,7 +1349,7 @@ impl EngineHost {
                         .as_ref()
                         .map(|(_, committed)| committed.as_str()),
                 );
-                if features.user_initiated && popup_app_link(&url, true) {
+                if features.user_initiated && popup_app_link(&url, true, None) {
                     return wry::NewWindowResponse::Deny;
                 }
                 // Bound script-triggered bursts without delaying ordinary rapid
@@ -2126,9 +2147,16 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             let link = app_link.clone();
-            if let Err(error) = security_policy.route_external_uris(move |uri, user_gesture| {
-                link(uri, user_gesture);
-            }) {
+            if let Err(error) =
+                security_policy.route_external_uris(move |uri, user_gesture, initiator| {
+                    let initiator = initiator
+                        .and_then(|origin| url::Url::parse(origin).ok())
+                        .and_then(|origin| {
+                            zephium_core::permissions::PageOrigin::from_url(&origin).ok()
+                        });
+                    link(uri, user_gesture, initiator);
+                })
+            {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
                 if report_failure {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });

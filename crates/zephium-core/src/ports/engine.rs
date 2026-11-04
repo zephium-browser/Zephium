@@ -1749,6 +1749,9 @@ pub enum EngineEvent {
         app: Option<String>,
         /// The person clicked, rather than the page navigating by itself.
         user_gesture: bool,
+        /// The site of the frame that asked, when the engine names one and it
+        /// is not the tab's own.
+        initiator: Option<crate::permissions::PageOrigin>,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {

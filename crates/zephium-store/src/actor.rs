@@ -435,6 +435,17 @@ enum Cmd {
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
     ),
+    AppLinkSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, String)>>>,
+    ),
+    SetAppLinkSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        String,
+        bool,
+        Sender<bool>,
+    ),
     DownloadSites(
         ProfileId,
         Sender<Option<Vec<(zephium_core::permissions::PageOrigin, bool)>>>,
@@ -1643,6 +1654,25 @@ impl Store for SqliteStore {
             .unwrap_or(false)
     }
 
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.ask(|reply| Cmd::AppLinkSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply))
+            .unwrap_or(false)
+    }
+
     fn download_sites(
         &self,
         profile: ProfileId,
@@ -2230,6 +2260,14 @@ fn actor(
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
+            }
+            Some(Cmd::AppLinkSites(profile, reply)) => {
+                let _ = reply.send(hub.app_link_sites(profile));
+            }
+            Some(Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_app_link_site(profile, &origin, &scheme, allowed);
+                let _ = reply.send(stored);
             }
             Some(Cmd::DownloadSites(profile, reply)) => {
                 let _ = reply.send(hub.download_sites(profile));

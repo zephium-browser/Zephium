@@ -280,6 +280,7 @@ impl Shell {
         }
         self.cancel_page_permission_for_profile(session.profile);
         self.download_sites.remove(&session.profile);
+        self.app_link_sites.remove(&session.profile);
         self.apply_profile_tombstone(session.profile);
         self.engine.erase_profile_data(
             session.profile,

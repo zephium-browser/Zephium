@@ -146,7 +146,13 @@ pub struct TabState {
 pub enum PageRequest {
     /// A link for an application on this computer, and that application's
     /// name when the system knows one.
-    ExternalApp { url: Url, app: Option<String> },
+    ExternalApp {
+        url: Url,
+        app: Option<String>,
+        /// The site that asked, kept for an "always" answer and named on the
+        /// card.
+        site: Option<crate::permissions::PageOrigin>,
+    },
     /// A new tab the page tried to open that was not let through, with its
     /// address when it was an ordinary web page.
     Popup { url: Option<Url> },

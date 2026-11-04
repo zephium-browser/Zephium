@@ -37,6 +37,7 @@ fn kinds() -> Vec<SitePermissionKind> {
             Kind::AutomaticDownloads,
             Kind::Popups,
             Kind::Downloads,
+            Kind::AppLinks,
         ]
     } else {
         vec![
@@ -45,6 +46,7 @@ fn kinds() -> Vec<SitePermissionKind> {
             Kind::Geolocation,
             Kind::Popups,
             Kind::Downloads,
+            Kind::AppLinks,
         ]
     }
 }
@@ -64,6 +66,7 @@ pub(super) fn kind_view(kind: SitePermissionKind) -> SitePermissionKindView {
         Kind::AutomaticDownloads => View::AutomaticDownloads,
         Kind::Popups => View::Popups,
         Kind::Downloads => View::Downloads,
+        Kind::AppLinks => View::AppLinks,
     }
 }
 
@@ -72,8 +75,8 @@ fn entries(
     origin: Option<&PageOrigin>,
 ) -> Vec<SitePermissionView> {
     decisions.retain(|entry| origin.is_none_or(|origin| entry.origin == *origin));
-    decisions.sort_by(|a, b| (a.kind, &a.origin).cmp(&(b.kind, &b.origin)));
-    decisions.dedup_by(|a, b| a.kind == b.kind && a.origin == b.origin);
+    decisions.sort_by(|a, b| (a.kind, &a.origin, &a.scheme).cmp(&(b.kind, &b.origin, &b.scheme)));
+    decisions.dedup_by(|a, b| a.kind == b.kind && a.origin == b.origin && a.scheme == b.scheme);
     decisions
         .into_iter()
         .take(zephium_core::permissions::MAX_SITE_PERMISSIONS)
@@ -84,6 +87,7 @@ fn entries(
                 RememberedPagePermission::Allow => SitePermissionDecisionView::Allow,
                 RememberedPagePermission::Deny => SitePermissionDecisionView::Block,
             },
+            scheme: entry.scheme,
         })
         .collect()
 }
@@ -137,6 +141,65 @@ impl Shell {
         self.engine.set_popup_sites(profile, origins.clone());
         self.popup_sites
             .insert(profile, origins.into_iter().collect());
+    }
+
+    /// Reads a profile's application link grants once. A private profile
+    /// starts with none.
+    pub(super) fn ensure_app_link_sites(&mut self, profile: ProfileId) {
+        if self.app_link_sites.contains_key(&profile) {
+            return;
+        }
+        let sites = if self.private_profile(profile) {
+            Vec::new()
+        } else {
+            let Some(sites) = self.store.app_link_sites(profile) else {
+                return;
+            };
+            sites
+        };
+        self.app_link_sites
+            .insert(profile, sites.into_iter().collect());
+    }
+
+    /// Lets `origin` open `scheme` links without asking, or forgets it. A
+    /// private profile keeps it in memory only.
+    pub(super) fn set_app_link_site(
+        &mut self,
+        profile: ProfileId,
+        origin: PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        if !zephium_core::navigation::app_link_scheme(&scheme) {
+            return false;
+        }
+        self.ensure_app_link_sites(profile);
+        let Some(current) = self.app_link_sites.get(&profile) else {
+            return false;
+        };
+        let key = (origin, scheme);
+        if current.contains(&key) == allowed {
+            return true;
+        }
+        if allowed && current.len() >= zephium_core::navigation::MAX_APP_LINK_SITES {
+            return false;
+        }
+        if !self.private_profile(profile)
+            && !self
+                .store
+                .set_app_link_site(profile, key.0.clone(), key.1.clone(), allowed)
+        {
+            return false;
+        }
+        let Some(sites) = self.app_link_sites.get_mut(&profile) else {
+            return false;
+        };
+        if allowed {
+            sites.insert(key);
+        } else {
+            sites.remove(&key);
+        }
+        true
     }
 
     /// Reads a profile's download decisions once and hands them to the
@@ -270,13 +333,16 @@ impl Shell {
         }
         self.ensure_popup_sites(profile);
         self.ensure_download_sites(profile);
+        self.ensure_app_link_sites(profile);
         let popups = self.popup_sites.get(&profile);
         let downloads = self.download_sites.get(&profile);
-        let popups_read = popups.is_some() && downloads.is_some();
+        let app_links = self.app_link_sites.get(&profile);
+        let popups_read = popups.is_some() && downloads.is_some() && app_links.is_some();
         let popups: Vec<SitePermission> = popups
             .into_iter()
             .flatten()
             .map(|origin| SitePermission {
+                scheme: None,
                 origin: origin.clone(),
                 kind: SitePermissionKind::Popups,
                 decision: RememberedPagePermission::Allow,
@@ -286,6 +352,7 @@ impl Shell {
                     .into_iter()
                     .flatten()
                     .map(|(origin, allowed)| SitePermission {
+                        scheme: None,
                         origin: origin.clone(),
                         kind: SitePermissionKind::Downloads,
                         decision: if *allowed {
@@ -293,6 +360,17 @@ impl Shell {
                         } else {
                             RememberedPagePermission::Deny
                         },
+                    }),
+            )
+            .chain(
+                app_links
+                    .into_iter()
+                    .flatten()
+                    .map(|(origin, scheme)| SitePermission {
+                        scheme: Some(scheme.clone()),
+                        origin: origin.clone(),
+                        kind: SitePermissionKind::AppLinks,
+                        decision: RememberedPagePermission::Allow,
                     }),
             )
             .collect();
@@ -324,6 +402,7 @@ impl Shell {
                                 .iter()
                                 .filter_map(|grant| {
                                     Some(SitePermission {
+                                        scheme: None,
                                         origin: grant.origin.clone(),
                                         kind: SitePermissionKind::from_page(grant.kind)?,
                                         decision: grant.decision,
@@ -353,6 +432,7 @@ impl Shell {
         origin: PageOrigin,
         kind: SitePermissionKind,
         decision: Option<RememberedPagePermission>,
+        scheme: Option<String>,
     ) -> Option<OperationDisposition> {
         let Some(profile) = self.windows.focused().map(|window| window.profile) else {
             return Some(operation_result(
@@ -365,6 +445,20 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::InvalidScope,
             ));
+        }
+        if kind == SitePermissionKind::AppLinks {
+            // Asking is the default, so anything but Allow is a removal.
+            let allowed = decision == Some(RememberedPagePermission::Allow);
+            let applied = scheme
+                .is_some_and(|scheme| self.set_app_link_site(profile, origin, scheme, allowed));
+            return Some(if applied {
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+            } else {
+                operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                )
+            });
         }
         if kind == SitePermissionKind::Downloads {
             let allowed = decision.map(|decision| decision == RememberedPagePermission::Allow);
@@ -606,6 +700,7 @@ mod tests {
     #[test]
     fn a_listing_is_filtered_sorted_and_free_of_duplicates() {
         let decision = |site: &str, kind| SitePermission {
+            scheme: None,
             origin: origin(site),
             kind,
             decision: RememberedPagePermission::Allow,

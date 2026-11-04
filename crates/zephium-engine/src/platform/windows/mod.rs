@@ -496,7 +496,7 @@ impl SecurityPolicy {
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str, bool) + 'static,
+        request: impl Fn(&str, bool, Option<&str>) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -508,10 +508,19 @@ impl SecurityPolicy {
                 args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
+                let mut origin = PWSTR::null();
+                // The origin of the frame that asked; an empty one is unknown.
+                let origin = args
+                    .InitiatingOrigin(&mut origin)
+                    .ok()
+                    .and_then(|_| {
+                        take_pwstr_bounded(origin, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                    })
+                    .filter(|origin| !origin.is_empty());
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri, user_gesture.as_bool());
+                    request(&uri, user_gesture.as_bool(), origin.as_deref());
                 }
             }
             Ok(())

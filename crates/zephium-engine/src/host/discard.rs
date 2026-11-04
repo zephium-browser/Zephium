@@ -1713,6 +1713,7 @@ mod tests {
             navigation_type: wry::AppleNavigationType::Other,
             is_get: get,
             target_is_main_frame: main,
+            source: None,
         }
     }
 

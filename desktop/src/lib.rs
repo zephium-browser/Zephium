@@ -3505,6 +3505,7 @@ fn site_permission_set(
     origin: String,
     kind: zephium_ipc::SitePermissionKindView,
     decision: Option<zephium_ipc::SitePermissionDecisionView>,
+    scheme: Option<String>,
 ) -> zephium_ipc::OperationAdmission {
     use zephium_core::permissions::{RememberedPagePermission, SitePermissionKind as Kind};
     use zephium_ipc::SitePermissionKindView as View;
@@ -3528,7 +3529,17 @@ fn site_permission_set(
         View::AutomaticDownloads => Kind::AutomaticDownloads,
         View::Popups => Kind::Popups,
         View::Downloads => Kind::Downloads,
+        View::AppLinks => Kind::AppLinks,
     };
+    // Only an application link grant names a scheme, and only one an
+    // application link could use.
+    if (kind == Kind::AppLinks)
+        != scheme
+            .as_deref()
+            .is_some_and(zephium_core::navigation::app_link_scheme)
+    {
+        return rejected_operation();
+    }
     let decision = decision.map(|decision| match decision {
         zephium_ipc::SitePermissionDecisionView::Allow => RememberedPagePermission::Allow,
         zephium_ipc::SitePermissionDecisionView::Block => RememberedPagePermission::Deny,
@@ -3540,6 +3551,7 @@ fn site_permission_set(
             origin,
             kind,
             decision,
+            scheme,
         },
     )
 }

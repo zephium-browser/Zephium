@@ -257,7 +257,7 @@ pub enum SpaceCommand {
 pub enum PageRequestDecision {
     Allow,
     /// Allow, and let this site open the same kind of link without asking
-    /// again until Zephium quits.
+    /// again; kept with the profile's other site settings.
     AlwaysAllow,
     Dismiss,
 }
@@ -711,6 +711,8 @@ pub enum Command {
         origin: zephium_core::permissions::PageOrigin,
         kind: zephium_core::permissions::SitePermissionKind,
         decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        /// The application link scheme, for app link grants.
+        scheme: Option<String>,
     },
     SitePermissionCatalogLoaded {
         operation_id: String,

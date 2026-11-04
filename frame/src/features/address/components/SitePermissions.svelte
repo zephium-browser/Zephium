@@ -42,6 +42,7 @@
     automatic_downloads: m.permission_automatic_downloads,
     popups: m.permission_popups,
     downloads: m.permission_downloads,
+    app_links: m.permission_app_links,
   };
   const options = $derived([
     { value: "allow", label: m.permission_allow() },
@@ -82,7 +83,7 @@
     loaded = true;
     decided = Object.fromEntries(
       (next?.entries ?? [])
-        .filter((entry) => entry.origin === origin)
+        .filter((entry) => entry.origin === origin && entry.kind !== "app_links")
         .map((entry) => [entry.kind, entry.decision]),
     );
   }

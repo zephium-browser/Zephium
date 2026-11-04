@@ -7,6 +7,7 @@
 mod agent_audit;
 #[cfg(feature = "work-execution")]
 mod agent_work;
+mod app_link_sites;
 mod blocker;
 mod bookmarks;
 mod chats;

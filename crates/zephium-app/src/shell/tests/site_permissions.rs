@@ -44,6 +44,7 @@ fn a_private_profile_lists_nothing_and_reads_nothing() {
             origin: origin("https://meet.example"),
             kind: SitePermissionKind::Camera,
             decision: Some(RememberedPagePermission::Allow),
+            scheme: None,
         }),
     });
     assert_eq!(
@@ -67,6 +68,7 @@ fn a_kind_this_platform_does_not_keep_is_refused() {
             origin: origin("https://synth.example"),
             kind: SitePermissionKind::Midi,
             decision: Some(RememberedPagePermission::Allow),
+            scheme: None,
         }),
     });
     // macOS keeps no MIDI decisions; Windows hands it to the engine.
@@ -118,6 +120,7 @@ fn allowing_pop_ups_from_a_blocked_card_is_saved_and_reaches_the_engine() {
             origin: origin("https://mail.example"),
             kind: SitePermissionKind::Popups,
             decision: Some(RememberedPagePermission::Deny),
+            scheme: None,
         }),
     });
     assert_eq!(
@@ -295,6 +298,7 @@ mod catalog {
                 origin: origin("https://meet.example"),
                 kind: SitePermissionKind::Camera,
                 decision: Some(RememberedPagePermission::Deny),
+                scheme: None,
             }),
         });
         assert!(operations.lock().unwrap().is_empty());
@@ -530,6 +534,7 @@ mod downloads {
                     origin: origin(site),
                     kind: SitePermissionKind::Downloads,
                     decision,
+                    scheme: None,
                 }),
             });
         };
@@ -609,5 +614,146 @@ mod downloads {
             engine.download_sites.lock().unwrap().last().cloned(),
             Some((profile, vec![("https://files.example".to_owned(), true)]))
         );
+    }
+}
+
+mod app_links {
+    use super::*;
+    use zephium_ipc::{PageRequestView, SitePermissionKindView};
+
+    fn shown(screen: &Screen, id: ItemId) -> Option<PageRequestView> {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.page_request)
+    }
+
+    fn opened(engine: &FakeEngine) -> usize {
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("open-app "))
+            .count()
+    }
+
+    fn ask(shell: &mut Shell, id: ItemId, url: &str, initiator: Option<&str>) {
+        shell.handle(Command::Engine(EngineEvent::ExternalAppRequested {
+            id,
+            url: url.into(),
+            app: Some("Meetings".into()),
+            user_gesture: true,
+            initiator: initiator.map(origin),
+        }));
+    }
+
+    #[test]
+    fn always_allow_is_kept_per_site_and_kind_of_link() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=1", None);
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            decision: crate::PageRequestDecision::AlwaysAllow,
+        });
+        assert_eq!(
+            store.app_link_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(origin("https://meet.example"), "zoommtg".to_owned())])
+        );
+        let before = opened(&engine);
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=2", None);
+        assert_eq!(shown(&screen, id), None);
+        assert_eq!(opened(&engine), before + 1, "the kept kind opens at once");
+        ask(&mut shell, id, "msteams:/l/meetup-join/1", None);
+        assert!(
+            matches!(
+                shown(&screen, id),
+                Some(PageRequestView::ExternalApp { .. })
+            ),
+            "another kind of link still asks"
+        );
+
+        let view = query(&mut shell, None);
+        let kept: Vec<_> = view
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == SitePermissionKindView::AppLinks)
+            .map(|entry| (entry.origin.clone(), entry.scheme.clone()))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![(
+                "https://meet.example".to_owned(),
+                Some("zoommtg".to_owned())
+            )]
+        );
+        shell.handle(Command::Operation {
+            operation_id: "forget".into(),
+            command: Box::new(Command::SetSitePermission {
+                origin: origin("https://meet.example"),
+                kind: SitePermissionKind::AppLinks,
+                decision: None,
+                scheme: Some("zoommtg".into()),
+            }),
+        });
+        assert_eq!(
+            store.app_link_sites.lock().unwrap().get(&profile).cloned(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_frame_from_another_site_is_named_and_kept_apart_from_the_tab() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, _engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://news.example/story");
+        ask(
+            &mut shell,
+            id,
+            "zoommtg://zoom.us/join",
+            Some("https://widget.example"),
+        );
+        assert_eq!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp {
+                site: Some("widget.example".into()),
+                scheme: "zoommtg".into(),
+                app: Some("Meetings".into()),
+            })
+        );
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            decision: crate::PageRequestDecision::AlwaysAllow,
+        });
+        assert_eq!(
+            store.app_link_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(
+                origin("https://widget.example"),
+                "zoommtg".to_owned()
+            )])
+        );
+    }
+
+    #[test]
+    fn a_private_profile_keeps_always_allow_in_memory_only() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        let profile = make_private(&mut shell);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=1", None);
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            decision: crate::PageRequestDecision::AlwaysAllow,
+        });
+        assert!(store.app_link_sites.lock().unwrap().get(&profile).is_none());
+        let before = opened(&engine);
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=2", None);
+        assert_eq!(opened(&engine), before + 1);
     }
 }

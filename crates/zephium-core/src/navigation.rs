@@ -227,6 +227,24 @@ const NOT_FOR_APPS: &[&str] = &[
 /// A link meant for an application on this computer, such as `zoommtg:`,
 /// `mailto:` or `slack:`. It never loads in a tab; the person decides
 /// whether the application it names may open it.
+/// Application link grants one profile keeps.
+pub const MAX_APP_LINK_SITES: usize = 512;
+
+/// A scheme an application link grant may name: one `external_app_link`
+/// itself would hand on.
+pub fn app_link_scheme(scheme: &str) -> bool {
+    scheme.len() <= 64
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        && scheme.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
+        })
+        && !NOT_FOR_APPS.contains(&scheme)
+        && !scheme.starts_with("zephium")
+}
+
 pub fn external_app_link(target: &str) -> Option<Url> {
     if target.len() > MAX_URL_BYTES {
         return None;

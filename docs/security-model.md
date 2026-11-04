@@ -321,8 +321,13 @@ automatically opened through the OS shell. A link for another application, a sch
 outside a fixed list that excludes content, script, file, share and handler schemes,
 never loads in a tab. It goes to an app-link card on the tab that names the
 application, and the host opens the application only after the person's answer. A
-page that acts by itself with no registered application is ignored. An Always allow
-answer is kept in memory for that profile, site host and scheme until Zephium quits. Human macOS/Windows new windows require
+page that acts by itself with no registered application is ignored. A frame from
+another site (WebKit's source frame, WebView2's `InitiatingOrigin`) is heard only when
+the person clicked in it, and the card then names that frame's site rather than the
+tab's. An Always allow answer is kept per profile, canonical site origin and scheme in
+the profile database (`app_link_sites`, profile migration 41, at most 512) and listed
+under Links to apps in Site settings; a private profile keeps it in memory until the
+session ends. Human macOS/Windows new windows require
 native user-activation admission and become host-owned tabs as described below. The
 one exception is a site the person allowed to open pop-ups, from the blocked-pop-up
 card or Site settings: its canonical origin is kept in the profile database

@@ -1156,6 +1156,7 @@ fn changing_the_site_setting_forgets_a_one_time_answer() {
             origin: PageOrigin::parse_exact("https://media.example").unwrap(),
             kind: zephium_core::permissions::SitePermissionKind::Camera,
             decision: None,
+            scheme: None,
         }),
     });
     while let Some(command) = queue.try_recv() {

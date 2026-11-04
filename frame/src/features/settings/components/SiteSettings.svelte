@@ -23,6 +23,7 @@
     automatic_downloads: m.permission_automatic_downloads,
     popups: m.permission_popups,
     downloads: m.permission_downloads,
+    app_links: m.permission_app_links,
   };
 
   let view = $state<SitePermissionsView | null>(null);
@@ -39,11 +40,20 @@
       .filter((group) => group.entries.length > 0),
   );
 
-  const key = (entry: SitePermissionView) => `${entry.kind} ${entry.origin}`;
+  const key = (entry: SitePermissionView) => `${entry.kind} ${entry.origin} ${entry.scheme ?? ""}`;
 
-  // Pop-ups are blocked unless allowed, so they offer no Block choice.
+  const scheme = (entry: SitePermissionView) =>
+    entry.scheme === null ? null : m.site_settings_app_link_scheme({ scheme: entry.scheme });
+
+  // The origin, and the scheme where a site has one grant per scheme, so each
+  // row's controls are told apart.
+  const subject = (entry: SitePermissionView) =>
+    [entry.origin, scheme(entry)].filter(Boolean).join(" · ");
+
+  // Pop-ups and links to apps are refused or asked about unless allowed, so
+  // they offer no Block choice.
   const decisions = (kind: SitePermissionKindView) =>
-    kind === "popups"
+    kind === "popups" || kind === "app_links"
       ? [{ value: "allow", label: m.permission_allow() }]
       : [
           { value: "allow", label: m.permission_allow() },
@@ -58,7 +68,7 @@
   async function change(entry: SitePermissionView, decision: SitePermissionDecisionView | null) {
     if (busy !== null) return;
     busy = key(entry);
-    failed = !(await sitePermissions.set(entry.origin, entry.kind, decision));
+    failed = !(await sitePermissions.set(entry.origin, entry.kind, decision, entry.scheme));
     await load();
     busy = null;
   }
@@ -81,9 +91,12 @@
         <ul>
           {#each group.entries as entry (key(entry))}
             <li>
-              <span class="origin">{entry.origin}</span>
+              <span class="name">
+                <span class="origin">{entry.origin}</span>
+                {#if entry.scheme !== null}<span class="scheme">{scheme(entry)}</span>{/if}
+              </span>
               <Select
-                label={`${labels[entry.kind]()} · ${entry.origin}`}
+                label={`${labels[entry.kind]()} · ${subject(entry)}`}
                 labelHidden
                 options={decisions(entry.kind)}
                 value={entry.decision}
@@ -93,7 +106,7 @@
               <Button
                 variant="ghost"
                 disabled={busy !== null}
-                aria-label={`${m.action_remove()} ${entry.origin}`}
+                aria-label={`${m.action_remove()} ${subject(entry)}`}
                 onclick={() => void change(entry, null)}
               >
                 {m.action_remove()}
@@ -139,13 +152,22 @@
     min-block-size: 36px;
   }
 
-  .origin {
+  .name {
+    display: grid;
     flex: 1;
     min-inline-size: 0;
+  }
+
+  .origin {
     overflow: hidden;
     font-size: var(--text-body);
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .scheme {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
   }
 
   .note {

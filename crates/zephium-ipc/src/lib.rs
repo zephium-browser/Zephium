@@ -424,6 +424,7 @@ pub enum SitePermissionKindView {
     AutomaticDownloads,
     Popups,
     Downloads,
+    AppLinks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -439,6 +440,8 @@ pub struct SitePermissionView {
     pub origin: String,
     pub kind: SitePermissionKindView,
     pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
 }
 
 /// The focused profile's saved site decisions.

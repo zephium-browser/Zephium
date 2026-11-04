@@ -1150,6 +1150,9 @@ pub(crate) struct FakeStore {
     pub(crate) download_sites: Mutex<
         std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
     >,
+    pub(crate) app_link_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
+    >,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1231,6 +1234,34 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        Some(
+            self.app_link_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        let mut sites = self.app_link_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|site| *site != (origin.clone(), scheme.clone()));
+        if allowed {
+            list.push((origin, scheme));
         }
         true
     }

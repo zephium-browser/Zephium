@@ -690,13 +690,18 @@ fn tab_view(
         },
         loading: tab.loading,
         page_request: tab.page_request.as_deref().map(|request| match request {
-            zephium_core::item::PageRequest::ExternalApp { url, app } => {
+            zephium_core::item::PageRequest::ExternalApp { url, app, site } => {
                 zephium_ipc::PageRequestView::ExternalApp {
-                    site: tab
-                        .url
+                    site: site
                         .as_ref()
-                        .and_then(|url| url.host_str())
-                        .map(str::to_owned),
+                        .and_then(|site| url::Url::parse(site.as_str()).ok())
+                        .and_then(|site| site.host_str().map(str::to_owned))
+                        .or_else(|| {
+                            tab.url
+                                .as_ref()
+                                .and_then(|url| url.host_str())
+                                .map(str::to_owned)
+                        }),
                     scheme: url.scheme().to_owned(),
                     app: app.clone(),
                 }

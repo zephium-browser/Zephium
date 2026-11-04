@@ -22,6 +22,9 @@ pub enum SitePermissionKind {
     Popups,
     /// Whether the site may save files at all; Zephium's own on both.
     Downloads,
+    /// A kind of application link the site may open without asking, named
+    /// by the entry's scheme; Zephium's own on both.
+    AppLinks,
 }
 
 impl SitePermissionKind {
@@ -50,6 +53,8 @@ pub struct SitePermission {
     pub origin: PageOrigin,
     pub kind: SitePermissionKind,
     pub decision: RememberedPagePermission,
+    /// The application link scheme, for [`SitePermissionKind::AppLinks`].
+    pub scheme: Option<String>,
 }
 
 /// One listing, or None when its source cannot be read right now.
@@ -80,6 +85,7 @@ mod tests {
             SitePermissionKind::AutomaticDownloads,
             SitePermissionKind::Popups,
             SitePermissionKind::Downloads,
+            SitePermissionKind::AppLinks,
         ] {
             assert_eq!(kind.page(), None);
         }

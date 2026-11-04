@@ -3546,9 +3546,20 @@ pub enum AppleNavigationType {
   Other,
 }
 
+/// The frame a navigation came from, as WebKit's security origin names it.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppleNavigationSource {
+  pub is_main_frame: bool,
+  pub scheme: String,
+  pub host: String,
+  /// Zero when the scheme's default.
+  pub port: u16,
+}
+
 /// Bounded native provenance accompanying an Apple navigation policy request.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppleNavigationAction {
   /// Native navigation cause.
   pub navigation_type: AppleNavigationType,
@@ -3557,6 +3568,8 @@ pub struct AppleNavigationAction {
   /// Whether WebKit identified the target as the main frame. `None` denotes a
   /// target-less/new-window action and must not be treated as main-frame work.
   pub target_is_main_frame: Option<bool>,
+  /// The frame that asked, when WebKit names a well-formed origin for it.
+  pub source: Option<AppleNavigationSource>,
 }
 
 /// Background throttling policy

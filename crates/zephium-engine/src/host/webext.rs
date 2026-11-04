@@ -2181,6 +2181,7 @@ mod tests {
                 navigation_type: wry::AppleNavigationType::LinkActivated,
                 is_get: true,
                 target_is_main_frame: Some(true),
+                source: None,
             },
         );
         assert!(!navigation.auth_cleanup_is_owned());
@@ -2213,6 +2214,7 @@ mod tests {
                     navigation_type: kind,
                     is_get: true,
                     target_is_main_frame: frame,
+                    source: None,
                 },
             );
             assert!(navigation.auth_cleanup_is_owned());

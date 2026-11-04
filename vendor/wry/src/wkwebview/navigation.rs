@@ -20,7 +20,7 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT},
+  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT},
   AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
   NavigationFailure, NavigationId, PageLoadEvent,
 };
@@ -920,12 +920,23 @@ pub(crate) fn navigation_policy(
         .HTTPMethod()
         .and_then(|method| bounded_nsstring(&method, CUSTOM_PROTOCOL_METHOD_LIMIT))
         .is_some_and(|method| method == "GET");
+      let source = action.sourceFrame().and_then(|frame| {
+        let origin = frame.securityOrigin();
+        let port = u16::try_from(origin.port()).ok()?;
+        Some(crate::AppleNavigationSource {
+          is_main_frame: frame.isMainFrame(),
+          scheme: bounded_nsstring(&origin.protocol(), ORIGIN_PART_LIMIT)?,
+          host: bounded_nsstring(&origin.host(), ORIGIN_PART_LIMIT)?,
+          port,
+        })
+      });
       let policy_allows = function(
         url.clone(),
         AppleNavigationAction {
           navigation_type,
           is_get,
           target_is_main_frame,
+          source,
         },
       );
       #[cfg(target_os = "macos")]

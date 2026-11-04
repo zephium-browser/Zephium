@@ -415,7 +415,8 @@ impl Shell {
                 url,
                 app,
                 user_gesture,
-            } => self.on_external_app_requested(id, url, app, user_gesture),
+                initiator,
+            } => self.on_external_app_requested(id, url, app, user_gesture, initiator),
             EngineEvent::HttpAuthRequested { id, prompt } => {
                 self.on_http_auth_requested(id, prompt)
             }

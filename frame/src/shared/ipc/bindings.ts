@@ -401,7 +401,7 @@ export const commands = {
 	 *  Changes one saved decision of the focused profile; no decision forgets it,
 	 *  so the site is asked again.
 	 */
-	sitePermissionSet: (origin: string, kind: SitePermissionKindView, decision: "allow" | "block" | null) => __TAURI_INVOKE<OperationAdmission>("site_permission_set", { origin, kind, decision }),
+	sitePermissionSet: (origin: string, kind: SitePermissionKindView, decision: "allow" | "block" | null, scheme: string | null) => __TAURI_INVOKE<OperationAdmission>("site_permission_set", { origin, kind, decision, scheme }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -3067,13 +3067,15 @@ export type SitePermissionDecisionView = "allow" | "block";
  *  A kind of decision Site settings lists. Which kinds a platform keeps is
  *  in `SitePermissionsView::kinds`.
  */
-export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups" | "downloads";
+export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups" | "downloads" | "app_links";
 
 export type SitePermissionView = {
 	/**  Canonical origin, such as `https://meet.example`. */
 	origin: string,
 	kind: SitePermissionKindView,
 	decision: SitePermissionDecisionView,
+	/**  The kind of application link, for `app_links`. */
+	scheme: string | null,
 };
 
 /**  The focused profile's saved site decisions. */

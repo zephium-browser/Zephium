@@ -8,7 +8,7 @@ use super::*;
 use crate::PageRequestDecision;
 use zephium_core::http_auth::{HttpAuthPrompt, HttpCredentials};
 use zephium_core::item::PageRequest;
-use zephium_core::permissions::DownloadPermissionPrompt;
+use zephium_core::permissions::{DownloadPermissionPrompt, PageOrigin};
 
 /// After the person chooses to wait, a page still hung this long later is
 /// asked about again.
@@ -55,6 +55,7 @@ impl Shell {
         url: String,
         app: Option<String>,
         user_gesture: bool,
+        initiator: Option<PageOrigin>,
     ) {
         let Some(url) = navigation::external_app_link(&url) else {
             return;
@@ -67,16 +68,17 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return;
         }
-        if self
-            .external_app_grant(id, &url)
-            .is_some_and(|grant| self.external_apps_allowed.contains(&grant))
+        let site = initiator.or_else(|| self.tab_origin(id));
+        if site
+            .as_ref()
+            .is_some_and(|site| self.app_link_allowed(id, site, url.scheme()))
         {
             let _ = self.engine.open_external_app(url.as_str());
             return;
         }
         if self
             .items
-            .set_page_request(id, PageRequest::ExternalApp { url, app })
+            .set_page_request(id, PageRequest::ExternalApp { url, app, site })
         {
             self.project_tab(id);
         }
@@ -250,10 +252,12 @@ impl Shell {
             (_, PageRequestDecision::Dismiss) | (PageRequest::Popup { url: None }, _) => {
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
-            (PageRequest::ExternalApp { url, .. }, decision) => {
+            (PageRequest::ExternalApp { url, site, .. }, decision) => {
                 if decision == PageRequestDecision::AlwaysAllow {
-                    if let Some(grant) = self.external_app_grant(id, &url) {
-                        self.external_apps_allowed.insert(grant);
+                    if let (Some(site), Some(profile)) = (site, self.profile_of_item(id)) {
+                        if !self.set_app_link_site(profile, site, url.scheme().to_owned(), true) {
+                            crate::diagnostic!("app links: the site's answer could not be kept");
+                        }
                     }
                 }
                 match self.engine.open_external_app(url.as_str()) {
@@ -304,14 +308,18 @@ impl Shell {
         }
     }
 
-    /// What an "always" answer is remembered by: the profile, the site the
-    /// tab shows, and the kind of link.
-    fn external_app_grant(
-        &self,
-        id: ItemId,
-        url: &url::Url,
-    ) -> Option<(ProfileId, String, String)> {
-        let host = self.items.tab(id)?.url.as_ref()?.host_str()?.to_owned();
-        Some((self.profile_of_item(id)?, host, url.scheme().to_owned()))
+    /// The site a tab shows, as an origin.
+    fn tab_origin(&self, id: ItemId) -> Option<PageOrigin> {
+        PageOrigin::from_url(self.items.tab(id)?.url.as_ref()?).ok()
+    }
+
+    fn app_link_allowed(&mut self, id: ItemId, site: &PageOrigin, scheme: &str) -> bool {
+        let Some(profile) = self.profile_of_item(id) else {
+            return false;
+        };
+        self.ensure_app_link_sites(profile);
+        self.app_link_sites
+            .get(&profile)
+            .is_some_and(|sites| sites.contains(&(site.clone(), scheme.to_owned())))
     }
 }

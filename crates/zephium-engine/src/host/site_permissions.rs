@@ -107,6 +107,7 @@ fn listed(
 ) -> Option<SitePermission> {
     let url = url::Url::parse(origin).ok()?;
     Some(SitePermission {
+        scheme: None,
         origin: PageOrigin::from_url(&url).ok()?,
         kind: site_kind(kind)?,
         decision: decision(state)?,
