@@ -29,8 +29,8 @@ arguments, and only uBlock Origin's two lists may call `trusted-*` ones. The
 one exception is YouTube: uBlock Origin's `rpnt` rule and its
 `trusted-edit-inbound-object` values carry JavaScript and request edits in the
 list itself, which the compiler admits only from those two lists, only for
-YouTube's hosts and within fixed sizes. The security model describes the
-limits.
+YouTube's hosts and within fixed sizes. Windows runs them; macOS withholds and
+counts them. The security model describes the limits.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in

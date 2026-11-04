@@ -156,6 +156,14 @@ pub enum CompileTarget {
     WebKit,
 }
 
+impl CompileTarget {
+    /// Whether YouTube's page-code rules run on this target. WebKit is served
+    /// a different ad path that they do not shorten, so it withholds them.
+    pub const fn runs_page_code(self) -> bool {
+        matches!(self, Self::Runtime)
+    }
+}
+
 impl SourceFormat {
     const fn adblock(self) -> FilterFormat {
         match self {
@@ -338,10 +346,11 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
+        let cosmetic_policy = crate::CosmeticPolicy::compile_for(
             prepared
                 .iter()
                 .map(|source| (source.cosmetics.as_str(), source.trusted)),
+            target.runs_page_code(),
         )
         .map_err(CompileError::Cosmetics)?;
         let cosmetics = if cosmetic_policy.report().accepted == 0 {

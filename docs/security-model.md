@@ -1144,9 +1144,11 @@ uBlock Origin's pinned HTTPS origin and carries no Zephium or publisher signatur
 compiler admits it only from uBlock Origin's two lists, only for a fixed allowlist of
 `youtube.com`, `m.youtube.com`, `music.youtube.com` and `www.youtube-nocookie.com` and
 their subdomains, and at most 16 KiB per rule and 64 KiB per site; any other such rule is
-dropped and counted in the compile report. It runs with the YouTube page's own privileges,
-never in privileged chrome, and pausing the site or turning protection off removes it with
-the rest of the program.
+dropped and counted in the compile report. Only the Windows engine runs it; WebKit is served
+a different ad path that it does not shorten, so macOS withholds and counts it. It runs with
+the YouTube page's own privileges and only where the page's real host, compared as text, is
+one of those sites, never in privileged chrome. Pausing the site or turning protection off
+removes it with the rest of the program.
 
 The release-seed loader verifies deterministic gzip identity and performs bounded lazy
 inflation plus exact raw length/digest/header validation after a compiled-cache miss. It

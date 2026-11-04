@@ -41,6 +41,8 @@ pub struct CosmeticReport {
     /// Page-code rules dropped: an untrusted list, a site outside YouTube's,
     /// or over a size limit.
     pub refused_page_code_rules: usize,
+    /// Admitted page-code rules this platform does not run.
+    pub withheld_page_code_rules: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -133,6 +135,15 @@ impl CosmeticPolicy {
     pub fn compile_with_trust<'a>(
         sources: impl IntoIterator<Item = (&'a str, bool)>,
     ) -> Result<Arc<Self>, CosmeticError> {
+        Self::compile_for(sources, true)
+    }
+
+    /// As [`Self::compile_with_trust`], running admitted page-code rules only
+    /// when `page_code_runs` is set; otherwise they are withheld and counted.
+    pub fn compile_for<'a>(
+        sources: impl IntoIterator<Item = (&'a str, bool)>,
+        page_code_runs: bool,
+    ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
             version: DATA_VERSION,
             rules: Vec::new(),
@@ -176,6 +187,12 @@ impl CosmeticPolicy {
                         page_code: bytes, ..
                     } if bytes != 0 && !page_code.admit(line, bytes) => {
                         data.report.refused_page_code_rules += 1;
+                        continue;
+                    }
+                    crate::scriptlets::Kind::Rule {
+                        page_code: bytes, ..
+                    } if bytes != 0 && !page_code_runs => {
+                        data.report.withheld_page_code_rules += 1;
                         continue;
                     }
                     crate::scriptlets::Kind::Rule {
@@ -1049,5 +1066,22 @@ mod tests {
             policy.generic_selectors("https://normal.example/", &vec![".x".to_owned(); 257]),
             Err(DocumentStyleFailure::ResourceLimit)
         );
+    }
+
+    #[test]
+    fn a_platform_without_page_code_withholds_and_counts_it() {
+        let list = "www.youtube.com##+js(rpnt, script, a, b)\nwww.youtube.com##+js(set, a.b, true)";
+        let running = CosmeticPolicy::compile_for([(list, true)], true).unwrap();
+        assert_eq!(running.report().page_code_rules, 1);
+        assert!(running
+            .scriptlet_program()
+            .unwrap()
+            .contains("zephiumReplaceNodeText(\"script\""));
+        let withheld = CosmeticPolicy::compile_for([(list, true)], false).unwrap();
+        assert_eq!(withheld.report().page_code_rules, 0);
+        assert_eq!(withheld.report().withheld_page_code_rules, 1);
+        let program = withheld.scriptlet_program().unwrap();
+        assert!(!program.contains("zephiumReplaceNodeText(\"script\""));
+        assert!(program.contains("zephiumSetConstant(\"a.b\""));
     }
 }
