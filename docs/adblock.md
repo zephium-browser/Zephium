@@ -290,7 +290,7 @@ reported upstream when it applies there.
 | Source count / candidate rules | 32 / 250,000 |
 | Physical line / lines | 64 KiB / 500,000 |
 | WebKit rules / JSON | 140,000 / 32 MiB |
-| Runtime regexes / raw pattern bytes | 1,536 / 2 MiB |
+| Runtime regexes / raw pattern bytes | 4,096 / 2 MiB |
 | Filter evaluations per request | 256 |
 | Request/source URL | 32 KiB each |
 | Cosmetic rules / portable policy | 50,000 / 16 MiB |
