@@ -1591,3 +1591,36 @@ fn the_runtime_target_ignores_pruned_rules() {
     assert_eq!(with.digest(), without.digest());
     assert_eq!(with.report(), without.report());
 }
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_rule_stays_unsplit_where_splitting_would_pass_the_webkit_rule_limit() {
+    let compile = |max_webkit_rules| {
+        let limits = CompileLimits::new(CompileLimitValues {
+            max_sources: 1,
+            max_source_bytes: 1_024,
+            max_total_source_bytes: 1_024,
+            max_line_bytes: 1_024,
+            max_rules: 8,
+            max_physical_lines: 8,
+            max_webkit_rules,
+            max_webkit_json_bytes: 64 * 1024,
+            max_request_url_bytes: 4_096,
+            max_source_url_bytes: 4_096,
+        })
+        .unwrap();
+        Compiler::new(limits)
+            .compile(CompileTarget::WebKit, vec![source("/banner.js^$script\n")])
+            .unwrap()
+    };
+    let split = compile(2);
+    let split = split.webkit().unwrap();
+    assert_eq!(split.rule_count(), 2);
+    assert!(!split.json().contains(".*"));
+    let unsplit = compile(1);
+    let unsplit = unsplit.webkit().unwrap();
+    assert_eq!(unsplit.rule_count(), 1);
+    assert!(unsplit
+        .json()
+        .contains(r"/banner\\.js([^A-Za-z0-9_.%-].*)?$"));
+}

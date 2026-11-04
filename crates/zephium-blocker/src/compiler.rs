@@ -1137,51 +1137,47 @@ fn compile_webkit(
             }
             let equivalent = webkit_equivalent_without_resource_semantics(filter)
                 .map_err(|_| CompileError::UpstreamInvariant)?;
-            let mut native_rules = Vec::new();
+            let mut unsplit = Vec::new();
             for mut native in equivalent {
                 if let Some(pattern) =
                     crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
                 {
                     native.trigger.url_filter = pattern;
                 }
-                match crate::webkit::split_separator_end(&native.trigger.url_filter) {
-                    Some([at_end, before_separator]) => {
-                        let mut second = native.clone();
-                        native.trigger.url_filter = at_end;
-                        second.trigger.url_filter = before_separator;
-                        native_rules.push(native);
-                        native_rules.push(second);
-                    }
-                    None => native_rules.push(native),
-                }
+                unsplit.push(native);
             }
-            if native_rules.is_empty() {
+            if unsplit.is_empty() {
                 return Err(CompileError::UpstreamInvariant);
             }
-            if native_rules
-                .iter()
-                .any(|native| native.trigger.url_filter.len() > MAX_WEBKIT_URL_FILTER_BYTES)
-            {
+            let mut split = Vec::with_capacity(unsplit.len());
+            for native in &unsplit {
+                match crate::webkit::split_separator_end(&native.trigger.url_filter) {
+                    Some([at_end, before_separator]) => {
+                        let mut first = native.clone();
+                        let mut second = native.clone();
+                        first.trigger.url_filter = at_end;
+                        second.trigger.url_filter = before_separator;
+                        split.push(first);
+                        split.push(second);
+                    }
+                    None => split.push(native.clone()),
+                }
+            }
+            let emitted_before = blocking_rules
+                .len()
+                .checked_add(exception_rules.len())
+                .ok_or(CompileError::RuleCountOverflow)?;
+            let mut kept = retain_for_webkit(split, &resource_types, pruned)?;
+            // Splitting is an optimization: it never decides whether a list fits.
+            if kept.as_ref().is_some_and(|kept| {
+                emitted_before.saturating_add(kept.len()) > limits.max_webkit_rules()
+            }) {
+                kept = retain_for_webkit(unsplit, &resource_types, pruned)?;
+            }
+            let Some(kept) = kept else {
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;
-            }
-            let mut kept = Vec::with_capacity(native_rules.len());
-            for native in native_rules {
-                let converted_rule = ConvertedRule {
-                    native,
-                    resource_types: resource_types.clone(),
-                };
-                if matches!(converted_rule.native.action.typ, CbType::Block)
-                    && converted_rule.native.trigger.url_filter.contains(".*")
-                    && pruned.contains(
-                        &serde_json::to_vec(&canonical(&converted_rule))
-                            .map_err(CompileError::SerializeWebKit)?,
-                    )
-                {
-                    continue;
-                }
-                kept.push(converted_rule);
-            }
+            };
             if kept.is_empty() {
                 pruned_rules = pruned_rules
                     .checked_add(1)
@@ -1292,6 +1288,40 @@ fn digest_policy(prepared: &[PreparedSource]) -> PolicyDigest {
 struct CanonicalRule<'a> {
     action: CanonicalAction<'a>,
     trigger: CanonicalTrigger<'a>,
+}
+
+#[cfg(feature = "webkit")]
+/// The rules WebKit receives for one filter: `None` when a URL filter is past
+/// WebKit's size limit, otherwise what is left after pruning.
+fn retain_for_webkit(
+    natives: Vec<CbRule>,
+    resource_types: &[WebKitResourceType],
+    pruned: &crate::webkit_prune::PrunedRules,
+) -> Result<Option<Vec<ConvertedRule>>, CompileError> {
+    if natives
+        .iter()
+        .any(|native| native.trigger.url_filter.len() > MAX_WEBKIT_URL_FILTER_BYTES)
+    {
+        return Ok(None);
+    }
+    let mut kept = Vec::with_capacity(natives.len());
+    for native in natives {
+        let converted_rule = ConvertedRule {
+            native,
+            resource_types: resource_types.to_vec(),
+        };
+        if matches!(converted_rule.native.action.typ, CbType::Block)
+            && converted_rule.native.trigger.url_filter.contains(".*")
+            && pruned.contains(
+                &serde_json::to_vec(&canonical(&converted_rule))
+                    .map_err(CompileError::SerializeWebKit)?,
+            )
+        {
+            continue;
+        }
+        kept.push(converted_rule);
+    }
+    Ok(Some(kept))
 }
 
 #[cfg(feature = "webkit")]
