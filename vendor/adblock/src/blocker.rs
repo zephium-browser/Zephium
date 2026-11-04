@@ -103,6 +103,7 @@ pub struct NetworkMatcherPreparationLimits {
 /// Exact resources retained by one prepared matcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkMatcherPreparation {
+    /// Regex entries prepared, the omitted ones that never match included.
     pub regexes: usize,
     /// Regexes past the limits, prepared as never matching.
     pub omitted_regexes: usize,

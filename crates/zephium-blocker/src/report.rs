@@ -20,7 +20,8 @@ pub struct RuntimeCoverage {
 }
 
 impl RuntimeCoverage {
-    /// Returns eagerly compiled regular-expression objects.
+    /// Returns eagerly prepared regular-expression entries, the omitted ones
+    /// that never match included.
     pub const fn regexes(self) -> usize {
         self.regexes
     }

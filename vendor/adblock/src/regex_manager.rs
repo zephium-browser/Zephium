@@ -211,6 +211,14 @@ pub fn regex_compiles_within(
     if !mask.is_regex() && !mask.is_complete_regex() {
         return true;
     }
+    // Compilation slices a complete regex's slashes off unchecked.
+    if mask.is_complete_regex()
+        && patterns.iter().any(|pattern| {
+            pattern.len() < 2 || !pattern.starts_with('/') || !pattern.ends_with('/')
+        })
+    {
+        return false;
+    }
     !matches!(
         make_regexp_bounded(
             mask,

@@ -77,6 +77,28 @@ fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
 }
 
 #[test]
+fn a_malformed_complete_regex_never_compiles_instead_of_panicking() {
+    use adblock::filters::network::NetworkFilterMask;
+    for pattern in ["", "/", "x", "/a", "a/", "/é", "é/"] {
+        assert!(
+            !adblock::regex_manager::regex_compiles_within(
+                NetworkFilterMask::IS_COMPLETE_REGEX,
+                &[pattern],
+                96 * 1024,
+                16 * 1024
+            ),
+            "{pattern}"
+        );
+    }
+    assert!(adblock::regex_manager::regex_compiles_within(
+        NetworkFilterMask::IS_COMPLETE_REGEX,
+        &["/ads?/"],
+        96 * 1024,
+        16 * 1024
+    ));
+}
+
+#[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());
     assert_eq!(SourceId::new(""), Err(SourceIdError::Empty));
