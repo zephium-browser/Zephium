@@ -102,12 +102,17 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
     assert!(official("||unrelated.example^")
         .verify_official_canary()
         .is_err());
-    // A wildcard exception scoped to one site fails open when no page is known.
-    assert!(
+    // A wildcard exception scoped to one site lets everything through only
+    // when no page is known, which this matcher almost never judges.
+    assert_eq!(
         official("||doubleclick.com^\n@@*$script,3p,from=elsewhere.example")
-            .verify_official_canary()
-            .is_err()
+            .verify_official_canary(),
+        Ok(())
     );
+    // An exception that applies on every page is still refused.
+    assert!(official("||doubleclick.com^\n@@||doubleclick.com^$script")
+        .verify_official_canary()
+        .is_err());
     // A list that blocks the harmless request is refused too.
     assert!(official("||doubleclick.com^\n||example.com^")
         .verify_official_canary()
@@ -120,6 +125,22 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
             .verify_official_canary(),
         Ok(())
     );
+}
+
+#[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+#[test]
+fn without_exact_attribution_the_canary_refuses_a_site_scoped_wildcard_exception() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![FilterSource::new(
+                id("easylist"),
+                SourceFormat::Standard,
+                "||doubleclick.com^\n@@*$script,3p,from=elsewhere.example".to_owned(),
+            )],
+        )
+        .unwrap();
+    assert!(rules.verify_official_canary().is_err());
 }
 
 #[test]

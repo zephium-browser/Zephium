@@ -204,10 +204,15 @@ impl CompiledRules {
     }
 
     /// Whether a runtime policy still decides the known requests as its
-    /// official lists must, on a neutral page and with no page known, so a
-    /// list update that silently stops blocking is refused instead of used.
-    /// Each blocked request is checked only when the list that blocks it is
-    /// part of the policy.
+    /// official lists must, so a list update that silently stops blocking is
+    /// refused instead of used. Each blocked request is checked only when the
+    /// list that blocks it is part of the policy.
+    ///
+    /// Where the matcher knows the page, requests are judged on a neutral
+    /// page: uBlock Origin's site-scoped wildcard exceptions
+    /// (`@@*$script,1p,domain=…`) let everything through when no page is known,
+    /// and that is how such a matcher judges almost no requests. Without exact
+    /// attribution every request is judged with no page known.
     pub fn verify_official_canary(&self) -> Result<(), String> {
         if self.target() != CompileTarget::Runtime {
             return Ok(());
@@ -239,6 +244,7 @@ impl CompiledRules {
                         RequestMethod::Get,
                     )),
                 ),
+                #[cfg(not(feature = "runtime-exact"))]
                 (
                     "with no page known",
                     self.evaluate_source_independent(NetworkRequest::source_independent(
