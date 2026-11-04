@@ -267,6 +267,10 @@ pub(crate) struct Program {
     pub(crate) script: Arc<str>,
     pub(crate) hosts: usize,
     pub(crate) calls: usize,
+    #[cfg(test)]
+    table: Vec<(u64, usize)>,
+    #[cfg(test)]
+    runs: Vec<String>,
 }
 
 pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::CosmeticError> {
@@ -311,6 +315,7 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     // asked about under a suffix no rule names.
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
     let mut table = Vec::new();
+    let mut hosts = 0;
     for key in &keys {
         let host = match key.strip_suffix(".*") {
             Some(name) => format!("{name}.invalid"),
@@ -329,16 +334,16 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
             .map(str::trim)
             .filter(|block| !block.is_empty())
             .collect();
-        if blocks.is_empty() {
-            continue;
-        }
+        // A host whose calls are all excepted still gets an entry, an empty
+        // one, so the page stops there instead of taking its parent's.
+        hosts += usize::from(!blocks.is_empty());
         blocks.sort_unstable();
         let invocations = blocks.join("\n");
         let next = calls.len();
         let index = *calls.entry(invocations).or_insert(next);
         table.push((key_hash(key), index));
     }
-    if table.is_empty() {
+    if hosts == 0 {
         return Ok(None);
     }
     let mut ordered: Vec<(&String, &usize)> = calls.iter().collect();
@@ -367,8 +372,18 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     }
     Ok(Some(Program {
         script: script.into(),
-        hosts: table.len(),
-        calls: ordered.len(),
+        hosts,
+        calls: ordered
+            .iter()
+            .filter(|(invocations, _)| !invocations.is_empty())
+            .count(),
+        #[cfg(test)]
+        table,
+        #[cfg(test)]
+        runs: ordered
+            .iter()
+            .map(|(invocations, _)| (*invocations).clone())
+            .collect(),
     }))
 }
 
@@ -512,5 +527,39 @@ mod tests {
         assert!(build(&[rule("a.com##+js(no-such-scriptlet, x)", false)])
             .unwrap()
             .is_none());
+    }
+
+    /// The calls a page on `host` runs, found the way the page finds them.
+    fn calls_for<'a>(program: &'a Program, host: &str) -> Option<&'a str> {
+        let labels: Vec<&str> = host.split('.').collect();
+        let entry = (0..labels.len())
+            .map(|i| labels[i..].join("."))
+            .chain((0..labels.len().saturating_sub(1)).map(|i| format!("{}.*", labels[i])))
+            .find_map(|key| {
+                program
+                    .table
+                    .iter()
+                    .find(|(hash, _)| *hash == key_hash(&key))
+                    .map(|(_, index)| *index)
+            })?;
+        Some(program.runs[entry].as_str())
+    }
+
+    #[test]
+    fn an_excepted_subdomain_runs_none_of_its_parents_excepted_calls() {
+        let program = build(&[
+            rule("youtube.com##+js(set, a.b, true)", false),
+            rule("youtube.com##+js(set, c.d, true)", false),
+            rule("m.youtube.com#@#+js(set, a.b, true)", false),
+            rule("music.youtube.com#@#+js()", false),
+        ])
+        .unwrap()
+        .unwrap();
+        let parent = calls_for(&program, "www.youtube.com").unwrap();
+        assert!(parent.contains("\"a.b\"") && parent.contains("\"c.d\""));
+        let mobile = calls_for(&program, "m.youtube.com").unwrap();
+        assert!(!mobile.contains("\"a.b\"") && mobile.contains("\"c.d\""));
+        assert_eq!(calls_for(&program, "music.youtube.com"), Some(""));
+        assert_eq!(calls_for(&program, "example.com"), None);
     }
 }
