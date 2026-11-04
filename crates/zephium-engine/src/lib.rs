@@ -1191,6 +1191,7 @@ impl RetirementGate {
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
@@ -3353,6 +3354,11 @@ impl Engine for WebviewEngine {
                     .is_some()
             })
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
     }
 
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {

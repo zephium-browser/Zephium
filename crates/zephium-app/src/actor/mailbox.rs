@@ -1331,6 +1331,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::HttpAuthRequested { .. }
                     | EngineEvent::HttpAuthEnded { .. }
+                    | EngineEvent::InsecureAutofillRequested { .. }
                     | EngineEvent::MediaCaptureChanged { .. }
                     | EngineEvent::AudioChanged { .. }
                     | EngineEvent::FullscreenChanged { .. }

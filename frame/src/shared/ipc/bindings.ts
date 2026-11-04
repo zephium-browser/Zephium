@@ -2486,6 +2486,11 @@ host: string;
 insecure: boolean; proxy: boolean;
 /**  The last username or password was wrong. */
 retry: boolean } |
+/**
+ *  AutoFill was asked for on a page that is not encrypted; `host` is the
+ *  page's host.
+ */
+{ kind: "insecure_autofill"; host: string } |
 /**  The page stopped responding: wait for it, or reload it. */
 { kind: "unresponsive" };
 

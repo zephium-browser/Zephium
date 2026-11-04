@@ -131,3 +131,15 @@ test("a private tab's blocked pop-up offers no lasting choice", async () => {
   await page.getByRole("button", { name: "Open" }).click();
   expect(pageAnswers).toHaveBeenLastCalledWith("tab-1", "allow");
 });
+
+test("AutoFill on a page that is not encrypted asks before filling", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    request: { kind: "insecure_autofill", host: "shop.example" },
+  });
+  const card = page.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("This page isn't secure");
+  await expect.element(card).toHaveTextContent("shop.example doesn't encrypt its connection");
+  await page.getByRole("button", { name: "Fill Anyway" }).click();
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", "allow");
+});

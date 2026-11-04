@@ -152,6 +152,8 @@ pub enum PageRequest {
     Popup { url: Option<Url> },
     /// The site or its proxy asks to sign in; the engine holds the request.
     HttpAuth(crate::http_auth::HttpAuthPrompt),
+    /// AutoFill was asked for on a page that is not encrypted.
+    InsecureAutofill,
     /// The page stopped responding; the person may wait or end it.
     Unresponsive,
 }

@@ -234,3 +234,50 @@ fn autofill_password_asks_the_engine_only_for_the_loaded_page_in_front() {
     assert_eq!(run(&mut shell).outcome, OperationOutcome::Deferred);
     assert_eq!(asked(&engine).last(), Some(&format!("autofill {private}")));
 }
+
+#[test]
+fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetWindowFocused(true));
+    let page = active_id(&screen);
+    navigate_and_commit(&mut shell, page, "http://shop.example/login");
+    let request = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == page.to_string())
+            .and_then(|tab| tab.page_request)
+    };
+    shell.handle(Command::Engine(EngineEvent::InsecureAutofillRequested {
+        id: page,
+    }));
+    assert_eq!(
+        request(&screen),
+        Some(zephium_ipc::PageRequestView::InsecureAutofill {
+            host: "shop.example".into()
+        })
+    );
+    let filled = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("autofill-insecure "))
+            .count()
+    };
+    shell.handle(Command::AnswerPageRequest {
+        id: page,
+        decision: crate::PageRequestDecision::Dismiss,
+    });
+    assert_eq!(request(&screen), None);
+    assert_eq!(filled(&engine), 0, "cancelling fills nothing");
+
+    shell.handle(Command::Engine(EngineEvent::InsecureAutofillRequested {
+        id: page,
+    }));
+    shell.handle(Command::AnswerPageRequest {
+        id: page,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(filled(&engine), 1);
+}
