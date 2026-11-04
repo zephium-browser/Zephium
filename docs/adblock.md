@@ -24,7 +24,7 @@ Procedural cosmetics, resource replacement, response-CSP mutation and
 URL-parameter rewriting are out of scope. On macOS 15.4+ and Windows,
 `##+js(...)` rules run scriptlets from a library built into the app, never
 fetched; lists only choose the scriptlet and its arguments, and only uBlock
-Origin's two lists may call `trusted-*` ones.
+Origin's own lists may call `trusted-*` ones.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in
@@ -65,17 +65,25 @@ Desktop builds use these fixed publisher endpoints, in catalog order:
 | --- | --- | --- |
 | EasyList | `https://easylist.to/easylist/easylist.txt` | CC-BY-SA-3.0 |
 | EasyPrivacy | `https://easylist.to/easylist/easyprivacy.txt` | CC-BY-SA-3.0 |
-| uBlock filters | `https://ublockorigin.github.io/uAssets/filters/filters.txt` | GPL-3.0-only |
+| uBlock filters | `https://ublockorigin.github.io/uAssets/filters/filters.min.txt` | GPL-3.0-only |
 | uBlock filters – Quick fixes | `https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt` | GPL-3.0-only |
+| uBlock filters – Link shorteners | `https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt` | GPL-3.0-only |
+| uBlock filters – Privacy | `https://ublockorigin.github.io/uAssets/filters/privacy.min.txt` | GPL-3.0-only |
+| uBlock filters – Resource abuse | `https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt` | GPL-3.0-only |
+| uBlock filters – Unbreak | `https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt` | GPL-3.0-only |
+| uBlock filters – Badware risks | `https://ublockorigin.github.io/uAssets/filters/badware.min.txt` | GPL-3.0-only |
 
 HTTPS authenticates the server/transport; these downloads do not have an
 independent publisher signature. The app trusts the official publishers' sites.
-The signed application also embeds the same four lists as a licensed offline
+The signed application also embeds the same nine lists as a licensed offline
 seed. EasyList lists carry a numeric `Version` and upstream `Commit`; the uBlock
 Origin lists have neither and are versioned by the UTC minute of their
 `Last modified` header; the seed also records that header in full, so a copy
 changed within the same minute is accepted only when it was modified later.
-Their `!#include` lines are not followed.
+`filters.min.txt` is uBlock Origin's own build of `filters.txt` with its
+includes (the general filters and one file per year); the `.min` lists carry no
+`Homepage` header. No other `!#include` line is followed, and the mobile
+filters are not used.
 Optional TUF support remains independently tested, but no TUF publication
 infrastructure or signing keys are required by this release design.
 
@@ -88,10 +96,14 @@ Manual refresh coalesces and is rate-limited. Existing application maintenance
 triggers due work; the blocker adds no idle polling timer.
 
 Headers, titles, URLs, lengths, hashes, rule counts and suspicious shrinkage are
-validated. The four lists form one candidate. The worker prepares the policy,
+validated. The nine lists form one candidate. The worker prepares the policy,
 then macOS preflights the native network artifact before durable
 activation. Static cosmetic syntax and budgets are validated by the compiler. Windows prepares its frozen matcher before publication. Failed
-candidates leave the working policy installed. Current, previous and bundled
+candidates leave the working policy installed. A runtime candidate must still
+block known EasyList and EasyPrivacy requests and allow a harmless one, judged
+on a neutral page; a build without exact attribution judges them with no page
+known, where uBlock Origin's site-scoped wildcard exceptions
+(`@@*$script,1p,domain=…`) let everything through. Current, previous and bundled
 source material provide recovery; current bytes are verified with a bounded
 streaming buffer. A 304 is accepted only for the exact verified retained bytes
 and validators actually sent; otherwise one unconditional retry is allowed.
@@ -105,7 +117,7 @@ Known limit: the candidate is rejected as a whole, so every list that changed
 in it is withheld, including those that compiled fine. Each recovers when its
 publisher next changes it (quick fixes within about 8 hours, the others daily).
 
-The current bundled seed is **202611021408**, 4,073,004 uncompressed bytes.
+The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
 `LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
@@ -115,11 +127,15 @@ Release tooling and SBOM checks bind those artifacts to the shipping graph
 are release-signed. Refresh the seed with:
 
 ```sh
-cargo xtask update-blocker-seed --easylist PATH --easyprivacy PATH \
-  --ublock-filters PATH --ublock-quick-fixes PATH \
+cargo xtask update-blocker-seed --sources DIR \
   --license assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt \
   --gpl-license assets/blocker-seed/v1/LICENSE-GPL-3.0.txt
 ```
+
+`DIR` holds each list under its seed name: `easylist.txt`, `easyprivacy.txt`,
+`ublock-filters.txt`, `ublock-quick-fixes.txt`, `ublock-link-shorteners.txt`,
+`ublock-privacy.txt`, `ublock-resource-abuse.txt`, `ublock-unbreak.txt` and
+`ublock-badware.txt`.
 
 ## macOS
 
@@ -352,6 +368,10 @@ unsupported.
   is kept until the next refresh. An edit that only changes letter case emits
   the same rule, since url-filters are case-insensitive, and stays pruned.
 - The Windows runtime matcher has no such per-rule cost and compiles every rule.
+- uBlock Origin's badware list names scam and malware sites, which no corpus
+  visits, so its wildcard rules are never pruned: they are left out of the
+  WebKit list (counted as `navigation_checked`) and judged when a page or frame
+  starts loading. Its rules without `.*` cost WebKit almost nothing and stay.
 - The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
   sites, the top sites, pages where exceptions apply
   (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.

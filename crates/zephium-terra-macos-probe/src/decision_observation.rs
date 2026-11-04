@@ -241,6 +241,41 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
                     "/../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"
                 )),
             ),
+            EmbeddedReleaseAsset::new(
+                "ublock-link-shorteners.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-privacy.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-privacy.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-resource-abuse.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-unbreak.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-unbreak.txt.gz"
+                )),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-badware.txt",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/blocker-seed/v1/ublock-badware.txt.gz"
+                )),
+            ),
         ],
         limits,
         licenses,

@@ -88,7 +88,8 @@ struct SourceSpec {
     target: &'static str,
     title: &'static str,
     source_url: &'static str,
-    homepage: &'static str,
+    /// uBlock Origin's assembled `.min` lists carry no homepage line.
+    homepage: Option<&'static str>,
     license: &'static LicenseSpec,
     header: HeaderFormat,
     min_bytes: usize,
@@ -96,13 +97,13 @@ struct SourceSpec {
     follows_expires: bool,
 }
 
-const SOURCES: [SourceSpec; 4] = [
+const SOURCES: [SourceSpec; 9] = [
     SourceSpec {
         id: "easylist",
         target: "easylist.txt",
         title: "EasyList",
         source_url: "https://easylist.to/easylist/easylist.txt",
-        homepage: "https://easylist.to/",
+        homepage: Some("https://easylist.to/"),
         license: &CC_BY_SA,
         header: HeaderFormat::Adblock,
         min_bytes: 256 * 1024,
@@ -114,7 +115,7 @@ const SOURCES: [SourceSpec; 4] = [
         target: "easyprivacy.txt",
         title: "EasyPrivacy",
         source_url: "https://easylist.to/easylist/easyprivacy.txt",
-        homepage: "https://easylist.to/",
+        homepage: Some("https://easylist.to/"),
         license: &CC_BY_SA,
         header: HeaderFormat::Adblock,
         min_bytes: 256 * 1024,
@@ -125,8 +126,8 @@ const SOURCES: [SourceSpec; 4] = [
         id: "ublock-filters",
         target: "ublock-filters.txt",
         title: "uBlock filters",
-        source_url: "https://ublockorigin.github.io/uAssets/filters/filters.txt",
-        homepage: "https://github.com/uBlockOrigin/uAssets",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/filters.min.txt",
+        homepage: None,
         license: &GPL_3,
         header: HeaderFormat::Dated,
         min_bytes: 128 * 1024,
@@ -138,14 +139,85 @@ const SOURCES: [SourceSpec; 4] = [
         target: "ublock-quick-fixes.txt",
         title: "uBlock\u{2080} filters \u{2013} Quick fixes",
         source_url: "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt",
-        homepage: "https://github.com/uBlockOrigin/uAssets",
+        homepage: Some(UASSETS),
         license: &GPL_3,
         header: HeaderFormat::Dated,
         min_bytes: 8 * 1024,
         min_rules: 50,
         follows_expires: true,
     },
+    uassets(
+        "ublock-link-shorteners",
+        "ublock-link-shorteners.txt",
+        "uBlock filters \u{2013} Link shorteners",
+        "https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt",
+        Some(UASSETS),
+        32 * 1024,
+        500,
+    ),
+    uassets(
+        "ublock-privacy",
+        "ublock-privacy.txt",
+        "uBlock filters \u{2013} Privacy",
+        "https://ublockorigin.github.io/uAssets/filters/privacy.min.txt",
+        None,
+        32 * 1024,
+        500,
+    ),
+    uassets(
+        "ublock-resource-abuse",
+        "ublock-resource-abuse.txt",
+        "uBlock filters \u{2013} Resource abuse",
+        "https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt",
+        Some(UASSETS),
+        2 * 1024,
+        20,
+    ),
+    uassets(
+        "ublock-unbreak",
+        "ublock-unbreak.txt",
+        "uBlock filters \u{2013} Unbreak",
+        "https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt",
+        None,
+        32 * 1024,
+        500,
+    ),
+    uassets(
+        "ublock-badware",
+        "ublock-badware.txt",
+        "uBlock filters \u{2013} Badware risks",
+        "https://ublockorigin.github.io/uAssets/filters/badware.min.txt",
+        None,
+        32 * 1024,
+        1000,
+    ),
 ];
+
+const UASSETS: &str = "https://github.com/uBlockOrigin/uAssets";
+
+/// One of uBlock Origin's daily lists, published next to its main filters.
+const fn uassets(
+    id: &'static str,
+    target: &'static str,
+    title: &'static str,
+    source_url: &'static str,
+    homepage: Option<&'static str>,
+    min_bytes: usize,
+    min_rules: usize,
+) -> SourceSpec {
+    SourceSpec {
+        id,
+        target,
+        title,
+        source_url,
+        homepage,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes,
+        min_rules,
+        follows_expires: false,
+    }
+}
 
 #[derive(Clone, Debug)]
 struct SourceInput {
@@ -518,16 +590,16 @@ fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), St
     Ok(())
 }
 
+/// Reads each list from `source_directory` under its bundled file name.
 pub(crate) fn update(
     repository: &Path,
-    source_paths: [&Path; SOURCES.len()],
+    source_directory: &Path,
     license_paths: [&Path; LICENSES.len()],
 ) -> Result<(), String> {
     let sources = SOURCES
         .iter()
-        .zip(source_paths)
-        .map(|(spec, path)| {
-            let raw = read_regular_file(path, MAX_SOURCE_BYTES)?;
+        .map(|spec| {
+            let raw = read_regular_file(&source_directory.join(spec.target), MAX_SOURCE_BYTES)?;
             let header = parse_source_header(&raw, spec)?;
             Ok(SourceInput { spec, raw, header })
         })
@@ -1016,7 +1088,7 @@ fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, St
             .ok_or_else(|| format!("{expected_title} has no {name} header"))
     };
     if field("Title")? != expected_title
-        || field("Homepage")? != spec.homepage
+        || fields.get("Homepage").copied() != spec.homepage
         || field(spec.license.terms_header)? != spec.license.terms_url
     {
         return Err(format!("{expected_title} header provenance is invalid"));
@@ -1965,6 +2037,7 @@ const fn webkit_drop_name(reason: zephium_blocker::WebKitDropReason) -> &'static
         WebKitDropReason::ImportantPriority => "important_priority",
         WebKitDropReason::SuppressedByRuleSemantics => "suppressed_by_rule_semantics",
         WebKitDropReason::UrlFilterTooLarge => "url_filter_too_large",
+        WebKitDropReason::NavigationChecked => "navigation_checked",
     }
 }
 
@@ -2037,9 +2110,10 @@ mod tests {
     fn source_headers_follow_each_lists_own_format() {
         let quick_fixes = &SOURCES[3];
         let mut list = format!(
-        WebKitDropReason::NavigationChecked => "navigation_checked",
             "! Title: {}\n! Last modified: Mon, 02 Nov 2026 14:08:18 +0000\n! Expires: 8 hours\n! License: {}\n! Homepage: {}\n",
-            quick_fixes.title, GPL_3.terms_url, quick_fixes.homepage
+            quick_fixes.title,
+            GPL_3.terms_url,
+            quick_fixes.homepage.unwrap()
         );
         for rule in 0..600 {
             list.push_str(&format!("example{rule}.invalid##.advertisement\n"));
