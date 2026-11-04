@@ -16,7 +16,7 @@ const QUALITY_FILE: &str = "compile-report.json";
 const NOTICE_FILE: &str = "NOTICE";
 const METADATA_FILES: [&str; 4] = [CATALOG_FILE, NOTICE_FILE, QUALITY_FILE, SEED_FILE];
 const SEED_SCHEMA_VERSION: u32 = 2;
-const QUALITY_SCHEMA_VERSION: u32 = 3;
+const QUALITY_SCHEMA_VERSION: u32 = 4;
 const REDISTRIBUTION: &str = "Unmodified upstream subscription; deterministic gzip packaging only";
 const HOUR: u64 = 60 * 60;
 const DAY: u64 = 24 * HOUR;
@@ -280,6 +280,12 @@ struct CosmeticGolden {
     accepted_rules: usize,
     rejected_rules: usize,
     generic_hide_controls: usize,
+    scriptlet_rules: usize,
+    unknown_scriptlet_rules: usize,
+    unsupported_scriptlet_rules: usize,
+    scriptlet_hosts: usize,
+    scriptlet_calls: usize,
+    scriptlet_program_bytes: usize,
     policy_sha256: String,
     policy_bytes: usize,
     native_artifact_sha256: Option<String>,
@@ -1858,10 +1864,17 @@ pub(crate) fn compile_hidden(
         .map(|policy| {
             let encoded = policy.encode().map_err(|error| error.to_string())?;
             let report = policy.report();
+            let (scriptlet_hosts, scriptlet_calls) = policy.scriptlet_coverage();
             Ok::<_, String>(CosmeticGolden {
                 accepted_rules: report.accepted,
                 rejected_rules: report.rejected,
                 generic_hide_controls: report.generic_controls,
+                scriptlet_rules: report.scriptlet_rules,
+                unknown_scriptlet_rules: report.unknown_scriptlet_rules,
+                unsupported_scriptlet_rules: report.unsupported_scriptlet_rules,
+                scriptlet_hosts,
+                scriptlet_calls,
+                scriptlet_program_bytes: policy.scriptlet_program().map_or(0, str::len),
                 policy_sha256: hex_sha256(&encoded),
                 policy_bytes: encoded.len(),
                 native_artifact_sha256: None,

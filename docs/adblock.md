@@ -20,8 +20,11 @@ soon as the empty native policy is acknowledged; the UI never describes that
 policy as active protection. Updates retain the installed policy throughout.
 Already issued requests cannot be blocked retroactively.
 
-Scriptlets, procedural cosmetics, resource replacement, response-CSP mutation,
-URL-parameter rewriting, and YouTube-specific ad blocking are out of scope.
+Procedural cosmetics, resource replacement, response-CSP mutation and
+URL-parameter rewriting are out of scope. On macOS 15.4+ and Windows,
+`##+js(...)` rules run scriptlets from a library built into the app, never
+fetched; lists only choose the scriptlet and its arguments, and only uBlock
+Origin's two lists may call `trusted-*` ones.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in
@@ -309,6 +312,29 @@ Child-frame cosmetic delivery is no longer enabled. Native QA also caught and
 fixed stale site controls after navigation: site identity/readiness now participate
 in status deduplication and focused tab updates publish that status.
 No test result claims Windows runtime, installer, battery or broad-web coverage.
+
+## YouTube
+
+uBlock Origin's `set` rules remove the pre-roll ad data from the watch page, so
+no pre-roll plays, but the video still starts later than in Brave. Measured on
+2026-11-04 with QA builds, 5 videos × 3 runs per browser, mean ± sd:
+
+| | Zephium | Brave |
+| --- | --- | --- |
+| macOS start ms | 8871 ± 6078 | 3831 ± 5339 |
+| macOS stall ms | 7200 ± 5805 | 2083 ± 5245 |
+| Windows start ms | 11308 ± 5403 | 4036 ± 3764 |
+| Windows stall ms | 7650 ± 5438 | 1567 ± 3521 |
+
+The stall is the player waiting for its first content media. Both browsers are
+served the ad data in the page and SABR streaming. On macOS, YouTube's client
+under WebKit requests neither of its ad probes
+(`static.doubleclick.net/instream/ad_status.js`,
+`googleads.g.doubleclick.net/pagead/id`) nor a second `/youtubei/v1/player`,
+with protection on or off, and the hold is timed by the server: with the ad
+left in, muted and played at 16×, content still arrived about the ad's length
+after it began. uBlock Origin's rule that rewrites YouTube's page script did not
+shorten the stall on either platform.
 
 ## Rules WebKit never needed
 

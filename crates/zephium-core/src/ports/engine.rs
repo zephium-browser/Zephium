@@ -720,6 +720,11 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Names the storage of a profile's views before the first one exists,
+    /// so native state made ahead of them, such as the profile's scriptlet
+    /// context, is made where those views will look for it. Call it before
+    /// the profile's first content policy.
+    fn prepare_profile(&self, _partition: Partition) {}
     /// Replaces the sites in `profile` whose pages may open a new tab
     /// without a click.
     fn set_popup_sites(&self, _profile: ProfileId, _origins: Vec<crate::permissions::PageOrigin>) {}

@@ -1101,12 +1101,11 @@ impl EngineHost {
                 digest: native_digest,
             });
             self.refresh_profile_document_styles(profile);
-            self.emit_content_policy_settlement(
-                profile,
-                generation,
-                ContentRuleSettlement::Applied { generation },
-            );
-            self.start_queued_content_policy(profile);
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            if self.wait_for_scriptlets(profile, generation) {
+                return;
+            }
+            self.settle_applied_content_policy(profile, generation);
             return;
         }
 
@@ -1340,6 +1339,20 @@ impl EngineHost {
             digest: native_digest,
         });
         self.refresh_profile_document_styles(profile);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if self.wait_for_scriptlets(profile, generation) {
+            return;
+        }
+        self.settle_applied_content_policy(profile, generation);
+    }
+
+    /// The applied generation's terminal settlement. It follows the profile's
+    /// scriptlet program, so views held for startup protection wait for both.
+    pub(super) fn settle_applied_content_policy(
+        &mut self,
+        profile: ProfileId,
+        generation: ContentPolicyGeneration,
+    ) {
         self.emit_content_policy_settlement(
             profile,
             generation,
@@ -1434,6 +1447,11 @@ impl EngineHost {
         self.blocker_statistics.remove(&profile);
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.refresh_profile_scriptlets(profile);
+            self.scriptlets.forget(profile);
         }
     }
 
@@ -2357,7 +2375,7 @@ mod tests {
                 .expect("replacement lost its authoritative applied state");
         let settlement = applied
             + source[applied..]
-                .find("ContentRuleSettlement::Applied { generation }")
+                .find("self.settle_applied_content_policy(profile, generation);")
                 .expect("replacement lost its terminal applied settlement");
         assert!(
             cohort < swap && swap < applied && applied < settlement,

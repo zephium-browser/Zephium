@@ -65,10 +65,11 @@ const UBLOCK_URL: &str =
 /// list updates after a temporary install, so its configuration gets longer.
 const FIREFOX_SETTLE_MS: u64 = 5000;
 const UBLOCK_SETTLE_MS: u64 = 30_000;
-/// Every document after the driver is ready, so a heavy page does not lose
-/// requests from the probe's count to the default buffer of 250.
-const PRELOAD: &str = "performance.setResourceTimingBufferSize(10000);";
+/// Every top-level document after the driver is ready.
+const PRELOAD: &str = include_str!("blocker_bench/preload.js");
 const WATCH_SECONDS: u64 = 30;
+/// Each of the two seeks after the watch gets this long to play again.
+const SEEK_WITHIN_MS: u64 = 15_000;
 const YOUTUBE_DIALOG_WAIT_MS: u64 = 4000;
 const QA_IDENTIFIER: &str = "app.zephium.protection-qa";
 /// Speedometer starts itself when it is given `startAutomatically`.
@@ -1472,7 +1473,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             results.launches.push(launch);
             let plan = context.plan(config);
             let feed = sites::YOUTUBE_FEED.to_string();
-            let watch = sites::watch_script(WATCH_SECONDS);
+            let watch = sites::watch_script(WATCH_SECONDS, SEEK_WITHIN_MS);
             let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![(
                 "feed",
                 None,
@@ -1486,7 +1487,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                     Some(id),
                     format!("https://www.youtube.com/watch?v={id}"),
                     &watch,
-                    WATCH_SECONDS * 1000 + 15_000,
+                    WATCH_SECONDS * 1000 + 2 * SEEK_WITHIN_MS + 15_000,
                 ));
             }
             pages.push((

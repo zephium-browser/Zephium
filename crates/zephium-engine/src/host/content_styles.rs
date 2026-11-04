@@ -274,6 +274,8 @@ impl EngineHost {
             spare.view.site_scope.refresh();
         }
         self.refresh_profile_document_styles(profile);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.refresh_profile_scriptlets(profile);
         true
     }
     pub(super) fn refresh_profile_document_styles(&mut self, profile: ProfileId) {

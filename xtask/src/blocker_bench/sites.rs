@@ -56,12 +56,18 @@ pub(super) fn probe_script(site: &Site) -> String {
     )
 }
 
-pub(super) fn watch_script(seconds: u64) -> String {
-    YOUTUBE_WATCH.replacen(
-        "const seconds = __SECONDS__;",
-        &format!("const seconds = {seconds};"),
-        1,
-    )
+pub(super) fn watch_script(seconds: u64, seek_within_ms: u64) -> String {
+    YOUTUBE_WATCH
+        .replacen(
+            "const seconds = __SECONDS__;",
+            &format!("const seconds = {seconds};"),
+            1,
+        )
+        .replacen(
+            "const seekWithinMs = __SEEK_WITHIN_MS__;",
+            &format!("const seekWithinMs = {seek_within_ms};"),
+            1,
+        )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -118,8 +124,9 @@ mod tests {
         };
         let probe = probe_script(&site);
         assert!(probe.contains("const siteSelectors = [\".ad-slot\",\"[id^='sda-']\"];"));
-        let watch = watch_script(30);
+        let watch = watch_script(30, 15000);
         assert!(watch.contains("const seconds = 30;"));
+        assert!(watch.contains("const seekWithinMs = 15000;"));
         let recipe = Recipe {
             click: vec!["#accept".into()],
             shadow: Some("#host".into()),
@@ -133,6 +140,7 @@ mod tests {
         assert!(check.contains("const recipe = null;"));
         assert!(!probe.contains("= __SITE__;"));
         assert!(!watch.contains("= __SECONDS__;"));
+        assert!(!watch.contains("= __SEEK_WITHIN_MS__;"));
         for placeholder in ["__RECIPE__", "__MODE__", "__WAIT__"] {
             assert!(!act.contains(placeholder) && !check.contains(placeholder));
         }
