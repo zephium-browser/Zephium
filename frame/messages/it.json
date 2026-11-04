@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Riprendi",
   "download_held": "In attesa della tua decisione",
   "download_held_prompt": "Questo tipo di file può danneggiare il computer. Vuoi tenerlo?",
+  "download_held_insecure_prompt": "Questo file è arrivato tramite una connessione non cifrata. Tenerlo?",
   "download_keep": "Tieni",
   "download_discard": "Elimina",
   "download_error_connection_lost": "La connessione è caduta. Torna al sito web per scaricare di nuovo questo file.",

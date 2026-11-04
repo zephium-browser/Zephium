@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Reanudar",
   "download_held": "Esperando tu decisión",
   "download_held_prompt": "Este tipo de archivo puede dañar tu ordenador. ¿Quieres conservarlo?",
+  "download_held_insecure_prompt": "Este archivo llegó por una conexión sin cifrar. ¿Conservarlo?",
   "download_keep": "Conservar",
   "download_discard": "Eliminar",
   "download_error_connection_lost": "Se perdió la conexión. Vuelve al sitio web para descargar este archivo de nuevo.",

@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Resume",
   "download_held": "Waiting for your decision",
   "download_held_prompt": "This type of file can harm your computer. Keep it?",
+  "download_held_insecure_prompt": "This file came over a connection that isn't encrypted. Keep it?",
   "download_keep": "Keep",
   "download_discard": "Delete",
   "download_error_connection_lost": "The connection was lost. Return to the website to download this file again.",

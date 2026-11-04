@@ -13,6 +13,7 @@ const entry: DownloadView = {
   received: "512",
   total: null,
   error: null,
+  insecure: false,
 };
 describe("native download progress", () => {
   it("keeps an unknown transfer length indeterminate", () => {

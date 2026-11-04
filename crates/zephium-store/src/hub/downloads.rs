@@ -331,6 +331,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         }
     }
 

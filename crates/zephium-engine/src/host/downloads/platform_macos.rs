@@ -474,6 +474,7 @@ impl Downloads {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         self.active.borrow_mut().insert(
             id,
@@ -498,9 +499,9 @@ impl Downloads {
                 name: None,
                 resume: None,
                 resuming: false,
-                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
                 site,
                 confirmed: false,
+                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
         unsafe { native.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
@@ -604,6 +605,13 @@ impl Downloads {
             };
             transfer.record.filename = name;
             transfer.record.total = u64::try_from(response.expectedContentLength()).ok();
+            // The response's own address, after every redirect.
+            transfer.record.insecure = response
+                .URL()
+                .and_then(|url| url.absoluteString())
+                .and_then(|url| bounded(&url, 8192))
+                .and_then(|url| url::Url::parse(&url).ok())
+                .is_some_and(|url| is_insecure_source(&url));
             let completion = completion.copy();
             transfer.destination_reply = Some(DestinationReply::new(move |path| {
                 let url = path.and_then(|path| {

@@ -3215,6 +3215,7 @@
   "download_resume_paused": "再開",
   "download_held": "確認待ち",
   "download_held_prompt": "この種類のファイルはコンピュータに損害を与える可能性があります。保存しますか？",
+  "download_held_insecure_prompt": "このファイルは暗号化されていない接続で届きました。保存しますか？",
   "download_keep": "保存",
   "download_discard": "削除",
   "download_error_connection_lost": "接続が切れました。このファイルをもう一度ダウンロードするには、Web サイトに戻ってください。",

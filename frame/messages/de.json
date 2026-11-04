@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Fortsetzen",
   "download_held": "Wartet auf deine Entscheidung",
   "download_held_prompt": "Diese Dateiart kann deinen Computer beschädigen. Behalten?",
+  "download_held_insecure_prompt": "Diese Datei kam über eine unverschlüsselte Verbindung. Behalten?",
   "download_keep": "Behalten",
   "download_discard": "Löschen",
   "download_error_connection_lost": "Die Verbindung wurde unterbrochen. Kehre zur Website zurück, um diese Datei erneut herunterzuladen.",

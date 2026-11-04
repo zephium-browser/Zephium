@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Відновити",
   "download_held": "Очікує вашого рішення",
   "download_held_prompt": "Файли цього типу можуть пошкодити ваш комп’ютер. Зберегти?",
+  "download_held_insecure_prompt": "Цей файл надійшов незашифрованим з’єднанням. Зберегти його?",
   "download_keep": "Зберегти",
   "download_discard": "Видалити",
   "download_error_connection_lost": "З’єднання втрачено. Поверніться на сайт, щоб завантажити цей файл знову.",

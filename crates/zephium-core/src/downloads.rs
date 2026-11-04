@@ -94,6 +94,10 @@ pub struct DownloadRecord {
     /// A native completion/cancellation or process-exit proof ended writes.
     #[serde(default)]
     pub writer_released: bool,
+    /// The file came over plain http from a host outside the person's own
+    /// network. Left out when false, so earlier builds still read the row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +171,7 @@ impl DownloadRecord {
             received: self.received.to_string(),
             total: self.total.map(|value| value.to_string()),
             error: self.error,
+            insecure: self.insecure,
         }
     }
 }
@@ -185,6 +190,8 @@ pub struct DownloadView {
     pub received: String,
     pub total: Option<String>,
     pub error: Option<DownloadError>,
+    /// The file came over a connection that is not encrypted.
+    pub insecure: bool,
 }
 
 /// The default saves straight to the system Downloads folder, as other
@@ -512,6 +519,15 @@ pub fn is_dangerous_file_on(name: &str, windows: bool) -> bool {
     })
 }
 
+/// Whether a download from `url` crossed the network unencrypted: plain http
+/// to a host outside the person's own network.
+pub fn is_insecure_source(url: &url::Url) -> bool {
+    url.scheme() == "http"
+        && !url
+            .host_str()
+            .is_some_and(crate::certificates::is_local_host)
+}
+
 pub fn canonical_id(id: &str) -> bool {
     DownloadId::parse(id).is_some_and(|value| value.to_string() == id)
 }
@@ -774,6 +790,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         assert!(record.update_progress(5, Some(10)));
         assert!(!record.update_progress(5, None));
@@ -1004,6 +1021,24 @@ mod tests {
         assert!(!is_dangerous_file("setup.exe.pdf"));
         // A name that sanitizing leaves is still judged by its extension.
         assert!(is_dangerous_file(&safe_filename("..\\..\\evil.EXE")));
+    }
+
+    #[test]
+    fn only_plain_http_from_outside_the_local_network_is_insecure() {
+        for (url, insecure) in [
+            ("http://files.example.com/setup.zip", true),
+            ("http://93.184.216.34/a.bin", true),
+            ("https://files.example.com/setup.zip", false),
+            ("http://127.0.0.1:8000/a.bin", false),
+            ("http://192.168.1.20/a.bin", false),
+            ("http://printer.local/driver.pkg", false),
+            ("http://[::1]/a.bin", false),
+            ("blob:https://example.com/0f1e", false),
+            ("data:text/plain,hi", false),
+        ] {
+            let url = url::Url::parse(url).unwrap();
+            assert_eq!(is_insecure_source(&url), insecure, "{url}");
+        }
     }
     #[test]
     fn abandoned_native_calls_complete_with_unavailable_once() {

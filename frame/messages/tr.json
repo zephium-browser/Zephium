@@ -3215,6 +3215,7 @@
   "download_resume_paused": "Sürdür",
   "download_held": "Kararınız bekleniyor",
   "download_held_prompt": "Bu dosya türü bilgisayarınıza zarar verebilir. Saklansın mı?",
+  "download_held_insecure_prompt": "Bu dosya şifrelenmemiş bir bağlantıyla geldi. Saklansın mı?",
   "download_keep": "Sakla",
   "download_discard": "Sil",
   "download_error_connection_lost": "Bağlantı kesildi. Bu dosyayı yeniden indirmek için web sitesine dönün.",

@@ -1412,6 +1412,8 @@ export type DownloadView = {
 	received: string,
 	total: string | null,
 	error: DownloadError | null,
+	/**  The file came over a connection that is not encrypted. */
+	insecure: boolean,
 };
 
 export type DownloadsChanged = {
@@ -2486,13 +2488,13 @@ host: string;
 insecure: boolean; proxy: boolean;
 /**  The last username or password was wrong. */
 retry: boolean } |
-/**  The page stopped responding: wait for it, or reload it. */
-{ kind: "unresponsive" };
 /**
  *  The site wants to save a file. `allowed` says the site may already
  *  download and only this unclicked download is asked about.
  */
 { kind: "download"; request: number; site: string; filename: string; allowed: boolean; unclicked: boolean } |
+/**  The page stopped responding: wait for it, or reload it. */
+{ kind: "unresponsive" };
 
 /**  One site's styles, for the Settings manager. */
 export type PageSiteStylesV1 = {

@@ -426,7 +426,11 @@ impl Downloads {
             if transfer.cancelling || transfer.record.state != DownloadState::Receiving {
                 return;
             }
-            if needs_confirmation(transfer.kept, &transfer.record.filename) {
+            if needs_confirmation(
+                transfer.kept,
+                &transfer.record.filename,
+                transfer.record.insecure,
+            ) {
                 // Received in full, but not placed among the person's files
                 // until they have been asked.
                 transfer.record.state = DownloadState::Held;
@@ -559,11 +563,11 @@ impl Downloads {
     }
 
     fn terminal(&self, id: DownloadId, state: DownloadState, error: Option<DownloadError>) {
+        self.release_site(id);
         let (destination, on_started) = {
             let mut active = self.active.borrow_mut();
             let Some(transfer) = active.get_mut(&id) else {
                 return;
-        self.release_site(id);
             };
             if transfer.persisting_terminal {
                 return;
@@ -977,9 +981,10 @@ impl Downloads {
     }
 }
 
-/// A finished download waits to be confirmed unless the person already kept it.
-fn needs_confirmation(kept: bool, filename: &str) -> bool {
-    !kept && is_dangerous_file(filename)
+/// A finished download waits to be confirmed unless the person already kept
+/// it: a type that can run, or a file that came over plain http.
+fn needs_confirmation(kept: bool, filename: &str, insecure: bool) -> bool {
+    !kept && (insecure || is_dangerous_file(filename))
 }
 
 /// Only a transfer that is receiving, still has its staging folder, and is
@@ -1182,10 +1187,13 @@ mod state_tests {
 
     #[test]
     fn a_dangerous_type_is_held_until_kept_and_then_published_like_any_other() {
-        assert!(needs_confirmation(false, "setup.exe"));
-        assert!(needs_confirmation(false, "disk.dmg"));
-        assert!(!needs_confirmation(true, "setup.exe"));
-        assert!(!needs_confirmation(false, "report.pdf"));
+        assert!(needs_confirmation(false, "setup.exe", false));
+        assert!(needs_confirmation(false, "disk.dmg", false));
+        assert!(!needs_confirmation(true, "setup.exe", false));
+        assert!(!needs_confirmation(false, "report.pdf", false));
+        // A file that came over plain http waits whatever its type, until kept.
+        assert!(needs_confirmation(false, "report.pdf", true));
+        assert!(!needs_confirmation(true, "report.pdf", true));
         // Only the file that is waiting can be kept or deleted, once.
         assert!(may_decide_held(DownloadState::Held, false, false));
         for state in [

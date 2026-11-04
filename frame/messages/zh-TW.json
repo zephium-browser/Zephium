@@ -3215,6 +3215,7 @@
   "download_resume_paused": "繼續",
   "download_held": "等待你的決定",
   "download_held_prompt": "此類檔案可能會損害你的電腦。要保留嗎？",
+  "download_held_insecure_prompt": "此檔案透過未加密的連線傳來。要保留嗎？",
   "download_keep": "保留",
   "download_discard": "刪除",
   "download_error_connection_lost": "連線已中斷。請回到網站重新下載此檔案。",

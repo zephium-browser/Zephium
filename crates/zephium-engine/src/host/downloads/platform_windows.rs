@@ -443,6 +443,7 @@ impl Downloads {
             super::site::SiteAdmission::Open => None,
             super::site::SiteAdmission::Hold(hold) => Some(hold),
         };
+        let insecure = url::Url::parse(&uri).is_ok_and(|url| is_insecure_source(&url));
         let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
             return;
         };
@@ -568,6 +569,7 @@ impl Downloads {
             identity: None,
             writer: Some(writer),
             writer_released: false,
+            insecure,
         };
         self.active.borrow_mut().insert(
             id,
@@ -592,10 +594,10 @@ impl Downloads {
                 persisting_terminal: false,
                 kept: false,
                 user_pausing: false,
-                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
-            },
                 site,
                 confirmed: false,
+                deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
+            },
         );
         self.changed(partition.profile());
         self.ensure_recovery(partition);
