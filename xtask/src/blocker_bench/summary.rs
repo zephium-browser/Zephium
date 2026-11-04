@@ -551,7 +551,25 @@ fn consent_line(results: &Results) -> String {
         .get("youtubeConsent")
         .and_then(Value::as_str)
         .unwrap_or("reject");
-    format!("YouTube's consent was answered \"{answer} all\".")
+    let answered: Vec<String> = results
+        .configs
+        .iter()
+        .filter_map(|config| {
+            let steps: Vec<&YoutubeStep> = results
+                .youtube
+                .iter()
+                .filter(|step| step.config == *config)
+                .collect();
+            (!steps.is_empty()).then(|| {
+                let count = steps.iter().filter(|step| step.consent_answered).count();
+                format!("{config} {count} of {}", steps.len())
+            })
+        })
+        .collect();
+    format!(
+        "YouTube's consent prompt was answered \"{answer} all\" on these steps: {}.",
+        answered.join(", ")
+    )
 }
 
 /// Which launches took the document-start script the watch timings come from.
@@ -1203,5 +1221,25 @@ mod tests {
         assert!(text.contains("| 1840 "), "{text}");
         assert!(text.contains("| 420 "), "{text}");
         assert!(text.contains("| 1/2 "), "{text}");
+    }
+
+    #[test]
+    fn the_consent_line_counts_the_steps_that_answered_per_browser() {
+        let mut results = results(Vec::new());
+        results.configs = vec![ZEPHIUM_ON.into(), "brave".into()];
+        results.options = json!({ "youtubeConsent": "accept" });
+        for (config, answered) in [(ZEPHIUM_ON, true), (ZEPHIUM_ON, false), ("brave", false)] {
+            results.youtube.push(YoutubeStep {
+                config: config.into(),
+                consent_answered: answered,
+                ..YoutubeStep::default()
+            });
+        }
+        assert_eq!(
+            consent_line(&results),
+            format!(
+                "YouTube's consent prompt was answered \"accept all\" on these steps: {ZEPHIUM_ON} 1 of 2, brave 0 of 1."
+            )
+        );
     }
 }
