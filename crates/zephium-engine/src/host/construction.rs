@@ -1551,6 +1551,9 @@ impl EngineHost {
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                // Every top-level http page is tried over https first and
+                // loads over http only when that fails.
+                .with_https_upgrade(wry::AppleHttpsUpgrade::AutomaticFallback)
                 .with_drag_drop_handler(move |event| {
                     let permitted = drop_permit.active_token().is_some()
                         && drop_presentation.load(Ordering::Acquire);

@@ -711,3 +711,69 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
         "another port is another origin"
     );
 }
+
+#[test]
+fn an_http_page_is_tried_over_https_first_and_falls_back_once() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let loads = |engine: &FakeEngine| -> Vec<String> {
+        engine
+            .calls()
+            .into_iter()
+            .filter_map(|call| {
+                call.strip_prefix(&format!("navigate {id} "))
+                    .or_else(|| call.strip_prefix(&format!("create {id} ")))
+                    .and_then(|rest| rest.split(' ').next())
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    let failure = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.failure)
+    };
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/news".into(),
+    });
+    assert_eq!(
+        loads(&engine).last().map(String::as_str),
+        Some("https://plain.example/news")
+    );
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Unreachable,
+        url: Some("https://plain.example/news".into()),
+        replaced_page: true,
+    }));
+    assert_eq!(failure(&screen), None, "the failed try never shows");
+    assert_eq!(
+        loads(&engine).last().map(String::as_str),
+        Some("http://plain.example/news"),
+        "the page loads over http as asked"
+    );
+
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/other".into(),
+    });
+    assert_eq!(
+        loads(&engine).last().map(String::as_str),
+        Some("http://plain.example/other"),
+        "a host that failed is not tried again"
+    );
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://router.lan/".into(),
+    });
+    assert_eq!(
+        loads(&engine).last().map(String::as_str),
+        Some("http://router.lan/"),
+        "the person's own network stays as asked"
+    );
+}

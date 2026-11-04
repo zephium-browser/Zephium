@@ -21,6 +21,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod https_first;
 mod media;
 mod network;
 mod operations;
@@ -262,6 +263,7 @@ pub struct Shell {
     /// past, for this run only; their pages never look secure.
     continued_certificates:
         std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
+    https_first: https_first::HttpsFirst,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -506,6 +508,7 @@ impl Shell {
             external_apps_allowed: std::collections::HashSet::new(),
             popup_sites: std::collections::HashMap::new(),
             continued_certificates: std::collections::HashSet::new(),
+            https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,

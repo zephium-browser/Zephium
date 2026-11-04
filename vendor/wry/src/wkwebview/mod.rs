@@ -616,6 +616,20 @@ impl InnerWebView {
         ns_string!("allowsPictureInPictureMediaPlayback"),
       );
 
+      #[cfg(target_os = "macos")]
+      if let Some(policy) = pl_attrs.https_upgrade {
+        use objc2_web_kit::WKWebpagePreferencesUpgradeToHTTPSPolicy as Policy;
+        let preferences = config.defaultWebpagePreferences();
+        // WebKit names this policy from macOS 15.2; earlier systems keep
+        // upgrading only the hosts it knows support https.
+        if preferences.respondsToSelector(objc2::sel!(setPreferredHTTPSNavigationPolicy:)) {
+          preferences.setPreferredHTTPSNavigationPolicy(match policy {
+            crate::AppleHttpsUpgrade::AutomaticFallback => Policy::AutomaticFallbackToHTTP,
+            crate::AppleHttpsUpgrade::UserMediatedFallback => Policy::UserMediatedFallbackToHTTP,
+          });
+        }
+      }
+
       if attributes.javascript_disabled {
         // <https://developer.apple.com/documentation/webkit/wkwebviewconfiguration/defaultwebpagepreferences>
         // Available: macOS 10.15+, iOS 13+

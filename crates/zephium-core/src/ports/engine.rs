@@ -901,6 +901,11 @@ pub trait Engine {
     fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Whether the engine itself tries every top-level `http` page over
+    /// https first and falls back on failure, so the browser does not.
+    fn upgrades_https_natively(&self) -> bool {
+        false
+    }
     /// Starts watching the committed document's icon links: what they name
     /// arrives as `EngineEvent::FaviconCandidates` when the head first has
     /// icons and whenever they change until the page has loaded. One call per

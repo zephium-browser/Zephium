@@ -553,6 +553,11 @@ impl Shell {
                             replaced_page && navigation::is_browser_target(url)
                         }
                     });
+                // An https try that failed loads over http next; its error
+                // never shows.
+                if self.https_first_failed(id) {
+                    return;
+                }
                 let covered = self
                     .items
                     .tab(id)
@@ -673,6 +678,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
+                self.https_first_settled(id, &committed_url);
                 if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
