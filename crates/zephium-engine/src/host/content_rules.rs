@@ -1451,10 +1451,7 @@ impl EngineHost {
     fn set_profile_navigation(
         &mut self,
         profile: ProfileId,
-        (badware, lists): (
-            Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
-            Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
-        ),
+        (badware, lists): (Option<NavigationPolicy>, Option<NavigationPolicy>),
     ) {
         let slot = self.blocker_navigation.entry(profile).or_default();
         let mut guard = slot.borrow_mut();
@@ -1787,6 +1784,8 @@ fn content_policy_generations(
 pub(super) fn policy_generation_is_applied(state: Option<&ProfileContentPolicy>) -> bool {
     state.is_some_and(|state| state.applied.is_some())
 }
+
+type NavigationPolicy = Arc<dyn zephium_core::blocker::NetworkRequestPolicy>;
 
 #[cfg(test)]
 mod tests {

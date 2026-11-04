@@ -816,7 +816,7 @@ impl EngineHost {
         // A page the lists refuse is named for chrome to explain; a refused
         // frame is only cancelled.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let navigation_refused: Rc<dyn Fn(&str, bool) -> bool> = {
+        let navigation_refused: Rc<super::content_styles::NavigationJudge> = {
             let scope = site_scope.clone();
             let permit = event_permit.clone();
             let sink = self.sink.clone();

@@ -22,14 +22,18 @@ pub(super) type SitePreferencesSlot =
 
 /// What judges a profile's pages and frames before they load.
 pub(super) type NavigationSlot = Rc<RefCell<NavigationGuard>>;
+/// Whether a view refuses a page, or a frame (`true`), before it loads.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) type NavigationJudge = dyn Fn(&str, bool) -> bool;
+type Policy = Arc<dyn NetworkRequestPolicy>;
 
 #[derive(Default)]
 pub(super) struct NavigationGuard {
     /// uBlock Origin's badware list.
-    pub(super) badware: Option<Arc<dyn NetworkRequestPolicy>>,
+    pub(super) badware: Option<Policy>,
     /// The lists' own `$document` rules, where the engine does not apply
     /// them itself (WebView2; WebKit's content rules do).
-    pub(super) lists: Option<Arc<dyn NetworkRequestPolicy>>,
+    pub(super) lists: Option<Policy>,
     /// Hosts the person opened anyway, until the app quits.
     pub(super) allowed: std::collections::HashSet<String>,
 }
@@ -122,7 +126,7 @@ impl ViewSiteScope {
         }
         let request =
             NetworkRequest::exact(url, source, "GET", kind, NetworkRequestSourceKind::Document)?;
-        let refuses = |policy: &Option<Arc<dyn NetworkRequestPolicy>>| {
+        let refuses = |policy: &Option<Policy>| {
             policy
                 .as_ref()
                 .is_some_and(|policy| policy.decide(&request) == NetworkDecision::Block)

@@ -885,7 +885,12 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "cfg(all(unix, not(target_os = \"macos\")))",
             ["webkit"].as_slice(),
         ),
-        ("cfg(target_os = \"macos\")", ["webkit"].as_slice()),
+        // The runtime matcher judges each page and frame against the badware
+        // list before it loads; WebKit applies the network rules.
+        (
+            "cfg(target_os = \"macos\")",
+            ["webkit", "runtime", "runtime-exact"].as_slice(),
+        ),
     ] {
         let dependency = targets
             .get(target)
@@ -2052,7 +2057,7 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         ),
         (
             "x86_64-apple-darwin",
-            &["webkit"],
+            &["runtime", "runtime-exact", "webkit"],
             &[
                 "content-blocking",
                 "addr",
@@ -2065,7 +2070,7 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         ),
         (
             "aarch64-apple-darwin",
-            &["webkit"],
+            &["runtime", "runtime-exact", "webkit"],
             &[
                 "content-blocking",
                 "addr",
