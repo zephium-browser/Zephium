@@ -34,21 +34,96 @@ struct Scriptlet {
 }
 
 /// Helpers named here are dependencies, not rule names.
-const HELPERS: &[Scriptlet] = &[Scriptlet {
-    name: "zephium-constant.fn",
-    aliases: &[],
-    trusted: false,
-    dependencies: &[],
-    source: include_str!("scriptlets/constant.js"),
-}];
+const HELPERS: &[Scriptlet] = &[
+    Scriptlet {
+        name: "zephium-constant.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/constant.js"),
+    },
+    Scriptlet {
+        name: "zephium-pattern.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/pattern.js"),
+    },
+    Scriptlet {
+        name: "zephium-json-pruner.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/json-pruner.js"),
+    },
+    Scriptlet {
+        name: "zephium-timer-booster.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/timer-booster.js"),
+    },
+    Scriptlet {
+        name: "zephium-request-matcher.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/request-matcher.js"),
+    },
+];
 
-const SCRIPTLETS: &[Scriptlet] = &[Scriptlet {
-    name: "set-constant.js",
-    aliases: &["set.js"],
-    trusted: false,
-    dependencies: &["zephium-constant.fn"],
-    source: include_str!("scriptlets/set-constant.js"),
-}];
+const SCRIPTLETS: &[Scriptlet] = &[
+    Scriptlet {
+        name: "set-constant.js",
+        aliases: &["set.js"],
+        trusted: false,
+        dependencies: &["zephium-constant.fn"],
+        source: include_str!("scriptlets/set-constant.js"),
+    },
+    Scriptlet {
+        name: "json-prune.js",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn", "zephium-json-pruner.fn"],
+        source: include_str!("scriptlets/json-prune.js"),
+    },
+    Scriptlet {
+        name: "json-prune-fetch-response.js",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-json-pruner.fn",
+            "zephium-request-matcher.fn",
+        ],
+        source: include_str!("scriptlets/json-prune-fetch-response.js"),
+    },
+    Scriptlet {
+        name: "json-prune-xhr-response.js",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-json-pruner.fn",
+            "zephium-request-matcher.fn",
+        ],
+        source: include_str!("scriptlets/json-prune-xhr-response.js"),
+    },
+    Scriptlet {
+        name: "nano-setTimeout-booster.js",
+        aliases: &["nano-stb.js"],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn", "zephium-timer-booster.fn"],
+        source: include_str!("scriptlets/nano-settimeout-booster.js"),
+    },
+    Scriptlet {
+        name: "nano-setInterval-booster.js",
+        aliases: &["nano-sib.js"],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn", "zephium-timer-booster.fn"],
+        source: include_str!("scriptlets/nano-setinterval-booster.js"),
+    },
+];
 
 /// A source file's function, without its leading comment lines.
 fn function_text(source: &str) -> String {
@@ -319,6 +394,31 @@ mod tests {
             assert_eq!(key_hash(key), page, "{key}");
             assert!(key_hash(key) < 1 << 53);
         }
+    }
+
+    #[test]
+    fn a_response_rule_reaches_its_scriptlet_with_its_pattern_intact() {
+        let program = build(&[rule(
+            r"www.youtube.com##+js(json-prune-fetch-response, adPlacements adSlots playerResponse.adPlacements, , propsToMatch, /\/player(\?|$)/)",
+            false,
+        )])
+        .unwrap()
+        .unwrap();
+        for helper in [
+            "zephiumPattern(",
+            "zephiumJsonPruner(",
+            "zephiumRequestMatcher(",
+        ] {
+            assert_eq!(
+                program
+                    .script
+                    .matches(&format!("function {helper}"))
+                    .count(),
+                1,
+                "{helper}"
+            );
+        }
+        assert!(program.script.contains(r#"zephiumJsonPruneFetchResponse("adPlacements adSlots playerResponse.adPlacements", "", "propsToMatch", "/\\/player(\\?|$)/")"#));
     }
 
     #[test]

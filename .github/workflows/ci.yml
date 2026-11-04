@@ -148,6 +148,8 @@ jobs:
           tool: cargo-deny@0.20.2
           fallback: none
       - run: cargo fmt --all -- --check
+      # The scriptlet library on synthetic payloads, outside any browser.
+      - run: node scripts/blocker-scriptlets/library.test.mjs
       - name: Security review deadlines (warn only)
         run: |
           cargo xtask check-engine-floors
