@@ -47,8 +47,9 @@ pub struct PageScript {
 #[derive(Default)]
 struct State {
     generation: u64,
-    root: Option<PathBuf>,
-    context: Option<Retained<WKWebExtensionContext>>,
+    /// The package running now, with its context. A failed load keeps the
+    /// one before it, so the next `set` tries again.
+    loaded: Option<(PathBuf, Retained<WKWebExtensionContext>)>,
 }
 
 impl PageScript {
@@ -96,8 +97,11 @@ impl PageScript {
 
     /// The package now loaded, if any.
     pub fn root(&self) -> Option<PathBuf> {
-        let state = self.state.borrow();
-        state.context.as_ref().and(state.root.clone())
+        self.state
+            .borrow()
+            .loaded
+            .as_ref()
+            .map(|(root, _)| root.clone())
     }
 
     /// Runs the package in `root` from the next document on, or nothing with
@@ -111,18 +115,17 @@ impl PageScript {
     ) -> bool {
         let generation = {
             let mut state = self.state.borrow_mut();
-            if state.root.as_deref() == root && (root.is_none() || state.context.is_some()) {
+            state.generation += 1;
+            if state.loaded.as_ref().map(|(loaded, _)| loaded.as_path()) == root {
                 drop(state);
                 done(Ok(()));
                 return false;
             }
-            state.generation += 1;
-            state.root = root.map(Path::to_path_buf);
             state.generation
         };
         let Some(root) = root else {
-            let old = self.state.borrow_mut().context.take();
-            if let Some(old) = old {
+            let old = self.state.borrow_mut().loaded.take();
+            if let Some((_, old)) = old {
                 let _ = unsafe { self.controller.unloadExtensionContext_error(&old) };
             }
             done(Ok(()));
@@ -135,6 +138,7 @@ impl PageScript {
         let url =
             NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&root.to_string_lossy()), true);
         let state = Rc::downgrade(&self.state);
+        let root = root.to_path_buf();
         let controller = self.controller.clone();
         let private_data = self.private_data;
         let done = RefCell::new(Some(done));
@@ -152,7 +156,13 @@ impl PageScript {
                 let Some(extension) = (unsafe { extension.as_ref() }) else {
                     return done(Err(describe(unsafe { error.as_ref() })));
                 };
-                done(activate(&state, &controller, extension, private_data));
+                done(activate(
+                    &state,
+                    &controller,
+                    extension,
+                    root.clone(),
+                    private_data,
+                ));
             });
         unsafe {
             WKWebExtension::extensionWithResourceBaseURL_completionHandler(
@@ -167,7 +177,7 @@ impl PageScript {
 
 impl Drop for PageScript {
     fn drop(&mut self) {
-        if let Some(context) = self.state.borrow_mut().context.take() {
+        if let Some((_, context)) = self.state.borrow_mut().loaded.take() {
             let _ = unsafe { self.controller.unloadExtensionContext_error(&context) };
         }
     }
@@ -177,6 +187,7 @@ fn activate(
     state: &Rc<RefCell<State>>,
     controller: &WKWebExtensionController,
     extension: &WKWebExtension,
+    root: PathBuf,
     private_data: bool,
 ) -> Result<(), String> {
     let mtm = MainThreadMarker::from(controller);
@@ -191,11 +202,11 @@ fn activate(
         );
     }
     let mut state = state.borrow_mut();
-    if let Some(old) = state.context.take() {
+    if let Some((_, old)) = state.loaded.take() {
         let _ = unsafe { controller.unloadExtensionContext_error(&old) };
     }
     unsafe { controller.loadExtensionContext_error(&context) }
         .map_err(|error| describe(Some(&error)))?;
-    state.context = Some(context);
+    state.loaded = Some((root, context));
     Ok(())
 }

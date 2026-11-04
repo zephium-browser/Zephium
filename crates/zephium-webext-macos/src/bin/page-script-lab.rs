@@ -35,6 +35,8 @@ enum Step {
     /// A program and the sites paused in it, or nothing.
     Set(Option<(&'static str, &'static [&'static str])>),
     SetTwice(&'static str, &'static str),
+    /// A package that fails to load, then the same root rewritten whole.
+    FailThenFix(&'static str),
     /// Opens a page on the first host framing a page on the second, and
     /// wants `top|frame`, each as `program:runs`.
     Expect(&'static str, &'static str, &'static str),
@@ -56,6 +58,8 @@ const STEPS: &[Step] = &[
     Step::Expect(PAUSED, OTHER, NOTHING),
     Step::SetTwice("A", "B"),
     Step::Expect(PAUSED, OTHER, "B:1|B:1"),
+    Step::FailThenFix("C"),
+    Step::Expect(PAUSED, OTHER, "C:1|C:1"),
 ];
 
 struct Lab {
@@ -189,6 +193,37 @@ fn run(lab: Rc<Lab>, index: usize) {
             lab.script.set(Some(&lab.package(first, &[])), |_| {});
             lab.script
                 .set(Some(&lab.package(second, &[])), move |_| next());
+        }
+        Step::FailThenFix(name) => {
+            let dir = lab.packages.join(format!("{name}-fixed"));
+            std::fs::create_dir_all(&dir).expect("package directory");
+            std::fs::write(dir.join("manifest.json"), "not a manifest").expect("manifest");
+            let before = lab.script.root();
+            println!("set {name} from a broken package, then from the same root fixed");
+            let checked = lab.clone();
+            lab.script.set(Some(&dir.clone()), move |result| {
+                let kept = checked.script.root() == before;
+                let ok = result.is_err() && kept;
+                println!(
+                    "  broken load: {} (failed {}, running root kept {kept})",
+                    if ok { "ok" } else { "FAIL" },
+                    result.is_err()
+                );
+                if !ok {
+                    *checked.failures.borrow_mut() += 1;
+                }
+                std::fs::remove_dir_all(&dir).expect("broken package removed");
+                let program = format!(
+                    "(() => {{ globalThis.__ps = '{name}'; globalThis.__runs = (globalThis.__runs || 0) + 1; }})();\n"
+                );
+                PageScript::write(&dir, &program).expect("package written");
+                checked.script.set(Some(&dir), move |result| {
+                    if let Err(error) = result {
+                        println!("  load failed: {error}");
+                    }
+                    next();
+                });
+            });
         }
         Step::Expect(top, frame, expected) => {
             let port = lab.port;
