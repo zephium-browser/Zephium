@@ -164,7 +164,8 @@ impl CompileTarget {
     /// is served the ad path they shorten, so both withhold them for now.
     pub const fn runs_page_code(self) -> bool {
         match self {
-            Self::Runtime | Self::WebKit => false,
+            // Spike only: both engines run YouTube's page code.
+            Self::Runtime | Self::WebKit => true,
         }
     }
 }
