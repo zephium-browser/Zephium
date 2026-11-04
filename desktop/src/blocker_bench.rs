@@ -464,6 +464,8 @@ fn handle(
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
+        "restart" => restart(app),
+        "command" => run_command(app, &command),
         "quit" => Ok(json!({})),
         _ => Err(format!("unknown op {op:?}")),
     };
@@ -644,6 +646,23 @@ fn front(window: &tauri::WebviewWindow) {
         ns_window.orderFrontRegardless();
         ns_window.makeKeyAndOrderFront(None);
     }
+}
+
+/// Raises the restart a newer runtime waits on, so its notice can be seen
+/// and captured without a real runtime update.
+fn restart(app: &tauri::AppHandle) -> Result<Value, String> {
+    if shell(app)?.dispatch(Command::Engine(EngineEvent::RuntimeRestartRequired)) {
+        Ok(json!({}))
+    } else {
+        Err("the command queue refused the request".into())
+    }
+}
+
+/// Runs a named chrome command, as a menu or shortcut does.
+fn run_command(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    let id = text(command, "id")?;
+    let admission = super::execute_command(app, id);
+    Ok(json!({ "admission": format!("{admission:?}") }))
 }
 
 /// Waits for a dispatched navigation to finish loading. On timeout it still
