@@ -528,6 +528,14 @@ pub fn is_insecure_source(url: &url::Url) -> bool {
             .is_some_and(crate::certificates::is_local_host)
 }
 
+/// Whether a download's final response address leaves it held: a plain
+/// http one by the rule above, or one the engine could not read or parse,
+/// since nothing then says it was encrypted.
+pub fn is_insecure_response(url: Option<&str>) -> bool {
+    url.and_then(|url| url::Url::parse(url).ok())
+        .is_none_or(|url| is_insecure_source(&url))
+}
+
 pub fn canonical_id(id: &str) -> bool {
     DownloadId::parse(id).is_some_and(|value| value.to_string() == id)
 }
@@ -1039,6 +1047,17 @@ mod tests {
             let url = url::Url::parse(url).unwrap();
             assert_eq!(is_insecure_source(&url), insecure, "{url}");
         }
+    }
+
+    #[test]
+    fn a_response_address_that_cannot_be_read_counts_as_insecure() {
+        assert!(is_insecure_response(None));
+        assert!(is_insecure_response(Some("not a url")));
+        assert!(is_insecure_response(Some("http://files.example.com/a.zip")));
+        assert!(!is_insecure_response(Some(
+            "https://files.example.com/a.zip"
+        )));
+        assert!(!is_insecure_response(Some("blob:https://example.com/0f1e")));
     }
     #[test]
     fn abandoned_native_calls_complete_with_unavailable_once() {

@@ -605,13 +605,15 @@ impl Downloads {
             };
             transfer.record.filename = name;
             transfer.record.total = u64::try_from(response.expectedContentLength()).ok();
-            // The response's own address, after every redirect.
-            transfer.record.insecure = response
-                .URL()
-                .and_then(|url| url.absoluteString())
-                .and_then(|url| bounded(&url, 8192))
-                .and_then(|url| url::Url::parse(&url).ok())
-                .is_some_and(|url| is_insecure_source(&url));
+            // The response's own address, after every redirect. One that is
+            // missing, too long or unreadable is held as insecure.
+            transfer.record.insecure = is_insecure_response(
+                response
+                    .URL()
+                    .and_then(|url| url.absoluteString())
+                    .and_then(|url| bounded(&url, 8192))
+                    .as_deref(),
+            );
             let completion = completion.copy();
             transfer.destination_reply = Some(DestinationReply::new(move |path| {
                 let url = path.and_then(|path| {
