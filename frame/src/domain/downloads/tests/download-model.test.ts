@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { downloadProgress, formatDownloadBytes } from "../download-model";
+import { displayDirectory, downloadProgress, formatDownloadBytes } from "../download-model";
 import type { DownloadView } from "$shared/ipc/bindings";
 
 const entry: DownloadView = {
@@ -25,5 +25,12 @@ describe("native download progress", () => {
     expect(downloadProgress({ ...entry, total: "100" })).toBe(1);
     expect(formatDownloadBytes("1024")).toContain("KB");
     expect(formatDownloadBytes("invalid")).toBe("—");
+  });
+});
+describe("download folder", () => {
+  it("shows a Windows folder without the verbatim prefix", () => {
+    expect(displayDirectory("\\\\?\\C:\\Users\\qa\\Saved")).toBe("C:\\Users\\qa\\Saved");
+    expect(displayDirectory("\\\\?\\UNC\\server\\share\\in")).toBe("\\\\server\\share\\in");
+    expect(displayDirectory("/Users/qa/Downloads")).toBe("/Users/qa/Downloads");
   });
 });
