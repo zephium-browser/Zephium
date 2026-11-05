@@ -186,13 +186,15 @@ impl EngineHost {
             return;
         };
         // A password filled into a page that is not encrypted crosses the
-        // network readable: the person is asked first.
-        let insecure = view
-            .navigation
-            .committed_snapshot()
-            .and_then(|(_, url)| url::Url::parse(&url).ok())
-            .is_some_and(|url| zephium_core::certificates::crosses_network_unencrypted(&url));
-        if insecure {
+        // network readable: the person is asked first. The page judged is the
+        // one on screen, which a provisional load has not replaced yet; one
+        // that can't be read counts as unencrypted.
+        let Some((epoch, resident)) = view.navigation.resident_document_snapshot() else {
+            return;
+        };
+        view.insecure_autofill.set(None);
+        if resident_unencrypted(&resident) {
+            view.insecure_autofill.set(Some(epoch));
             view.event_permit
                 .emit(&self.sink, EngineEvent::InsecureAutofillRequested { id });
             return;
@@ -210,6 +212,18 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        // Only the document the warning was shown for: by now the tab may
+        // have moved on to another page that was never asked about.
+        let asked = view.insecure_autofill.take();
+        if asked.is_none()
+            || view
+                .navigation
+                .resident_document_snapshot()
+                .map(|(epoch, _)| epoch)
+                != asked
+        {
+            return;
+        }
         let page = crate::platform::imp::native_webview(view);
         if let Some(window) = page.window() {
             window.makeFirstResponder(Some(&page));
@@ -297,5 +311,27 @@ mod tests {
     fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
         assert_eq!(settled_zoom_scale(1.0, 1.25, true), 1.25);
         assert_eq!(settled_zoom_scale(1.25, 1.5, false), 1.25);
+    }
+}
+
+/// Whether the page at `url` crosses the network unencrypted; an address
+/// that can't be read is treated as if it did.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn resident_unencrypted(url: &str) -> bool {
+    url::Url::parse(url).map_or(true, |url| {
+        zephium_core::certificates::crosses_network_unencrypted(&url)
+    })
+}
+
+#[cfg(test)]
+mod autofill_tests {
+    use super::resident_unencrypted;
+
+    #[test]
+    fn autofill_asks_first_on_plain_http_and_on_an_address_it_cannot_read() {
+        assert!(resident_unencrypted("http://shop.example/login"));
+        assert!(resident_unencrypted("not a url"));
+        assert!(!resident_unencrypted("https://shop.example/login"));
+        assert!(!resident_unencrypted("http://router.lan/"));
     }
 }
