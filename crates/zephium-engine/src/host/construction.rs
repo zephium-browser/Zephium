@@ -1345,6 +1345,7 @@ impl EngineHost {
             let popup_app_link = app_link.clone();
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
+                let clicked = popup_policy.clicked(features.user_initiated);
                 features.user_initiated = popup_policy.admits(
                     features.user_initiated,
                     tracker
@@ -1398,6 +1399,7 @@ impl EngineHost {
                     activity,
                     &url,
                     features,
+                    clicked,
                 );
                 if matches!(response, wry::NewWindowResponse::Deny) {
                     report_blocked();
@@ -3136,6 +3138,7 @@ fn download_ask(
         permit: permit.clone(),
         sink: sink.clone(),
         site: committed_origin(navigation),
+        opened_by_click: false,
     }
 }
 

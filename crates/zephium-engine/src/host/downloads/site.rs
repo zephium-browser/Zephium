@@ -23,6 +23,8 @@ pub(in crate::host) struct SiteAsk {
     pub permit: EventPermit,
     pub sink: Sink,
     pub site: Option<PageOrigin>,
+    /// A person's click opened the new tab this download starts in.
+    pub opened_by_click: bool,
 }
 
 /// A transfer that may not choose its destination until the person answers.

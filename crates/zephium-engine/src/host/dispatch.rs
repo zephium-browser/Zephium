@@ -612,6 +612,7 @@ pub(super) fn try_open_native_tab(
     activity: crate::navigation_epoch::NavigationActivity,
     url: &str,
     features: wry::NewWindowFeatures,
+    clicked: bool,
 ) -> wry::NewWindowResponse {
     if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
         return wry::NewWindowResponse::Deny;
@@ -623,7 +624,7 @@ pub(super) fn try_open_native_tab(
         let Some(host) = slot.as_mut() else {
             return wry::NewWindowResponse::Deny;
         };
-        host.open_native_tab(source, permit, activity, url, features)
+        host.open_native_tab(source, permit, activity, url, features, clicked)
     })
 }
 

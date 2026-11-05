@@ -383,9 +383,10 @@ impl Downloads {
             return None;
         }
         // WebKit's word that nobody clicked. A new tab a click opened counts
-        // as that click. Before macOS 15.2 WebKit cannot say, and the save
-        // sheet below still asks about every such download.
-        let clicked = initial_open
+        // as that click; one an allowed site opened by itself does not.
+        // Before macOS 15.2 WebKit cannot say, and the save sheet below still
+        // asks about every such download.
+        let clicked = (initial_open && ask.as_ref().is_some_and(|ask| ask.opened_by_click))
             || unsafe {
                 !native.respondsToSelector(objc2::sel!(isUserInitiated)) || native.isUserInitiated()
             };

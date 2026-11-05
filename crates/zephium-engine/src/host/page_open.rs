@@ -100,6 +100,7 @@ impl EngineHost {
         activity: NavigationActivity,
         url: &str,
         features: NewWindowFeatures,
+        clicked: bool,
     ) -> NewWindowResponse {
         if !features.user_initiated || !permit.allows_target(url) {
             return NewWindowResponse::Deny;
@@ -155,11 +156,13 @@ impl EngineHost {
                 return NewWindowResponse::Deny;
             }
         }
-        self.adopt_native_tab(source, permit, activity, url, features, || true)
+        self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
     }
 
     /// Both callers authenticate their native opener first. Preserve WebView2's
     /// original request (including OAuth state); never replay just its URL.
+    /// `clicked` is the person's click, not an allowed site's own opening.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn adopt_native_tab(
         &mut self,
         source: ItemId,
@@ -167,6 +170,7 @@ impl EngineHost {
         activity: NavigationActivity,
         url: &str,
         features: NewWindowFeatures,
+        clicked: bool,
         opener_current: impl Fn() -> bool,
     ) -> NewWindowResponse {
         let Some(token) = permit.active_token() else {
@@ -192,6 +196,7 @@ impl EngineHost {
                     permit: view.event_permit.clone(),
                     sink: self.sink.clone(),
                     site: super::construction::committed_origin(&view.navigation),
+                    opened_by_click: clicked,
                 });
         let built = self.build_view(
             Rc::new(Cell::new(child)),
