@@ -348,13 +348,27 @@ fn migrate(old: v1::Record, now: u64, intact: impl Fn(&Source) -> bool) -> Optio
     Some(record)
 }
 
+/// The lists a schema-2 record's schedule is in, in its order.
+const SCHEMA_2_LISTS: [OfficialFilter; 4] = [
+    OfficialFilter::EasyList,
+    OfficialFilter::EasyPrivacy,
+    OfficialFilter::UblockFilters,
+    OfficialFilter::UblockQuickFixes,
+];
+
 /// A schema-2 record, from before uBlock Origin's other lists: every list it
 /// downloaded that still verifies is kept for reuse, and every list is due now.
+/// A list's rejected copy stays rejected until that list is checked past it.
 fn migrate_lists(old: Record, now: u64, intact: impl Fn(&Source) -> bool) -> Record {
     let mut record = Record::fresh(old.highest_revision, now);
     record.jitter = old.jitter;
     record.attempted = old.attempted;
     record.verification = old.verification;
+    for (filter, schedule) in SCHEMA_2_LISTS.iter().zip(&old.schedule) {
+        if let Some(index) = OfficialFilter::ALL.iter().position(|known| known == filter) {
+            record.schedule[index].rejected = schedule.rejected;
+        }
+    }
     for source in [old.candidate, old.current, old.previous]
         .into_iter()
         .flatten()
@@ -1286,7 +1300,12 @@ mod tests {
             },
             "previous": null,
             "candidate": null,
-            "schedule": vec![serde_json::json!({ "due": 5000, "failure_streak": 0 }); 4],
+            "schedule": [
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0, "rejected": vec![9u8; 32] },
+                { "due": 5000, "failure_streak": 0 },
+            ],
             "retained": [],
         });
         atomic_write(
@@ -1309,6 +1328,11 @@ mod tests {
         assert_eq!(kept, ["easylist", "ublock-filters", "ublock-quick-fixes"]);
         for source in &store.record.retained {
             assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
+        // uBlock Origin's filters keep their rejected copy; no other list has one.
+        for (filter, schedule) in OfficialFilter::ALL.iter().zip(&store.record.schedule) {
+            let expected = (*filter == OfficialFilter::UblockFilters).then_some([9u8; 32]);
+            assert_eq!(schedule.rejected, expected, "{}", filter.id());
         }
     }
 }
