@@ -957,6 +957,10 @@ impl Engine for FakeEngine {
         self.log(format!("open-app {url}"));
         self.native_admission()
     }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
+        self.native_admission()
+    }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         self.log(format!("allow-certificate {item} {url}"));
         self.native_admission()

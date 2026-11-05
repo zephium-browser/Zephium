@@ -4,6 +4,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { preferences } from "$domain/preferences";
+import { uiCommands } from "$domain/ui-commands";
 import AddressFieldHost from "./AddressFieldHost.svelte";
 
 const native = vi.hoisted(() => ({
@@ -49,10 +50,14 @@ afterEach(() => {
 
 async function field(
   props: { compact?: boolean } = {},
-  page: Parameters<typeof tabFixture>[0] = { url: "https://www.wikipedia.org/wiki/Premium" },
+  overrides: Partial<Parameters<typeof tabFixture>[0]> = {},
 ) {
   await tabs.init();
-  const tab = tabFixture({ projection_revision: stamp(), ...page });
+  const tab = tabFixture({
+    projection_revision: stamp(),
+    url: "https://www.wikipedia.org/wiki/Premium",
+    ...overrides,
+  });
   emitNativeEvent("itemsChanged", {
     projection_revision: stamp(),
     profile: null,
@@ -76,6 +81,58 @@ test("a click on a page's address edits it here, and only the shortcut opens the
   expect(native.edit).not.toHaveBeenCalled();
 });
 
+test("a refused page over the last one shows its own address, without the last page's lock", async () => {
+  const { screen, input } = await field(
+    {},
+    {
+      failure: {
+        url: "https://blocked-badware.test/win",
+        reason: "blocked",
+        can_continue: false,
+        certificate: null,
+        blocked: "badware",
+        covers_page: true,
+      },
+    },
+  );
+  expect(input.value).toBe("blocked-badware.test");
+  // No site to describe: the lock and site details belong to a loaded page.
+  expect(screen.container.querySelector("[data-trailing]")?.textContent).toBe("null");
+  input.focus();
+  await expect.poll(() => input.value).toBe("https://blocked-badware.test/win");
+});
+
+test("a first page that could not open keeps its address in the field", async () => {
+  const { input } = await field(
+    {},
+    { url: null, failure: { url: "http://localtest.me/", reason: "unreachable" } },
+  );
+  expect(input.value).toBe("localtest.me");
+  input.focus();
+  await expect.poll(() => input.value).toBe("http://localtest.me/");
+});
+
+test("the location shortcut on a refused page edits the refused address", async () => {
+  await uiCommands.init();
+  await field(
+    {},
+    {
+      failure: {
+        url: "https://blocked-badware.test/win",
+        reason: "blocked",
+        can_continue: true,
+        certificate: null,
+        blocked: "badware",
+        covers_page: true,
+      },
+    },
+  );
+  emitNativeEvent("uiCommand", "url.focus");
+  await expect.poll(() => native.edit.mock.calls.length).toBe(1);
+  expect(native.edit).toHaveBeenCalledWith(tabs.activeId(), "https://blocked-badware.test/win");
+  uiCommands.dispose();
+});
+
 test("editing shows the whole address and rests on the host", async () => {
   const { input } = await field();
   expect(input.value).toBe("www.wikipedia.org");
@@ -83,19 +140,6 @@ test("editing shows the whole address and rests on the host", async () => {
   await expect.poll(() => input.value).toBe("https://www.wikipedia.org/wiki/Premium");
   input.blur();
   await expect.poll(() => input.value).toBe("www.wikipedia.org");
-});
-
-test("a first page that could not open keeps its address in the field", async () => {
-  const { input } = await field(
-    {},
-    {
-      url: null,
-      failure: { url: "http://localtest.me/", reason: "unreachable" },
-    },
-  );
-  expect(input.value).toBe("localtest.me");
-  input.focus();
-  await expect.poll(() => input.value).toBe("http://localtest.me/");
 });
 
 test("a press anywhere else in the chrome ends editing", async () => {

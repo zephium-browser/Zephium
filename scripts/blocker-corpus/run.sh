@@ -1,7 +1,8 @@
 #!/bin/zsh
 # One release pass for crates/zephium-blocker/src/webkit_pruned.txt: records the page corpus with
-# no blocking, replays it through WebKit with every rule of the bundled lists reporting its
-# matches, and writes the wildcard block rules nothing matched. See docs/adblock.md.
+# no blocking, loading only the reviewed sites of scripts/blocker-corpus/hosts-allowed.txt, replays
+# it through WebKit with every rule of the bundled lists reporting its matches, and writes the
+# wildcard block rules nothing matched. See docs/adblock.md.
 # usage: scripts/blocker-corpus/run.sh OUT_DIR
 set -euo pipefail
 here=${0:A:h}
@@ -23,6 +24,8 @@ done
 } > "$out/consent.js"
 
 cd "$repo"
+# The corpus loads real pages in WebKit; never below the pinned security floor.
+cargo xtask blocker-prune host-floor
 rm -f "$out/rules.json"
 cargo xtask blocker-prune materialize --output "$out/rules.json"
 cargo xtask blocker-prune notify --rules "$out/rules.json" --output "$out/notify.json"
@@ -32,11 +35,15 @@ pages=0
 corpora=() visits=()
 for list in "$here"/pages/*.txt "$out/rulehosts.txt"; do
   name=${list:t:r}
-  echo "recording $name ($(wc -l < "$list" | tr -d ' ') pages)"
-  "$out/record" "$list" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 "$out/consent.js" \
-    2> "$out/record-$name.log"
+  # Only reviewed sites load; the rest are printed for review.
+  cargo xtask blocker-prune admit --allowed "$here/hosts-allowed.txt" --pages "$list" \
+    --output "$out/admitted-$name.txt"
+  echo "recording $name ($(grep -c . "$out/admitted-$name.txt") pages)"
+  "$out/record" "$out/admitted-$name.txt" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 \
+    "$out/consent.js" "$here/hosts-allowed.txt" 2> "$out/record-$name.log"
+  grep '^refused ' "$out/record-$name.log" > "$out/refused-$name.txt" || true
   corpora+=("$out/corpus-$name.jsonl") visits+=("$out/visits-$name.jsonl")
-  pages=$(( pages + $(grep -c . "$list") ))
+  pages=$(( pages + $(grep -c . "$out/admitted-$name.txt") ))
 done
 cat "${corpora[@]}" > "$out/corpus.jsonl"
 echo "replaying $(wc -l < "$out/corpus.jsonl" | tr -d ' ') loads"

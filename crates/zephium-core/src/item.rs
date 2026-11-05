@@ -166,6 +166,9 @@ pub struct NavigationFailure {
     /// stays out of the layout, history intact, until another document
     /// commits in it.
     pub covers_page: bool,
+    /// A refused page the person may open anyway: only where the refusal is
+    /// Zephium's own check, which an allowance lifts.
+    pub can_continue: bool,
 }
 
 impl TabState {

@@ -3498,6 +3498,8 @@ pub enum NavigationFailure {
   /// The server's certificate was refused, and what the engine could tell
   /// about why.
   Certificate(CertificateProblem),
+  /// macOS: the view's content rules refused the page.
+  Blocked,
   /// Any other failure.
   Other,
 }
@@ -3511,6 +3513,9 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
+  /// macOS: a content rule refused the navigation to `url`, taken from the
+  /// error itself; the document shown before is still there.
+  Refused { url: String },
 }
 
 /// Why a server certificate was refused, as a category; never native text.
