@@ -713,6 +713,57 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
 }
 
 #[test]
+fn a_first_view_closed_with_its_https_try_loads_over_http_in_a_new_view() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let created = |engine: &FakeEngine| -> Vec<String> {
+        engine
+            .calls()
+            .into_iter()
+            .filter_map(|call| {
+                call.strip_prefix(&format!("create {id} "))
+                    .and_then(|rest| rest.split(' ').next())
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    let failure = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .and_then(|tab| tab.failure)
+    };
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/".into(),
+    });
+    let before = created(&engine).len();
+    // The engine closes a new view whose first load fails before commit.
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Unreachable,
+        url: Some("https://plain.example/".into()),
+        replaced_page: false,
+    }));
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
+    assert_eq!(failure(&screen), None, "the failed try never shows");
+    assert_eq!(
+        created(&engine)[before..],
+        ["http://plain.example/".to_owned()],
+        "the page opens over http in a new view"
+    );
+
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
+    assert!(
+        failure(&screen).is_some(),
+        "an http load that fails as well is shown"
+    );
+}
+
+#[test]
 fn an_http_page_is_tried_over_https_first_and_falls_back_once() {
     use zephium_core::ports::engine::NavigationFailureReason;
     let (mut shell, engine, screen) = setup();
