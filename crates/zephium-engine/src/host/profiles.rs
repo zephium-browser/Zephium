@@ -810,12 +810,12 @@ impl EngineHost {
             .or_default()
             .push(debt);
 
-        let newly_quarantined = self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
-        if newly_quarantined {
+        if let Some(events) = announcement {
             let ids = self.retire_profile_process_views(profile);
             self.remember_profile_recovery_ids(profile, ids);
-            self.announce_profile_restart(profile);
+            self.announce(events);
         }
     }
 
@@ -1269,20 +1269,20 @@ impl EngineHost {
     /// that its own process group exited.
     #[cfg(target_os = "windows")]
     pub(super) fn quarantine_unverifiable_windows_profile(&mut self, profile: ProfileId) {
-        self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
         let ids = self.retire_profile_process_views(profile);
         self.remember_profile_recovery_ids(profile, ids);
-        self.announce_profile_restart(profile);
+        if let Some(events) = announcement {
+            self.announce(events);
+        }
     }
 
-    /// Only a new process can browse a quarantined profile again; chrome
-    /// says so rather than leave its tabs failing without a reason.
     #[cfg(target_os = "windows")]
-    fn announce_profile_restart(&self, profile: ProfileId) {
-        self.sink.emit(EngineEvent::RuntimeRestartRequired);
-        self.sink
-            .emit(EngineEvent::ProfileRestartRequired { profile });
+    fn announce(&self, events: [EngineEvent; 2]) {
+        for event in events {
+            self.sink.emit(event);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1438,6 +1438,19 @@ pub(super) fn failed_provenance(check: ProvenanceCheck) -> String {
     } else {
         failed.join(", ")
     }
+}
+
+/// Marks `profile` quarantined. Only a new process can browse it again, so
+/// the first time chrome is told why its tabs stopped and offered a restart.
+#[cfg(target_os = "windows")]
+fn quarantine(
+    quarantined: &mut HashSet<ProfileId>,
+    profile: ProfileId,
+) -> Option<[EngineEvent; 2]> {
+    quarantined.insert(profile).then_some([
+        EngineEvent::RuntimeRestartRequired,
+        EngineEvent::ProfileRestartRequired { profile },
+    ])
 }
 
 #[cfg(test)]

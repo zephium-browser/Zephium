@@ -573,3 +573,36 @@ fn a_failed_provenance_check_is_named_without_process_details() {
         "no runtime version observer"
     );
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_quarantine_offers_the_restart_once_and_names_the_runtime_first() {
+    let profile = ProfileId::from(41);
+    let mut quarantined = HashSet::new();
+    let first = quarantine(&mut quarantined, profile);
+    assert!(matches!(
+        first,
+        Some([
+            EngineEvent::RuntimeRestartRequired,
+            EngineEvent::ProfileRestartRequired { profile: named },
+        ]) if named == profile
+    ));
+    assert!(quarantine(&mut quarantined, profile).is_none());
+    assert!(quarantined.contains(&profile));
+    // Both ways into quarantine tell chrome through this one place.
+    let source = include_str!("../profiles.rs");
+    let source = source.split("#[cfg(test)]").next().unwrap();
+    assert_eq!(
+        source
+            .matches("quarantine(&mut self.unverifiable_browser_processes, profile)")
+            .count(),
+        2
+    );
+    assert_eq!(source.matches("self.announce(events)").count(), 2);
+    assert_eq!(
+        source
+            .matches("EngineEvent::ProfileRestartRequired")
+            .count(),
+        1
+    );
+}
