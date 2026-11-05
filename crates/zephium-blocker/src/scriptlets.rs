@@ -244,34 +244,34 @@ pub(crate) struct ScriptletRule {
 pub(crate) enum Kind {
     /// Not scriptlet syntax.
     None,
-    /// A rule to keep, and whether its scriptlet is one the library lacks.
-    Rule { unknown: bool },
+    /// A rule to keep, whether its scriptlet is one the library lacks, and
+    /// whether it runs with a stand-in for what it names, such as an empty
+    /// body for a resource the app does not ship.
+    Rule { unknown: bool, substituted: bool },
     /// Scriptlet syntax we do not run: too long, no hostname, or a hostname
     /// form other than names and single-label entities.
     Unsupported,
 }
 
 pub(crate) fn classify(line: &str) -> Kind {
-    let Some((domains, body)) = line
-        .split_once("##+js(")
-        .or_else(|| line.split_once("#@#+js("))
-    else {
-        return Kind::None;
+    // Whichever marker comes first decides, as adblock-rust reads it; a
+    // marker inside an argument is text.
+    let (exception, at, marker) = match (line.find("##+js("), line.find("#@#+js(")) {
+        (Some(rule), Some(except)) if except < rule => (true, except, "#@#+js("),
+        (Some(rule), _) => (false, rule, "##+js("),
+        (None, Some(except)) => (true, except, "#@#+js("),
+        (None, None) => return Kind::None,
     };
+    let (domains, body) = (&line[..at], &line[at + marker.len()..]);
     if line.len() > MAX_RULE_BYTES || !body.ends_with(')') {
         return Kind::Unsupported;
     }
-    let exception = line.contains("#@#+js(");
     let keys = domain_keys(domains);
     if keys.is_none() || (!exception && domains.is_empty()) {
         return Kind::Unsupported;
     }
-    let name = body[..body.len() - 1]
-        .split(',')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'');
+    let arguments = arguments(&body[..body.len() - 1]);
+    let name = arguments.first().copied().unwrap_or_default();
     if !exception && RESPONSE_TEXT.contains(&name.strip_suffix(".js").unwrap_or(name)) {
         let mut named = domains
             .split(',')
@@ -291,9 +291,37 @@ pub(crate) fn classify(line: &str) -> Kind {
             return Kind::Unsupported;
         }
     }
+    let bare = name.strip_suffix(".js").unwrap_or(name);
     Kind::Rule {
         unknown: !exception && !known(name),
+        substituted: !exception
+            && matches!(bare, "no-xhr-if" | "prevent-xhr")
+            && arguments
+                .get(2)
+                .is_some_and(|directive| directive.starts_with("war:")),
     }
+}
+
+/// A rule's comma-separated arguments, trimmed and unquoted; `\,` is a comma
+/// inside one.
+fn arguments(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut start, mut escaped) = (0, false);
+    for (index, character) in body.char_indices() {
+        match character {
+            '\\' => escaped = !escaped,
+            ',' if !escaped => {
+                parts.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => escaped = false,
+        }
+    }
+    parts.push(&body[start..]);
+    parts
+        .into_iter()
+        .map(|part| part.trim().trim_matches(|c| c == '"' || c == '\''))
+        .collect()
 }
 
 /// The hostnames and entities a rule names, negated ones included, or `None`
@@ -637,15 +665,15 @@ mod tests {
     fn unknown_and_unsupported_rules_are_told_apart() {
         assert!(matches!(
             classify("a.com##+js(set, a, 1)"),
-            Kind::Rule { unknown: false }
+            Kind::Rule { unknown: false, .. }
         ));
         assert!(matches!(
             classify("a.com##+js(no-such-scriptlet, a)"),
-            Kind::Rule { unknown: true }
+            Kind::Rule { unknown: true, .. }
         ));
         assert!(matches!(
             classify("a.com#@#+js()"),
-            Kind::Rule { unknown: false }
+            Kind::Rule { unknown: false, .. }
         ));
         assert!(matches!(classify("##+js(set, a, 1)"), Kind::Unsupported));
         assert!(matches!(
@@ -660,6 +688,42 @@ mod tests {
     }
 
     #[test]
+    fn the_first_marker_decides_and_a_quoted_one_is_text() {
+        // A quoted exception marker does not lift the YouTube host gate.
+        assert!(matches!(
+            classify(r##"example.com##+js(trusted-rpfr, x, "#@#+js(")"##),
+            Kind::Unsupported
+        ));
+        // An exception that quotes the other marker is still an exception.
+        assert!(matches!(
+            classify(r###"a.com#@#+js(trusted-rpfr, x, "##+js(")"###),
+            Kind::Rule {
+                unknown: false,
+                substituted: false
+            }
+        ));
+    }
+
+    #[test]
+    fn a_resource_no_xhr_if_answers_with_an_empty_body_is_a_loss() {
+        for (line, substituted) in [
+            ("a.com##+js(no-xhr-if, ads.js, war:noop-vast3.xml)", true),
+            (
+                "a.com##+js(prevent-xhr.js, 'ads.js', 'war:noop.json')",
+                true,
+            ),
+            ("a.com##+js(no-xhr-if, ads.js, emptyObj)", false),
+            ("a.com##+js(no-xhr-if, a\\,war:b, true)", false),
+            ("a.com#@#+js(no-xhr-if, ads.js, war:noop-vast3.xml)", false),
+        ] {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false, substituted: s } if s == substituted),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
     fn response_text_is_replaced_only_on_youtube_s_hosts() {
         for line in [
             "www.youtube.com##+js(trusted-rpfr, '\"adSlots\"', '\"no_ads\"', player?)",
@@ -668,7 +732,7 @@ mod tests {
             "example.com#@#+js(trusted-rpfr, a, b)",
         ] {
             assert!(
-                matches!(classify(line), Kind::Rule { unknown: false }),
+                matches!(classify(line), Kind::Rule { unknown: false, .. }),
                 "{line}"
             );
         }

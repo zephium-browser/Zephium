@@ -34,6 +34,10 @@ pub struct CosmeticReport {
     pub scriptlet_rules: usize,
     /// Admitted scriptlet rules naming a scriptlet the library lacks.
     pub unknown_scriptlet_rules: usize,
+    /// Admitted scriptlet rules that run with a stand-in for what they name:
+    /// `no-xhr-if` answers a `war:` resource the app does not ship with an
+    /// empty body, still keeping the request from leaving.
+    pub substituted_scriptlet_rules: usize,
     /// Scriptlet rules left out: generic, overlong, or a hostname form the
     /// program cannot key.
     pub unsupported_scriptlet_rules: usize,
@@ -163,7 +167,10 @@ impl CosmeticPolicy {
                         data.report.unsupported_scriptlet_rules += 1;
                         continue;
                     }
-                    crate::scriptlets::Kind::Rule { unknown } => {
+                    crate::scriptlets::Kind::Rule {
+                        unknown,
+                        substituted,
+                    } => {
                         // A scriptlet the library lacks runs nowhere, so it
                         // is counted and never reaches the program.
                         if !unknown {
@@ -174,6 +181,7 @@ impl CosmeticPolicy {
                         }
                         data.report.scriptlet_rules += 1;
                         data.report.unknown_scriptlet_rules += usize::from(unknown);
+                        data.report.substituted_scriptlet_rules += usize::from(substituted);
                         continue;
                     }
                 }
