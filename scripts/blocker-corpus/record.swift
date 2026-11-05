@@ -2,7 +2,10 @@
 // resource load WebKit checks against content rules (all frames) with its resource type, through
 // one notify rule per type. Each page loads, settles, then scrolls four times, and its visit is
 // written with a status: ok, failed, timeout (never finished) or late (finished after the wait).
-// usage: record <pages.txt> <out.jsonl> <visits.jsonl> [settle-seconds] [consent.js]
+// A page or frame navigation, and each redirect it takes, goes ahead only to a host on the
+// reviewed list (matched exactly, ignoring case); any other is cancelled and logged as
+// `refused <main|frame> <host>`. Subresource loads are not navigations and are recorded.
+// usage: record <pages.txt> <out.jsonl> <visits.jsonl> <settle-seconds> <consent.js> <allowed-hosts.txt>
 import AppKit
 import WebKit
 
@@ -16,7 +19,29 @@ final class Recorder: NSObject, WKNavigationDelegate {
     var failed = false
     var out: FileHandle
     var count = 0
-    init(out: FileHandle) { self.out = out }
+    let allowed: Set<String>
+    init(out: FileHandle, allowed: Set<String>) { self.out = out; self.allowed = allowed }
+    /// Only http(s) leaves the machine; about:blank, data: and the like stay.
+    func admitted(_ url: URL?) -> Bool {
+        guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return true }
+        return url.host.map { allowed.contains($0.lowercased()) } ?? false
+    }
+    func refuse(_ url: URL?, frame: Bool) {
+        FileHandle.standardError.write("refused \(frame ? "frame" : "main") \(url?.host ?? "?")\n".data(using: .utf8)!)
+    }
+    // Asked for every page and frame navigation, and again for each server redirect.
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if admitted(action.request.url) { decisionHandler(.allow); return }
+        refuse(action.request.url, frame: action.targetFrame?.isMainFrame == false)
+        decisionHandler(.cancel)
+    }
+    // A main-frame server redirect is also checked here, in case the policy was not asked.
+    func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        if !admitted(webView.url) {
+            refuse(webView.url, frame: false)
+            webView.stopLoading()
+        }
+    }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true; finishedAt = Date(); failed = false }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { fail(error) }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { fail(error) }
@@ -54,6 +79,11 @@ final class Recorder: NSObject, WKNavigationDelegate {
         let visits = FileHandle(forWritingAtPath: args[3])!
         let settle = args.count > 4 ? Double(args[4])! : 6
         let consent = args.count > 5 ? try? String(contentsOfFile: args[5], encoding: .utf8) : nil
+        guard args.count > 6, let hostText = try? String(contentsOfFile: args[6], encoding: .utf8) else {
+            FileHandle.standardError.write("record needs the reviewed host list\n".data(using: .utf8)!)
+            exit(2)
+        }
+        let allowed = Set(hostText.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty && !$0.hasPrefix("#") })
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
         NSApp.finishLaunching()
@@ -69,7 +99,7 @@ final class Recorder: NSObject, WKNavigationDelegate {
         store.compileContentRuleList(forIdentifier: "notify-all", encodedContentRuleList: json) { l, e in list = l; compiled = true; if let e { print("compile \(e)") } }
         spin(60) { compiled }
         guard let list else { exit(1) }
-        let recorder = Recorder(out: out)
+        let recorder = Recorder(out: out, allowed: allowed)
         // One configuration for every page, so they share one process pool (a fresh configuration
         // starts its own, and thousands exhaust the system's power-notification registrations).
         let config = WKWebViewConfiguration()

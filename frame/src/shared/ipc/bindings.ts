@@ -286,6 +286,13 @@ export const commands = {
 	 *  person's own network only, and loads the page again.
 	 */
 	tabsContinuePastCertificate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_certificate", { id }),
+	/**
+	 *  Opens the page the filter lists refused anyway; its host stays allowed
+	 *  until the app quits.
+	 */
+	tabsContinuePastBlock: (id: string, url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_block", { id, url }),
+	/**  Leaves the page the filter lists refused. */
+	tabsLeaveBlockedPage: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_leave_blocked_page", { id }),
 	/**  Shows the folder with Zephium's local log and crash report. */
 	diagnosticsShowLogs: () => __TAURI_INVOKE<boolean>("diagnostics_show_logs"),
 	/**  The text for a bug report: version, system and the redacted recent log. */
@@ -3176,6 +3183,12 @@ export type TabAudioView = {
 
 export type TabAvailability = { state: "sleeping" } | { state: "waiting_for_capacity"; url: string } | { state: "blocked_by_capacity"; url: string };
 
+export type TabBlockReason =
+/**  A known scam or malware site, from uBlock Origin's badware list. */
+"badware" |
+/**  A known ad or tracking redirect. */
+"filter_lists";
+
 export type TabCertificateProblem =
 /**  Expired, or not valid yet. */
 "expired" |
@@ -3200,6 +3213,8 @@ export type TabFailure = {
 	 *  they may continue past it. Never true for a public name.
 	 */
 	can_continue?: boolean,
+	/**  For a page the filter lists refused, why. */
+	blocked?: TabBlockReason | null,
 	/**
 	 *  The page that was showing is gone; the failure stands in its place
 	 *  until another page opens, even while one loads.
@@ -3214,7 +3229,9 @@ export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "t
  *  The profile's browser engine can be trusted again only after Zephium
  *  restarts; every tab in it says so.
  */
-"restart_required" | "other";
+"restart_required" |
+/**  The filter lists refused the page; `blocked` says why. */
+"blocked" | "other";
 
 /**
  *  What the tab menu can offer for the tab it opens on, as the sidebar sees

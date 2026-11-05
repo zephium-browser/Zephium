@@ -433,6 +433,13 @@ impl Shell {
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
+            EngineEvent::NavigationBlocked {
+                id,
+                url,
+                reason,
+                request,
+                can_continue,
+            } => self.on_navigation_blocked(id, url, reason, request, can_continue),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -689,6 +696,10 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                // Expected, not rejected: the view under a refused first page.
+                if self.items.is_refused_stand_in(id, &committed_url) {
+                    return;
+                }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
                 let uncovered = self
                     .items
@@ -823,6 +834,7 @@ impl Shell {
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
             | EngineEvent::FocusBlocked { id, .. }
+            | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }

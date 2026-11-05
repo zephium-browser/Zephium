@@ -629,6 +629,7 @@ impl Items {
                         url,
                         reason: crate::ports::engine::NavigationFailureReason::Other,
                         covers_page: false,
+                        can_continue: false,
                     }));
                 }
             }
@@ -705,7 +706,30 @@ impl Items {
             _ => false,
         }
     }
+    /// Whether `url` is the blank page a refused first page is built on,
+    /// which never replaces the explanation.
+    pub fn is_refused_stand_in(&self, id: ItemId, url: &Url) -> bool {
+        url.as_str() == "about:blank"
+            // A blank page the person asked for is theirs, and commits.
+            && self
+                .pending_navigations
+                .get(&id)
+                .is_none_or(|pending| pending.url.as_ref() != Some(url))
+            && self
+                .tab(id)
+                .and_then(|tab| tab.failure.as_deref())
+                .is_some_and(|failure| {
+                    matches!(
+                        failure.reason,
+                        crate::ports::engine::NavigationFailureReason::Blocked(_)
+                    )
+                })
+    }
+
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
+        if self.is_refused_stand_in(id, &url) {
+            return false;
+        }
         if let Some(tab) = self.tab_mut(id) {
             if tab.content != TabContent::Web {
                 return false;
@@ -719,6 +743,23 @@ impl Items {
         } else {
             false
         }
+    }
+
+    /// A tab whose only page was refused before it loaded keeps neither its
+    /// address nor its title, as a new tab would.
+    pub fn forget_unloaded_page(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.url = None;
+        tab.title = TabState::new().title;
+        true
+    }
+
+    /// Drops the tab's failure, so the page under it, if any, shows again.
+    pub fn clear_navigation_failure(&mut self, id: ItemId) -> bool {
+        self.tab_mut(id)
+            .is_some_and(|tab| tab.failure.take().is_some())
     }
 
     /// Clears only the still-current intent. A delayed failure from an older
@@ -752,7 +793,14 @@ impl Items {
             .get(&id)
             .and_then(|pending| pending.url.clone())
             .or_else(|| self.opening.get(&id).cloned());
-        let covers_page = replaced_page && self.tab(id).is_some_and(TabState::has_view);
+        // A refused page requested nothing, and a tab's first one may be
+        // refused before its view is counted; it covers either way.
+        let refused = matches!(
+            reason,
+            crate::ports::engine::NavigationFailureReason::Blocked(_)
+        );
+        let covers_page =
+            replaced_page && (refused || self.tab(id).is_some_and(TabState::has_view));
         if asked.is_none() && !covers_page {
             return false;
         }
@@ -766,7 +814,49 @@ impl Items {
             url,
             reason,
             covers_page,
+            can_continue: false,
         }));
+        true
+    }
+
+    /// A page the lists refused covers the tab. A refusal is dropped when the
+    /// person has since asked for something else: it must name the pending
+    /// request, or, unattributed, the very address that request is for.
+    pub fn record_refusal(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationBlockReason,
+        url: Url,
+        request: Option<NavigationRequestId>,
+        can_continue: bool,
+    ) -> bool {
+        if let Some(pending) = self.pending_navigations.get(&id) {
+            let current = match request {
+                Some(request) => request == pending.request,
+                // A view's first load reaches the engine without a request,
+                // so a refusal where it redirects names none and is still it.
+                None => {
+                    pending.url.as_ref() == Some(&url)
+                        || (pending.url.is_some() && self.opening.get(&id) == pending.url.as_ref())
+                }
+            };
+            if !current {
+                return false;
+            }
+        }
+        if !self.record_navigation_failure(
+            id,
+            crate::ports::engine::NavigationFailureReason::Blocked(reason),
+            Some(url),
+            true,
+        ) {
+            return false;
+        }
+        // The refused navigation is over; nothing else waits on it.
+        self.pending_navigations.remove(&id);
+        if let Some(failure) = self.tab_mut(id).and_then(|tab| tab.failure.as_mut()) {
+            failure.can_continue = can_continue;
+        }
         true
     }
 
@@ -1183,6 +1273,42 @@ mod tests {
         assert!(items.navigation_failed(id(1), request));
         assert_eq!(items.pending_navigation(id(1)), None);
         assert!(items.tab(id(1)).unwrap().url.is_none());
+    }
+
+    #[test]
+    fn a_refused_first_page_s_blank_stand_in_is_expected_and_never_commits() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        let blank = Url::parse("about:blank").unwrap();
+        // Before any refusal a blank page is an ordinary commit.
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        assert!(items.is_refused_stand_in(id(1), &blank));
+        assert!(!items.set_committed_url(id(1), blank.clone()));
+        assert!(items.tab(id(1)).unwrap().failure.is_some());
+        // A blank page the person asks for themselves commits over it.
+        items.navigate(id(1), "about:blank");
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.set_committed_url(id(1), blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        // A real page the person then opens commits as usual.
+        let page = Url::parse("https://news.example/").unwrap();
+        assert!(!items.is_refused_stand_in(id(1), &page));
+        assert!(items.set_committed_url(id(1), page));
     }
 
     #[test]

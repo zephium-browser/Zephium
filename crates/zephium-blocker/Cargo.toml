@@ -9,6 +9,9 @@ default = ["runtime", "runtime-exact", "webkit"]
 runtime = []
 runtime-exact = ["runtime", "adblock/embedded-domain-resolver"]
 webkit = ["adblock/content-blocking"]
+# Protection QA builds only: one `.test` host per blocked-page reason, which
+# never resolves, so the page can be shown without loading a real site.
+qa-test-hosts = []
 
 [dependencies]
 zephium-core.workspace = true

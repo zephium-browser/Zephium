@@ -2,6 +2,7 @@
 
 mod archive;
 mod audio;
+mod blocked;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -882,6 +883,12 @@ impl Shell {
             }
             Command::ContinuePastCertificate(id) => {
                 let _ = self.operation_continue_past_certificate(id);
+            }
+            Command::ContinuePastBlock { id, url } => {
+                let _ = self.operation_continue_past_block(id, &url);
+            }
+            Command::LeaveBlockedPage(id) => {
+                let _ = self.operation_leave_blocked_page(id);
             }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);
