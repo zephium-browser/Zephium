@@ -143,3 +143,12 @@ test("AutoFill on a page that is not encrypted asks before filling", async () =>
   await page.getByRole("button", { name: "Fill Anyway" }).click();
   expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", "allow");
 });
+
+test("Cancel on the AutoFill warning fills nothing", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    request: { kind: "insecure_autofill", host: "shop.example" },
+  });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", "dismiss");
+});
