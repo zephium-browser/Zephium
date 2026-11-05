@@ -733,6 +733,16 @@ fn tab_view(
                     retry: prompt.retry,
                 }
             }
+            zephium_core::item::PageRequest::InsecureAutofill => {
+                zephium_ipc::PageRequestView::InsecureAutofill {
+                    host: tab
+                        .url
+                        .as_ref()
+                        .and_then(|url| url.host_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                }
+            }
             zephium_core::item::PageRequest::Unresponsive => {
                 zephium_ipc::PageRequestView::Unresponsive
             }

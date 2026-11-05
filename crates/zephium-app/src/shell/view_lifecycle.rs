@@ -398,6 +398,11 @@ impl Shell {
         self.cancel_pending_presentation(id);
         self.clear_discard_after_retirement(id);
         self.items.view_creation_failed(id);
+        if self.https_first_reopen(id) {
+            let _ = self.relayout();
+            self.project_tab(id);
+            return;
+        }
         let split_collapsed = self.collapse_failed_split_leaf(id);
         if split_collapsed {
             self.schedule_persist();

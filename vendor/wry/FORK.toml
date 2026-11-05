@@ -110,3 +110,7 @@ paths = ["src/lib.rs", "src/wkwebview/navigation.rs"]
 [[patch_sets]]
 name = "MSRV-compatible native class bundle identity"
 paths = ["src/wkwebview/class/wry_web_view.rs"]
+
+[[patch_sets]]
+name = "macOS https-first navigation policy"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs"]

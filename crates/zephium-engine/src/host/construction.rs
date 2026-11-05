@@ -1625,6 +1625,9 @@ impl EngineHost {
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                // Every top-level http page is tried over https first and
+                // loads over http only when that fails.
+                .with_https_upgrade(wry::AppleHttpsUpgrade::AutomaticFallback)
                 .with_drag_drop_handler(move |event| {
                     let permitted = drop_permit.active_token().is_some()
                         && drop_presentation.load(Ordering::Acquire);
@@ -2722,6 +2725,8 @@ impl EngineHost {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             automatic_pip_sequence: Rc::new(Cell::new(0)),
             favicon_watch: Cell::new(0),
+            #[cfg(target_os = "macos")]
+            insecure_autofill: Cell::new(None),
             media_watch: Cell::new((0, false)),
             #[cfg(target_os = "windows")]
             _favicon_observer: favicon_observer,

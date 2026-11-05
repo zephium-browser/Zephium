@@ -137,6 +137,9 @@ pub enum PageRequestView {
         /// The last username or password was wrong.
         retry: bool,
     },
+    /// AutoFill was asked for on a page that is not encrypted; `host` is the
+    /// page's host.
+    InsecureAutofill { host: String },
     /// The page stopped responding: wait for it, or reload it.
     Unresponsive,
 }

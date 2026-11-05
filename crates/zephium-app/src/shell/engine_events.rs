@@ -420,6 +420,9 @@ impl Shell {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::InsecureAutofillRequested { id } => {
+                self.on_insecure_autofill_requested(id)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::NavigationBlocked {
                 id,
@@ -560,6 +563,19 @@ impl Shell {
                             replaced_page && navigation::is_browser_target(url)
                         }
                     });
+                // An https try that failed loads over http next; its error
+                // never shows.
+                match self.https_first_failed(id) {
+                    super::https_first::HttpsFallback::NotATry => {}
+                    super::https_first::HttpsFallback::LoadingOverHttp => return,
+                    super::https_first::HttpsFallback::Refused(asked) => {
+                        if self.items.record_failure_at(id, reason, asked) {
+                            let _ = self.relayout();
+                            self.project_tab(id);
+                        }
+                        return;
+                    }
+                }
                 let covered = self
                     .items
                     .tab(id)
@@ -680,6 +696,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
+                self.https_first_settled(id, &committed_url);
                 if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
@@ -820,6 +837,7 @@ impl Shell {
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }

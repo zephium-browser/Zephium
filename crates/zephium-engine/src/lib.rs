@@ -1193,6 +1193,7 @@ impl RetirementGate {
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
@@ -3347,6 +3348,24 @@ impl Engine for WebviewEngine {
     #[cfg(target_os = "macos")]
     fn autofill_password(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.autofill_password(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn upgrades_https_natively(&self) -> bool {
+        // WebKit names the policy human tabs set from macOS 15.2.
+        static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NATIVE.get_or_init(|| {
+            objc2::runtime::AnyClass::get(c"WKWebpagePreferences").is_some_and(|class| {
+                class
+                    .instance_method(objc2::sel!(setPreferredHTTPSNavigationPolicy:))
+                    .is_some()
+            })
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
     }
 
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {

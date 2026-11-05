@@ -1282,8 +1282,15 @@ These inherited properties must not be overstated:
   is not proof of renderer/site isolation.
 - TLS errors fail with the engine's default evaluation. Zephium's error page names
   the problem where the engine can tell, and offers a way past only for a host on the
-  person's own network. There is no HTTPS-only mode, certificate pinning, or
-  independently tested TLS policy yet.
+  person's own network. A top-level page asked for over plain `http` with a public
+  DNS name on the default port is tried over `https` first and loads over `http`
+  only when that fails: on macOS 15.2 and later through WebKit's own
+  `preferredHTTPSNavigationPolicy` (automatic fallback) for every top-level
+  navigation, elsewhere by the browser for the pages it opens itself (typed
+  addresses, bookmarks, history, restored tabs), with a host that failed not tried
+  again until Zephium quits. On Windows a page's own links to `http` are not
+  upgraded. There is no HTTPS-only mode, certificate pinning, or independently
+  tested TLS policy yet.
 - Cookies, cache, service workers, storage quotas, and clearing semantics are chiefly
   engine-owned. Per-profile partition construction and a verified engine-store
   retirement primitive are implemented. A crash-resumable coordinator now spans

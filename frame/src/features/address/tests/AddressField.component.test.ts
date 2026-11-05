@@ -102,6 +102,16 @@ test("a refused page over the last one shows its own address, without the last p
   await expect.poll(() => input.value).toBe("https://blocked-badware.test/win");
 });
 
+test("a first page that could not open keeps its address in the field", async () => {
+  const { input } = await field(
+    {},
+    { url: null, failure: { url: "http://localtest.me/", reason: "unreachable" } },
+  );
+  expect(input.value).toBe("localtest.me");
+  input.focus();
+  await expect.poll(() => input.value).toBe("http://localtest.me/");
+});
+
 test("the location shortcut on a refused page edits the refused address", async () => {
   await uiCommands.init();
   await field(

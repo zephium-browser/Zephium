@@ -199,6 +199,10 @@ struct ObservedView {
     // Which icon watch of this view's document is current; an older watch's
     // reports are ignored.
     favicon_watch: Cell<u64>,
+    // The document an AutoFill warning was shown for; an approval fills only
+    // that document.
+    #[cfg(target_os = "macos")]
+    insecure_autofill: Cell<Option<crate::navigation_epoch::NavigationEpoch>>,
     // The media watch's generation, and whether it is running.
     media_watch: Cell<(u64, bool)>,
     replay_safety: Rc<discard::ReplaySafety>,

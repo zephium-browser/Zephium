@@ -906,6 +906,10 @@ impl Engine for FakeEngine {
         self.log(format!("autofill {id}"));
         self.native_admission()
     }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
+        self.native_admission()
+    }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("discover {id}"));
         self.native_admission()

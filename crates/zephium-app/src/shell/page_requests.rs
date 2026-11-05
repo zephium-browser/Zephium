@@ -81,6 +81,19 @@ impl Shell {
         }
     }
 
+    /// AutoFill on a page that is not encrypted waits for the person, on the
+    /// tab in front only.
+    pub(super) fn on_insecure_autofill_requested(&mut self, id: ItemId) {
+        let in_front = self.windows.focused().and_then(|window| window.active) == Some(id);
+        if in_front
+            && self
+                .items
+                .set_page_request(id, PageRequest::InsecureAutofill)
+        {
+            self.project_tab(id);
+        }
+    }
+
     pub(super) fn on_http_auth_requested(&mut self, id: ItemId, prompt: HttpAuthPrompt) {
         let request = prompt.request;
         if self
@@ -146,6 +159,27 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        // Filling opens the passwords panel over the page: only the page in
+        // front of the person may be filled, so a tab switched away from
+        // keeps its question.
+        let filling = matches!(
+            decision,
+            PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
+        ) && self.items.tab(id).is_some_and(|tab| {
+            matches!(
+                tab.page_request.as_deref(),
+                Some(PageRequest::InsecureAutofill)
+            )
+        });
+        if filling
+            && (self.active_browser_page().is_some()
+                || self
+                    .windows
+                    .focused()
+                    .is_none_or(|window| window.active != Some(id)))
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
         let Some(request) = self.items.take_page_request(id) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
@@ -171,6 +205,16 @@ impl Shell {
                     ),
                 }
             }
+            (
+                PageRequest::InsecureAutofill,
+                PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow,
+            ) => match self.engine.autofill_insecure_password(id) {
+                NativeDispatch::Rejected | NativeDispatch::Unsupported => operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::NativeDispatchRejected,
+                ),
+                _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
+            },
             (PageRequest::Unresponsive, PageRequestDecision::Dismiss) => {
                 self.crash
                     .unresponsive_waits
