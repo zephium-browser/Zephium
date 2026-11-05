@@ -42,17 +42,32 @@ function zephiumTrustedPreventDomBypass(methodPath = '', targetProp = '') {
         } catch (e) {
         }
     };
+    // Captured, so a named form control cannot shadow it on the inserted node.
+    const select = typeof Element === 'function' ? Element.prototype.querySelectorAll : null;
+    const inside = (node) => {
+        try {
+            return select === null ? [] : [...Reflect.apply(select, node, ['iframe,frame'])];
+        } catch (e) {
+            return [];
+        }
+    };
+    // A frame's own script can run before the insertion returns, such as from
+    // a custom element's connectedCallback, and keep the original function.
     owner[name] = new Proxy(owner[name], {
         apply(target, self, args) {
-            const result = Reflect.apply(target, self, args);
+            // The native call empties a fragment, so its frames are found first.
+            const frames = [];
             for (const node of args) {
-                if (typeof HTMLElement !== 'function' || !(node instanceof HTMLElement)) {
-                    continue;
+                if (typeof DocumentFragment === 'function' && node instanceof DocumentFragment) {
+                    frames.push(...inside(node));
+                } else if (typeof HTMLElement === 'function' && node instanceof HTMLElement) {
+                    frames.push(node, ...inside(node));
                 }
-                for (const frame of [node, ...node.querySelectorAll('iframe,frame')]) {
-                    if ('contentWindow' in frame) {
-                        delegate(frame);
-                    }
+            }
+            const result = Reflect.apply(target, self, args);
+            for (const frame of frames) {
+                if ('contentWindow' in frame) {
+                    delegate(frame);
                 }
             }
             return result;

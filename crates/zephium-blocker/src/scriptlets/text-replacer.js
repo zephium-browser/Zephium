@@ -21,7 +21,13 @@ function zephiumTextReplacer(pattern, replacement, options) {
         }
     }
     // A string or a regular expression replaces as String.prototype.replace does: the first match, or every match with the g flag.
-    const replace = pattern === '*' ? () => value : (text) => text.replace(search, value);
+    // One expression serves every response; a global or sticky one starts each from the beginning.
+    const replace = pattern === '*' ? () => value : (text) => {
+        if (search instanceof RegExp) {
+            search.lastIndex = 0;
+        }
+        return text.replace(search, value);
+    };
     // The edited text, or null when it would not change.
     return (text) => {
         if (includes !== null && !includes(text)) {

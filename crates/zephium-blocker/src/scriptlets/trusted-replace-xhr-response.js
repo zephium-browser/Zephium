@@ -6,11 +6,17 @@ function zephiumTrustedReplaceXhrResponse(pattern = '', replacement = '', propsT
     }
     const matches = zephiumRequestMatcher(['propsToMatch', propsToMatch]);
     const { parse, stringify } = JSON;
+    // open() sends the six methods Fetch normalizes in upper case, others as given.
+    const method = (value) => {
+        const text = String(value);
+        const upper = text.toUpperCase();
+        return ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upper) ? upper : text;
+    };
     const proto = XMLHttpRequest.prototype;
     const requests = new WeakMap();
     proto.open = new Proxy(proto.open, {
         apply(target, self, args) {
-            requests.set(self, { matched: matches({ method: String(args[0]), url: String(args[1]) }) });
+            requests.set(self, { matched: matches({ method: method(args[0]), url: String(args[1]) }) });
             return Reflect.apply(target, self, args);
         },
     });
@@ -45,7 +51,9 @@ function zephiumTrustedReplaceXhrResponse(pattern = '', replacement = '', propsT
         ...text,
         get: new Proxy(text.get, {
             apply(target, self, args) {
-                const result = edited(self);
+                // Other types throw natively, and still do.
+                const textual = self.responseType === '' || self.responseType === 'text';
+                const result = textual ? edited(self) : null;
                 return result !== null && typeof result.value === 'string' ? result.value : Reflect.apply(target, self, args);
             },
         }),

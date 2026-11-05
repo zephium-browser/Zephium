@@ -46,22 +46,44 @@ function zephiumNoXhrIf(conditions = '', directive = '') {
         // emptyStr, and war: resources the app does not ship.
         return '';
     };
+    // open() sends the six methods Fetch normalizes in upper case, others as given.
+    const method = (value) => {
+        const text = String(value);
+        const upper = text.toUpperCase();
+        return ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upper) ? upper : text;
+    };
+    const later = setTimeout;
     const proto = XMLHttpRequest.prototype;
     const defused = new WeakMap();
     proto.open = new Proxy(proto.open, {
         apply(target, self, args) {
-            const details = { method: String(args[0]), url: String(args[1]) };
+            const details = { method: method(args[0]), url: String(args[1]) };
             if (tests.every((test) => test(details))) {
-                defused.set(self, { url: details.url, sync: args[2] === false, done: false, text: body() });
+                defused.set(self, { url: details.url, sync: args[2] === false, sent: false, done: false, text: body() });
             } else {
                 defused.delete(self);
             }
             return Reflect.apply(target, self, args);
         },
     });
+    if (typeof proto.abort === 'function') {
+        proto.abort = new Proxy(proto.abort, {
+            apply(target, self, args) {
+                defused.delete(self);
+                return Reflect.apply(target, self, args);
+            },
+        });
+    }
+    // A listener that opens or aborts the request ends the sequence for it.
     const finish = (xhr, entry) => {
+        if (defused.get(xhr) !== entry) {
+            return;
+        }
         entry.done = true;
         for (const type of ['readystatechange', 'load', 'loadend']) {
+            if (defused.get(xhr) !== entry) {
+                return;
+            }
             xhr.dispatchEvent(new Event(type));
         }
     };
@@ -71,38 +93,56 @@ function zephiumNoXhrIf(conditions = '', directive = '') {
             if (entry === undefined) {
                 return Reflect.apply(target, self, args);
             }
+            if (entry.sent) {
+                throw new DOMException("Failed to execute 'send' on 'XMLHttpRequest': The object's state must be OPENED.", 'InvalidStateError');
+            }
+            entry.sent = true;
+            // A native request completes from a later task, after the caller's continuation.
             if (entry.sync) {
                 finish(self, entry);
             } else {
-                Promise.resolve().then(() => finish(self, entry));
+                later(() => finish(self, entry), 0);
             }
         },
     });
-    const response = (xhr, entry) => {
-        switch (xhr.responseType) {
+    const decode = (type, text) => {
+        switch (type) {
             case '':
             case 'text':
-                return entry.text;
+                return text;
             case 'json':
                 try {
-                    return JSON.parse(entry.text);
+                    return JSON.parse(text);
                 } catch (e) {
                     return null;
                 }
             case 'arraybuffer':
-                return new TextEncoder().encode(entry.text).buffer;
+                return new TextEncoder().encode(text).buffer;
             case 'blob':
-                return new Blob([entry.text]);
+                return new Blob([text]);
             default:
                 return null;
         }
+    };
+    // The same object for repeated reads, until the page asks for another type.
+    const response = (xhr, entry) => {
+        if (entry.decoded === undefined || entry.decoded.type !== xhr.responseType) {
+            entry.decoded = { type: xhr.responseType, value: decode(xhr.responseType, entry.text) };
+        }
+        return entry.decoded.value;
+    };
+    const responseText = (xhr, entry) => {
+        if (xhr.responseType !== '' && xhr.responseType !== 'text') {
+            throw new DOMException("Failed to read the 'responseText' property from 'XMLHttpRequest': The value is only accessible if the object's 'responseType' is '' or 'text'.", 'InvalidStateError');
+        }
+        return entry.text;
     };
     const answers = {
         readyState: () => 4,
         status: () => 200,
         statusText: () => 'OK',
         responseURL: (xhr, entry) => entry.url,
-        responseText: (xhr, entry) => entry.text,
+        responseText,
         response,
     };
     for (const [name, answer] of Object.entries(answers)) {

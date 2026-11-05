@@ -16,19 +16,26 @@ const page = (fetchBody) => {
   class FakeXhr extends EventTarget {
     open(method, url) { this.method = method; this.url = url; }
     send() {}
+    abort() {}
   }
   for (const name of ['responseText', 'response']) {
     Object.defineProperty(FakeXhr.prototype, name, {
       configurable: true,
       enumerable: true,
-      get() { return name === 'response' && this.responseType === 'json' ? JSON.parse(this.body) : this.body; },
+      get() {
+        const textual = this.responseType === undefined || this.responseType === '' || this.responseType === 'text';
+        if (name === 'responseText' && !textual) {
+          throw new DOMException('not text', 'InvalidStateError');
+        }
+        return name === 'response' && this.responseType === 'json' ? JSON.parse(this.body) : this.body;
+      },
     });
   }
   // Each page wraps its own Response, as each document does.
   const PageResponse = class Response extends globalThis.Response {};
   const timers = [];
   const context = {
-    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, Event, TextEncoder, Blob, console, timers,
+    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, Event, DOMException, TextEncoder, Blob, console, timers,
     setTimeout: (handler, delay) => timers.push(['timeout', delay]),
     setInterval: (handler, delay) => timers.push(['interval', delay]),
   };
@@ -148,6 +155,12 @@ const player = () => ({
   assert.equal(edit('a', 'b', 'a z', 'includes', '/z$/'), 'b z');
   assert.equal(context.zephiumTextReplacer('', 'x', []), null);
   assert.equal(context.zephiumTextReplacer('/(/', 'x', []), null);
+  // One expression serves every response: a sticky or global one starts each from the beginning.
+  for (const pattern of ['/a/y', '/a/g']) {
+    const reused = context.zephiumTextReplacer(pattern, 'b', []);
+    assert.equal(reused('ab'), 'bb', pattern);
+    assert.equal(reused('ab'), 'bb', pattern);
+  }
 }
 
 // A player response shaped like YouTube's, as text, for the replace scriptlets.
@@ -187,6 +200,24 @@ const playerText = () => JSON.stringify({
   const untouched = page(playerText());
   untouched.zephiumTrustedReplaceFetchResponse('', 'x', 'player');
   assert.ok((await (await untouched.fetch('/player')).json()).adSlots);
+  // A URL-only call is a GET, and a method fetch() normalizes matches in upper case.
+  const methods = page(playerText());
+  methods.zephiumTrustedReplaceFetchResponse('"adSlots"', '"no_ads"', 'method:GET');
+  assert.equal((await (await methods.fetch('/x')).json()).adSlots, undefined);
+  const posted = page(playerText());
+  posted.zephiumTrustedReplaceFetchResponse('"adSlots"', '"no_ads"', 'method:POST');
+  assert.equal((await (await posted.fetch('/x', { method: 'post' })).json()).adSlots, undefined);
+  assert.ok((await (await posted.fetch('/x', { method: 'patch' })).json()).adSlots);
+  // A request from another realm is known by its tag, not its prototype.
+  const foreign = page(playerText());
+  foreign.zephiumTrustedReplaceFetchResponse('"adSlots"', '"no_ads"', 'player?');
+  const request = { url: 'https://www.youtube.com/youtubei/v1/player?key=1', method: 'POST', [Symbol.toStringTag]: 'Request' };
+  assert.equal((await (await foreign.fetch(request)).json()).adSlots, undefined);
+  // Copies of the edited response, and copies of those, keep its address.
+  const copied = await foreign.fetch('https://www.youtube.com/youtubei/v1/player?key=2');
+  assert.equal(copied.clone().url, 'https://www.youtube.com/youtubei/v1/player?key=2');
+  assert.equal(copied.clone().clone().url, 'https://www.youtube.com/youtubei/v1/player?key=2');
+  assert.equal((await copied.clone().json()).adSlots, undefined);
 }
 
 // trusted-replace-xhr-response: the rules' regular expressions on text and json responses.
@@ -222,11 +253,26 @@ const playerText = () => JSON.stringify({
   const broken = page('{}');
   broken.zephiumTrustedReplaceXhrResponse('*', '{', '');
   assert.ok(request(broken, '/player', 'json').response.adSlots);
+  // A lower-case method open() normalizes still matches, and responseText of json still throws.
+  const typed = page('{}');
+  typed.zephiumTrustedReplaceXhrResponse('"adSlots"', '"no_ads"', 'method:POST');
+  const lower = new typed.XMLHttpRequest();
+  lower.open('post', '/player');
+  lower.responseType = '';
+  lower.readyState = 4;
+  lower.body = playerText();
+  assert.equal(JSON.parse(lower.responseText).adSlots, undefined);
+  const asJson = request(typed, '/player', 'json');
+  assert.throws(() => asJson.responseText, { name: 'InvalidStateError' });
+  assert.equal(asJson.response.adSlots, undefined);
 }
 
 // no-xhr-if: matching requests never leave and complete with the directive's body.
 {
+  const task = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const later = (handler, delay) => setTimeout(handler, delay);
   const context = page('{}');
+  context.setTimeout = later;
   context.zephiumNoXhrIf('/\\/api\\/stats\\/atr\\?.+&docid=/ method:POST');
   const sent = [];
   context.XMLHttpRequest.prototype.send = new Proxy(context.XMLHttpRequest.prototype.send, {});
@@ -244,16 +290,59 @@ const playerText = () => JSON.stringify({
   }
   atr.send('body');
   assert.deepEqual(events, []);
+  // Like a native request, it completes from a later task, not a microtask.
   await Promise.resolve();
+  assert.deepEqual(events, []);
+  await task();
   assert.deepEqual(events, ['readystatechange', 'load', 'loadend']);
+  assert.throws(() => atr.send(), { name: 'InvalidStateError' });
   assert.equal(atr.readyState, 4);
   assert.equal(atr.status, 200);
   assert.equal(atr.responseText, '');
   assert.equal(atr.responseURL, 'https://www.youtube.com/api/stats/atr?ns=yt&rt=1.0&docid=abc');
   const get = open('GET', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
   get.send();
-  await Promise.resolve();
+  await task();
   assert.equal(get.readyState, undefined);
+  // open() sends a lower-case POST as POST.
+  const lower = open('post', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
+  lower.send();
+  await task();
+  assert.equal(lower.status, 200);
+  // An abort before completion ends it; so does a listener that opens the request again.
+  const aborted = open('POST', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
+  const abortedEvents = [];
+  aborted.addEventListener('load', () => abortedEvents.push('load'));
+  aborted.send();
+  aborted.abort();
+  await task();
+  assert.deepEqual(abortedEvents, []);
+  assert.equal(aborted.status, undefined);
+  const reopened = open('POST', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
+  const reopenedEvents = [];
+  reopened.addEventListener('readystatechange', () => {
+    reopenedEvents.push('readystatechange');
+    reopened.open('GET', 'https://www.youtube.com/next');
+  });
+  reopened.addEventListener('load', () => reopenedEvents.push('load'));
+  reopened.send();
+  await task();
+  assert.deepEqual(reopenedEvents, ['readystatechange']);
+  // One response object per type, and responseText only for text.
+  const objects = page('{}');
+  objects.setTimeout = later;
+  objects.zephiumNoXhrIf('ads.js', 'emptyObj');
+  const typed = new objects.XMLHttpRequest();
+  typed.responseType = 'json';
+  typed.open('GET', 'https://cdn.test/ads.js');
+  typed.send();
+  await task();
+  assert.equal(typeof typed.response, 'object');
+  assert.equal(typed.response, typed.response);
+  assert.throws(() => typed.responseText, { name: 'InvalidStateError' });
+  typed.responseType = 'text';
+  assert.equal(typed.response, '{}');
+  assert.equal(typed.responseText, '{}');
   const directive = (value, responseType = '') => {
     const other = page('{}');
     other.zephiumNoXhrIf('ads.js !example.com', value);
@@ -292,18 +381,24 @@ const playerText = () => JSON.stringify({
   class FakeFrame extends FakeElement {
     constructor(view) { super(); this.contentWindow = null; this.view = view; }
   }
+  class FakeFragment {
+    constructor(children) { this.children = children; }
+  }
+  // Inserting a fragment moves its children out of it, as the DOM does.
   const makeNode = () => {
     const Node = function Node() {};
     Node.prototype.appendChild = function appendChild(child) {
-      for (const frame of [child, ...child.querySelectorAll()]) {
+      for (const frame of [child, ...FakeElement.prototype.querySelectorAll.call(child)]) {
         if (frame instanceof FakeFrame) { frame.contentWindow = frame.view; }
       }
+      if (child instanceof FakeFragment) { child.children = []; }
       return child;
     };
     return Node;
   };
+  const dom = { HTMLElement: FakeElement, Element: FakeElement, DocumentFragment: FakeFragment };
   const Node = makeNode();
-  Object.assign(parent, { Node, HTMLElement: FakeElement });
+  Object.assign(parent, { Node, ...dom });
   parent.fetch = new Proxy(parent.fetch, { apply: () => Promise.resolve('patched') });
   parent.zephiumTrustedPreventDomBypass('Node.prototype.appendChild', 'fetch');
   const frame = new FakeFrame(frameWindow);
@@ -312,16 +407,27 @@ const playerText = () => JSON.stringify({
   // A dotted target, on a frame inside the inserted element.
   const parsing = page('{}');
   const ParsingNode = makeNode();
-  Object.assign(parsing, { Node: ParsingNode, HTMLElement: FakeElement });
+  Object.assign(parsing, { Node: ParsingNode, ...dom });
   vm.runInContext('JSON.parse = new Proxy(JSON.parse, { apply: () => "parent" });', parsing);
   parsing.zephiumTrustedPreventDomBypass('Node.prototype.appendChild', 'JSON.parse');
   const nestedWindow = vm.createContext({});
   const nested = new FakeFrame(vm.runInContext('globalThis', nestedWindow));
   new ParsingNode().appendChild(new FakeElement([nested]));
   assert.equal(vm.runInContext('JSON.parse("1")', nestedWindow), 'parent');
+  // A frame inside a fragment, which the insertion empties.
+  const fragmentWindow = vm.createContext({});
+  const inFragment = new FakeFrame(vm.runInContext('globalThis', fragmentWindow));
+  new ParsingNode().appendChild(new FakeFragment([inFragment]));
+  assert.equal(vm.runInContext('JSON.parse("1")', fragmentWindow), 'parent');
+  // A named control shadowing querySelectorAll on the inserted node changes nothing.
+  const shadowedWindow = vm.createContext({});
+  const shadowed = new FakeElement([new FakeFrame(vm.runInContext('globalThis', shadowedWindow))]);
+  shadowed.querySelectorAll = () => { throw new Error('a form control'); };
+  new ParsingNode().appendChild(shadowed);
+  assert.equal(vm.runInContext('JSON.parse("1")', shadowedWindow), 'parent');
   const whole = page('{}');
   const WholeNode = makeNode();
-  Object.assign(whole, { Node: WholeNode, HTMLElement: FakeElement, document: {} });
+  Object.assign(whole, { Node: WholeNode, ...dom, document: {} });
   whole.zephiumTrustedPreventDomBypass('Node.prototype.appendChild');
   const replaced = new FakeFrame(vm.createContext({}));
   new WholeNode().appendChild(replaced);
