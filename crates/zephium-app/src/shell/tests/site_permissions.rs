@@ -716,12 +716,12 @@ mod app_links {
             &mut shell,
             id,
             "zoommtg://zoom.us/join",
-            Some("https://widget.example"),
+            Some("https://widget.example:8443"),
         );
         assert_eq!(
             shown(&screen, id),
             Some(PageRequestView::ExternalApp {
-                site: Some("widget.example".into()),
+                site: Some("widget.example:8443".into()),
                 scheme: "zoommtg".into(),
                 app: Some("Meetings".into()),
             })
@@ -733,7 +733,7 @@ mod app_links {
         assert_eq!(
             store.app_link_sites.lock().unwrap().get(&profile).cloned(),
             Some(vec![(
-                origin("https://widget.example"),
+                origin("https://widget.example:8443"),
                 "zoommtg".to_owned()
             )])
         );
