@@ -35,7 +35,7 @@ const page = (fetchBody) => {
   const PageResponse = class Response extends globalThis.Response {};
   const timers = [];
   const context = {
-    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, Event, DOMException, TextEncoder, Blob, console, timers,
+    Response: PageResponse, Request, Headers, XMLHttpRequest: FakeXhr, Event, DOMException, URL, TextEncoder, Blob, console, timers,
     setTimeout: (handler, delay) => timers.push(['timeout', delay]),
     setInterval: (handler, delay) => timers.push(['interval', delay]),
   };
@@ -300,6 +300,15 @@ const playerText = () => JSON.stringify({
   assert.equal(atr.status, 200);
   assert.equal(atr.responseText, '');
   assert.equal(atr.responseURL, 'https://www.youtube.com/api/stats/atr?ns=yt&rt=1.0&docid=abc');
+  // A relative address is matched as written and reported resolved, without its fragment.
+  const relative = page('{}');
+  relative.setTimeout = later;
+  relative.document = { baseURI: 'https://www.youtube.com/watch?v=1' };
+  relative.zephiumNoXhrIf('/^\\/api\\/stats\\/qoe/');
+  const qoe = new relative.XMLHttpRequest();
+  qoe.open('GET', '/api/stats/qoe?x=1#frag', false);
+  qoe.send();
+  assert.equal(qoe.responseURL, 'https://www.youtube.com/api/stats/qoe?x=1');
   const get = open('GET', 'https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
   get.send();
   await task();
@@ -374,21 +383,31 @@ const playerText = () => JSON.stringify({
   const parent = page('{}');
   const frameWindow = vm.createContext({ fetch: async () => 'frame', JSON });
   vm.runInContext('this.fetch = fetch; this.JSON = JSON;', frameWindow);
+  // Each querySelectorAll accepts only its own kind of receiver, as the DOM's do.
   class FakeElement {
     constructor(children = []) { this.children = children; }
-    querySelectorAll() { return this.children; }
+    querySelectorAll() {
+      if (!(this instanceof FakeElement)) { throw new TypeError('Illegal invocation'); }
+      return this.children;
+    }
   }
   class FakeFrame extends FakeElement {
     constructor(view) { super(); this.contentWindow = null; this.view = view; }
   }
   class FakeFragment {
     constructor(children) { this.children = children; }
+    querySelectorAll() {
+      if (!(this instanceof FakeFragment)) { throw new TypeError('Illegal invocation'); }
+      return this.children;
+    }
   }
   // Inserting a fragment moves its children out of it, as the DOM does.
   const makeNode = () => {
-    const Node = function Node() {};
+    const Node = function Node(connected = true) { this.connected = connected; };
+    Object.defineProperty(Node.prototype, 'isConnected', { get() { return this.connected; } });
     Node.prototype.appendChild = function appendChild(child) {
-      for (const frame of [child, ...FakeElement.prototype.querySelectorAll.call(child)]) {
+      const inner = child instanceof FakeFragment ? FakeFragment : FakeElement;
+      for (const frame of this.connected ? [child, ...inner.prototype.querySelectorAll.call(child)] : []) {
         if (frame instanceof FakeFrame) { frame.contentWindow = frame.view; }
       }
       if (child instanceof FakeFragment) { child.children = []; }
@@ -425,6 +444,13 @@ const playerText = () => JSON.stringify({
   shadowed.querySelectorAll = () => { throw new Error('a form control'); };
   new ParsingNode().appendChild(shadowed);
   assert.equal(vm.runInContext('JSON.parse("1")', shadowedWindow), 'parent');
+  // A detached receiver gives its frames no window, so nothing is scanned.
+  const detached = new FakeElement([new FakeFrame(vm.createContext({}))]);
+  let scanned = 0;
+  const counted = detached.children[0];
+  Object.defineProperty(counted, 'contentWindow', { get() { scanned++; return null; }, configurable: true });
+  new ParsingNode(false).appendChild(detached);
+  assert.equal(scanned, 0);
   const whole = page('{}');
   const WholeNode = makeNode();
   Object.assign(whole, { Node: WholeNode, ...dom, document: {} });

@@ -42,13 +42,27 @@ function zephiumTrustedPreventDomBypass(methodPath = '', targetProp = '') {
         } catch (e) {
         }
     };
-    // Captured, so a named form control cannot shadow it on the inserted node.
-    const select = typeof Element === 'function' ? Element.prototype.querySelectorAll : null;
-    const inside = (node) => {
+    // Captured, so a named form control cannot shadow them on the inserted
+    // node; each only accepts its own kind of receiver.
+    const elementSelect = typeof Element === 'function' ? Element.prototype.querySelectorAll : null;
+    const fragmentSelect = typeof DocumentFragment === 'function' ? DocumentFragment.prototype.querySelectorAll : null;
+    const inside = (node, fragment) => {
+        const select = fragment ? fragmentSelect : elementSelect;
         try {
             return select === null ? [] : [...Reflect.apply(select, node, ['iframe,frame'])];
         } catch (e) {
             return [];
+        }
+    };
+    const connectedGetter = typeof Node === 'function'
+        ? Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected')?.get
+        : undefined;
+    // A frame in a detached tree has no window to delegate yet.
+    const connected = (node) => {
+        try {
+            return connectedGetter === undefined || node == null || Reflect.apply(connectedGetter, node, []) !== false;
+        } catch (e) {
+            return true;
         }
     };
     // A frame's own script can run before the insertion returns, such as from
@@ -57,11 +71,11 @@ function zephiumTrustedPreventDomBypass(methodPath = '', targetProp = '') {
         apply(target, self, args) {
             // The native call empties a fragment, so its frames are found first.
             const frames = [];
-            for (const node of args) {
+            for (const node of connected(self) ? args : []) {
                 if (typeof DocumentFragment === 'function' && node instanceof DocumentFragment) {
-                    frames.push(...inside(node));
+                    frames.push(...inside(node, true));
                 } else if (typeof HTMLElement === 'function' && node instanceof HTMLElement) {
-                    frames.push(node, ...inside(node));
+                    frames.push(node, ...inside(node, false));
                 }
             }
             const result = Reflect.apply(target, self, args);

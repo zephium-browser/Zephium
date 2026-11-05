@@ -53,13 +53,24 @@ function zephiumNoXhrIf(conditions = '', directive = '') {
         return ['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upper) ? upper : text;
     };
     const later = setTimeout;
+    // What a native request reports: absolute against the document, without a fragment.
+    const resolved = (url) => {
+        try {
+            const base = typeof document === 'object' && document !== null ? document.baseURI : location.href;
+            const absolute = new URL(url, base);
+            absolute.hash = '';
+            return absolute.href;
+        } catch (e) {
+            return url;
+        }
+    };
     const proto = XMLHttpRequest.prototype;
     const defused = new WeakMap();
     proto.open = new Proxy(proto.open, {
         apply(target, self, args) {
             const details = { method: method(args[0]), url: String(args[1]) };
             if (tests.every((test) => test(details))) {
-                defused.set(self, { url: details.url, sync: args[2] === false, sent: false, done: false, text: body() });
+                defused.set(self, { url: resolved(details.url), sync: args[2] === false, sent: false, done: false, text: body() });
             } else {
                 defused.delete(self);
             }
