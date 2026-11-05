@@ -80,6 +80,12 @@ test("a badware page names the list, goes back first and lets the person continu
   await expect
     .element(page.getByRole("alert"))
     .toHaveTextContent("uBlock Origin's Badware list as a known scam or malware site");
+  // The protection bench ends a refused load when this page shows this refusal.
+  const shown = page.getByRole("alert").element() as HTMLElement;
+  expect([shown.dataset.zephiumBlockedTab, shown.dataset.zephiumBlockedUrl]).toEqual([
+    "tab-7",
+    "https://scam.example/win",
+  ]);
   await expect.element(page.getByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   await page.getByRole("button", { name: "Go back" }).click();
   expect(left).toHaveBeenCalledExactlyOnceWith("tab-7");

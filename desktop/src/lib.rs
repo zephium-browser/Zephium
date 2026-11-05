@@ -7212,6 +7212,8 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
                 }
                 Projection::OperationProcessed(disposition) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::operation_processed(&disposition);
                     let panel_result=disposition.clone();
                     if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
                         work_product::preference_processed(&emit_handle, disposition);

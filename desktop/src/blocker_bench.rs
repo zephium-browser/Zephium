@@ -18,7 +18,8 @@ use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 use zephium_engine::WebviewEngine;
 use zephium_ipc::{
-    BlockerPhase, BlockerPreferenceState, BlockerSourcePhase, ItemsState, ProfilesView, TabView,
+    BlockerPhase, BlockerPreferenceState, BlockerSourcePhase, ItemsState, OperationDisposition,
+    ProfilesView, TabView,
 };
 
 const FLAG: &str = "--blocker-bench";
@@ -47,6 +48,10 @@ struct State {
     watching: bool,
     fresh: Vec<String>,
     finished: HashMap<String, Instant>,
+    blocked: HashMap<String, String>,
+    // Fills only while a command waits on an operation's result.
+    awaiting: bool,
+    results: HashMap<String, OperationDisposition>,
 }
 
 static BENCH: OnceLock<Bench> = OnceLock::new();
@@ -63,6 +68,7 @@ impl Bench {
         state.watching = on;
         state.fresh.clear();
         state.finished.clear();
+        state.blocked.clear();
     }
 
     fn note_tabs<'a>(
@@ -154,6 +160,54 @@ impl Bench {
         self.changed.notify_all();
     }
 
+    /// A refused page never starts loading; it ends where chrome shows why.
+    fn refused(&self, tab: String, url: &str, at: Instant) {
+        let mut state = self.lock();
+        state.loading.remove(&tab);
+        if state.watching {
+            let url = tauri::Url::parse(url).map_or_else(|_| url.to_owned(), String::from);
+            state.blocked.insert(tab.clone(), url);
+            state.finished.insert(tab, at);
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    fn note_result(&self, disposition: &OperationDisposition) {
+        let mut state = self.lock();
+        if state.awaiting {
+            state
+                .results
+                .insert(disposition.operation_id.clone(), disposition.clone());
+            drop(state);
+            self.changed.notify_all();
+        }
+    }
+
+    fn await_results(&self, on: bool) {
+        let mut state = self.lock();
+        state.awaiting = on;
+        state.results.clear();
+    }
+
+    fn wait_result(&self, operation: &str, deadline: Instant) -> Option<OperationDisposition> {
+        let mut state = self.lock();
+        loop {
+            if let Some(disposition) = state.results.remove(operation) {
+                return Some(disposition);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+    }
+
     /// When the tab's load finished, once it has; `None` at `deadline`.
     fn wait_finished(&self, tab: &str, deadline: Instant) -> Option<Instant> {
         let mut state = self.lock();
@@ -243,11 +297,18 @@ pub(crate) fn engine_event(event: &EngineEvent) {
         EngineEvent::LoadingChanged { id, loading } => {
             bench.loading_changed(id.to_string(), *loading, Instant::now());
         }
-        // A refused page never starts loading; showing why is its end.
-        EngineEvent::NavigationBlocked { id, .. } => {
-            bench.loading_changed(id.to_string(), false, Instant::now());
+        EngineEvent::NavigationBlocked { id, url, .. } => {
+            bench.refused(id.to_string(), url, Instant::now());
         }
         _ => {}
+    }
+}
+
+/// The actor's result for an operation the driver is waiting on. Chrome
+/// acknowledges every result, so the driver keeps its own copy.
+pub(crate) fn operation_processed(disposition: &OperationDisposition) {
+    if let Some(bench) = BENCH.get() {
+        bench.note_result(disposition);
     }
 }
 
@@ -474,7 +535,7 @@ fn handle(
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
-        "setting" => setting(app, &command),
+        "setting" => setting(app, bench, &command),
         "capture" => capture(app, &command),
         "quit" => Ok(json!({})),
         _ => Err(format!("unknown op {op:?}")),
@@ -533,7 +594,7 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
     let shell = shell(app)?;
     raise(app);
     if command.get("private").and_then(Value::as_bool) == Some(true) {
-        return open_private(&shell, bench, url, timeout);
+        return open_private(app, &shell, bench, url, timeout);
     }
     bench.watch(true);
     let started = Instant::now();
@@ -548,11 +609,12 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
     if let Some(tab) = &tab {
         select(&shell, bench, tab);
     }
-    load(bench, dispatched, tab, started, timeout)
+    load(app, bench, dispatched, tab, started, timeout)
 }
 
 /// Opens a private window and loads `url` in its first tab.
 fn open_private(
+    app: &tauri::AppHandle,
     shell: &Handle,
     bench: &Bench,
     url: &str,
@@ -582,7 +644,7 @@ fn open_private(
         id,
         input: url.to_owned(),
     });
-    load(bench, dispatched, Some(tab), started, timeout)
+    load(app, bench, dispatched, Some(tab), started, timeout)
 }
 
 fn navigate(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value, String> {
@@ -607,7 +669,7 @@ fn navigate(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Va
         input: url.to_owned(),
     };
     let dispatched = shell.dispatch(command);
-    load(bench, dispatched, Some(tab), started, timeout)
+    load(app, bench, dispatched, Some(tab), started, timeout)
 }
 
 /// A page that is not the window's active tab is hidden and throttled, which
@@ -661,17 +723,26 @@ fn front(window: &tauri::WebviewWindow) {
 /// Waits for a dispatched navigation to finish loading. On timeout it still
 /// names the tab, so the harness can measure what loaded and close it.
 fn load(
+    app: &tauri::AppHandle,
     bench: &Bench,
     dispatched: bool,
     tab: Option<String>,
     started: Instant,
     timeout: Duration,
 ) -> Result<Value, String> {
+    let deadline = started + timeout;
     let finished = tab
         .as_deref()
         .filter(|_| dispatched)
-        .and_then(|tab| bench.wait_finished(tab, started + timeout));
+        .and_then(|tab| bench.wait_finished(tab, deadline));
+    let refused = tab
+        .as_deref()
+        .and_then(|tab| bench.lock().blocked.get(tab).cloned());
     bench.watch(false);
+    let finished = match (finished, &tab, refused) {
+        (Some(_), Some(tab), Some(url)) => wait_rendered(app, tab, &url, deadline),
+        (finished, ..) => finished,
+    };
     if !dispatched {
         return Err("the command queue refused the request".into());
     }
@@ -682,6 +753,45 @@ fn load(
         Some(at) => json!({ "tab": tab, "loadMs": millis(at.saturating_duration_since(started)) }),
         None => json!({ "tab": tab, "loadMs": millis(timeout), "timedOut": true }),
     })
+}
+
+/// The blocked page for `url` as chrome draws it for `tab`, once it is laid
+/// out; `None` at `deadline`.
+fn wait_rendered(
+    app: &tauri::AppHandle,
+    tab: &str,
+    url: &str,
+    deadline: Instant,
+) -> Option<Instant> {
+    let (tab, url) = (
+        serde_json::to_string(tab).ok()?,
+        serde_json::to_string(url).ok()?,
+    );
+    let script = format!(
+        "(() => {{ const page = document.querySelector('[data-zephium-blocked-tab]'); \
+         if (!page || page.dataset.zephiumBlockedTab !== {tab} || page.dataset.zephiumBlockedUrl !== {url}) return false; \
+         return page.getBoundingClientRect().height > 0; }})()"
+    );
+    loop {
+        if shown(app, &script) {
+            return Some(Instant::now());
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(READY_POLL);
+    }
+}
+
+fn shown(app: &tauri::AppHandle, script: &str) -> bool {
+    let Some(window) = app.get_webview_window(crate::MAIN_LABEL) else {
+        return false;
+    };
+    let (done, answer) = std::sync::mpsc::channel();
+    let asked = window.eval_with_callback(script, move |result| {
+        let _ = done.send(result == "true");
+    });
+    asked.is_ok() && answer.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
 }
 
 /// The body of an async function, run in the page's main world. The envelope
@@ -755,16 +865,33 @@ fn blocked(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Val
     Ok(json!({ "value": today }))
 }
 
-/// An app setting, such as `appearance`, as the settings page would set it.
-fn setting(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+/// An app setting, such as `appearance`, as the settings page would set it:
+/// admitted as an operation, then answered with what the shell made of it.
+fn setting(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value, String> {
     let (key, value) = (text(command, "key")?, text(command, "value")?);
-    if shell(app)?.dispatch(Command::SetAppSetting {
-        key: key.to_owned(),
-        value: value.to_owned(),
-    }) {
-        Ok(json!({}))
-    } else {
-        Err("the command queue refused the request".into())
+    let (shell, deadline) = (shell(app)?, Instant::now() + timeout(command));
+    // The result can arrive before the admission returns its id.
+    bench.await_results(true);
+    let admission = crate::dispatch_operation(
+        app,
+        &shell,
+        Command::SetAppSetting {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        },
+    );
+    let result = admission
+        .operation_id
+        .filter(|_| admission.accepted)
+        .map(|operation| bench.wait_result(&operation, deadline));
+    bench.await_results(false);
+    match result.ok_or("the setting was not admitted")? {
+        Some(disposition) => Ok(json!({
+            "admitted": true,
+            "outcome": disposition.outcome,
+            "reason": disposition.reason,
+        })),
+        None => Ok(json!({ "admitted": true, "timedOut": true })),
     }
 }
 
@@ -808,6 +935,7 @@ fn close(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_ipc::{OperationOutcome, OperationReason};
 
     #[test]
     fn a_load_ends_only_for_a_watch_and_idleness_follows_the_last_event() {
@@ -851,5 +979,43 @@ mod tests {
             Value::Object(reply),
             json!({ "id": 7, "ok": false, "error": "no" })
         );
+    }
+
+    #[test]
+    fn a_refusal_ends_the_load_and_names_the_page_chrome_must_show() {
+        let bench = Bench::default();
+        bench.loading_changed("tab".into(), true, Instant::now());
+        bench.watch(true);
+        bench.refused("tab".into(), "https://example.com", Instant::now());
+        assert!(bench
+            .wait_finished("tab", Instant::now() + Duration::from_secs(1))
+            .is_some());
+        assert!(bench.wait_idle("tab", Instant::now()));
+        assert_eq!(
+            bench.lock().blocked.get("tab").map(String::as_str),
+            Some("https://example.com/")
+        );
+        bench.watch(false);
+        assert!(bench.lock().blocked.is_empty());
+    }
+
+    #[test]
+    fn a_result_is_kept_only_while_a_command_waits_for_one() {
+        let bench = Bench::default();
+        let disposition = |id: &str| OperationDisposition {
+            operation_id: id.into(),
+            outcome: OperationOutcome::Rejected,
+            reason: OperationReason::InvalidInput,
+        };
+        bench.note_result(&disposition("early"));
+        bench.await_results(true);
+        assert_eq!(bench.wait_result("early", Instant::now()), None);
+        bench.note_result(&disposition("op"));
+        assert_eq!(
+            bench.wait_result("op", Instant::now()),
+            Some(disposition("op"))
+        );
+        bench.await_results(false);
+        assert!(bench.lock().results.is_empty());
     }
 }

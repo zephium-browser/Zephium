@@ -79,7 +79,12 @@
     back is the way out; opening it anyway stays quiet and lasts until quit,
     and is offered only where Zephium's own check refused it.
   -->
-  <div class="failed-page" role="alert">
+  <div
+    class="failed-page"
+    role="alert"
+    data-zephium-blocked-tab={tab.id}
+    data-zephium-blocked-url={failure.url}
+  >
     <h1>{m.navigation_blocked_title({ host })}</h1>
     <p>{blocked[failure.blocked ?? "filter_lists"]()}</p>
     <Button variant="primary" pending={acting} onclick={leaveBlocked}
