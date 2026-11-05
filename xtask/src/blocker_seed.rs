@@ -1852,6 +1852,10 @@ pub(crate) fn compile_hidden(
         CompileTarget::Webkit => zephium_blocker::CompileTarget::WebKit,
     };
     let compiler = Compiler::default();
+    // The WebKit artifact is macOS's, which judges the badware list's page
+    // loads with its runtime matcher, though this graph builds only WebKit.
+    #[cfg(feature = "blocker-seed-webkit")]
+    let compiler = compiler.with_navigation_check(true);
     #[cfg(feature = "blocker-seed-webkit")]
     let compiler = if unpruned {
         compiler.without_webkit_pruning()

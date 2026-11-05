@@ -247,6 +247,8 @@ pub struct Compiler {
     webkit_pruned: Option<&'static crate::webkit_prune::PrunedRules>,
     #[cfg(feature = "webkit")]
     webkit_pruning: bool,
+    #[cfg(feature = "webkit")]
+    navigation_checked: bool,
 }
 
 impl Compiler {
@@ -258,7 +260,20 @@ impl Compiler {
             webkit_pruned: None,
             #[cfg(feature = "webkit")]
             webkit_pruning: true,
+            #[cfg(feature = "webkit")]
+            navigation_checked: cfg!(feature = "runtime"),
         }
+    }
+
+    /// Whether the badware list's page and frame wildcard rules are judged
+    /// by the navigation check, which only a build with the runtime matcher
+    /// has, and so left out of WebKit. A build without it keeps them, or
+    /// nothing would refuse those loads. Release tooling that compiles for a
+    /// platform other than its own build says which.
+    #[cfg(feature = "webkit")]
+    pub const fn with_navigation_check(mut self, built: bool) -> Self {
+        self.navigation_checked = built;
+        self
     }
 
     /// Keeps every WebKit rule, for release tooling that measures which
@@ -399,8 +414,13 @@ impl Compiler {
                         } else {
                             crate::webkit_prune::PrunedRules::none()
                         };
-                        let (rules, coverage) =
-                            compile_webkit(&mut prepared, accepted_rules, self.limits, pruned)?;
+                        let (rules, coverage) = compile_webkit(
+                            &mut prepared,
+                            accepted_rules,
+                            self.limits,
+                            pruned,
+                            self.navigation_checked,
+                        )?;
                         let blocking_entries = coverage.blocking_rule_entries;
                         (None, None, Some(rules), Some(coverage), blocking_entries)
                     }
@@ -1098,12 +1118,23 @@ fn compile_webkit(
     accepted_rules: usize,
     limits: CompileLimits,
     pruned: &crate::webkit_prune::PrunedRules,
+    navigation_checked: bool,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     // Splitting separator ends is an optimization: a list that fits WebKit's
     // limits only unsplit is compiled unsplit, every rule of it.
-    match compile_webkit_with(prepared, accepted_rules, limits, pruned, true) {
+    let mut compile = |split| {
+        compile_webkit_with(
+            prepared,
+            accepted_rules,
+            limits,
+            pruned,
+            split,
+            navigation_checked,
+        )
+    };
+    match compile(true) {
         Err(CompileError::TooManyWebKitRules { .. } | CompileError::WebKitJsonTooLarge { .. }) => {
-            compile_webkit_with(prepared, accepted_rules, limits, pruned, false)
+            compile(false)
         }
         result => result,
     }
@@ -1116,6 +1147,7 @@ fn compile_webkit_with(
     limits: CompileLimits,
     pruned: &crate::webkit_prune::PrunedRules,
     split_separator_ends: bool,
+    navigation_checked: bool,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     let mut bad_filter_ids = HashSet::new();
     for source in &*prepared {
@@ -1201,7 +1233,8 @@ fn compile_webkit_with(
             // The navigation check judges only page and frame loads, so only a
             // rule for those alone may leave WebKit for it; any other type keeps
             // its blocking here.
-            if source.id.as_str() == NAVIGATION_CHECKED_SOURCE
+            if navigation_checked
+                && source.id.as_str() == NAVIGATION_CHECKED_SOURCE
                 && resource_types.iter().all(|resource| {
                     matches!(
                         resource,

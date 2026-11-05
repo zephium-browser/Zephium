@@ -1622,7 +1622,7 @@ fn the_runtime_target_ignores_pruned_rules() {
     assert_eq!(with.report(), without.report());
 }
 
-#[cfg(feature = "webkit")]
+#[cfg(all(feature = "webkit", feature = "runtime"))]
 #[test]
 fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
     let rules = concat!(
@@ -1657,6 +1657,26 @@ fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
     let coverage = other.report().webkit().unwrap();
     assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
     assert_eq!(coverage.converted_input_rules(), 6);
+}
+
+#[cfg(all(feature = "webkit", not(feature = "runtime")))]
+#[test]
+fn without_the_navigation_check_badware_page_rules_stay_in_webkit() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![FilterSource::new(
+                id("ublock-badware"),
+                SourceFormat::Standard,
+                "||scam.example/*/winpage$doc\n||scam.example/*/framepage$subdocument\n".to_owned(),
+            )],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 2);
+    let json = rules.webkit().unwrap().json();
+    assert!(json.contains("winpage") && json.contains("framepage"));
 }
 
 #[cfg(feature = "webkit")]
