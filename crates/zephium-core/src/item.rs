@@ -121,6 +121,9 @@ pub struct TabState {
     /// Something the page asked for that waits on the person. Runtime only,
     /// and cleared when the tab commits another document.
     pub page_request: Option<Box<PageRequest>>,
+    /// Counts the requests set on this tab, so an answer names the one it
+    /// was shown.
+    pub page_request_serial: u32,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub zoom: f64,
@@ -182,6 +185,7 @@ impl TabState {
             url: None,
             loading: false,
             page_request: None,
+            page_request_serial: 0,
             can_go_back: false,
             can_go_forward: false,
             zoom: 1.0,

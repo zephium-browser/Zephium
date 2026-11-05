@@ -37,6 +37,7 @@
   "page_request_download_allow": "允許",
   "page_request_download_once": "下載",
   "page_request_not_now": "暫不",
+  "page_request_failed": "無法套用你的選擇，請再試一次。",
   "page_request_waiting": "這個網頁正在等你",
   "page_request_unresponsive_title": "這個網頁沒有回應",
   "page_request_unresponsive_detail": "你可以等候，或重新載入網頁。",

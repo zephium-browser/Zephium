@@ -37,6 +37,7 @@
   "page_request_download_allow": "Разрешить",
   "page_request_download_once": "Загрузить",
   "page_request_not_now": "Не сейчас",
+  "page_request_failed": "Не удалось применить ваш ответ. Попробуйте еще раз.",
   "page_request_waiting": "Страница ждет вашего ответа",
   "page_request_unresponsive_title": "Страница не отвечает",
   "page_request_unresponsive_detail": "Можно подождать или перезагрузить её.",

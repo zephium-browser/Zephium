@@ -10,6 +10,7 @@ const native = vi.hoisted(() => ({
   defaultZoom: "100",
   page: null as string | null,
   edit: vi.fn(async () => true),
+  answer: vi.fn(async () => ({ accepted: true, operation_id: null })),
 }));
 
 vi.mock("$domain/surface", () => ({ surface: { currentPage: () => native.page } }));
@@ -30,6 +31,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsBootstrap: async () => {},
     runCommand: async () => ({ accepted: true, operation_id: null }),
     launcherEdit: native.edit,
+    tabsAnswerPageRequest: native.answer as never,
     settingGet: async (key: string) => (key === "zoom.default" ? native.defaultZoom : null),
   });
 });
@@ -128,11 +130,13 @@ test("a page's link for another app asks before it opens", async () => {
     ...tab,
     projection_revision: stamp(),
     page_request: { kind: "external_app", site: "zoom.us", scheme: "zoommtg", app: "zoom.us" },
+    page_request_serial: 4,
   });
   const card = screen.getByRole("alertdialog");
   await expect.element(card).toHaveTextContent("Open zoom.us?");
   await expect.element(card.getByRole("checkbox")).not.toBeChecked();
-  await expect.element(card.getByRole("button", { name: "Cancel" })).toBeVisible();
+  await card.getByRole("button", { name: "Cancel" }).click();
+  expect(native.answer).toHaveBeenLastCalledWith(tab.id, 4, "dismiss");
 });
 
 test("a page that stopped responding offers to wait or reload", async () => {

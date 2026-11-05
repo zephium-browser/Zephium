@@ -677,6 +677,7 @@ impl Items {
                         )) =>
             {
                 tab.page_request = Some(Box::new(request));
+                tab.page_request_serial = tab.page_request_serial.wrapping_add(1);
                 true
             }
             _ => false,

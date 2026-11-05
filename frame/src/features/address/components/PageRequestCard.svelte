@@ -8,12 +8,16 @@
   import * as m from "$shared/i18n/messages";
   import type { PageRequestAnswer, PageRequestView } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
+  import { settle } from "$domain/operations";
   import Icon from "$shared/ui/Icon";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
 
-  let { tab, request }: { tab: string; request: PageRequestView } = $props();
+  let { tab, serial, request }: { tab: string; serial: number; request: PageRequestView } =
+    $props();
   let always = $state(false);
+  let answering = $state(false);
+  let failed = $state(false);
   let username = $state("");
   let password = $state("");
   let fields = $state<HTMLDivElement>();
@@ -99,8 +103,14 @@
   // The site asking, when its profile can keep allowing its pop-ups.
   let popupSite = $derived(request.kind === "popup" ? request.site : null);
 
-  function answer(value: PageRequestAnswer) {
-    void commands.tabsAnswerPageRequest(tab, value).catch(() => {});
+  // The answer names the request shown, so it never lands on a newer one.
+  async function answer(value: PageRequestAnswer) {
+    if (answering) return;
+    answering = true;
+    failed = false;
+    const result = await settle(commands.tabsAnswerPageRequest(tab, serial, value));
+    answering = false;
+    failed = result.outcome === "failed" || result.outcome === "rejected";
   }
 </script>
 
@@ -148,6 +158,9 @@
       </Button>
     </div>
   {:else if download}
+    {#if failed}
+      <p class="notice" role="alert">{m.page_request_failed()}</p>
+    {/if}
     {#if download.unclicked}
       <p class="notice">{m.page_request_download_unclicked()}</p>
     {/if}
@@ -160,6 +173,9 @@
       </Button>
     </div>
   {:else if hung}
+    {#if failed}
+      <p class="notice" role="alert">{m.page_request_failed()}</p>
+    {/if}
     <div class="actions">
       <Button size="compact" variant="ghost" onclick={() => answer("dismiss")}>
         {m.page_request_wait()}
@@ -169,6 +185,9 @@
       </Button>
     </div>
   {:else}
+    {#if failed}
+      <p class="notice" role="alert">{m.page_request_failed()}</p>
+    {/if}
     {#if app?.app && app.site}
       <label class="always">
         <input type="checkbox" bind:checked={always} />

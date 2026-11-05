@@ -41,9 +41,11 @@ impl Shell {
             } => self.operation_set_profile_avatar(profile, avatar, photo),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
-            Command::AnswerPageRequest { id, decision } => {
-                self.operation_answer_page_request(id, decision)
-            }
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => self.operation_answer_page_request(id, request, decision),
             Command::AnswerHttpAuth {
                 id,
                 request,

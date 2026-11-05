@@ -272,7 +272,7 @@ export const commands = {
 	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
-	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
+	tabsAnswerPageRequest: (id: string, request: number, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, request, answer }),
 	/**
 	 *  Answers the tab's sign-in prompt; no credentials cancels it. The typed
 	 *  values move into storage wiped on drop and are never logged.
@@ -3250,6 +3250,8 @@ export type TabView = {
 	loading: boolean,
 	/**  What the page asked for that waits on the person. */
 	page_request?: PageRequestView | null,
+	/**  Names the request shown, for its answer. */
+	page_request_serial?: number | null,
 	/**
 	 *  Transient native residency state. It never replaces the committed URL
 	 *  or title, and an explicit retry remains a fresh navigation intent.

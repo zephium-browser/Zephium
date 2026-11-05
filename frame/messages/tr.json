@@ -37,6 +37,7 @@
   "page_request_download_allow": "İzin ver",
   "page_request_download_once": "İndir",
   "page_request_not_now": "Şimdi değil",
+  "page_request_failed": "Yanıtınız uygulanamadı. Yeniden deneyin.",
   "page_request_waiting": "Bu sayfa sizi bekliyor",
   "page_request_unresponsive_title": "Bu sayfa yanıt vermiyor",
   "page_request_unresponsive_detail": "Bekleyebilir ya da sayfayı yeniden yükleyebilirsiniz.",

@@ -1182,6 +1182,11 @@ pub(crate) struct FakeStore {
     pub(super) task_searches: Mutex<Vec<String>>,
 }
 
+/// The serial of the request the tab shows, as its card would answer.
+pub(crate) fn shown_serial(shell: &Shell, id: ItemId) -> u32 {
+    shell.items.tab(id).map_or(0, |tab| tab.page_request_serial)
+}
+
 /// One list of download decisions the shell handed the engine.
 type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 

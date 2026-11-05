@@ -322,6 +322,7 @@ fn a_page_that_stops_responding_in_front_asks_to_wait_or_reload() {
     hung(&mut shell, id, false);
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::Dismiss,
     });
     assert_eq!(request(&screen, id), None);
@@ -337,6 +338,7 @@ fn a_page_that_stops_responding_in_front_asks_to_wait_or_reload() {
     // Reload ends the hung view; the crash path brings the page back.
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(request(&screen, id), None);
@@ -412,6 +414,7 @@ fn a_link_for_another_app_waits_for_the_person() {
 
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::AlwaysAllow,
     });
     assert_eq!(request(&screen), None);
@@ -442,6 +445,7 @@ fn a_link_for_another_app_waits_for_the_person() {
         assert_eq!(request(&screen).is_some(), shown);
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::Dismiss,
         });
     }
@@ -455,6 +459,7 @@ fn a_link_for_another_app_waits_for_the_person() {
     }));
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::Dismiss,
     });
     assert_eq!(request(&screen), None);
@@ -497,6 +502,7 @@ fn a_blocked_new_tab_can_be_opened_from_its_notice() {
 
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(last(&screen).tabs.len(), tabs_before + 1);
@@ -633,6 +639,7 @@ fn a_sign_in_prompt_waits_on_its_tab_and_answers_once() {
     ask(&mut shell, 6);
     shell.handle(Command::AnswerPageRequest {
         id,
+        request: shown_serial(&shell, id),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(shown(&screen), None);

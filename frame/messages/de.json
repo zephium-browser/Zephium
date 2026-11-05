@@ -37,6 +37,7 @@
   "page_request_download_allow": "Erlauben",
   "page_request_download_once": "Laden",
   "page_request_not_now": "Nicht jetzt",
+  "page_request_failed": "Deine Antwort konnte nicht übernommen werden. Versuch es erneut.",
   "page_request_waiting": "Diese Seite wartet auf dich",
   "page_request_unresponsive_title": "Diese Seite reagiert nicht",
   "page_request_unresponsive_detail": "Du kannst warten oder sie neu laden.",

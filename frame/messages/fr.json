@@ -37,6 +37,7 @@
   "page_request_download_allow": "Autoriser",
   "page_request_download_once": "Télécharger",
   "page_request_not_now": "Pas maintenant",
+  "page_request_failed": "Impossible d'appliquer votre réponse. Réessayez.",
   "page_request_waiting": "Cette page attend votre réponse",
   "page_request_unresponsive_title": "Cette page ne répond pas",
   "page_request_unresponsive_detail": "Vous pouvez attendre ou la recharger.",

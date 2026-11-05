@@ -430,6 +430,8 @@ pub enum Command {
     /// The person's answer to what the tab's page asked for.
     AnswerPageRequest {
         id: ItemId,
+        /// The serial of the request the person was shown.
+        request: u32,
         decision: PageRequestDecision,
     },
     /// The person's answer to the tab's sign-in prompt: credentials, or

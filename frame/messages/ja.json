@@ -37,6 +37,7 @@
   "page_request_download_allow": "許可",
   "page_request_download_once": "ダウンロード",
   "page_request_not_now": "今はしない",
+  "page_request_failed": "選択を反映できませんでした。もう一度お試しください。",
   "page_request_waiting": "このページがあなたの操作を待っています",
   "page_request_unresponsive_title": "このページは応答していません",
   "page_request_unresponsive_detail": "待つか、再読み込みしてください。",

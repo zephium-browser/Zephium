@@ -98,6 +98,7 @@ fn allowing_pop_ups_from_a_blocked_card_is_saved_and_reaches_the_engine() {
         operation_id: "always".into(),
         command: Box::new(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         }),
     });
@@ -164,6 +165,7 @@ fn a_private_tab_cannot_always_allow_pop_ups() {
         operation_id: "always".into(),
         command: Box::new(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         }),
     });
@@ -450,7 +452,11 @@ mod downloads {
     }
 
     fn answer(shell: &mut Shell, id: ItemId, decision: crate::PageRequestDecision) {
-        shell.handle(Command::AnswerPageRequest { id, decision });
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            request: shown_serial(shell, id),
+            decision,
+        });
     }
 
     #[test]
@@ -519,6 +525,7 @@ mod downloads {
             operation_id: "allow".into(),
             command: Box::new(Command::AnswerPageRequest {
                 id,
+                request: shown_serial(&shell, id),
                 decision: crate::PageRequestDecision::Allow,
             }),
         });
@@ -850,6 +857,7 @@ mod app_links {
             operation_id: "always".into(),
             command: Box::new(Command::AnswerPageRequest {
                 id,
+                request: shown_serial(&shell, id),
                 decision: crate::PageRequestDecision::AlwaysAllow,
             }),
         });
@@ -909,6 +917,57 @@ mod app_links {
     }
 
     #[test]
+    fn an_answer_to_a_card_since_replaced_is_refused() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, operations, _queue) = ready(store);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        shell.handle(Command::Engine(EngineEvent::PageOpenBlocked {
+            id,
+            url: None,
+        }));
+        let popup = shown_serial(&shell, id);
+        ask(&mut shell, id, "zoommtg://zoom.us/join", None);
+        let app = shown_serial(&shell, id);
+        assert_ne!(popup, app);
+        assert_eq!(
+            last(&screen)
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id.to_string())
+                .and_then(|tab| tab.page_request_serial),
+            Some(app)
+        );
+
+        let answer = |shell: &mut Shell, request| {
+            shell.handle(Command::Operation {
+                operation_id: format!("answer-{request}"),
+                command: Box::new(Command::AnswerPageRequest {
+                    id,
+                    request,
+                    decision: crate::PageRequestDecision::Allow,
+                }),
+            });
+        };
+        answer(&mut shell, popup);
+        assert_eq!(
+            operations.lock().unwrap()[0].outcome,
+            OperationOutcome::Rejected
+        );
+        assert_eq!(opened(&engine), 0);
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp { .. })
+        ));
+        answer(&mut shell, app);
+        assert_eq!(
+            operations.lock().unwrap()[1].outcome,
+            OperationOutcome::Applied
+        );
+        assert_eq!(opened(&engine), 1);
+    }
+
+    #[test]
     fn a_kept_answer_opens_nothing_for_another_site() {
         let store = Arc::new(FakeStore::default());
         let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
@@ -928,6 +987,7 @@ mod app_links {
         ));
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::Dismiss,
         });
 
@@ -966,6 +1026,7 @@ mod app_links {
         );
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         });
         assert_eq!(opened(&engine), 1);
@@ -986,6 +1047,7 @@ mod app_links {
         ask(&mut shell, id, "zoommtg://zoom.us/join?confno=1", None);
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         });
         assert_eq!(
@@ -1057,6 +1119,7 @@ mod app_links {
         );
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         });
         assert_eq!(
@@ -1078,6 +1141,7 @@ mod app_links {
         ask(&mut shell, id, "zoommtg://zoom.us/join?confno=1", None);
         shell.handle(Command::AnswerPageRequest {
             id,
+            request: shown_serial(&shell, id),
             decision: crate::PageRequestDecision::AlwaysAllow,
         });
         assert!(store.app_link_sites.lock().unwrap().get(&profile).is_none());

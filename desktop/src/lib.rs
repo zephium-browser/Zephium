@@ -2961,6 +2961,7 @@ fn tabs_answer_page_request(
     caller: WebviewWindow,
     shell: State<'_, Handle>,
     id: String,
+    request: u32,
     answer: zephium_ipc::PageRequestAnswer,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Main, "tabs_answer_page_request") {
@@ -2974,7 +2975,11 @@ fn tabs_answer_page_request(
         zephium_ipc::PageRequestAnswer::Dismiss => zephium_app::PageRequestDecision::Dismiss,
     };
     dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
-        Command::AnswerPageRequest { id, decision }
+        Command::AnswerPageRequest {
+            id,
+            request,
+            decision,
+        }
     })
 }
 

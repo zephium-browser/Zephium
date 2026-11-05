@@ -734,6 +734,7 @@ fn tab_view(
                 zephium_ipc::PageRequestView::Unresponsive
             }
         }),
+        page_request_serial: tab.page_request.as_ref().map(|_| tab.page_request_serial),
         availability: None,
         failure: tab.failure.as_ref().map(|failure| {
             use zephium_core::certificates::CertificateProblem as Problem;

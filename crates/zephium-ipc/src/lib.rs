@@ -31,6 +31,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]

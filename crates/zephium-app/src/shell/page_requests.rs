@@ -199,19 +199,24 @@ impl Shell {
     pub(super) fn operation_answer_page_request(
         &mut self,
         id: ItemId,
+        serial: u32,
         decision: PageRequestDecision,
     ) -> OperationDisposition {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        let Some(request) = self
-            .items
-            .tab(id)
-            .and_then(|tab| tab.page_request.as_deref())
-            .cloned()
-        else {
+        let Some((request, shown)) = self.items.tab(id).and_then(|tab| {
+            Some((
+                tab.page_request.as_deref()?.clone(),
+                tab.page_request_serial,
+            ))
+        }) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
+        // An answer to a card that has since been replaced is not this one's.
+        if shown != serial {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
         // A lasting answer is kept before anything opens; one that cannot be
         // kept leaves the card up to say so.
         if decision == PageRequestDecision::AlwaysAllow

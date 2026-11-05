@@ -881,8 +881,12 @@ impl Shell {
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
             }
-            Command::AnswerPageRequest { id, decision } => {
-                let _ = self.operation_answer_page_request(id, decision);
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => {
+                let _ = self.operation_answer_page_request(id, request, decision);
             }
             Command::AnswerHttpAuth {
                 id,

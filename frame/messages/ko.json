@@ -37,6 +37,7 @@
   "page_request_download_allow": "허용",
   "page_request_download_once": "다운로드",
   "page_request_not_now": "나중에",
+  "page_request_failed": "선택한 내용을 적용하지 못했어요. 다시 시도해 주세요.",
   "page_request_waiting": "이 페이지가 응답을 기다리고 있어요",
   "page_request_unresponsive_title": "이 페이지가 응답하지 않아요",
   "page_request_unresponsive_detail": "기다리거나 새로고침할 수 있어요.",
