@@ -1782,6 +1782,7 @@ impl EngineHost {
             let failure_id = load_id.clone();
             let failure_certificates = Rc::downgrade(&certificates);
             let failure_replaced = replaced_navigation.clone();
+            let failure_navigation = navigation.clone();
             builder =
                 builder.with_navigation_failure_handler(move |navigation, reason, document| {
                     let reason = failure_reason(reason);
@@ -1801,7 +1802,9 @@ impl EngineHost {
                                 id: failure_id.get(),
                                 url: url.clone(),
                                 reason: block,
-                                request: None,
+                                // A redirect of the person's navigation is
+                                // still theirs, so the explanation shows.
+                                request: failure_navigation.request_in_flight(navigation),
                                 can_continue: false,
                             },
                         );
