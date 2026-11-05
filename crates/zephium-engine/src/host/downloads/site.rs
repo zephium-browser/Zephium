@@ -8,7 +8,8 @@ use std::cell::Cell;
 
 use zephium_core::ids::ItemId;
 use zephium_core::permissions::{
-    download_gate, DownloadGate, DownloadPermissionPrompt, MAX_DOWNLOAD_SITES,
+    download_answer_allows, download_gate, DownloadGate, DownloadPermissionPrompt,
+    MAX_DOWNLOAD_SITES,
 };
 use zephium_core::ports::engine::EngineEvent;
 
@@ -211,7 +212,13 @@ impl Downloads {
                 let Some(hold) = transfer.site.take() else {
                     continue;
                 };
-                if !allow {
+                let remembered = self
+                    .sites
+                    .borrow()
+                    .get(&transfer.partition.profile())
+                    .and_then(|sites| sites.get(&hold.site).copied());
+                let expired = transfer.deadline.expired(Instant::now());
+                if !download_answer_allows(allow, remembered, expired) {
                     None
                 } else {
                     transfer.confirmed = true;

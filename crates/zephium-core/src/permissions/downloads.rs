@@ -33,6 +33,13 @@ pub const fn download_gate(remembered: Option<bool>, clicked: bool) -> DownloadG
     }
 }
 
+/// Whether the person's Allow lets a held download go on. A site blocked
+/// since the card was shown stays blocked, and an answer after the wait is
+/// over counts as Not now.
+pub const fn download_answer_allows(allow: bool, remembered: Option<bool>, expired: bool) -> bool {
+    allow && !expired && !matches!(remembered, Some(false))
+}
+
 /// A download the person is asked about, under the address field of the tab
 /// it came from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,5 +68,14 @@ mod tests {
         assert_eq!(download_gate(Some(true), false), DownloadGate::Ask);
         assert_eq!(download_gate(None, true), DownloadGate::Ask);
         assert_eq!(download_gate(None, false), DownloadGate::Ask);
+    }
+
+    #[test]
+    fn an_allow_is_refused_for_a_site_blocked_since_or_after_the_wait() {
+        assert!(download_answer_allows(true, None, false));
+        assert!(download_answer_allows(true, Some(true), false));
+        assert!(!download_answer_allows(true, Some(false), false));
+        assert!(!download_answer_allows(true, None, true));
+        assert!(!download_answer_allows(false, Some(true), false));
     }
 }

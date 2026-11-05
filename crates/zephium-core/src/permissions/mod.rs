@@ -9,8 +9,8 @@ mod page;
 mod site;
 
 pub use downloads::{
-    download_gate, DownloadGate, DownloadPermissionPrompt, DOWNLOAD_PERMISSION_TIMEOUT,
-    MAX_DOWNLOAD_SITES,
+    download_answer_allows, download_gate, DownloadGate, DownloadPermissionPrompt,
+    DOWNLOAD_PERMISSION_TIMEOUT, MAX_DOWNLOAD_SITES,
 };
 pub use page::{
     PageOrigin, PageOriginError, PagePermissionApplyError, PagePermissionCatalog,

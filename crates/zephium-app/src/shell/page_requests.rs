@@ -216,7 +216,8 @@ impl Shell {
         };
         // A lasting answer is kept before anything opens; one that cannot be
         // kept leaves the card up to say so.
-        if decision == PageRequestDecision::AlwaysAllow && !self.keep_page_request_answer(id, &request)
+        if decision == PageRequestDecision::AlwaysAllow
+            && !self.keep_page_request_answer(id, &request)
         {
             return operation_result(
                 OperationOutcome::Rejected,
@@ -234,15 +235,12 @@ impl Shell {
             (PageRequest::Download(prompt), decision) => {
                 self.answer_download_prompt(id, prompt, decision)
             }
-            (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => {
-                match url {
-                    Some(url) => self.operation_open_url(url.to_string(), true),
-                    None => operation_result(
-                        OperationOutcome::Applied,
-                        OperationReason::MutationApplied,
-                    ),
+            (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => match url {
+                Some(url) => self.operation_open_url(url.to_string(), true),
+                None => {
+                    operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
                 }
-            }
+            },
             (PageRequest::Unresponsive, PageRequestDecision::Dismiss) => {
                 self.crash
                     .unresponsive_waits
@@ -309,12 +307,26 @@ impl Shell {
         prompt: DownloadPermissionPrompt,
         decision: PageRequestDecision,
     ) -> OperationDisposition {
-        let allow = matches!(
+        let mut allow = matches!(
             decision,
             PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
         );
+        let profile = self.profile_of_item(id);
+        let remembered = profile.and_then(|profile| {
+            self.ensure_download_sites(profile);
+            self.download_sites
+                .get(&profile)?
+                .get(&prompt.site)
+                .copied()
+        });
+        // Blocked from Site settings while the card waited: the block stands.
+        let refused =
+            allow && !zephium_core::permissions::download_answer_allows(allow, remembered, false);
+        if refused {
+            allow = false;
+        }
         if allow && !prompt.allowed {
-            if let Some(profile) = self.profile_of_item(id) {
+            if let Some(profile) = profile {
                 if !self.set_download_site(profile, prompt.site.clone(), Some(true)) {
                     crate::diagnostic!("downloads: the site's answer could not be kept");
                 }
@@ -328,6 +340,9 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::NativeDispatchRejected,
             ),
+            _ if refused => {
+                operation_result(OperationOutcome::Rejected, OperationReason::StoreConflict)
+            }
             _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
         }
     }

@@ -226,7 +226,10 @@ fn a_deleted_profile_forgets_its_site_lists_and_never_reads_them_again() {
     assert!(!held(&shell));
     let reads = store.site_list_reads.lock().unwrap().len();
     read_site_lists(&mut shell, profile);
-    assert!(!held(&shell), "nothing is put back before the store erases it");
+    assert!(
+        !held(&shell),
+        "nothing is put back before the store erases it"
+    );
     assert_eq!(store.site_list_reads.lock().unwrap().len(), reads);
 }
 
@@ -252,7 +255,10 @@ fn a_private_profile_never_reads_kept_download_or_app_link_decisions() {
         initiator: zephium_core::navigation::AppLinkSource::Page,
     }));
     assert!(
-        engine.calls().iter().all(|call| !call.starts_with("open-app ")),
+        engine
+            .calls()
+            .iter()
+            .all(|call| !call.starts_with("open-app ")),
         "a saved profile's grant never reaches a private one"
     );
     assert!(store.site_list_reads.lock().unwrap().is_empty());
@@ -486,6 +492,47 @@ mod downloads {
         assert_eq!(
             engine.download_sites.lock().unwrap().last().cloned(),
             Some((profile, vec![("https://files.example".to_owned(), true)]))
+        );
+    }
+
+    #[test]
+    fn an_allow_after_the_site_was_blocked_is_refused_and_keeps_nothing() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+            id,
+            prompt: prompt(4, "https://files.example", false, false),
+        }));
+        shell.handle(Command::Operation {
+            operation_id: "block".into(),
+            command: Box::new(Command::SetSitePermission {
+                origin: origin("https://files.example"),
+                kind: SitePermissionKind::Downloads,
+                decision: Some(RememberedPagePermission::Deny),
+                scheme: None,
+            }),
+        });
+        shell.handle(Command::Operation {
+            operation_id: "allow".into(),
+            command: Box::new(Command::AnswerPageRequest {
+                id,
+                decision: crate::PageRequestDecision::Allow,
+            }),
+        });
+        assert_eq!(
+            operations.lock().unwrap()[1].outcome,
+            OperationOutcome::Rejected
+        );
+        assert_eq!(
+            answers(&engine),
+            vec![format!("download-permission {id} 4 refuse")]
+        );
+        assert_eq!(
+            store.download_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(origin("https://files.example"), false)])
         );
     }
 
