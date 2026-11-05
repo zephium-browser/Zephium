@@ -23,7 +23,9 @@ pub(in crate::host) struct SiteAsk {
     pub permit: EventPermit,
     pub sink: Sink,
     pub site: Option<PageOrigin>,
-    /// A person's click opened the new tab this download starts in.
+    /// A person's click opened the new tab this download starts in. Only
+    /// macOS reads it: WebView2 never says whether a download was clicked.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub opened_by_click: bool,
 }
 
