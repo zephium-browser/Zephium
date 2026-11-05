@@ -6323,6 +6323,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     if matches!(&event, tauri::RunEvent::Exit) {
         updates::finish_on_exit(app);
     }
+    #[cfg(not(target_os = "windows"))]
     if matches!(&event, tauri::RunEvent::Exit) {
         relaunch::finish_on_exit(app);
     }
@@ -6336,6 +6337,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     };
     if code != Some(1) && updates::blocks_exit(app) {
         api.prevent_exit();
+        relaunch::exit_refused();
         return;
     }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
@@ -7758,6 +7760,7 @@ pub fn run() {
         // exact process HANDLE authorize deletion of these private UDFs. A
         // failure remains visible in the process status and quarantines the
         // generation for a later verified cleanup pass.
+        let handle = app.handle().clone();
         let exit_code = app.run_return(handle_run_event);
         // Setup can fail after zero or one privileged environment exists.
         // Every attempted build may have created native state before returning
@@ -7776,6 +7779,7 @@ pub fn run() {
             );
         }
         updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
+        relaunch::finish_after_cleanup(&handle, cleanup_succeeded && exit_code == 0);
         std::process::exit(if cleanup_succeeded || exit_code != 0 {
             exit_code
         } else {
