@@ -253,16 +253,23 @@ pub(crate) enum Kind {
     Unsupported,
 }
 
-pub(crate) fn classify(line: &str) -> Kind {
-    // Whichever marker comes first decides, as adblock-rust reads it; a
-    // marker inside an argument is text.
+/// A scriptlet line's hostnames and body, and whether it is an exception.
+/// Whichever marker comes first decides, as adblock-rust reads it; a marker
+/// inside an argument is text. Admission and building both split here.
+fn split(line: &str) -> Option<(bool, &str, &str)> {
     let (exception, at, marker) = match (line.find("##+js("), line.find("#@#+js(")) {
         (Some(rule), Some(except)) if except < rule => (true, except, "#@#+js("),
         (Some(rule), _) => (false, rule, "##+js("),
         (None, Some(except)) => (true, except, "#@#+js("),
-        (None, None) => return Kind::None,
+        (None, None) => return None,
     };
-    let (domains, body) = (&line[..at], &line[at + marker.len()..]);
+    Some((exception, &line[..at], &line[at + marker.len()..]))
+}
+
+pub(crate) fn classify(line: &str) -> Kind {
+    let Some((exception, domains, body)) = split(line) else {
+        return Kind::None;
+    };
     if line.len() > MAX_RULE_BYTES || !body.ends_with(')') {
         return Kind::Unsupported;
     }
@@ -422,11 +429,7 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
         if !matches!(classify(&rule.line), Kind::Rule { .. }) {
             return Err(crate::CosmeticError::InvalidPolicy);
         }
-        let Some((domains, _)) = rule
-            .line
-            .split_once("##+js(")
-            .or_else(|| rule.line.split_once("#@#+js("))
-        else {
+        let Some((_, domains, _)) = split(&rule.line) else {
             return Err(crate::CosmeticError::InvalidPolicy);
         };
         keys.extend(domain_keys(domains).ok_or(crate::CosmeticError::InvalidPolicy)?);
@@ -702,6 +705,27 @@ mod tests {
                 substituted: false
             }
         ));
+    }
+
+    #[test]
+    fn every_rule_admission_keeps_also_builds() {
+        let odd = [
+            r###"a.com#@#+js(trusted-rpfr, x, "##+js(")"###,
+            r##"www.youtube.com##+js(trusted-rpfr, x, "#@#+js(")"##,
+            r##"a.com#@#+js(set, "a.com##+js(", 1)"##,
+            "a.com#@#+js(set, b, '##+js(x)')",
+            "a.com##+js(set, b\\, c, 1)",
+        ];
+        for line in odd {
+            assert!(matches!(classify(line), Kind::Rule { .. }), "{line}");
+            for trusted in [false, true] {
+                assert!(build(&[rule(line, trusted)]).is_ok(), "{line}");
+            }
+        }
+        // Through the cosmetic compile, beside an ordinary rule.
+        let source = format!("{}\na.com##+js(set, ok, 1)", odd.join("\n"));
+        let policy = crate::CosmeticPolicy::compile_with_trust([(source.as_str(), true)]).unwrap();
+        assert!(policy.scriptlet_program().is_some());
     }
 
     #[test]
