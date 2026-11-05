@@ -159,6 +159,27 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        // Filling opens the passwords panel over the page: only the page in
+        // front of the person may be filled, so a tab switched away from
+        // keeps its question.
+        let filling = matches!(
+            decision,
+            PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
+        ) && self.items.tab(id).is_some_and(|tab| {
+            matches!(
+                tab.page_request.as_deref(),
+                Some(PageRequest::InsecureAutofill)
+            )
+        });
+        if filling
+            && (self.active_browser_page().is_some()
+                || !self
+                    .windows
+                    .focused()
+                    .is_some_and(|window| window.active == Some(id)))
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
         let Some(request) = self.items.take_page_request(id) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };

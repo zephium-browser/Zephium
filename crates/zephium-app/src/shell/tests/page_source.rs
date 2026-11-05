@@ -280,4 +280,23 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(filled(&engine), 1);
+
+    // A tab the person switched away from is never filled, and keeps its
+    // question for when it is in front again.
+    shell.handle(Command::Engine(EngineEvent::InsecureAutofillRequested {
+        id: page,
+    }));
+    shell.handle(Command::Open);
+    shell.handle(Command::AnswerPageRequest {
+        id: page,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(filled(&engine), 1, "a tab not in front is not filled");
+    assert!(request(&screen).is_some());
+    shell.handle(Command::Activate(page));
+    shell.handle(Command::AnswerPageRequest {
+        id: page,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(filled(&engine), 2);
 }
