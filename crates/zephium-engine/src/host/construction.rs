@@ -1259,18 +1259,14 @@ impl EngineHost {
                     wry::AppleNavigationType::LinkActivated
                 );
                 if !admitted {
-                    match apple_app_link_source(action.source.as_ref()) {
-                        Some(initiator) => {
-                            if action_app_link(&target, gesture, initiator) {
-                                return false;
-                            }
-                        }
+                    let handled = match apple_app_link_source(action.source.as_ref()) {
+                        Some(initiator) => action_app_link(&target, gesture, initiator),
                         // A frame whose site cannot be named never opens an
                         // application, so no site's answer stands in for it.
-                        None if zephium_core::navigation::external_app_link(&target).is_some() => {
-                            return false;
-                        }
-                        None => {}
+                        None => zephium_core::navigation::external_app_link(&target).is_some(),
+                    };
+                    if handled {
+                        return false;
                     }
                 }
                 if admitted
