@@ -443,10 +443,14 @@ fn configure_with_credential_denied(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
+            // An app link goes on only so WebView2 raises
+            // LaunchingExternalUriScheme, whose handlers always cancel it and
+            // ask the person first; cancelled here, a frame's link is lost.
             if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
                 |uri| {
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
+                        || zephium_core::navigation::external_app_link(&uri).is_some()
                 },
             ) {
                 args.SetCancel(false)?;
