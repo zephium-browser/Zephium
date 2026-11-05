@@ -188,8 +188,9 @@ the commit and are judged against the new document. A request the new document
 makes before its commit, such as an Early Hints preload, is judged against the
 previous document. Before a view's first HTTP(S) commit, and after a commit to
 any other scheme or to a URL over 32 KiB, matching is source-independent:
-domain- and party-scoped rules are skipped, and a block that such an exception
-could cancel fails open. Service- and shared-worker requests are not
+domain- and party-scoped rules are skipped, blocks and exceptions alike, so an
+exception that needs the page, such as `@@*$script,1p,domain=…`, never lifts a
+block there. Service- and shared-worker requests are not
 intercepted, so they have no main-document source either. The report still
 counts attribution-sensitive rules separately from resource-type losses.
 
@@ -307,8 +308,8 @@ real site; no release build carries them.
 own, reviewed and shipped with the app, compiled after every catalog's lists;
 its digest is part of the artifact's cache key. On Windows its site-scoped
 exceptions are judged against the view's main document, like every rule there
-(see above); before a view's first HTTP(S) commit they fail open on any site,
-as any site-scoped exception does there. It holds exceptions only, never
+(see above); before a view's first HTTP(S) commit they do not apply, as no
+site-scoped exception does there. It holds exceptions only, never
 blocks (a test enforces this), for breakage the downloaded lists do not fix
 yet. Each rule has a comment naming its site, the evidence and the date, and is
 reported upstream when it applies there.

@@ -102,8 +102,8 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
     assert!(official("||unrelated.example^")
         .verify_official_canary()
         .is_err());
-    // A wildcard exception scoped to one site lets everything through only
-    // when no page is known, which this matcher almost never judges.
+    // A wildcard exception scoped to one site lifts nothing elsewhere, nor
+    // where no page is known.
     assert_eq!(
         official("||doubleclick.com^\n@@*$script,3p,from=elsewhere.example")
             .verify_official_canary(),
@@ -127,9 +127,9 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
     );
 }
 
-#[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+#[cfg(feature = "runtime")]
 #[test]
-fn without_exact_attribution_the_canary_refuses_a_site_scoped_wildcard_exception() {
+fn with_no_page_known_a_site_scoped_wildcard_exception_lifts_no_block() {
     let rules = Compiler::default()
         .compile(
             CompileTarget::Runtime,
@@ -140,7 +140,16 @@ fn without_exact_attribution_the_canary_refuses_a_site_scoped_wildcard_exception
             )],
         )
         .unwrap();
-    assert!(rules.verify_official_canary().is_err());
+    assert_eq!(rules.verify_official_canary(), Ok(()));
+    assert_eq!(
+        rules
+            .evaluate_source_independent(source_independent_request(
+                "https://ad.doubleclick.com/activity;src=1"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
+    );
 }
 
 #[test]
@@ -300,7 +309,7 @@ fn approximate_attribution_never_evaluates_source_sensitive_rules() {
 
 #[cfg(feature = "runtime-exact")]
 #[test]
-fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
+fn unknown_attribution_never_lets_a_scoped_exception_lift_a_block() {
     let rules = Compiler::default()
         .compile(
             CompileTarget::Runtime,
@@ -331,13 +340,13 @@ fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
             ))
             .unwrap()
             .action(),
-        NetworkAction::Allow
+        NetworkAction::Block
     );
 }
 
 #[cfg(feature = "runtime")]
 #[test]
-fn source_independent_matching_preserves_target_semantics_and_fails_open_on_source_semantics() {
+fn source_independent_matching_preserves_target_semantics_and_fails_closed_on_source_semantics() {
     fn action(rules: &str, url: &str, method: RequestMethod) -> NetworkAction {
         Compiler::default()
             .compile(CompileTarget::Runtime, vec![source(rules)])
@@ -363,8 +372,8 @@ fn source_independent_matching_preserves_target_semantics_and_fails_open_on_sour
         let rules = format!("||tracker.example^\n{scoped_exception}");
         assert_eq!(
             action(&rules, target, RequestMethod::Get),
-            NetworkAction::Allow,
-            "unknown source attribution could activate {scoped_exception}"
+            NetworkAction::Block,
+            "{scoped_exception} needs the page, so it cannot lift a block without one"
         );
     }
 
