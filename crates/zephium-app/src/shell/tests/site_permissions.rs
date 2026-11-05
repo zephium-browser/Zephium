@@ -180,6 +180,88 @@ fn a_private_tab_cannot_always_allow_pop_ups() {
         .all(|(owner, sites)| *owner != profile || sites.is_empty()));
 }
 
+fn seed_site_lists(store: &FakeStore, profile: ProfileId) {
+    store.app_link_sites.lock().unwrap().insert(
+        profile,
+        vec![(origin("https://meet.example"), "zoommtg".to_owned())],
+    );
+    store
+        .download_sites
+        .lock()
+        .unwrap()
+        .insert(profile, vec![(origin("https://files.example"), true)]);
+    store
+        .popup_sites
+        .lock()
+        .unwrap()
+        .insert(profile, vec![origin("https://mail.example")]);
+}
+
+fn read_site_lists(shell: &mut Shell, profile: ProfileId) {
+    shell.ensure_app_link_sites(profile);
+    shell.ensure_download_sites(profile);
+    shell.ensure_popup_sites(profile);
+}
+
+#[test]
+fn a_deleted_profile_forgets_its_site_lists_and_never_reads_them_again() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, _operations, _queue) = ready(store.clone());
+    let profile = shell.windows.focused().unwrap().profile;
+    seed_site_lists(&store, profile);
+    shell.app_link_sites.clear();
+    shell.download_sites.clear();
+    shell.popup_sites.clear();
+    read_site_lists(&mut shell, profile);
+    assert!(shell.app_link_sites.contains_key(&profile));
+    assert!(shell.download_sites.contains_key(&profile));
+    assert!(shell.popup_sites.contains_key(&profile));
+
+    shell.apply_profile_tombstone(profile);
+    let held = |shell: &Shell| {
+        shell.app_link_sites.contains_key(&profile)
+            || shell.download_sites.contains_key(&profile)
+            || shell.popup_sites.contains_key(&profile)
+    };
+    assert!(!held(&shell));
+    let reads = store.site_list_reads.lock().unwrap().len();
+    read_site_lists(&mut shell, profile);
+    assert!(!held(&shell), "nothing is put back before the store erases it");
+    assert_eq!(store.site_list_reads.lock().unwrap().len(), reads);
+}
+
+#[test]
+fn a_private_profile_never_reads_kept_download_or_app_link_decisions() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "https://meet.example/room");
+    let profile = make_private(&mut shell);
+    seed_site_lists(&store, profile);
+    shell.app_link_sites.clear();
+    shell.download_sites.clear();
+    shell.popup_sites.clear();
+    store.site_list_reads.lock().unwrap().clear();
+
+    read_site_lists(&mut shell, profile);
+    shell.handle(Command::Engine(EngineEvent::ExternalAppRequested {
+        id,
+        url: "zoommtg://zoom.us/join?confno=1".into(),
+        app: Some("Meetings".into()),
+        user_gesture: true,
+        initiator: None,
+    }));
+    assert!(
+        engine.calls().iter().all(|call| !call.starts_with("open-app ")),
+        "a saved profile's grant never reaches a private one"
+    );
+    assert!(store.site_list_reads.lock().unwrap().is_empty());
+    assert_eq!(
+        engine.download_sites.lock().unwrap().last().cloned(),
+        Some((profile, Vec::new()))
+    );
+}
+
 /// macOS keeps these decisions in the page-permission catalog; Windows asks
 /// the engine.
 #[cfg(not(target_os = "windows"))]

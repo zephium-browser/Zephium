@@ -1153,6 +1153,8 @@ pub(crate) struct FakeStore {
     pub(crate) app_link_sites: Mutex<
         std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
     >,
+    /// Every durable read of a pop-up, download or app-link list, by list.
+    pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1214,6 +1216,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<zephium_core::permissions::PageOrigin>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("popup_sites", profile));
         Some(
             self.popup_sites
                 .lock()
@@ -1241,6 +1247,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("app_link_sites", profile));
         Some(
             self.app_link_sites
                 .lock()
@@ -1269,6 +1279,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("download_sites", profile));
         Some(
             self.download_sites
                 .lock()

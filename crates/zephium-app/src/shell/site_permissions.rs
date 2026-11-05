@@ -130,6 +130,12 @@ impl Shell {
             .is_none_or(|profile| profile.kind == ProfileKind::Incognito)
     }
 
+    /// A deleted profile's lists are never read back while its data is
+    /// still being erased.
+    fn known_profile(&self, profile: ProfileId) -> bool {
+        self.profiles.get(profile).is_some()
+    }
+
     /// Reads a saved profile's pop-up list once and hands it to the engine.
     pub(super) fn ensure_popup_sites(&mut self, profile: ProfileId) {
         if self.popup_sites.contains_key(&profile) || self.private_profile(profile) {
@@ -146,7 +152,7 @@ impl Shell {
     /// Reads a profile's application link grants once. A private profile
     /// starts with none.
     pub(super) fn ensure_app_link_sites(&mut self, profile: ProfileId) {
-        if self.app_link_sites.contains_key(&profile) {
+        if self.app_link_sites.contains_key(&profile) || !self.known_profile(profile) {
             return;
         }
         let sites = if self.private_profile(profile) {
@@ -205,7 +211,7 @@ impl Shell {
     /// Reads a profile's download decisions once and hands them to the
     /// engine. A private profile starts with none.
     pub(super) fn ensure_download_sites(&mut self, profile: ProfileId) {
-        if self.download_sites.contains_key(&profile) {
+        if self.download_sites.contains_key(&profile) || !self.known_profile(profile) {
             return;
         }
         let sites = if self.private_profile(profile) {
