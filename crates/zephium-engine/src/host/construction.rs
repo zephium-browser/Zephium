@@ -858,7 +858,7 @@ impl EngineHost {
                             id: item.get(),
                             url: target.to_owned(),
                             reason,
-                            request: refused_navigation.pending_request_for(target),
+                            request: refused_navigation.refused_request(target),
                             can_continue: true,
                         },
                     );

@@ -753,6 +753,54 @@ fn a_tab_opened_at_a_refused_address_shows_why_over_its_blank_page() {
 }
 
 #[test]
+fn an_address_opened_in_a_new_tab_that_redirects_into_a_refused_host_shows_why() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let blocked = |id| {
+        Command::Engine(EngineEvent::NavigationBlocked {
+            id,
+            url: "https://scam.example/win".into(),
+            reason: NavigationBlockReason::Badware,
+            request: None,
+            can_continue: true,
+        })
+    };
+    let failure = |screen: &Screen, id: ItemId| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+            .failure
+    };
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://fine.example/".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    shell.handle(blocked(id));
+    let shown = failure(&screen, id).expect("the redirect's refusal is explained");
+    assert_eq!(shown.url, "https://scam.example/win");
+    assert!(shown.can_continue);
+
+    // Once the person asks for another page, the first load's refusal is stale.
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://fine.example/".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "other.example".into(),
+    });
+    shell.handle(blocked(id));
+    assert_eq!(failure(&screen, id), None);
+}
+
+#[test]
 fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
     use zephium_core::ports::engine::NavigationBlockReason;
     use zephium_ipc::{TabBlockReason, TabFailureReason};
@@ -923,7 +971,11 @@ fn a_refusal_of_what_the_person_no_longer_asks_for_is_dropped() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
-    navigate_and_commit(&mut shell, id, "news.example");
+    shell.handle(Command::Navigate {
+        id,
+        input: "news.example".into(),
+    });
+    let old = shell.items.pending_navigation_request(id).unwrap();
     // The person has since asked for another page.
     shell.handle(Command::Navigate {
         id,
@@ -937,13 +989,14 @@ fn a_refusal_of_what_the_person_no_longer_asks_for_is_dropped() {
             .unwrap()
             .failure
     };
-    for request in [
-        Some(zephium_core::ports::engine::NavigationRequestId(999_999)),
-        None,
+    // A redirect of the earlier request, and a load the old page began.
+    for (url, request) in [
+        ("https://scam.example/", Some(old)),
+        ("https://scam.example/", None),
     ] {
         shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
             id,
-            url: "https://scam.example/".into(),
+            url: url.into(),
             reason: NavigationBlockReason::Badware,
             request,
             can_continue: true,
@@ -959,4 +1012,33 @@ fn a_refusal_of_what_the_person_no_longer_asks_for_is_dropped() {
         can_continue: true,
     }));
     assert!(failure(&screen).is_some());
+}
+
+#[test]
+fn a_typed_address_that_redirects_into_a_refused_host_shows_why() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "fine.example".into(),
+    });
+    let typed = shell.items.pending_navigation_request(id).unwrap();
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+        request: Some(typed),
+        can_continue: true,
+    }));
+    let failure = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap()
+        .failure
+        .unwrap();
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.can_continue);
 }

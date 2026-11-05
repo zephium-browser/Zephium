@@ -833,7 +833,12 @@ impl Items {
         if let Some(pending) = self.pending_navigations.get(&id) {
             let current = match request {
                 Some(request) => request == pending.request,
-                None => pending.url.as_ref() == Some(&url),
+                // A view's first load reaches the engine without a request,
+                // so a refusal where it redirects names none and is still it.
+                None => {
+                    pending.url.as_ref() == Some(&url)
+                        || (pending.url.is_some() && self.opening.get(&id) == pending.url.as_ref())
+                }
             };
             if !current {
                 return false;
