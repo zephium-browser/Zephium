@@ -116,6 +116,10 @@ impl Shell {
                     self.forget_content_fullscreen(*id);
                 }
             }
+            // A quarantined profile's views are gone, and its prompt with them.
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.cancel_page_permission_for_profile(*profile);
+            }
             EngineEvent::ProfileProcessExited { profile, ids } => {
                 self.cancel_page_permission_for_profile(*profile);
                 for id in ids {
