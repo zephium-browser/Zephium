@@ -991,10 +991,8 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
 
     #[test]
     fn source_independent_match_budget_exhaustion_is_fail_open() {
-        let engine = Engine::new_with_list_text(concat!(
-            "*$script\n",
-            "@@*$script,domain=publisher.example\n",
-        ));
+        let engine =
+            Engine::new_with_list_text(concat!("*$script\n", "@@||cdn.example^$script\n",));
         engine
             .prepare_and_freeze_network_matcher(NetworkMatcherPreparationLimits {
                 max_regexes: 32,
@@ -1018,7 +1016,7 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
     }
 
     #[test]
-    fn source_independent_exception_partition_is_scanned_once() {
+    fn a_source_sensitive_exception_does_not_lift_a_block_without_the_source() {
         let engine = Engine::new_with_list_text(concat!(
             "*$script\n",
             "@@*$script,domain=publisher.example\n",
@@ -1038,14 +1036,14 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
             Request::new_source_independent("https://cdn.example/ad.js", "script", "get").unwrap();
         let result = engine
             .try_check_prepared_source_independent_network_request(&request)
-            .expect("one blocking candidate and one conservative exception candidate fit");
+            .expect("the blocking candidate fits; the source-sensitive exception is skipped");
         assert!(
-            !result.should_block(),
-            "a potentially matching attribution-sensitive exception must fail open",
+            result.should_block(),
+            "an exception that needs the initiating document cannot apply without it",
         );
         assert!(
-            result.filter.is_none() && result.exception.is_none(),
-            "a conservative attribution result must not be reported as an exact rule match",
+            result.filter.is_some() && result.exception.is_none(),
+            "the block is reported as the exact rule that matched",
         );
     }
 
@@ -1147,7 +1145,7 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
     }
 
     #[test]
-    fn serialization_retains_conservative_unknown_attribution_matching() {
+    fn serialization_retains_unknown_attribution_matching() {
         let limits = NetworkMatcherPreparationLimits {
             max_regexes: 1_024,
             max_pattern_bytes: 1024 * 1024,
@@ -1171,7 +1169,7 @@ trustedSetLocalStorageItem("mol.ads.cmp.tcf.cache", "{\"getTCData\":{\"cmpId\":2
         restored.prepare_and_freeze_network_matcher(limits).unwrap();
 
         for (url, expected_block) in [
-            ("https://tracker.example/tracker42.js", false),
+            ("https://tracker.example/tracker42.js", true),
             ("https://critical.example/ad.js", true),
         ] {
             let request = Request::new_source_independent(url, "script", "get").unwrap();

@@ -1604,6 +1604,7 @@ impl Shell {
         self.ensure_blocker_statistics(profile, false);
         self.ensure_blocker_site_preferences(profile);
         self.ensure_popup_sites(profile);
+        self.ensure_download_sites(profile);
         self.engine
             .prepare_profile(self.partition_of_profile(profile));
         let accepted = self.blocker.start_uninitialized(profile);

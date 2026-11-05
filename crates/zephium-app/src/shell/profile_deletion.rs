@@ -243,6 +243,9 @@ impl Shell {
         self.recently_closed
             .retain(|entry| entry.profile != profile);
         self.zoom.forget_profile(profile);
+        self.app_link_sites.remove(&profile);
+        self.popup_sites.remove(&profile);
+        self.download_sites.remove(&profile);
         self.extension_browser_surfaces.retire_profile(profile);
         self.extension_actions.retire_profile(profile);
         // Retire compiler admission and erase any callback result before the

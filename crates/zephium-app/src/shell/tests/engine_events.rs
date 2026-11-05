@@ -210,6 +210,7 @@ fn bootstrap_projects_every_sanitized_runtime_security_advisory() {
         statuses.lock().unwrap().as_slice(),
         &[RuntimeStatus {
             restart_required: false,
+            restart_reason: None,
             session_set_aside: false,
             user_content_degraded_scope_count: 0,
             security_advisories: vec![
@@ -295,5 +296,61 @@ fn page_permission_completion_is_explicitly_denied_before_and_after_bootstrap() 
                 PagePermissionRequestSettlement::Deny,
             ),
         ]
+    );
+}
+
+#[test]
+fn a_profile_only_a_restart_can_trust_says_so_on_its_tabs() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "news.example");
+    let profile = shell.profile_of_item(id).unwrap();
+    shell.handle(Command::Engine(EngineEvent::ProfileRestartRequired {
+        profile,
+    }));
+    // The engine refuses every later view in the profile; that refusal is
+    // still explained as the restart, not a generic failure.
+    shell.handle(Command::Engine(EngineEvent::ViewCreationFailed { id }));
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    let failure = tab.failure.expect("the restart is explained");
+    assert_eq!(
+        failure.reason,
+        zephium_ipc::TabFailureReason::RestartRequired
+    );
+    assert!(failure.covers_page);
+    assert_eq!(failure.url, "https://news.example/");
+    assert!(shell.runtime_restart_required);
+}
+
+#[test]
+fn a_restart_says_whether_it_finishes_an_update_or_recovers_a_profile() {
+    let reasons = Arc::new(Mutex::new(Vec::new()));
+    let sink = reasons.clone();
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RuntimeStatus(status) = projection {
+                sink.lock().unwrap().push(status.restart_reason);
+            }
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Engine(EngineEvent::RuntimeRestartRequired));
+    let profile = shell.spaces.iter().next().unwrap().profile;
+    shell.handle(Command::Engine(EngineEvent::ProfileRestartRequired {
+        profile,
+    }));
+    use zephium_ipc::RuntimeRestartReason::{Profile, RuntimeUpdate};
+    assert_eq!(
+        *reasons.lock().unwrap(),
+        vec![None, Some(RuntimeUpdate), Some(Profile)]
     );
 }

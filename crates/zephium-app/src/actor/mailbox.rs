@@ -1331,15 +1331,20 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::HttpAuthRequested { .. }
                     | EngineEvent::HttpAuthEnded { .. }
+                    | EngineEvent::DownloadPermissionRequested { .. }
+                    | EngineEvent::DownloadPermissionEnded { .. }
+                    | EngineEvent::InsecureAutofillRequested { .. }
                     | EngineEvent::MediaCaptureChanged { .. }
                     | EngineEvent::AudioChanged { .. }
                     | EngineEvent::FullscreenChanged { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
+                    | EngineEvent::NavigationFailureReported { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }
                     | EngineEvent::ProfileProcessExited { .. }
+                    | EngineEvent::ProfileRestartRequired { .. }
                     | EngineEvent::Crashed { .. }
                     | EngineEvent::ViewDiscarded { .. }
                     | EngineEvent::ViewDiscardRefused { .. }

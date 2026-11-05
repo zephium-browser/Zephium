@@ -36,6 +36,8 @@ export const current = (): Notices =>
     advisories: runtime.status().security_advisories,
     sessionSetAside: runtime.status().session_set_aside && !sessionDismissed,
     cleanupDismissed,
+    restart: runtime.status().restart_required ? (runtime.status().restart_reason ?? null) : null,
+    restarting: runtime.pendingRelaunch(),
   });
 
 export function dismissSession() {

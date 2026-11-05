@@ -257,7 +257,7 @@ pub enum SpaceCommand {
 pub enum PageRequestDecision {
     Allow,
     /// Allow, and let this site open the same kind of link without asking
-    /// again until Zephium quits.
+    /// again; kept with the profile's other site settings.
     AlwaysAllow,
     Dismiss,
 }
@@ -430,6 +430,8 @@ pub enum Command {
     /// The person's answer to what the tab's page asked for.
     AnswerPageRequest {
         id: ItemId,
+        /// The serial of the request the person was shown.
+        request: u32,
         decision: PageRequestDecision,
     },
     /// The person's answer to the tab's sign-in prompt: credentials, or
@@ -442,6 +444,14 @@ pub enum Command {
     /// The person chose to continue past the certificate the tab refused,
     /// on a host on their own network, and to load it again.
     ContinuePastCertificate(ItemId),
+    /// The person chose to open the page the filter lists refused anyway:
+    /// the address they were shown, so a refusal they never saw is not lifted.
+    ContinuePastBlock {
+        id: ItemId,
+        url: String,
+    },
+    /// The person left the page the filter lists refused.
+    LeaveBlockedPage(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {
@@ -711,6 +721,8 @@ pub enum Command {
         origin: zephium_core::permissions::PageOrigin,
         kind: zephium_core::permissions::SitePermissionKind,
         decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        /// The application link scheme, for app link grants.
+        scheme: Option<String>,
     },
     SitePermissionCatalogLoaded {
         operation_id: String,

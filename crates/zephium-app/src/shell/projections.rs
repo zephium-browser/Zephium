@@ -148,6 +148,15 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            // A profile's tabs already say why; the pill names the restart
+            // the person can act on, which then also adopts any new runtime.
+            restart_reason: self.runtime_restart_required.then_some(
+                if self.restart_profiles.is_empty() {
+                    zephium_ipc::RuntimeRestartReason::RuntimeUpdate
+                } else {
+                    zephium_ipc::RuntimeRestartReason::Profile
+                },
+            ),
             session_set_aside: self.session_set_aside,
             user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
             security_advisories: self
@@ -501,7 +510,28 @@ impl Shell {
                 reason: zephium_ipc::TabFailureReason::Crashed,
                 certificate: None,
                 can_continue: false,
+                blocked: None,
                 covers_page: false,
+            });
+        }
+        // A profile only a restart can trust again says so on every tab, in
+        // place of whatever its views last failed with.
+        if self
+            .profile_of_item(id)
+            .is_some_and(|profile| self.restart_profiles.contains(&profile))
+        {
+            view.failure = Some(zephium_ipc::TabFailure {
+                url: view
+                    .failure
+                    .take()
+                    .map(|failure| failure.url)
+                    .or_else(|| view.url.clone())
+                    .unwrap_or_default(),
+                reason: zephium_ipc::TabFailureReason::RestartRequired,
+                certificate: None,
+                can_continue: false,
+                blocked: None,
+                covers_page: true,
             });
         }
         view.certificate_exception = self.under_certificate_exception(id, tab);
@@ -562,6 +592,11 @@ impl Shell {
         tab: &TabState,
         profile: Option<ProfileId>,
     ) -> Option<zephium_ipc::IconRef> {
+        // A failure filling the pane is not the page whose icon the tab had;
+        // that icon returns with the page when the person leaves.
+        if tab.failure_covers_page() {
+            return None;
+        }
         let icon = self.icon_ref(zephium_ipc::IconSurface::Chrome, tab, profile);
         self.keep_or_hold_icon(id, tab, profile?, icon)
     }
@@ -587,6 +622,14 @@ impl Shell {
         let parsed = url::Url::parse(url).ok()?;
         self.icon_ref_for_page(surface, profile, &parsed)
     }
+}
+
+/// The site as cards name it: host and any non-default port, no scheme.
+fn origin_label(origin: &str) -> String {
+    origin
+        .split_once("://")
+        .map_or(origin, |(_, host)| host)
+        .to_owned()
 }
 
 fn page_permission_kind_view(
@@ -662,6 +705,16 @@ fn runtime_security_advisory_view(
     }
 }
 
+/// A failure that fills the tab's pane (a refused page, or one that never
+/// opened) titles the tab with its host; the page behind it keeps its own
+/// title for when the person leaves.
+fn failed_pane_title(tab: &TabState) -> Option<String> {
+    let failure = tab.failure.as_deref()?;
+    (failure.covers_page || (!tab.loading && tab.url.is_none()))
+        .then(|| failure.url.host_str().map(str::to_owned))
+        .flatten()
+}
+
 fn tab_view(
     id: ItemId,
     tab: &TabState,
@@ -671,7 +724,7 @@ fn tab_view(
     TabView {
         id: id.to_string(),
         projection_revision: format!("{revision:032x}"),
-        title: tab.title.clone(),
+        title: failed_pane_title(tab).unwrap_or_else(|| tab.title.clone()),
         url: tab.url.as_ref().map(ToString::to_string),
         content: match tab.content {
             zephium_core::item::TabContent::Web => zephium_ipc::TabContentView::Web,
@@ -690,13 +743,9 @@ fn tab_view(
         },
         loading: tab.loading,
         page_request: tab.page_request.as_deref().map(|request| match request {
-            zephium_core::item::PageRequest::ExternalApp { url, app } => {
+            zephium_core::item::PageRequest::ExternalApp { url, app, site } => {
                 zephium_ipc::PageRequestView::ExternalApp {
-                    site: tab
-                        .url
-                        .as_ref()
-                        .and_then(|url| url.host_str())
-                        .map(str::to_owned),
+                    site: site.as_ref().map(|site| origin_label(site.as_str())),
                     scheme: url.scheme().to_owned(),
                     app: app.clone(),
                 }
@@ -717,10 +766,30 @@ fn tab_view(
                     retry: prompt.retry,
                 }
             }
+            zephium_core::item::PageRequest::Download(prompt) => {
+                zephium_ipc::PageRequestView::Download {
+                    request: prompt.request,
+                    site: origin_label(prompt.site.as_str()),
+                    filename: prompt.filename.clone(),
+                    allowed: prompt.allowed,
+                    unclicked: prompt.unclicked,
+                }
+            }
+            zephium_core::item::PageRequest::InsecureAutofill => {
+                zephium_ipc::PageRequestView::InsecureAutofill {
+                    host: tab
+                        .url
+                        .as_ref()
+                        .and_then(|url| url.host_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                }
+            }
             zephium_core::item::PageRequest::Unresponsive => {
                 zephium_ipc::PageRequestView::Unresponsive
             }
         }),
+        page_request_serial: tab.page_request.as_ref().map(|_| tab.page_request_serial),
         availability: None,
         failure: tab.failure.as_ref().map(|failure| {
             use zephium_core::certificates::CertificateProblem as Problem;
@@ -746,11 +815,22 @@ fn tab_view(
                     Reason::Insecure | Reason::Certificate(_) => {
                         zephium_ipc::TabFailureReason::Insecure
                     }
+                    Reason::Blocked(_) => zephium_ipc::TabFailureReason::Blocked,
                     Reason::Other => zephium_ipc::TabFailureReason::Other,
                 },
-                can_continue: certificate.is_some()
-                    && zephium_core::certificates::may_continue(&failure.url),
+                can_continue: (certificate.is_some()
+                    && zephium_core::certificates::may_continue(&failure.url))
+                    || failure.can_continue,
                 certificate,
+                blocked: match failure.reason {
+                    Reason::Blocked(
+                        zephium_core::ports::engine::NavigationBlockReason::Badware,
+                    ) => Some(zephium_ipc::TabBlockReason::Badware),
+                    Reason::Blocked(
+                        zephium_core::ports::engine::NavigationBlockReason::FilterLists,
+                    ) => Some(zephium_ipc::TabBlockReason::FilterLists),
+                    _ => None,
+                },
                 covers_page: failure.covers_page,
             }
         }),

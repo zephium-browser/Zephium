@@ -76,7 +76,7 @@ beforeEach(() => {
     private: false,
     complete: true,
     kinds: ["camera", "microphone", "geolocation", "popups"],
-    entries: [{ origin: "https://meet.example", kind: "camera", decision: "allow" }],
+    entries: [{ origin: "https://meet.example", kind: "camera", decision: "allow", scheme: null }],
   });
 });
 afterEach(() => {

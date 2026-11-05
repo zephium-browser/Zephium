@@ -52,14 +52,18 @@ existing install on its current version.
    so do this right before tagging:
 
    ```sh
-   curl -fsSL -o /tmp/easylist.txt https://easylist.to/easylist/easylist.txt
-   curl -fsSL -o /tmp/easyprivacy.txt https://easylist.to/easylist/easyprivacy.txt
-   curl -fsSL -o /tmp/ublock-filters.txt https://ublockorigin.github.io/uAssets/filters/filters.txt
-   curl -fsSL -o /tmp/ublock-quick-fixes.txt https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt
-   cargo xtask update-blocker-seed --easylist /tmp/easylist.txt \
-     --easyprivacy /tmp/easyprivacy.txt \
-     --ublock-filters /tmp/ublock-filters.txt \
-     --ublock-quick-fixes /tmp/ublock-quick-fixes.txt \
+   mkdir -p /tmp/blocker-seed && cd /tmp/blocker-seed
+   curl -fsSL -o easylist.txt https://easylist.to/easylist/easylist.txt
+   curl -fsSL -o easyprivacy.txt https://easylist.to/easylist/easyprivacy.txt
+   curl -fsSL -o ublock-filters.txt https://ublockorigin.github.io/uAssets/filters/filters.min.txt
+   curl -fsSL -o ublock-quick-fixes.txt https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt
+   curl -fsSL -o ublock-link-shorteners.txt https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt
+   curl -fsSL -o ublock-privacy.txt https://ublockorigin.github.io/uAssets/filters/privacy.min.txt
+   curl -fsSL -o ublock-resource-abuse.txt https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt
+   curl -fsSL -o ublock-unbreak.txt https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt
+   curl -fsSL -o ublock-badware.txt https://ublockorigin.github.io/uAssets/filters/badware.min.txt
+   cd -
+   cargo xtask update-blocker-seed --sources /tmp/blocker-seed \
      --license assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt \
      --gpl-license assets/blocker-seed/v1/LICENSE-GPL-3.0.txt
    ```

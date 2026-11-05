@@ -229,7 +229,7 @@ fn run(
         .with_url(if gate.is_some() { "about:blank" } else { target }).with_incognito(true).with_visible(!hidden).with_focused(!hidden)
         .with_devtools(true)
         .with_apple_navigation_action_handler(move |target, action| {
-            let allowed = policy_gate.as_ref().is_none_or(|gate| gate.allows_apple_action(&target, action));
+            let allowed = policy_gate.as_ref().is_none_or(|gate| gate.allows_apple_action(&target, action.clone()));
             let challenge = url::Url::parse(&target).is_ok_and(|url| url.host_str() == Some("challenges.cloudflare.com"));
             if challenge { eprintln!("liveness_probe site={site:?} stage={stage:?} frame=challenge requested=true allowed={allowed} main={:?}", action.target_is_main_frame); }
             if !allowed { eprintln!("liveness_probe site={site:?} stage={stage:?} navigation_refused=true"); }

@@ -490,6 +490,20 @@ impl EngineHost {
                 || !environment_matches
                 || !self.browser_version_observers.contains_key(&profile)
             {
+                eprintln!(
+                    "engine: warning: WebView2 profile provenance failed: {}",
+                    failed_provenance(ProvenanceCheck {
+                        same_process: existing.id() == process_id,
+                        observer_for_process:
+                            observer.is_some_and(
+                                |observer| observer.expected_process_id() == existing.id()
+                            ),
+                        exit_unobserved: observer.is_some_and(|observer| observer.is_pending()),
+                        process_running: existing.is_running(),
+                        same_environment: environment_matches,
+                        version_observed: self.browser_version_observers.contains_key(&profile),
+                    })
+                );
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 eprintln!("windows-work-construction: stage=process_reuse observer_matches={observer_matches} environment_matches={environment_matches} retained_pid={} observer_pid={:?} returned_pid={process_id} observer_generation={:?} version_observer={} retained_running={} exit_observer_pending={}; content=redacted", existing.id(), observer.map(|observer| observer.expected_process_id()), observer.map(|observer| observer.generation()), self.browser_version_observers.contains_key(&profile),existing.is_running(), observer.is_some_and(|observer|observer.is_pending()));
                 self.unproven_environments
@@ -796,11 +810,12 @@ impl EngineHost {
             .or_default()
             .push(debt);
 
-        let newly_quarantined = self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
-        if newly_quarantined {
+        if let Some(events) = announcement {
             let ids = self.retire_profile_process_views(profile);
             self.remember_profile_recovery_ids(profile, ids);
+            self.announce(events);
         }
     }
 
@@ -1254,10 +1269,20 @@ impl EngineHost {
     /// that its own process group exited.
     #[cfg(target_os = "windows")]
     pub(super) fn quarantine_unverifiable_windows_profile(&mut self, profile: ProfileId) {
-        self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
         let ids = self.retire_profile_process_views(profile);
         self.remember_profile_recovery_ids(profile, ids);
+        if let Some(events) = announcement {
+            self.announce(events);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn announce(&self, events: [EngineEvent; 2]) {
+        for event in events {
+            self.sink.emit(event);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1370,6 +1395,62 @@ impl EngineHost {
         self.exiting_browser_processes.remove(&profile);
         true
     }
+}
+
+/// What a new WebView2 controller had to share with the profile's retained
+/// browser process for the profile to keep browsing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) struct ProvenanceCheck {
+    pub(super) same_process: bool,
+    pub(super) observer_for_process: bool,
+    pub(super) exit_unobserved: bool,
+    pub(super) process_running: bool,
+    pub(super) same_environment: bool,
+    pub(super) version_observed: bool,
+}
+
+/// The checks that failed, for a log line a person can share: it names
+/// conditions only, never a process, path or page.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn failed_provenance(check: ProvenanceCheck) -> String {
+    let failed: Vec<&str> = [
+        (check.same_process, "the browser process changed"),
+        (
+            check.observer_for_process,
+            "the exit observer watches another process",
+        ),
+        (
+            check.exit_unobserved,
+            "the browser process exit was already observed",
+        ),
+        (
+            check.process_running,
+            "the browser process is no longer running",
+        ),
+        (check.same_environment, "the environment changed"),
+        (check.version_observed, "no runtime version observer"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| (!held).then_some(name))
+    .collect();
+    if failed.is_empty() {
+        "no single check failed".to_owned()
+    } else {
+        failed.join(", ")
+    }
+}
+
+/// Marks `profile` quarantined. Only a new process can browse it again, so
+/// the first time chrome is told why its tabs stopped and offered a restart.
+#[cfg(target_os = "windows")]
+fn quarantine(
+    quarantined: &mut HashSet<ProfileId>,
+    profile: ProfileId,
+) -> Option<[EngineEvent; 2]> {
+    quarantined.insert(profile).then_some([
+        EngineEvent::RuntimeRestartRequired,
+        EngineEvent::ProfileRestartRequired { profile },
+    ])
 }
 
 #[cfg(test)]

@@ -39,6 +39,12 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
         ),
         "notify" => notify(&options.path("rules")?, &options.path("output")?),
         "hosts" => hosts(&options.path("rules")?, &options.path("output")?),
+        "host-floor" => host_floor(),
+        "admit" => admit(
+            &options.path("allowed")?,
+            &options.path("pages")?,
+            &options.path("output")?,
+        ),
         "build" => build(
             &options.path("rules")?,
             &options.paths("loads")?,
@@ -55,6 +61,8 @@ fn usage() -> String {
     "usage: cargo xtask blocker-prune <materialize --output PATH \
      | notify --rules ARTIFACT --output PATH \
      | hosts --rules ARTIFACT --output PATH \
+     | host-floor \
+     | admit --allowed HOSTS --pages PATH --output PATH \
      | build --rules ARTIFACT --loads PATH... --matches PATH... --visits PATH... --corpus TEXT \
        --output PATH>"
         .into()
@@ -172,6 +180,107 @@ fn hosts(rules_path: &Path, output: &Path) -> Result<(), String> {
     write(output, &text)
 }
 
+/// Refuses unless this Mac's macOS and Safari meet the engine security floor
+/// the app pins: the corpus loads real pages in WebKit.
+fn host_floor() -> Result<(), String> {
+    let read = |args: &[&str]| -> Result<String, String> {
+        let output = std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output()
+            .map_err(|error| format!("{}: {error}", args[0]))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let macos = read(&["sw_vers", "-productVersion"])?;
+    let safari = read(&[
+        "defaults",
+        "read",
+        "/Applications/Safari.app/Contents/Info.plist",
+        "CFBundleShortVersionString",
+    ])?;
+    meets_host_floor(&macos, &safari)?;
+    println!("macOS {macos} and Safari {safari} meet the engine security floor");
+    Ok(())
+}
+
+fn meets_host_floor(macos: &str, safari: &str) -> Result<(), String> {
+    use zephium_core::macos::{
+        ProductVersion, GOLDEN_GATE_SECURITY_FLOOR, SAFARI_SECURITY_FLOOR, SEQUOIA_SECURITY_FLOOR,
+        SONOMA_SECURITY_FLOOR, TAHOE_SECURITY_FLOOR,
+    };
+    let version = |text: &str| -> Result<ProductVersion, String> {
+        let mut parts: Vec<&str> = text.split('.').collect();
+        parts.resize(3.max(parts.len()), "0");
+        parts
+            .join(".")
+            .parse::<ProductVersion>()
+            .map_err(|_| format!("unreadable version {text:?}"))
+    };
+    let (macos_version, safari_version) = (version(macos)?, version(safari)?);
+    let floor = match macos_version.components()[0] {
+        14 => SONOMA_SECURITY_FLOOR,
+        15 => SEQUOIA_SECURITY_FLOOR,
+        26 => TAHOE_SECURITY_FLOOR,
+        27 => GOLDEN_GATE_SECURITY_FLOOR,
+        major => return Err(format!("macOS {major} has no reviewed security floor")),
+    };
+    if macos_version < floor {
+        return Err(format!(
+            "macOS {macos} is below the security floor {floor}; update it before recording"
+        ));
+    }
+    if safari_version < SAFARI_SECURITY_FLOOR {
+        return Err(format!(
+            "Safari {safari} is below the security floor {SAFARI_SECURITY_FLOOR}; update it before recording"
+        ));
+    }
+    Ok(())
+}
+
+/// The pages of `pages` whose host is on the reviewed list, written to
+/// `output`. Every other page is withheld and printed for review: the corpus
+/// never loads a site nobody approved.
+fn admit(allowed: &Path, pages: &Path, output: &Path) -> Result<(), String> {
+    let allowed = read_list(allowed)?;
+    let allowed: BTreeSet<&str> = allowed.iter().map(String::as_str).collect();
+    let (mut admitted, mut withheld) = (String::new(), Vec::new());
+    for page in read_list(pages)? {
+        if page_admitted(&allowed, &page) {
+            admitted.push_str(&page);
+            admitted.push('\n');
+        } else {
+            withheld.push(page);
+        }
+    }
+    write(output, &admitted)?;
+    if !withheld.is_empty() {
+        eprintln!(
+            "withheld {} pages of {} whose host is not on the reviewed list:",
+            withheld.len(),
+            pages.display()
+        );
+        for page in &withheld {
+            eprintln!("  {page}");
+        }
+    }
+    Ok(())
+}
+
+fn page_admitted(allowed: &BTreeSet<&str>, page: &str) -> bool {
+    page.starts_with("https://")
+        && url_host(page).is_some_and(|host| allowed.contains(host.to_ascii_lowercase().as_str()))
+}
+
+/// Non-empty lines that are not `#` comments.
+fn read_list(path: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// A replayed load: its top page, URL and resource type.
 type LoadKey = (String, String, String);
 
@@ -279,7 +388,13 @@ fn build(
         return Err("no replayed load was exercised; check the replay".into());
     }
     let rows = loads.len();
-    let (mut kept_untested, mut kept_unloaded) = (0usize, 0usize);
+    let mut reached = loaded.clone();
+    reached.extend(
+        loads
+            .keys()
+            .filter_map(|(_, url, _)| url_host(url).map(str::to_owned)),
+    );
+    let (mut kept_untested, mut kept_unloaded, mut kept_unreached) = (0usize, 0usize, 0usize);
     for ((_, rule), count) in rules.iter().zip(&mut hits) {
         if *count > 0 || !is_wildcard_block(rule) {
             continue;
@@ -290,6 +405,11 @@ fn build(
         } else if !applies_on_a_loaded_site(rule, &loaded) {
             *count += 1;
             kept_unloaded += 1;
+        } else if rule["trigger"]["if-domain"].is_null()
+            && rule_host(rule).is_some_and(|host| !reaches(&reached, &host))
+        {
+            *count += 1;
+            kept_unreached += 1;
         }
     }
     let wildcard_blocks = rules
@@ -325,6 +445,10 @@ fn build(
     );
     let _ = writeln!(
         text,
+        "# Hosts: {kept_unreached} rules kept whose host no recorded load or visit reached."
+    );
+    let _ = writeln!(
+        text,
         "# Artifact: {} rules, sha256 {}.",
         rules.len(),
         hex(&Sha256::digest(&artifact))
@@ -343,6 +467,19 @@ fn build(
         digests.len()
     );
     Ok(())
+}
+
+/// Whether a recorded host is `host` or one of its subdomains. A rule that
+/// applies on any page, for a host the corpus never reached, is untested, not
+/// unneeded: its sites are not recorded, and their blocking must not depend on
+/// them being recorded.
+fn reaches(recorded: &BTreeSet<String>, host: &str) -> bool {
+    recorded.iter().any(|seen| {
+        seen == host
+            || seen
+                .strip_suffix(host)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
 }
 
 /// How many visits there were and how many loaded, and the hosts of those
@@ -500,6 +637,70 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_for_a_host_no_load_or_visit_reached_is_kept() {
+        let artifact = concat!(
+            r#"[{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?a\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?c\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?d\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"/x.*y"}}]"#
+        );
+        // c.example was only requested from another page; d.example never.
+        let (listed, written) = listed(
+            artifact,
+            &[concat!(
+                r#"{"page":"https://a.example/","top":"t","url":"https://cdn.c.example/z","type":"image","seen":"image"}"#,
+                "\n"
+            )],
+            LOADED,
+        );
+        let mut listed = listed;
+        listed.sort_unstable();
+        assert_eq!(listed, [0, 1, 3]);
+        assert!(
+            written.contains("# Hosts: 1 rules kept whose host no recorded load or visit reached.")
+        );
+    }
+
+    #[test]
+    fn the_corpus_never_records_below_the_engine_security_floor() {
+        assert!(meets_host_floor("26.6.2", "26.6.2").is_err());
+        assert!(meets_host_floor("26.7.2", "26.7.2").is_ok());
+        assert!(meets_host_floor("27.2", "27.2").is_ok());
+        assert!(meets_host_floor("27.1", "27.1").is_err());
+        assert!(meets_host_floor("13.7", "18.0").is_err());
+    }
+
+    #[test]
+    fn only_listed_hosts_are_admitted_exactly() {
+        let allowed: BTreeSet<&str> = ["www.example.com", "news.example.org"].into();
+        for (page, admitted) in [
+            ("https://www.example.com/", true),
+            ("https://WWW.example.com/path", true),
+            ("https://news.example.org/", true),
+            ("https://example.com/", false),
+            ("https://evil.www.example.com/", false),
+            ("https://www.example.com.evil.example/", false),
+            ("http://www.example.com/", false),
+            ("https://short.example/abc", false),
+        ] {
+            assert_eq!(page_admitted(&allowed, page), admitted, "{page}");
+        }
+    }
+
+    #[test]
+    fn every_committed_page_is_on_the_reviewed_list() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/blocker-corpus");
+        let allowed = read_list(&corpus.join("hosts-allowed.txt")).unwrap();
+        let allowed: BTreeSet<&str> = allowed.iter().map(String::as_str).collect();
+        for entry in std::fs::read_dir(corpus.join("pages")).unwrap() {
+            let path = entry.unwrap().path();
+            for page in read_list(&path).unwrap() {
+                assert!(page_admitted(&allowed, &page), "{}: {page}", path.display());
+            }
+        }
+    }
+
+    #[test]
     fn a_match_in_any_replay_of_a_load_counts() {
         let load = r#""page":"p","top":"t","url":"u1","type":"image""#;
         let (listed, _) = listed(
@@ -555,8 +756,10 @@ mod tests {
             &[r#"{"page":"p","top":"t","url":"https://c.example/","type":"image","seen":"image"}"#],
             visits,
         );
-        assert_eq!(listed, [2, 3]);
+        // The last rule applies anywhere, but nothing reached a.example.
+        assert_eq!(listed, [2]);
         assert!(written.contains("# Visits: 1 of 2 loaded; 2 rules kept"));
+        assert!(written.contains("# Hosts: 1 rules kept"));
     }
 
     #[test]

@@ -69,6 +69,17 @@
   let composing = false;
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
+  // A failure that fills the pane (a refused or unopened page) names its own
+  // address; the page behind it, if any, is not what the person sees. The
+  // pane shows it on the same terms as the shell's failedPane.
+  let failedUrl = $derived.by(() => {
+    const tab = tabs.activeTab();
+    const failure = tab?.failure;
+    if (!tab || !failure) return null;
+    const fills =
+      failure.covers_page || (!tab.loading && (!tab.url || tab.availability?.state === "sleeping"));
+    return fills ? failure.url : null;
+  });
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
   // The page in front using the camera or microphone says so where its
   // address is, as well as on its tab.
@@ -106,10 +117,12 @@
   );
   let zoom = $derived(tabs.activeTab()?.zoom ?? null);
   let standardZoom = $derived(Number(preferences.value("zoom.default")));
-  let authoritativeValue = $derived(restingAddress(activeUrl));
+  let authoritativeValue = $derived(restingAddress(failedUrl ?? activeUrl));
   let value = $derived(editing ? draft : authoritativeValue);
   let security = $derived(
-    addressSecurity(activeUrl, tabs.activeTab()?.certificate_exception === true),
+    failedUrl === null
+      ? addressSecurity(activeUrl, tabs.activeTab()?.certificate_exception === true)
+      : "none",
   );
   // A web page in front has a site to describe. A new tab, an internal page
   // and a page behind Settings have none.
@@ -137,10 +150,11 @@
    *  there is no page to edit and the field takes the typing. */
   function editInLauncher(): boolean {
     const tab = tabs.activeTab();
-    if (!tab?.url || (tab.content ?? "web") !== "web") return false;
+    const url = failedUrl ?? tab?.url;
+    if (!tab || !url || (tab.content ?? "web") !== "web") return false;
     // Work has no page in front, so there the launcher opens empty.
     if (surface.currentPage() === "work") void commands.runCommand("launcher.toggle");
-    else void commands.launcherEdit(tab.id, tab.url);
+    else void commands.launcherEdit(tab.id, url);
     return true;
   }
 
@@ -193,7 +207,7 @@
     // Keep the resting chrome quiet while preserving the complete location
     // when the user explicitly enters edit mode.
     const from = textStart();
-    draft = editingAddress(activeUrl) || value;
+    draft = editingAddress(failedUrl ?? activeUrl) || value;
     editing = true;
     flushSync();
     input.select();
@@ -257,6 +271,7 @@
   });
 
   let pageRequest = $derived(tabs.activeTab()?.page_request ?? null);
+  let pageRequestSerial = $derived(tabs.activeTab()?.page_request_serial ?? 0);
 
   // What appears only on demand is fetched the first time it is wanted, not
   // at startup; a failed fetch is tried again at the next request.
@@ -461,8 +476,8 @@
       <Icon icon={Alert02Icon} size={14} />
     </p>
   {:else if pageRequest && RequestCard}
-    {#key `${tabs.activeId()}:${JSON.stringify(pageRequest)}`}
-      <RequestCard tab={tabs.activeId()!} request={pageRequest} />
+    {#key `${tabs.activeId()}:${pageRequestSerial}:${JSON.stringify(pageRequest)}`}
+      <RequestCard tab={tabs.activeId()!} serial={pageRequestSerial} request={pageRequest} />
     {/key}
   {/if}
 </form>
