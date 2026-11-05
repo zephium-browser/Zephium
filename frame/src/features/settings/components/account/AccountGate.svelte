@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
-  import { decode, placeSky, SCENES, scene as skyScene, seen, type Scene } from "$shared/sky";
+  import { decode, placeSky, scene as skyScene, seen, skyImage, type Scene } from "$shared/sky";
 
   let { children, foot }: { children: Snippet; foot?: Snippet } = $props();
 
@@ -18,7 +18,10 @@
   $effect(() => {
     const wanted = scene;
     let live = true;
-    void decode(wanted).then(
+    void decode(
+      wanted,
+      untrack(() => sky.w),
+    ).then(
       () => {
         if (live) shown = wanted;
       },
@@ -48,7 +51,7 @@
   <div
     class="sky"
     aria-hidden="true"
-    style:background-image={`url("${SCENES[scene]}")`}
+    style:background-image={`url("${skyImage(scene, sky.w)}")`}
     style:background-size={`${sky.w}px ${sky.h}px`}
     style:background-position={`${sky.x}px ${sky.y}px`}
   ></div>

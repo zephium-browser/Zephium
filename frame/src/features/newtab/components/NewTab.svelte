@@ -29,7 +29,7 @@
     FROSTS,
     placeSky,
     placeSkyInWindow,
-    SCENES,
+    skyImage,
     scene as skyScene,
     seen,
     type Scene,
@@ -205,7 +205,10 @@
     const reveal = () => {
       if (live) shown = wanted;
     };
-    void decode(wanted).then(reveal, reveal);
+    void decode(
+      wanted,
+      untrack(() => sky.w),
+    ).then(reveal, reveal);
     return () => {
       live = false;
     };
@@ -345,7 +348,7 @@
         {/key}
       {:else if useSky}<div
           class="sky"
-          style:background-image={`url("${SCENES[scene]}")`}
+          style:background-image={`url("${skyImage(scene, sky.w)}")`}
           style:background-size={`${sky.w}px ${sky.h}px`}
           style:background-position={`${sky.x}px ${sky.y}px`}
         ></div>{/if}
