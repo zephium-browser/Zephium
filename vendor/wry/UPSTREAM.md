@@ -252,7 +252,14 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 not reported as one, so the failure lands on the document the person asked for
 and the host can show its own explanation. The handler's `FailedDocument` says
 when that error document replaced the shown page, with the address from Wry's
-in-flight navigation record; macOS always reports `Kept`.
+in-flight navigation record.
+
+On macOS, `WebKitErrorDomain` 104 (a content rule blocked the frame load) maps
+to `NavigationFailure::Blocked`, and its `FailedDocument` is `Refused { url }`:
+the address the error's `NSURLErrorFailingURLErrorKey` names, bounded like
+every page URL. The view's own URL is still the previous page at that point,
+so the host must not name the refusal by it. Other macOS failures report
+`Kept`.
 
 ### Independent Windows controller initialization (2026-10-27)
 

@@ -1275,9 +1275,28 @@ impl ArtifactCache {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
+                            // Badware in the catalog that cannot be compiled
+                            // fails the generation: the policy applied before
+                            // stays, never one without the navigation check.
+                            let navigation = match compile_navigation(&catalog, compiler) {
+                                Ok(navigation) => navigation,
+                                Err(failure) => {
+                                    self.artifact = Some(CachedArtifact::Failed(failure));
+                                    self.catalog = None;
+                                    return BlockerCompileOutcome::Failed(failure);
+                                }
+                            };
+                            let rules = with_navigation(rules, navigation.clone());
                             let durably_cached = match persistent.as_ref() {
                                 Some(cache)
-                                    if cache.store(cache_key, &persistent_copy, &rules).is_ok() =>
+                                    if cache
+                                        .store(
+                                            cache_key,
+                                            &persistent_copy,
+                                            &rules,
+                                            navigation.as_ref(),
+                                        )
+                                        .is_ok() =>
                                 {
                                     true
                                 }
@@ -1334,6 +1353,70 @@ fn complete_job(
         }));
         admission.finish_delivery(job.profile, job.generation);
     }
+}
+
+/// uBlock Origin's list of scam and malware sites, which alone judges each
+/// page and frame as it starts loading: WebKit gets none of its wildcard
+/// rules, and a refused page is named as a scam or malware site.
+#[cfg(feature = "runtime")]
+const NAVIGATION_SOURCE: &str = "ublock-badware";
+
+/// The badware list alone, compiled for the runtime matcher.
+/// The badware list's own matcher: none when the catalog has no badware list,
+/// an error when it has one that does not compile.
+#[cfg(feature = "runtime")]
+fn compile_navigation(
+    catalog: &StaticPolicyCatalog,
+    compiler: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+    #[allow(unused_mut)]
+    let mut sources: Vec<_> = catalog
+        .instantiate()
+        .into_iter()
+        .filter(|source| source.id().as_str() == NAVIGATION_SOURCE)
+        .collect();
+    #[cfg(feature = "qa-test-hosts")]
+    sources.push(FilterSource::new(
+        crate::SourceId::new("zephium-qa-badware").expect("a valid source ID"),
+        crate::SourceFormat::Standard,
+        crate::builtin::QA_BADWARE_RULES.to_owned(),
+    ));
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    compiler
+        .compile(CompileTarget::Runtime, sources)
+        .map(Some)
+        .map_err(|error| {
+            eprintln!("content blocker: navigation check unavailable: {error}");
+            map_compile_error(&error)
+        })
+}
+
+#[cfg(not(feature = "runtime"))]
+fn compile_navigation(
+    _: &StaticPolicyCatalog,
+    _: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+    Ok(None)
+}
+
+#[cfg(feature = "runtime")]
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<CompiledRules>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) if rules.enabled() => {
+            rules.with_navigation(Arc::new(RuntimePolicy::compiled(navigation)))
+        }
+        _ => rules,
+    }
+}
+
+#[cfg(not(feature = "runtime"))]
+fn with_navigation(rules: Arc<ContentRules>, _: Option<CompiledRules>) -> Arc<ContentRules> {
+    rules
 }
 
 fn with_own_rules(mut sources: Vec<FilterSource>, target: CompileTarget) -> Vec<FilterSource> {
@@ -1471,8 +1554,9 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             coverage,
             rules,
             cosmetics,
+            navigation,
         } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
-            .map(|rules| attach_cosmetics(rules, cosmetics)),
+            .map(|rules| attach_loaded_navigation(attach_cosmetics(rules, cosmetics), navigation)),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
@@ -1480,6 +1564,8 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             artifact_digest,
             encoded,
             cosmetics,
+            #[cfg(feature = "runtime")]
+            navigation,
         } => {
             let rules = ContentRules::declarative_with_digest(
                 digest,
@@ -1488,8 +1574,22 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
                 artifact_digest,
                 encoded,
             )?;
-            Some(attach_cosmetics(rules, cosmetics))
+            let rules = attach_cosmetics(rules, cosmetics);
+            #[cfg(feature = "runtime")]
+            let rules = attach_loaded_navigation(rules, navigation);
+            Some(rules)
         }
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn attach_loaded_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<Box<CachedRuntimeRules>>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) => rules.with_navigation(Arc::new(RuntimePolicy::persistent(navigation))),
+        None => rules,
     }
 }
 
@@ -1816,6 +1916,170 @@ fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_badware_test_host() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        let navigation = RuntimePolicy::compiled(
+            compile_navigation(&catalog, Compiler::default())
+                .expect("the QA host compiles")
+                .expect("the QA host"),
+        );
+        let url = "https://blocked-badware.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(navigation.decide(&request), NetworkDecision::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "qa-test-hosts")))]
+    #[test]
+    fn a_badware_list_that_does_not_compile_fails_the_generation_closed() {
+        let catalog = |rules: &str| {
+            StaticPolicyCatalog::new(vec![
+                PolicySource::new(
+                    SourceId::new("easylist").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example^"),
+                ),
+                PolicySource::new(
+                    SourceId::new(NAVIGATION_SOURCE).unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(rules),
+                ),
+            ])
+            .unwrap()
+        };
+        assert!(
+            compile_navigation(&catalog("||scam.example^"), Compiler::default())
+                .unwrap()
+                .is_some()
+        );
+        // A list with nothing usable in it is an error, not "no check".
+        assert!(compile_navigation(&catalog("! nothing usable"), Compiler::default()).is_err());
+        let no_badware = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        assert!(compile_navigation(&no_badware, Compiler::default())
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_ads_test_host_on_the_runtime_engine() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let sources = with_own_rules(
+            vec![FilterSource::new(
+                SourceId::new("easylist").unwrap(),
+                SourceFormat::Standard,
+                "||ads.example^".to_owned(),
+            )],
+            CompileTarget::Runtime,
+        );
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(CompileTarget::Runtime, sources)
+                .unwrap(),
+        );
+        let url = "https://blocked-ads.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&request), NetworkDecision::Block);
+    }
+
+    #[cfg(all(
+        feature = "runtime-exact",
+        feature = "webkit",
+        not(target_os = "windows")
+    ))]
+    #[test]
+    fn webkit_rules_carry_a_badware_navigation_check() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let source = |id: &str, rules: &str| {
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from(rules),
+            )
+        };
+        let catalog = |sources| StaticPolicyCatalog::new(sources).unwrap();
+        let compile = |catalog: &StaticPolicyCatalog| {
+            let compiler = Compiler::default();
+            let compiled = compiler
+                .compile(CompileTarget::WebKit, catalog.instantiate())
+                .unwrap();
+            with_navigation(
+                adapt_rules(compiled).unwrap(),
+                compile_navigation(catalog, compiler).unwrap(),
+            )
+        };
+        let page = |url| {
+            CoreRequest::exact(
+                url,
+                url,
+                "GET",
+                NetworkResourceType::Document,
+                NetworkRequestSourceKind::Document,
+            )
+            .unwrap()
+        };
+        let with_badware = compile(&catalog(vec![
+            source("easylist", "||ads.example^"),
+            source(
+                "ublock-badware",
+                "||scam.example^$doc\n||cdn.example/*/alarm.mp3",
+            ),
+        ]));
+        let navigation = with_badware
+            .navigation_policy()
+            .expect("a navigation check");
+        assert_eq!(
+            navigation.decide(&page("https://scam.example/")),
+            NetworkDecision::Block
+        );
+        // Only the badware list judges navigations.
+        assert_eq!(
+            navigation.decide(&page("https://ads.example/")),
+            NetworkDecision::Allow
+        );
+        let without = compile(&catalog(vec![source("easylist", "||ads.example^")]));
+        // Protection QA builds always carry their test host.
+        assert_eq!(
+            without.navigation_policy().is_some(),
+            cfg!(feature = "qa-test-hosts")
+        );
+    }
 
     fn compiler_with_post_ack_exit_gate() -> (Arc<WorkerBlocker>, SyncSender<()>, Receiver<()>) {
         let (queue, receiver) = mpsc::sync_channel::<WorkerCommand>(1);
@@ -3124,6 +3388,8 @@ mod tests {
         all(not(target_os = "windows"), feature = "webkit")
     ))]
     #[test]
+    // Protection QA builds add a rule of their own, so no catalog fails alone.
+    #[cfg(not(feature = "qa-test-hosts"))]
     fn deterministic_compile_failure_is_cached_once() {
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("invalid").unwrap(),

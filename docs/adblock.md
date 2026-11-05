@@ -272,6 +272,35 @@ oldest first. Only the focused profile is queryable. New Tab queries on show,
 tab changes, calendar-day changes and visibility restoration; statistics add no polling timer or event
 stream. Unavailable statistics produce an error, never an invented zero.
 
+## Pages the lists refuse
+
+Every page and frame is judged before it loads, and nothing is requested for
+one the lists refuse:
+
+- uBlock Origin's badware list (scam and malware sites) is compiled on its own
+  for the runtime matcher, on both platforms, and kept in the compiled cache
+  with the lists so a restart reads no source. WebKit never gets its wildcard
+  rules.
+- On Windows the full runtime policy then judges the document against the
+  lists' `$document` rules, which WebView2's request filter never sees. On
+  macOS WebKit's content rules apply them, and their refusal is reported the
+  same way.
+- A refused page covers the tab with Zephium's blocked page, naming the site
+  and the reason: a known scam or malware site on the badware list, or a known
+  ad or tracking redirect. Go back returns to the page that was showing, or
+  back in history; Continue anyway opens it and allows its host in that profile
+  until the app quits. A refused frame is only left empty.
+- A tab opened straight at a refused address is judged before its view is
+  built: the view starts on a blank page under the blocked page, so no
+  navigation is cancelled during construction. The address bar shows the
+  refused address and the tab is titled with its host.
+- A site with protection paused is not judged. Site choices that have not
+  loaded yet pause nothing.
+
+Protection QA builds (`adblock-qa`) add `blocked-badware.test` and
+`blocked-ads.test`, one host per reason, so the page can be shown without any
+real site; no release build carries them.
+
 ## Zephium's own rules
 
 `crates/zephium-blocker/src/zephium_rules.txt` is a short filter list of our
@@ -376,10 +405,17 @@ unsupported.
   visits, so its wildcard rules are never pruned: they are left out of the
   WebKit list (counted as `navigation_checked`) and judged when a page or frame
   starts loading. Its rules without `.*` cost WebKit almost nothing and stay.
-- The corpus covers the benchmark sites, YouTube, ad-heavy news and betting
-  sites, the top sites, pages where exceptions apply
-  (`scripts/blocker-corpus/pages/`), and the hosts the wildcard rules name.
-  Adult sites are left out of every list.
+- The corpus covers the benchmark sites, YouTube, ad-heavy news sites, the top
+  sites and pages where exceptions apply (`scripts/blocker-corpus/pages/`), and
+  those hosts the wildcard rules name that are on the reviewed list. Only hosts
+  listed exactly in `scripts/blocker-corpus/hosts-allowed.txt`, which holds
+  well-known sites alone, are loaded: `cargo xtask blocker-prune admit`
+  withholds every other page of every list and prints it for review, and the
+  recorder cancels every navigation and redirect, in the page or in a frame, to
+  any other host and logs it. Never added: piracy or unlicensed streaming;
+  cracks, warez or free downloads; link shorteners; adult sites; gambling and
+  betting, including odds sites; scams. Licensed services such as Netflix,
+  Spotify, Twitch, Vimeo, Crunchyroll and YouTube are fine.
 - A rule is listed only when the replay could test it and nothing matched. A
   load WebKit did not check as its recorded type keeps every rule of that type
   whose url-filter matches it. Each visit is recorded as ok, failed, timeout or
@@ -401,7 +437,10 @@ The full-set cost is paired by round.
 On 27.2 the full set costs nothing measurable; on the Mac mini, with 26.6.2's
 older WebKit, it costs 1%. macOS ships the full set without a trim.
 
-Refreshing the list is a release step, not CI: it loads hundreds of real pages
+Refreshing the list is a release step, not CI, and runs only on a Mac whose
+macOS and Safari meet the engine security floor the app pins:
+`scripts/blocker-corpus/run.sh` starts with `cargo xtask blocker-prune
+host-floor`, which refuses below it. It loads hundreds of real pages
 in WebKit with the network on (about five hours), then replays every recorded
 load against the bundled lists through a local listener that answers nothing.
 After `cargo xtask update-blocker-seed`, on an otherwise idle Mac:

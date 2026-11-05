@@ -184,6 +184,10 @@ pub struct TabFailure {
     /// they may continue past it. Never true for a public name.
     #[serde(default)]
     pub can_continue: bool,
+    /// For a page the filter lists refused, why.
+    #[serde(default)]
+    #[specta(optional)]
+    pub blocked: Option<TabBlockReason>,
     /// The page that was showing is gone; the failure stands in its place
     /// until another page opens, even while one loads.
     #[serde(default)]
@@ -212,7 +216,18 @@ pub enum TabFailureReason {
     Insecure,
     /// The page's process ended and it could not be brought back on its own.
     Crashed,
+    /// The filter lists refused the page; `blocked` says why.
+    Blocked,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
