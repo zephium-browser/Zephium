@@ -2378,6 +2378,9 @@ impl Engine for WebviewEngine {
             let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
         });
     }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn set_download_sites(
         &self,
         profile: ProfileId,
