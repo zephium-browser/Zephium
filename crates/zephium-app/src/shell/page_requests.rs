@@ -173,10 +173,10 @@ impl Shell {
         });
         if filling
             && (self.active_browser_page().is_some()
-                || !self
+                || self
                     .windows
                     .focused()
-                    .is_some_and(|window| window.active == Some(id)))
+                    .is_none_or(|window| window.active != Some(id)))
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
