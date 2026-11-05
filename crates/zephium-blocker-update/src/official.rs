@@ -671,6 +671,13 @@ fn next_due(record: &Record) -> u64 {
 fn commit_candidate(next: &mut Record) {
     next.previous = next.current.take();
     next.current = next.candidate.take();
+    if next
+        .current
+        .as_ref()
+        .is_some_and(|package| package.sources.len() == OfficialFilter::ALL.len())
+    {
+        next.retained.clear();
+    }
     next.checked = catalog_checked(next);
     next.verification = next.verification.saturating_add(1);
     next.failure_streak = 0;
@@ -756,7 +763,8 @@ where
     >,
 {
     store.collect().map_err(|_| (FailureKind::Storage, None))?;
-    let checked_at = now();
+    // The refresh's recorded start, so a failure backs off the lists tried here.
+    let checked_at = store.record.attempted.unwrap_or_else(now);
     let any_due = store
         .record
         .schedule
@@ -1612,6 +1620,40 @@ mod tests {
         // The other list keeps its own time instead of the withheld one's backoff.
         assert_eq!(next.due, started + 1_800);
         assert!(next.schedule[0].rejected.is_some());
+    }
+
+    #[test]
+    fn a_refresh_tries_the_lists_due_when_it_started() {
+        let (_dir, mut store, _package) = fixture();
+        let started = now();
+        let mut next = store.record.clone();
+        next.attempted = Some(started - 10);
+        next.schedule[0].due = started - 20;
+        // Due after the refresh started: the next refresh's, like its backoff.
+        next.schedule[1].due = started - 5;
+        next.schedule[2].due = started + DAY;
+        next.schedule[3].due = started + DAY;
+        store.persist(next).unwrap();
+        let (_sender, mut cancelled) = watch::channel(false);
+        let mut calls = Vec::new();
+        let mut fetch = |filter: OfficialFilter, _: Option<FilterValidators>| {
+            calls.push(filter);
+            std::future::ready(Ok(FilterResponse::NotModified))
+        };
+        runtime()
+            .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
+            .unwrap();
+        assert_eq!(calls, [OfficialFilter::EasyList]);
+    }
+
+    #[test]
+    fn a_committed_package_of_every_list_lets_migrated_lists_go() {
+        let (_dir, store, package) = fixture();
+        let mut next = store.record.clone();
+        next.retained = package.sources[..2].to_vec();
+        next.candidate = Some(package);
+        commit_candidate(&mut next);
+        assert!(next.retained.is_empty());
     }
 
     #[test]

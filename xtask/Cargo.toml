@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-blocker-seed-runtime = ["dep:zephium-blocker", "zephium-blocker/runtime"]
+blocker-seed-runtime = ["dep:zephium-blocker", "zephium-blocker/runtime", "zephium-blocker/runtime-exact"]
 blocker-seed-webkit = ["dep:zephium-blocker", "zephium-blocker/webkit"]
 
 [dependencies]

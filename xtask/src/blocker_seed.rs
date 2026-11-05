@@ -351,6 +351,7 @@ struct SourceGolden {
 #[serde(deny_unknown_fields)]
 struct RuntimeGolden {
     regexes: usize,
+    omitted_regexes: usize,
     regex_limit: usize,
     pattern_bytes: usize,
     pattern_bytes_limit: usize,
@@ -1791,7 +1792,9 @@ pub(crate) fn compile_hidden(
         .compile(native_target, sources)
         .map_err(|error| format!("{error:?}"))?;
     #[cfg(feature = "blocker-seed-runtime")]
-    verify_runtime_release_seed_smoke(&compiled)?;
+    compiled
+        .verify_official_canary()
+        .map_err(|error| format!("runtime release seed: {error}"))?;
     if let Some(output) = artifact_output {
         let webkit = compiled
             .webkit()
@@ -1829,6 +1832,7 @@ pub(crate) fn compile_hidden(
     #[cfg(feature = "blocker-seed-runtime")]
     let runtime = report.runtime().map(|coverage| RuntimeGolden {
         regexes: coverage.regexes(),
+        omitted_regexes: coverage.omitted_regexes(),
         regex_limit: coverage.regex_limit(),
         pattern_bytes: coverage.pattern_bytes(),
         pattern_bytes_limit: coverage.pattern_bytes_limit(),
@@ -1922,40 +1926,6 @@ pub(crate) fn compile_hidden(
         "{}",
         String::from_utf8(encoded).map_err(|_| "compiler report is not UTF-8")?
     );
-    Ok(())
-}
-
-#[cfg(feature = "blocker-seed-runtime")]
-fn verify_runtime_release_seed_smoke(
-    compiled: &zephium_blocker::CompiledRules,
-) -> Result<(), String> {
-    use zephium_blocker::{NetworkAction, NetworkRequest, RequestMethod, ResourceType};
-
-    for (url, expected) in [
-        (
-            "https://ad.doubleclick.com/activity;src=1",
-            NetworkAction::Block,
-        ),
-        (
-            "https://www.googletagmanager.com/zephium-blocker-smoke.js",
-            NetworkAction::Block,
-        ),
-        ("https://example.com/app.js", NetworkAction::Allow),
-    ] {
-        let decision = compiled
-            .evaluate_source_independent(NetworkRequest::source_independent(
-                url,
-                ResourceType::Script,
-                RequestMethod::Get,
-            ))
-            .map_err(|error| format!("runtime release-seed smoke probe failed: {error:?}"))?;
-        if decision.action() != expected {
-            return Err(format!(
-                "runtime release-seed smoke probe returned {:?} for {url}, expected {expected:?}",
-                decision.action()
-            ));
-        }
-    }
     Ok(())
 }
 
