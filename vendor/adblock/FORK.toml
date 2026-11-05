@@ -62,7 +62,6 @@ paths = [
   "src/filters/fb_network.rs",
   "src/filters/fb_network_builder.rs",
   "src/filters/network.rs",
-  "src/filters/network_matchers.rs",
 ]
 invariants = [
   "source-sensitive rules never become broader blocks when the initiating frame is unknown",
