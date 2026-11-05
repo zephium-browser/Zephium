@@ -294,6 +294,17 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     assert_eq!(filled(&engine), 1, "a tab not in front is not filled");
     assert!(request(&screen).is_some());
     shell.handle(Command::Activate(page));
+
+    // Nor while a browser page such as Settings is in front of it.
+    let _ = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle(Command::AnswerPageRequest {
+        id: page,
+        decision: crate::PageRequestDecision::Allow,
+    });
+    assert_eq!(filled(&engine), 1, "a page behind Settings is not filled");
+    assert!(request(&screen).is_some());
+    let _ = shell.handle_operation(Command::ShowBrowserPage(None));
+
     shell.handle(Command::AnswerPageRequest {
         id: page,
         decision: crate::PageRequestDecision::Allow,
