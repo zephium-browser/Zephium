@@ -1628,15 +1628,15 @@ fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
     let rules = concat!(
         "||scam.example^$doc\n",
         "||cdn.example/*/alarm.mp3\n",
-        "||scam.example/*/winpage$doc\n",
-        "||scam.example/*/framepage$subdocument\n",
+        "||lure.example/*/winpage$doc\n",
+        "||lure.example/*/framepage$subdocument\n",
         "||scam.example/*/both$doc,script\n",
         "/track/*/pixel$image,xhr\n",
     );
-    let compile = |id_text: &str| {
+    let compile_for = |target: CompileTarget, id_text: &str| {
         Compiler::default()
             .compile(
-                CompileTarget::WebKit,
+                target,
                 vec![FilterSource::new(
                     id(id_text),
                     SourceFormat::Standard,
@@ -1645,6 +1645,7 @@ fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
             )
             .unwrap()
     };
+    let compile = |id_text: &str| compile_for(CompileTarget::WebKit, id_text);
     let badware = compile("ublock-badware");
     let coverage = badware.report().webkit().unwrap();
     // The navigation check judges only these two; every other type stays blocked here.
@@ -1653,6 +1654,36 @@ fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
     let json = badware.webkit().unwrap().json();
     assert!(json.contains("alarm") && json.contains("both") && json.contains("pixel"));
     assert!(!json.contains("winpage") && !json.contains("framepage"));
+    #[cfg(feature = "runtime-exact")]
+    {
+        // The navigation check compiles the badware list for the runtime
+        // matcher and refuses both loads WebKit no longer sees.
+        let navigation = compile_for(CompileTarget::Runtime, "ublock-badware");
+        let decide = |url: &str, page: &str, resource| {
+            navigation
+                .evaluate(NetworkRequest::new(url, page, resource, RequestMethod::Get))
+                .unwrap()
+                .action()
+        };
+        let page = "https://lure.example/a/b/winpage";
+        assert_eq!(
+            decide(page, page, ResourceType::Document),
+            NetworkAction::Block
+        );
+        assert_eq!(
+            decide(
+                "https://lure.example/a/framepage",
+                "https://news.example/",
+                ResourceType::Subdocument
+            ),
+            NetworkAction::Block
+        );
+        let elsewhere = "https://news.example/a/winpage";
+        assert_eq!(
+            decide(elsewhere, elsewhere, ResourceType::Document),
+            NetworkAction::Allow
+        );
+    }
     let other = compile("ublock-filters");
     let coverage = other.report().webkit().unwrap();
     assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
