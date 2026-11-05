@@ -224,6 +224,24 @@ const NOT_FOR_APPS: &[&str] = &[
     "zephium",
 ];
 
+/// Application link grants one profile keeps.
+pub const MAX_APP_LINK_SITES: usize = 512;
+
+/// A scheme an application link grant may name: one `external_app_link`
+/// itself would hand on.
+pub fn app_link_scheme(scheme: &str) -> bool {
+    scheme.len() <= 64
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        && scheme.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
+        })
+        && !NOT_FOR_APPS.contains(&scheme)
+        && !scheme.starts_with("zephium")
+}
+
 /// The https address an `http` page is first tried at, as Chrome's HTTPS
 /// upgrades do: a public DNS name on the default port. Addresses on the
 /// person's own network, IP literals and other ports stay as asked.
@@ -279,6 +297,20 @@ pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
         (false, true) => AppLinkOutcome::Show,
         (false, false) => AppLinkOutcome::Silent,
     }
+}
+
+/// Which document asked to open an application link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppLinkSource {
+    /// The tab's own document.
+    Page,
+    /// A frame from another site; it is named on the card and its own
+    /// answers are kept apart from the tab's.
+    Frame(crate::permissions::PageOrigin),
+    /// The engine cannot say which document asked, as for a link opened
+    /// into a new tab. A kept answer never opens it, and the card names no
+    /// site.
+    Unknown,
 }
 
 /// Syntactic browser-tab target. Windows extension documents additionally

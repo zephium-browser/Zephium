@@ -271,6 +271,7 @@
   });
 
   let pageRequest = $derived(tabs.activeTab()?.page_request ?? null);
+  let pageRequestSerial = $derived(tabs.activeTab()?.page_request_serial ?? 0);
 
   // What appears only on demand is fetched the first time it is wanted, not
   // at startup; a failed fetch is tried again at the next request.
@@ -475,8 +476,8 @@
       <Icon icon={Alert02Icon} size={14} />
     </p>
   {:else if pageRequest && RequestCard}
-    {#key `${tabs.activeId()}:${JSON.stringify(pageRequest)}`}
-      <RequestCard tab={tabs.activeId()!} request={pageRequest} />
+    {#key `${tabs.activeId()}:${pageRequestSerial}:${JSON.stringify(pageRequest)}`}
+      <RequestCard tab={tabs.activeId()!} serial={pageRequestSerial} request={pageRequest} />
     {/key}
   {/if}
 </form>

@@ -121,6 +121,9 @@ pub struct TabState {
     /// Something the page asked for that waits on the person. Runtime only,
     /// and cleared when the tab commits another document.
     pub page_request: Option<Box<PageRequest>>,
+    /// Counts the requests set on this tab, so an answer names the one it
+    /// was shown.
+    pub page_request_serial: u32,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub zoom: f64,
@@ -146,12 +149,20 @@ pub struct TabState {
 pub enum PageRequest {
     /// A link for an application on this computer, and that application's
     /// name when the system knows one.
-    ExternalApp { url: Url, app: Option<String> },
+    ExternalApp {
+        url: Url,
+        app: Option<String>,
+        /// The site that asked, kept for an "always" answer and named on the
+        /// card.
+        site: Option<crate::permissions::PageOrigin>,
+    },
     /// A new tab the page tried to open that was not let through, with its
     /// address when it was an ordinary web page.
     Popup { url: Option<Url> },
     /// The site or its proxy asks to sign in; the engine holds the request.
     HttpAuth(crate::http_auth::HttpAuthPrompt),
+    /// The site wants to save a file; the engine holds the download.
+    Download(crate::permissions::DownloadPermissionPrompt),
     /// AutoFill was asked for on a page that is not encrypted.
     InsecureAutofill,
     /// The page stopped responding; the person may wait or end it.
@@ -179,6 +190,7 @@ impl TabState {
             url: None,
             loading: false,
             page_request: None,
+            page_request_serial: 0,
             can_go_back: false,
             can_go_forward: false,
             zoom: 1.0,

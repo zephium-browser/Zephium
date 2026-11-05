@@ -624,6 +624,14 @@ impl Shell {
     }
 }
 
+/// The site as cards name it: host and any non-default port, no scheme.
+fn origin_label(origin: &str) -> String {
+    origin
+        .split_once("://")
+        .map_or(origin, |(_, host)| host)
+        .to_owned()
+}
+
 fn page_permission_kind_view(
     kind: zephium_core::permissions::PagePermissionKind,
 ) -> Option<PagePermissionKindView> {
@@ -735,13 +743,9 @@ fn tab_view(
         },
         loading: tab.loading,
         page_request: tab.page_request.as_deref().map(|request| match request {
-            zephium_core::item::PageRequest::ExternalApp { url, app } => {
+            zephium_core::item::PageRequest::ExternalApp { url, app, site } => {
                 zephium_ipc::PageRequestView::ExternalApp {
-                    site: tab
-                        .url
-                        .as_ref()
-                        .and_then(|url| url.host_str())
-                        .map(str::to_owned),
+                    site: site.as_ref().map(|site| origin_label(site.as_str())),
                     scheme: url.scheme().to_owned(),
                     app: app.clone(),
                 }
@@ -762,6 +766,15 @@ fn tab_view(
                     retry: prompt.retry,
                 }
             }
+            zephium_core::item::PageRequest::Download(prompt) => {
+                zephium_ipc::PageRequestView::Download {
+                    request: prompt.request,
+                    site: origin_label(prompt.site.as_str()),
+                    filename: prompt.filename.clone(),
+                    allowed: prompt.allowed,
+                    unclicked: prompt.unclicked,
+                }
+            }
             zephium_core::item::PageRequest::InsecureAutofill => {
                 zephium_ipc::PageRequestView::InsecureAutofill {
                     host: tab
@@ -776,6 +789,7 @@ fn tab_view(
                 zephium_ipc::PageRequestView::Unresponsive
             }
         }),
+        page_request_serial: tab.page_request.as_ref().map(|_| tab.page_request_serial),
         availability: None,
         failure: tab.failure.as_ref().map(|failure| {
             use zephium_core::certificates::CertificateProblem as Problem;

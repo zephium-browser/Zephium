@@ -444,10 +444,14 @@ fn configure_with_credential_denied(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
+            // An app link goes on only so WebView2 raises
+            // LaunchingExternalUriScheme, whose handlers always cancel it and
+            // ask the person first; cancelled here, a frame's link is lost.
             if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
                 |uri| {
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
+                        || zephium_core::navigation::external_app_link(&uri).is_some()
                 },
             ) {
                 args.SetCancel(false)?;
@@ -498,7 +502,7 @@ impl SecurityPolicy {
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str, bool) + 'static,
+        request: impl Fn(&str, bool, Option<&str>) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -510,10 +514,19 @@ impl SecurityPolicy {
                 args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
+                let mut origin = PWSTR::null();
+                // The origin of the frame that asked; an empty one is unknown.
+                let origin = args
+                    .InitiatingOrigin(&mut origin)
+                    .ok()
+                    .and_then(|_| {
+                        take_pwstr_bounded(origin, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                    })
+                    .filter(|origin| !origin.is_empty());
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri, user_gesture.as_bool());
+                    request(&uri, user_gesture.as_bool(), origin.as_deref());
                 }
             }
             Ok(())

@@ -604,6 +604,10 @@ pub(crate) struct EngineHost {
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
     blocker_navigation: HashMap<ProfileId, content_styles::NavigationSlot>,
     popup_sites: HashMap<ProfileId, Rc<popup_sites::PopupSites>>,
+    /// Handed from a native new-tab request to the view it builds, so a
+    /// download that tab starts at once is asked about on its opener.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_tab_download_ask: Option<downloads::SiteAsk>,
     /// Certificates people chose to continue past, per profile, until quit.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificate_exceptions: HashMap<ProfileId, certificates::SharedExceptions>,

@@ -31,6 +31,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
@@ -136,6 +140,15 @@ pub enum PageRequestView {
         proxy: bool,
         /// The last username or password was wrong.
         retry: bool,
+    },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
     },
     /// AutoFill was asked for on a page that is not encrypted; `host` is the
     /// page's host.
@@ -435,6 +448,8 @@ pub enum SitePermissionKindView {
     LocalFonts,
     AutomaticDownloads,
     Popups,
+    Downloads,
+    AppLinks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -450,6 +465,8 @@ pub struct SitePermissionView {
     pub origin: String,
     pub kind: SitePermissionKindView,
     pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
 }
 
 /// The focused profile's saved site decisions.

@@ -24,6 +24,7 @@ const receiving = {
   received: "48000000",
   total: "120000000",
   error: null,
+  insecure: false,
 };
 
 vi.mock("$shared/ipc/bindings", async () => {

@@ -441,6 +441,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         recover_staging(&record).unwrap();
         assert!(!path.exists());

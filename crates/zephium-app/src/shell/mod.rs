@@ -251,14 +251,25 @@ pub struct Shell {
     closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
     roster: profile_roster::RosterState,
     space_memory: spaces::SpaceMemory,
-    /// Sites allowed to open a kind of application link without asking,
-    /// for this run only.
-    external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
+    /// Kinds of application link each profile's sites may open without
+    /// asking, as (site, scheme). Saved profiles read theirs from the store;
+    /// a private profile keeps them only until the session ends.
+    app_link_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<(zephium_core::permissions::PageOrigin, String)>,
+    >,
     /// Sites each saved profile lets open new tabs without a click, as read
     /// from the store; a profile is absent until its list has been read.
     popup_sites: std::collections::HashMap<
         ProfileId,
         std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
+    >,
+    /// Whether each site may save files, per profile: true to allow, false to
+    /// block. Saved profiles read theirs from the store; a private profile
+    /// keeps what the person answers only until the session ends.
+    download_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeMap<zephium_core::permissions::PageOrigin, bool>,
     >,
     /// Local https origins whose refused certificate the person continued
     /// past, for this run only; their pages never look secure.
@@ -508,8 +519,9 @@ impl Shell {
             closed_projected: Vec::new(),
             roster: profile_roster::RosterState::default(),
             space_memory: spaces::SpaceMemory::default(),
-            external_apps_allowed: std::collections::HashSet::new(),
+            app_link_sites: std::collections::HashMap::new(),
             popup_sites: std::collections::HashMap::new(),
+            download_sites: std::collections::HashMap::new(),
             continued_certificates: std::collections::HashSet::new(),
             https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
@@ -748,6 +760,7 @@ impl Shell {
                     origin,
                     kind,
                     decision,
+                    scheme,
                 } = &command
                 {
                     if let Some(mut completion) = self.begin_site_permission_change(
@@ -755,6 +768,7 @@ impl Shell {
                         origin.clone(),
                         *kind,
                         *decision,
+                        scheme.clone(),
                     ) {
                         completion.operation_id = operation_id;
                         (self.emit)(Projection::OperationProcessed(completion));
@@ -874,8 +888,12 @@ impl Shell {
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
             }
-            Command::AnswerPageRequest { id, decision } => {
-                let _ = self.operation_answer_page_request(id, decision);
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => {
+                let _ = self.operation_answer_page_request(id, request, decision);
             }
             Command::AnswerHttpAuth {
                 id,

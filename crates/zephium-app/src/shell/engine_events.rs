@@ -415,10 +415,7 @@ impl Shell {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
                     .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
-                if self
-                    .items
-                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
-                {
+                if self.replace_page_request(id, zephium_core::item::PageRequest::Popup { url }) {
                     self.project_tab(id);
                 }
             }
@@ -427,11 +424,18 @@ impl Shell {
                 url,
                 app,
                 user_gesture,
-            } => self.on_external_app_requested(id, url, app, user_gesture),
+                initiator,
+            } => self.on_external_app_requested(id, url, app, user_gesture, initiator),
             EngineEvent::HttpAuthRequested { id, prompt } => {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::DownloadPermissionRequested { id, prompt } => {
+                self.on_download_permission_requested(id, prompt)
+            }
+            EngineEvent::DownloadPermissionEnded { id, request } => {
+                self.on_download_permission_ended(id, request)
+            }
             EngineEvent::InsecureAutofillRequested { id } => {
                 self.on_insecure_autofill_requested(id)
             }
@@ -850,6 +854,8 @@ impl Shell {
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::DownloadPermissionRequested { id, .. }
+            | EngineEvent::DownloadPermissionEnded { id, .. }
             | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
             | EngineEvent::NavigationBlocked { id, .. }

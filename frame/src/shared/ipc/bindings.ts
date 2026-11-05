@@ -272,7 +272,7 @@ export const commands = {
 	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
-	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
+	tabsAnswerPageRequest: (id: string, request: number, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, request, answer }),
 	/**
 	 *  Answers the tab's sign-in prompt; no credentials cancels it. The typed
 	 *  values move into storage wiped on drop and are never logged.
@@ -408,7 +408,7 @@ export const commands = {
 	 *  Changes one saved decision of the focused profile; no decision forgets it,
 	 *  so the site is asked again.
 	 */
-	sitePermissionSet: (origin: string, kind: SitePermissionKindView, decision: "allow" | "block" | null) => __TAURI_INVOKE<OperationAdmission>("site_permission_set", { origin, kind, decision }),
+	sitePermissionSet: (origin: string, kind: SitePermissionKindView, decision: "allow" | "block" | null, scheme: string | null) => __TAURI_INVOKE<OperationAdmission>("site_permission_set", { origin, kind, decision, scheme }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -1421,6 +1421,8 @@ export type DownloadView = {
 	received: string,
 	total: string | null,
 	error: DownloadError | null,
+	/**  The file came over a connection that is not encrypted. */
+	insecure: boolean,
 };
 
 export type DownloadsChanged = {
@@ -2496,6 +2498,11 @@ insecure: boolean; proxy: boolean;
 /**  The last username or password was wrong. */
 retry: boolean } |
 /**
+ *  The site wants to save a file. `allowed` says the site may already
+ *  download and only this unclicked download is asked about.
+ */
+{ kind: "download"; request: number; site: string; filename: string; allowed: boolean; unclicked: boolean } |
+/**
  *  AutoFill was asked for on a page that is not encrypted; `host` is the
  *  page's host.
  */
@@ -3082,13 +3089,15 @@ export type SitePermissionDecisionView = "allow" | "block";
  *  A kind of decision Site settings lists. Which kinds a platform keeps is
  *  in `SitePermissionsView::kinds`.
  */
-export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups";
+export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups" | "downloads" | "app_links";
 
 export type SitePermissionView = {
 	/**  Canonical origin, such as `https://meet.example`. */
 	origin: string,
 	kind: SitePermissionKindView,
 	decision: SitePermissionDecisionView,
+	/**  The kind of application link, for `app_links`. */
+	scheme: string | null,
 };
 
 /**  The focused profile's saved site decisions. */
@@ -3278,6 +3287,8 @@ export type TabView = {
 	loading: boolean,
 	/**  What the page asked for that waits on the person. */
 	page_request?: PageRequestView | null,
+	/**  Names the request shown, for its answer. */
+	page_request_serial?: number | null,
 	/**
 	 *  Transient native residency state. It never replaces the committed URL
 	 *  or title, and an explicit retry remains a fresh navigation intent.

@@ -267,6 +267,7 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     };
     shell.handle(Command::AnswerPageRequest {
         id: page,
+        request: shown_serial(&shell, page),
         decision: crate::PageRequestDecision::Dismiss,
     });
     assert_eq!(request(&screen), None);
@@ -277,6 +278,7 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     }));
     shell.handle(Command::AnswerPageRequest {
         id: page,
+        request: shown_serial(&shell, page),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(filled(&engine), 1);
@@ -289,6 +291,7 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     shell.handle(Command::Open);
     shell.handle(Command::AnswerPageRequest {
         id: page,
+        request: shown_serial(&shell, page),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(filled(&engine), 1, "a tab not in front is not filled");
@@ -299,6 +302,7 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     let _ = shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
     shell.handle(Command::AnswerPageRequest {
         id: page,
+        request: shown_serial(&shell, page),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(filled(&engine), 1, "a page behind Settings is not filled");
@@ -307,6 +311,7 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
 
     shell.handle(Command::AnswerPageRequest {
         id: page,
+        request: shown_serial(&shell, page),
         decision: crate::PageRequestDecision::Allow,
     });
     assert_eq!(filled(&engine), 2);

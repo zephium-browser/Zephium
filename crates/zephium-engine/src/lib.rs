@@ -1194,6 +1194,8 @@ impl RetirementGate {
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::DownloadPermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadPermissionEnded { id, .. }
             | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
             | event @ EngineEvent::NavigationBlocked { id, .. }
@@ -2381,6 +2383,18 @@ impl Engine for WebviewEngine {
             let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
         });
     }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_download_sites(profile, sites));
+        });
+    }
     fn site_permissions(
         &self,
         profile: ProfileId,
@@ -2962,6 +2976,25 @@ impl Engine for WebviewEngine {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (item, request, credentials);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.answer_download_permission(item, request, allow)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, allow);
             NativeDispatch::Unsupported
         }
     }

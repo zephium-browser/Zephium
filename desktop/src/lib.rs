@@ -3004,6 +3004,7 @@ fn tabs_answer_page_request(
     caller: WebviewWindow,
     shell: State<'_, Handle>,
     id: String,
+    request: u32,
     answer: zephium_ipc::PageRequestAnswer,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Main, "tabs_answer_page_request") {
@@ -3017,7 +3018,11 @@ fn tabs_answer_page_request(
         zephium_ipc::PageRequestAnswer::Dismiss => zephium_app::PageRequestDecision::Dismiss,
     };
     dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
-        Command::AnswerPageRequest { id, decision }
+        Command::AnswerPageRequest {
+            id,
+            request,
+            decision,
+        }
     })
 }
 
@@ -3583,6 +3588,7 @@ fn site_permission_set(
     origin: String,
     kind: zephium_ipc::SitePermissionKindView,
     decision: Option<zephium_ipc::SitePermissionDecisionView>,
+    scheme: Option<String>,
 ) -> zephium_ipc::OperationAdmission {
     use zephium_core::permissions::{RememberedPagePermission, SitePermissionKind as Kind};
     use zephium_ipc::SitePermissionKindView as View;
@@ -3605,7 +3611,12 @@ fn site_permission_set(
         View::LocalFonts => Kind::LocalFonts,
         View::AutomaticDownloads => Kind::AutomaticDownloads,
         View::Popups => Kind::Popups,
+        View::Downloads => Kind::Downloads,
+        View::AppLinks => Kind::AppLinks,
     };
+    if !site_permission_scheme_admitted(kind, scheme.as_deref()) {
+        return rejected_operation();
+    }
     let decision = decision.map(|decision| match decision {
         zephium_ipc::SitePermissionDecisionView::Allow => RememberedPagePermission::Allow,
         zephium_ipc::SitePermissionDecisionView::Block => RememberedPagePermission::Deny,
@@ -3617,8 +3628,23 @@ fn site_permission_set(
             origin,
             kind,
             decision,
+            scheme,
         },
     )
+}
+
+/// Only an application link grant names a scheme, and only one an
+/// application link could use; every other kind names none.
+fn site_permission_scheme_admitted(
+    kind: zephium_core::permissions::SitePermissionKind,
+    scheme: Option<&str>,
+) -> bool {
+    match kind {
+        zephium_core::permissions::SitePermissionKind::AppLinks => {
+            scheme.is_some_and(zephium_core::navigation::app_link_scheme)
+        }
+        _ => scheme.is_none(),
+    }
 }
 
 #[tauri::command]
@@ -7874,6 +7900,34 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_an_app_link_grant_names_a_scheme() {
+        use zephium_core::permissions::SitePermissionKind as Kind;
+        assert!(super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("zoommtg")
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            None
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("javascript")
+        ));
+        assert!(super::site_permission_scheme_admitted(Kind::Camera, None));
+        for scheme in ["zoommtg", "javascript", "NOT A SCHEME"] {
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Camera,
+                Some(scheme)
+            ));
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Downloads,
+                Some(scheme)
+            ));
+        }
+    }
 
     use tauri::Url;
     use zephium_ipc::{
