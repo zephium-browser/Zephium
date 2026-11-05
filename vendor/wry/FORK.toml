@@ -114,3 +114,7 @@ paths = ["src/wkwebview/class/wry_web_view.rs"]
 [[patch_sets]]
 name = "macOS https-first navigation policy"
 paths = ["src/lib.rs", "src/wkwebview/mod.rs"]
+
+[[patch_sets]]
+name = "macOS navigation source frame and context-menu download marker"
+paths = ["src/lib.rs", "src/native_bounds.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
