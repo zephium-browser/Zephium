@@ -69,6 +69,9 @@
   let composing = false;
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
+  // A tab whose first page could not open has no page yet; the field still
+  // names the address that failed, so it can be read, edited and tried again.
+  let shownUrl = $derived(activeUrl || tabs.activeTab()?.failure?.url || "");
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
   // The page in front using the camera or microphone says so where its
   // address is, as well as on its tab.
@@ -106,7 +109,7 @@
   );
   let zoom = $derived(tabs.activeTab()?.zoom ?? null);
   let standardZoom = $derived(Number(preferences.value("zoom.default")));
-  let authoritativeValue = $derived(restingAddress(activeUrl));
+  let authoritativeValue = $derived(restingAddress(shownUrl));
   let value = $derived(editing ? draft : authoritativeValue);
   let security = $derived(
     addressSecurity(activeUrl, tabs.activeTab()?.certificate_exception === true),
@@ -193,7 +196,7 @@
     // Keep the resting chrome quiet while preserving the complete location
     // when the user explicitly enters edit mode.
     const from = textStart();
-    draft = editingAddress(activeUrl) || value;
+    draft = editingAddress(shownUrl) || value;
     editing = true;
     flushSync();
     input.select();

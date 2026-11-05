@@ -47,12 +47,12 @@ afterEach(() => {
   native.edit.mockClear();
 });
 
-async function field(props: { compact?: boolean } = {}) {
+async function field(
+  props: { compact?: boolean } = {},
+  page: Parameters<typeof tabFixture>[0] = { url: "https://www.wikipedia.org/wiki/Premium" },
+) {
   await tabs.init();
-  const tab = tabFixture({
-    projection_revision: stamp(),
-    url: "https://www.wikipedia.org/wiki/Premium",
-  });
+  const tab = tabFixture({ projection_revision: stamp(), ...page });
   emitNativeEvent("itemsChanged", {
     projection_revision: stamp(),
     profile: null,
@@ -83,6 +83,19 @@ test("editing shows the whole address and rests on the host", async () => {
   await expect.poll(() => input.value).toBe("https://www.wikipedia.org/wiki/Premium");
   input.blur();
   await expect.poll(() => input.value).toBe("www.wikipedia.org");
+});
+
+test("a first page that could not open keeps its address in the field", async () => {
+  const { input } = await field(
+    {},
+    {
+      url: null,
+      failure: { url: "http://localtest.me/", reason: "unreachable" },
+    },
+  );
+  expect(input.value).toBe("localtest.me");
+  input.focus();
+  await expect.poll(() => input.value).toBe("http://localtest.me/");
 });
 
 test("a press anywhere else in the chrome ends editing", async () => {
