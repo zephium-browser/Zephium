@@ -1275,11 +1275,6 @@ unsafe extern "system" fn owner_proc(
     let restore =
         (msg == WM_ACTIVATE && activation_restores_focus(w)).then(|| (*p).reactivation_focus);
     let result = DefSubclassProc(hwnd, msg, w, l);
-    if let Some(target) =
-        restore.filter(|target| can_restore_focus(hwnd, *target, GetForegroundWindow()))
-    {
-        let _ = SetFocus(Some(target));
-    }
     // Keep the owned caption hidden through all synchronous size/focus messages.
     // WM_SIZE alone is too early: Windows may still be animating the owner.
     if state_command {
@@ -1305,6 +1300,12 @@ unsafe extern "system" fn owner_proc(
     // read where the pointer now is over it.
     if msg == WM_WINDOWPOSCHANGED {
         pointer_moved(hwnd);
+    }
+    if let Some(target) =
+        restore.filter(|target| can_restore_focus(hwnd, *target, GetForegroundWindow()))
+    {
+        // Focus callbacks can destroy the owner, so do not read State after this.
+        let _ = SetFocus(Some(target));
     }
     result
 }
