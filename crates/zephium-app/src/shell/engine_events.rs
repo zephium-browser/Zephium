@@ -403,10 +403,7 @@ impl Shell {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
                     .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
-                if self
-                    .items
-                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
-                {
+                if self.replace_page_request(id, zephium_core::item::PageRequest::Popup { url }) {
                     self.project_tab(id);
                 }
             }

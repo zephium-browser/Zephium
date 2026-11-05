@@ -37,7 +37,7 @@ impl Shell {
         if shown || waiting || !in_front || !self.items.tab(id).is_some_and(TabState::has_view) {
             return;
         }
-        if self.items.set_page_request(id, PageRequest::Unresponsive) {
+        if self.replace_page_request(id, PageRequest::Unresponsive) {
             self.project_tab(id);
         }
     }
@@ -82,21 +82,14 @@ impl Shell {
             let _ = self.engine.open_external_app(url.as_str());
             return;
         }
-        if self
-            .items
-            .set_page_request(id, PageRequest::ExternalApp { url, app, site })
-        {
+        if self.replace_page_request(id, PageRequest::ExternalApp { url, app, site }) {
             self.project_tab(id);
         }
     }
 
     pub(super) fn on_http_auth_requested(&mut self, id: ItemId, prompt: HttpAuthPrompt) {
         let request = prompt.request;
-        self.withdraw_download_prompt(id);
-        if self
-            .items
-            .set_page_request(id, PageRequest::HttpAuth(prompt))
-        {
+        if self.replace_page_request(id, PageRequest::HttpAuth(prompt)) {
             self.project_tab(id);
         } else {
             let _ = self.engine.answer_http_auth(id, request, None);
@@ -144,8 +137,13 @@ impl Shell {
         }
     }
 
-    /// Something else takes the tab's card: the download it showed is
+    /// Puts `request` on the tab's card. A download waiting there is
     /// refused rather than left waiting unseen.
+    pub(super) fn replace_page_request(&mut self, id: ItemId, request: PageRequest) -> bool {
+        self.withdraw_download_prompt(id);
+        self.items.set_page_request(id, request)
+    }
+
     fn withdraw_download_prompt(&mut self, id: ItemId) {
         if let Some(request) = self.download_prompt(id) {
             let _ = self.items.take_page_request(id);

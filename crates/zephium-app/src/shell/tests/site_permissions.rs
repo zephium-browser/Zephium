@@ -652,6 +652,54 @@ mod downloads {
     }
 
     #[test]
+    fn a_card_that_takes_a_waiting_download_s_place_refuses_it() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://files.example/list");
+        let replacements: [(u32, EngineEvent); 3] = [
+            (
+                10,
+                EngineEvent::ExternalAppRequested {
+                    id,
+                    url: "zoommtg://zoom.us/join".into(),
+                    app: Some("Meetings".into()),
+                    user_gesture: true,
+                    initiator: zephium_core::navigation::AppLinkSource::Page,
+                },
+            ),
+            (11, EngineEvent::PageOpenBlocked { id, url: None }),
+            (
+                12,
+                EngineEvent::PageResponsiveness {
+                    id,
+                    responding: false,
+                },
+            ),
+        ];
+        for (request, event) in replacements {
+            shell.handle(Command::Engine(EngineEvent::DownloadPermissionRequested {
+                id,
+                prompt: prompt(request, "https://files.example", false, false),
+            }));
+            assert!(matches!(
+                shown(&screen, id),
+                Some(PageRequestView::Download { .. })
+            ));
+            shell.handle(Command::Engine(event));
+            assert!(!matches!(
+                shown(&screen, id),
+                Some(PageRequestView::Download { .. })
+            ));
+            assert_eq!(
+                answers(&engine).last().cloned(),
+                Some(format!("download-permission {id} {request} refuse"))
+            );
+            let _ = shell.items.take_page_request(id);
+        }
+    }
+
+    #[test]
     fn site_settings_list_and_change_download_decisions() {
         let store = Arc::new(FakeStore::default());
         let (mut shell, engine, _screen, operations, _queue) = ready(store.clone());
