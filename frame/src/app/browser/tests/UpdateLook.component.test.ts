@@ -60,6 +60,7 @@ async function start(advisory: boolean) {
   await runtime.init();
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    restart_reason: null,
     session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: advisory

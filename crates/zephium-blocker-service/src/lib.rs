@@ -2313,6 +2313,10 @@ fn refresh_jitter() -> Duration {
 mod tests {
     use super::*;
 
+    /// A candidate compiles at background priority, which a busy Windows
+    /// runner can starve for seconds; a prompt compile still answers at once.
+    const CANDIDATE_COMPILED: Duration = Duration::from_secs(30);
+
     #[test]
     fn a_startup_candidate_waits_for_the_first_profile_policy_or_the_yield() {
         let started = Instant::now();
@@ -2409,7 +2413,7 @@ mod tests {
         let capped = Instant::now() - CANDIDATE_QUIET_WAIT_CAP;
         *service.candidate_quiet_wait.lock().unwrap() = Some(([2; 32], capped));
         service.drive_locked(false);
-        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
         // A native retry of the same list does not wait the whole cap again.
         assert!(service.pages_allow_candidate([2; 32], Instant::now()));
         assert!(!service.pages_allow_candidate([3; 32], Instant::now()));
@@ -3578,7 +3582,7 @@ mod tests {
             .lock_state()
             .admit_activation(activation(), now_unix());
         service.drive_locked(false);
-        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
         // WebKit is checking the list: a crash now must leave its name behind.
         let crashed = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(crashed, hex_digest(&[2; 32]));
@@ -3694,7 +3698,7 @@ mod tests {
             now_unix(),
         );
         service.drive_locked(false);
-        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
         assert!(matches!(
             service.lock_state().transition,
             Some(CatalogTransition::Preparing(_))
@@ -3707,7 +3711,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         service.lock_state().native_retry.as_mut().unwrap().2 = Instant::now();
         service.drive_locked(false);
-        rx.recv_timeout(Duration::from_secs(2))
+        rx.recv_timeout(CANDIDATE_COMPILED)
             .unwrap()
             .finish(ContentRuleValidationOutcome::Valid);
         let completion = service

@@ -219,6 +219,9 @@ pub enum TabFailureReason {
     Insecure,
     /// The page's process ended and it could not be brought back on its own.
     Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
     /// The filter lists refused the page; `blocked` says why.
     Blocked,
     Other,
@@ -1333,6 +1336,8 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Why a restart is required; none while it is not.
+    pub restart_reason: Option<RuntimeRestartReason>,
     /// The saved session could not be restored this launch: its bytes were
     /// kept in a file and the browser started with fresh tabs.
     pub session_set_aside: bool,
@@ -1345,6 +1350,15 @@ pub struct RuntimeStatus {
     /// Canonically ordered closed-vocabulary set. Rust emits at most six
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRestartReason {
+    /// A newer browser runtime is installed; only a restart adopts it.
+    RuntimeUpdate,
+    /// A profile's browser engine can be trusted again only after a restart.
+    Profile,
 }
 
 /// Non-fatal, process-local classification produced before native WebView

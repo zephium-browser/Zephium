@@ -6,6 +6,7 @@ import { tabFixture } from "$shared/testing/fixtures";
 import NavigationError from "../components/NavigationError.svelte";
 
 const continued = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const relaunched = vi.hoisted(() => vi.fn(async () => true));
 const left = vi.hoisted(() => vi.fn(async () => ({ accepted: true, operation_id: null })));
 const unblocked = vi.hoisted(() =>
   vi.fn(async (_id: string, _url: string) => ({ accepted: true, operation_id: null })),
@@ -15,6 +16,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     tabsContinuePastCertificate: continued as never,
+    appRelaunch: relaunched,
     tabsLeaveBlockedPage: left as never,
     tabsContinuePastBlock: unblocked as never,
   });
@@ -22,6 +24,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 afterEach(() => {
   continued.mockClear();
+  relaunched.mockClear();
   left.mockClear();
   unblocked.mockClear();
 });
@@ -67,6 +70,31 @@ test("a secure-connection failure without a certificate has no way past", async 
   show({ url: "https://nas.local/", reason: "insecure", can_continue: true });
   await expect.element(page.getByRole("button", { name: "Show details" })).not.toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Try again" })).toBeVisible();
+});
+
+test("a profile only a restart can trust offers the restart, never the address", async () => {
+  show({ url: "https://example.com/", reason: "restart_required", covers_page: true });
+  await expect.element(page.getByRole("heading")).toHaveTextContent("Zephium needs to restart");
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("keep browsing safely in this profile");
+  await expect.element(page.getByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Restart Zephium" }).click();
+  expect(relaunched).toHaveBeenCalledOnce();
+});
+
+test("a restart that does not start says so and can be tried again", async () => {
+  relaunched.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("ipc"));
+  show({ url: "https://example.com/", reason: "restart_required", covers_page: true });
+  const button = page.getByRole("button", { name: "Restart Zephium" });
+  const failed = page.getByText("Zephium couldn't restart. Try again.");
+  await button.click();
+  await expect.element(failed).toBeInTheDocument();
+  await button.click();
+  await expect.element(failed).toBeInTheDocument();
+  await button.click();
+  await expect.element(failed).not.toBeInTheDocument();
+  expect(relaunched).toHaveBeenCalledTimes(3);
 });
 
 test("a badware page names the list, goes back first and lets the person continue", async () => {

@@ -148,6 +148,15 @@ impl Shell {
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,
+            // A profile's tabs already say why; the pill names the restart
+            // the person can act on, which then also adopts any new runtime.
+            restart_reason: self.runtime_restart_required.then_some(
+                if self.restart_profiles.is_empty() {
+                    zephium_ipc::RuntimeRestartReason::RuntimeUpdate
+                } else {
+                    zephium_ipc::RuntimeRestartReason::Profile
+                },
+            ),
             session_set_aside: self.session_set_aside,
             user_content_degraded_scope_count: self.user_content_status.degraded_scope_count(),
             security_advisories: self
@@ -503,6 +512,26 @@ impl Shell {
                 can_continue: false,
                 blocked: None,
                 covers_page: false,
+            });
+        }
+        // A profile only a restart can trust again says so on every tab, in
+        // place of whatever its views last failed with.
+        if self
+            .profile_of_item(id)
+            .is_some_and(|profile| self.restart_profiles.contains(&profile))
+        {
+            view.failure = Some(zephium_ipc::TabFailure {
+                url: view
+                    .failure
+                    .take()
+                    .map(|failure| failure.url)
+                    .or_else(|| view.url.clone())
+                    .unwrap_or_default(),
+                reason: zephium_ipc::TabFailureReason::RestartRequired,
+                certificate: None,
+                can_continue: false,
+                blocked: None,
+                covers_page: true,
             });
         }
         view.certificate_exception = self.under_certificate_exception(id, tab);

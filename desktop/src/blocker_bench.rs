@@ -535,6 +535,8 @@ fn handle(
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
+        "restart" => restart(app),
+        "command" => run_command(app, &command),
         "setting" => setting(app, bench, &command),
         "capture" => capture(app, &command),
         "quit" => Ok(json!({})),
@@ -717,6 +719,31 @@ fn front(window: &tauri::WebviewWindow) {
         let ns_window = unsafe { &*(pointer as *const NSWindow) };
         ns_window.orderFrontRegardless();
         ns_window.makeKeyAndOrderFront(None);
+    }
+}
+
+/// Raises the restart a newer runtime waits on, so its notice can be seen
+/// and captured without a real runtime update.
+fn restart(app: &tauri::AppHandle) -> Result<Value, String> {
+    if shell(app)?.dispatch(Command::Engine(EngineEvent::RuntimeRestartRequired)) {
+        Ok(json!({}))
+    } else {
+        Err("the command queue refused the request".into())
+    }
+}
+
+/// Runs a named chrome command, as a menu or shortcut does. `id` belongs to
+/// the protocol, so the command is named by `name`.
+fn run_command(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    let name = text(command, "name")?;
+    admitted(&super::execute_command(app, name))
+}
+
+fn admitted(admission: &zephium_ipc::OperationAdmission) -> Result<Value, String> {
+    if admission.accepted {
+        Ok(json!({ "operation": admission.operation_id }))
+    } else {
+        Err("the command was not admitted".into())
     }
 }
 
@@ -936,6 +963,22 @@ fn close(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
     use zephium_ipc::{OperationOutcome, OperationReason};
+
+    #[test]
+    fn a_command_is_named_apart_from_the_protocol_id_and_a_refusal_fails() {
+        let request = json!({ "id": 7, "op": "command", "name": "browser.relaunch" });
+        assert_eq!(text(&request, "name"), Ok("browser.relaunch"));
+        let refused = zephium_ipc::OperationAdmission {
+            operation_id: None,
+            accepted: false,
+        };
+        assert!(admitted(&refused).is_err());
+        let taken = zephium_ipc::OperationAdmission {
+            operation_id: Some("01".into()),
+            accepted: true,
+        };
+        assert_eq!(admitted(&taken), Ok(json!({ "operation": "01" })));
+    }
 
     #[test]
     fn a_load_ends_only_for_a_watch_and_idleness_follows_the_last_event() {

@@ -594,6 +594,8 @@ export const commands = {
 	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  Closes Zephium as a quit does, then starts it again. */
+	appRelaunch: () => __TAURI_INVOKE<boolean>("app_relaunch"),
 	/**  What the release now running brought, when it arrived as an update. */
 	updateHighlights: () => __TAURI_INVOKE<{
 	version: string,
@@ -2928,6 +2930,12 @@ export type ResourceSummary = {
 	work: string | null,
 };
 
+export type RuntimeRestartReason =
+/**  A newer browser runtime is installed; only a restart adopts it. */
+"runtime_update" |
+/**  A profile's browser engine can be trusted again only after a restart. */
+"profile";
+
 /**  Sanitized advisory delivered only to privileged main chrome. */
 export type RuntimeSecurityAdvisory = {
 	kind: RuntimeSecurityAdvisoryKind,
@@ -2953,6 +2961,8 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
  */
 export type RuntimeStatus = {
 	restart_required: boolean,
+	/**  Why a restart is required; none while it is not. */
+	restart_reason: RuntimeRestartReason | null,
 	/**
 	 *  The saved session could not be restored this launch: its bytes were
 	 *  kept in a file and the browser started with fresh tabs.
@@ -3220,6 +3230,11 @@ export type TabFailure = {
 export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" |
 /**  The page's process ended and it could not be brought back on its own. */
 "crashed" |
+/**
+ *  The profile's browser engine can be trusted again only after Zephium
+ *  restarts; every tab in it says so.
+ */
+"restart_required" |
 /**  The filter lists refused the page; `blocked` says why. */
 "blocked" | "other";
 

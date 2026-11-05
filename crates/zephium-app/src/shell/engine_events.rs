@@ -116,6 +116,10 @@ impl Shell {
                     self.forget_content_fullscreen(*id);
                 }
             }
+            // A quarantined profile's views are gone, and its prompt with them.
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.cancel_page_permission_for_profile(*profile);
+            }
             EngineEvent::ProfileProcessExited { profile, ids } => {
                 self.cancel_page_permission_for_profile(*profile);
                 for id in ids {
@@ -129,6 +133,14 @@ impl Shell {
                 if !self.runtime_restart_required {
                     self.runtime_restart_required = true;
                     self.project_runtime_status();
+                }
+            }
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.runtime_restart_required = true;
+                if self.restart_profiles.insert(profile) {
+                    // The status now names the profile as the reason.
+                    self.project_runtime_status();
+                    self.project_items();
                 }
             }
             EngineEvent::ContentRulesSettled {
@@ -784,7 +796,8 @@ impl Shell {
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
-            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            | EngineEvent::ProfileProcessExited { profile, .. }
+            | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),
                 ..

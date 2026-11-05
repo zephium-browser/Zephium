@@ -32,6 +32,7 @@
     timed_out: m.navigation_error_timed_out,
     insecure: m.navigation_error_insecure,
     crashed: m.navigation_error_crashed,
+    restart_required: m.navigation_error_restart_required,
     blocked: m.navigation_error_other,
     other: m.navigation_error_other,
   };
@@ -48,6 +49,18 @@
     revoked: m.navigation_error_certificate_revoked,
     other: m.navigation_error_certificate_other,
   };
+
+  let restarting = $state(false);
+  let restartFailed = $state(false);
+
+  // A restart that starts ends this page; one that does not says so.
+  async function restart() {
+    restarting = true;
+    restartFailed = false;
+    const started = await commands.appRelaunch().catch(() => false);
+    restarting = false;
+    restartFailed = !started;
+  }
 
   function continueUnsafe() {
     void commands.tabsContinuePastCertificate(tab.id).catch(() => {});
@@ -71,7 +84,8 @@
   A page the person asked for did not load, or its process ended. Chrome says
   why in plain words and offers the same address again. A refused certificate
   says what was wrong with it; only a host on the person's own network has a
-  way past, behind details and a warning.
+  way past, behind details and a warning. A profile only a restart can trust
+  again offers that instead of the address.
 -->
 {#if failure.reason === "blocked"}
   <!--
@@ -100,17 +114,24 @@
 {:else}
   <div class="failed-page" role="alert">
     <h1>
-      {failure.reason === "insecure"
-        ? m.navigation_error_insecure_title({ host })
-        : failure.reason === "crashed"
-          ? m.navigation_error_crashed_title({ host })
-          : m.navigation_error_title({ host })}
+      {failure.reason === "restart_required"
+        ? m.navigation_error_restart_required_title()
+        : failure.reason === "insecure"
+          ? m.navigation_error_insecure_title({ host })
+          : failure.reason === "crashed"
+            ? m.navigation_error_crashed_title({ host })
+            : m.navigation_error_title({ host })}
     </h1>
     <p>{help[failure.reason]()}</p>
     {#if failure.certificate}<p>{certificate[failure.certificate]()}</p>{/if}
-    <Button onclick={() => tabs.navigate(tab.id, failure.url)}
-      >{failure.reason === "crashed" ? m.navigation_error_reload() : m.surface_retry()}</Button
-    >
+    {#if failure.reason === "restart_required"}
+      <Button pending={restarting} onclick={restart}>{m.navigation_error_restart()}</Button>
+      {#if restartFailed}<p>{m.navigation_error_restart_failed()}</p>{/if}
+    {:else}
+      <Button onclick={() => tabs.navigate(tab.id, failure.url)}
+        >{failure.reason === "crashed" ? m.navigation_error_reload() : m.surface_retry()}</Button
+      >
+    {/if}
     {#if failure.certificate && failure.can_continue}
       <Button
         variant="ghost"

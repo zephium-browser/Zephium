@@ -285,6 +285,8 @@ pub struct Shell {
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// Profiles whose browser engine only a restart can trust again.
+    restart_profiles: std::collections::HashSet<ProfileId>,
     /// The saved session could not be restored this launch and was set aside.
     session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
@@ -526,6 +528,7 @@ impl Shell {
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            restart_profiles: std::collections::HashSet::new(),
             session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
