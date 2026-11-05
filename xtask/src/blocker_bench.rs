@@ -149,6 +149,8 @@ enum Config {
     ZephiumOff,
     ZephiumOn,
     Brave,
+    /// Brave with Shields down on every site: the same engine and lists, none applied.
+    BraveOff,
     Edge,
     Chrome,
     Firefox,
@@ -168,6 +170,7 @@ impl Config {
             Config::ZephiumOff => summary::ZEPHIUM_OFF,
             Config::ZephiumOn => summary::ZEPHIUM_ON,
             Config::Brave => "brave",
+            Config::BraveOff => "brave-off",
             Config::Edge => "edge",
             Config::Chrome => "chrome",
             Config::Firefox => "firefox",
@@ -180,6 +183,7 @@ impl Config {
             Config::ZephiumOff,
             Config::ZephiumOn,
             Config::Brave,
+            Config::BraveOff,
             Config::Edge,
             Config::Chrome,
             Config::Firefox,
@@ -194,7 +198,18 @@ impl Config {
     }
 
     fn chromium(self) -> bool {
-        matches!(self, Config::Brave | Config::Edge | Config::Chrome)
+        matches!(
+            self,
+            Config::Brave | Config::BraveOff | Config::Edge | Config::Chrome
+        )
+    }
+
+    /// The configuration whose template profile this one starts from.
+    fn template(self) -> Config {
+        match self {
+            Config::BraveOff => Config::Brave,
+            other => other,
+        }
     }
 
     fn firefox(self) -> bool {
@@ -207,6 +222,7 @@ impl Config {
             Config::ZephiumOff => "zoff",
             Config::ZephiumOn => "zon",
             Config::Brave => "brave",
+            Config::BraveOff => "braveoff",
             Config::Edge => "edge",
             Config::Chrome => "chrome",
             Config::Firefox => "ff",
@@ -607,7 +623,7 @@ fn executables(options: &Options) -> Result<BTreeMap<&'static str, PathBuf>, Str
             Config::ZephiumOff | Config::ZephiumOn => options.zephium.clone().ok_or(
                 "zephium-off and zephium-on need --zephium <path to the protection QA app binary>",
             )?,
-            Config::Brave => options
+            Config::Brave | Config::BraveOff => options
                 .brave
                 .clone()
                 .or_else(|| default_executable(*config))
@@ -646,7 +662,7 @@ fn default_executable(config: Config) -> Option<PathBuf> {
             std::env::var_os(variable).map(|root| PathBuf::from(root).join(path))
         };
         match config {
-            Config::Brave => under(
+            Config::Brave | Config::BraveOff => under(
                 "ProgramFiles",
                 r"BraveSoftware\Brave-Browser\Application\brave.exe",
             ),
@@ -662,7 +678,9 @@ fn default_executable(config: Config) -> Option<PathBuf> {
         }
     } else {
         let path = match config {
-            Config::Brave => "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            Config::Brave | Config::BraveOff => {
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+            }
             Config::Edge => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             Config::Chrome => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             Config::Firefox | Config::FirefoxUbo => {
@@ -707,7 +725,8 @@ fn fetch_ublock(cache: &Path) -> Result<PathBuf, String> {
 /// profile that has already had its first-run downloads.
 fn prepare_templates(context: &mut Context) -> Result<(), String> {
     for config in context.options.browsers.clone() {
-        if !config.chromium() {
+        let config = config.template();
+        if !config.chromium() || context.templates.contains_key(config.name()) {
             continue;
         }
         let template = context.cache.join(format!("{}-template", config.name()));
@@ -738,6 +757,33 @@ fn prepare_templates(context: &mut Context) -> Result<(), String> {
         context.templates.insert(config.name(), template);
     }
     Ok(())
+}
+
+/// Turns Brave's Shields down by default in a profile before it starts:
+/// `braveShields` is a content setting, where block means down.
+fn shields_down(profile: &Path) -> Result<(), String> {
+    let path = profile.join("Default").join("Preferences");
+    std::fs::create_dir_all(profile.join("Default")).map_err(|e| e.to_string())?;
+    let mut preferences: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        Err(_) => json!({}),
+    };
+    let object = |value: &mut Value, key: &str| -> Result<(), String> {
+        let map = value.as_object_mut().ok_or("not a JSON object")?;
+        map.entry(key).or_insert_with(|| json!({}));
+        Ok(())
+    };
+    object(&mut preferences, "profile")?;
+    object(
+        &mut preferences["profile"],
+        "default_content_setting_values",
+    )?;
+    preferences["profile"]["default_content_setting_values"]["braveShields"] = json!(2);
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&preferences).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Copies a profile, leaving out the locks and the port file a running
@@ -943,9 +989,13 @@ impl Context {
             .prefix(&format!("{}-", config.name()))
             .tempdir_in(self.cache.join("profiles"))
             .map_err(|e| e.to_string())?;
-        if let Some(template) = self.templates.get(config.name()) {
+        if let Some(template) = self.templates.get(config.template().name()) {
             copy_profile(template, directory.path())
                 .map_err(|e| format!("copying the template profile: {e}"))?;
+        }
+        if config == Config::BraveOff {
+            shields_down(directory.path())
+                .map_err(|e| format!("turning Brave's Shields down: {e}"))?;
         }
         Ok(directory)
     }
