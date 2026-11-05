@@ -742,6 +742,78 @@ mod app_links {
     }
 
     #[test]
+    fn always_allow_that_cannot_be_kept_opens_nothing_and_leaves_the_card() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, operations, _queue) = ready(store.clone());
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        ask(&mut shell, id, "zoommtg://zoom.us/join", None);
+        store
+            .app_link_writes_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        shell.handle(Command::Operation {
+            operation_id: "always".into(),
+            command: Box::new(Command::AnswerPageRequest {
+                id,
+                decision: crate::PageRequestDecision::AlwaysAllow,
+            }),
+        });
+        assert_eq!(
+            operations.lock().unwrap()[0].outcome,
+            OperationOutcome::Rejected
+        );
+        assert_eq!(opened(&engine), 0);
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp { .. })
+        ));
+    }
+
+    #[test]
+    fn a_revoke_the_store_could_not_confirm_is_read_back_before_the_next_link() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, operations, _queue) = ready(store.clone());
+        let profile = shell.windows.focused().unwrap().profile;
+        grant_meet(&store, &mut shell);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=1", None);
+        assert_eq!(opened(&engine), 1);
+
+        // The write timed out but landed.
+        store
+            .app_link_writes_fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        shell.handle(Command::Operation {
+            operation_id: "forget".into(),
+            command: Box::new(Command::SetSitePermission {
+                origin: origin("https://meet.example"),
+                kind: SitePermissionKind::AppLinks,
+                decision: None,
+                scheme: Some("zoommtg".into()),
+            }),
+        });
+        assert_eq!(
+            operations.lock().unwrap()[0].outcome,
+            OperationOutcome::Rejected
+        );
+        store
+            .app_link_sites
+            .lock()
+            .unwrap()
+            .get_mut(&profile)
+            .unwrap()
+            .clear();
+
+        ask(&mut shell, id, "zoommtg://zoom.us/join?confno=2", None);
+        assert_eq!(opened(&engine), 1, "the revoked grant opens nothing");
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp { .. })
+        ));
+    }
+
+    #[test]
     fn a_kept_answer_opens_nothing_for_another_site() {
         let store = Arc::new(FakeStore::default());
         let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());

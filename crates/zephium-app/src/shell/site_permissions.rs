@@ -195,6 +195,9 @@ impl Shell {
                 .store
                 .set_app_link_site(profile, key.0.clone(), key.1.clone(), allowed)
         {
+            // The write may still land, so the next check reads the store
+            // again rather than trust what was held.
+            self.app_link_sites.remove(&profile);
             return false;
         }
         let Some(sites) = self.app_link_sites.get_mut(&profile) else {

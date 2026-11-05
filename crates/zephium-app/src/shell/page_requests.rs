@@ -206,9 +206,24 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        let Some(request) = self.items.take_page_request(id) else {
+        let Some(request) = self
+            .items
+            .tab(id)
+            .and_then(|tab| tab.page_request.as_deref())
+            .cloned()
+        else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
+        // A lasting answer is kept before anything opens; one that cannot be
+        // kept leaves the card up to say so.
+        if decision == PageRequestDecision::AlwaysAllow && !self.keep_page_request_answer(id, &request)
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreAdmissionRejected,
+            );
+        }
+        let _ = self.items.take_page_request(id);
         self.project_tab(id);
         match (request, decision) {
             // Signing in has its own answer; anything else here cancels.
@@ -220,12 +235,6 @@ impl Shell {
                 self.answer_download_prompt(id, prompt, decision)
             }
             (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => {
-                if !self.allow_popups_for_tab(id) {
-                    return operation_result(
-                        OperationOutcome::Rejected,
-                        OperationReason::StoreAdmissionRejected,
-                    );
-                }
                 match url {
                     Some(url) => self.operation_open_url(url.to_string(), true),
                     None => operation_result(
@@ -258,14 +267,7 @@ impl Shell {
             (_, PageRequestDecision::Dismiss) | (PageRequest::Popup { url: None }, _) => {
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
-            (PageRequest::ExternalApp { url, site, .. }, decision) => {
-                if decision == PageRequestDecision::AlwaysAllow {
-                    if let (Some(site), Some(profile)) = (site, self.profile_of_item(id)) {
-                        if !self.set_app_link_site(profile, site, url.scheme().to_owned(), true) {
-                            crate::diagnostic!("app links: the site's answer could not be kept");
-                        }
-                    }
-                }
+            (PageRequest::ExternalApp { url, .. }, _) => {
                 match self.engine.open_external_app(url.as_str()) {
                     NativeDispatch::Rejected => operation_result(
                         OperationOutcome::Rejected,
@@ -280,6 +282,22 @@ impl Shell {
             (PageRequest::Popup { url: Some(url) }, _) => {
                 self.operation_open_url(url.to_string(), true)
             }
+        }
+    }
+
+    /// Keeps an Always allow for the site that asked. A download keeps its
+    /// own answer, and a card that names no site keeps nothing.
+    fn keep_page_request_answer(&mut self, id: ItemId, request: &PageRequest) -> bool {
+        match request {
+            PageRequest::ExternalApp {
+                url,
+                site: Some(site),
+                ..
+            } => self.profile_of_item(id).is_some_and(|profile| {
+                self.set_app_link_site(profile, site.clone(), url.scheme().to_owned(), true)
+            }),
+            PageRequest::Popup { .. } => self.allow_popups_for_tab(id),
+            _ => true,
         }
     }
 

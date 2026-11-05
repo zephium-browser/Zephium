@@ -1155,6 +1155,8 @@ pub(crate) struct FakeStore {
     >,
     /// Every durable read of a pop-up, download or app-link list, by list.
     pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
+    /// Application link writes report failure, as a store that timed out.
+    pub(crate) app_link_writes_fail: std::sync::atomic::AtomicBool,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1267,6 +1269,12 @@ impl Store for FakeStore {
         scheme: String,
         allowed: bool,
     ) -> bool {
+        if self
+            .app_link_writes_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
         let mut sites = self.app_link_sites.lock().unwrap();
         let list = sites.entry(profile).or_default();
         list.retain(|site| *site != (origin.clone(), scheme.clone()));
