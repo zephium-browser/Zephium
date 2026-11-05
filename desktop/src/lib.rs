@@ -3531,13 +3531,7 @@ fn site_permission_set(
         View::Downloads => Kind::Downloads,
         View::AppLinks => Kind::AppLinks,
     };
-    // Only an application link grant names a scheme, and only one an
-    // application link could use.
-    if (kind == Kind::AppLinks)
-        != scheme
-            .as_deref()
-            .is_some_and(zephium_core::navigation::app_link_scheme)
-    {
+    if !site_permission_scheme_admitted(kind, scheme.as_deref()) {
         return rejected_operation();
     }
     let decision = decision.map(|decision| match decision {
@@ -3554,6 +3548,20 @@ fn site_permission_set(
             scheme,
         },
     )
+}
+
+/// Only an application link grant names a scheme, and only one an
+/// application link could use; every other kind names none.
+fn site_permission_scheme_admitted(
+    kind: zephium_core::permissions::SitePermissionKind,
+    scheme: Option<&str>,
+) -> bool {
+    match kind {
+        zephium_core::permissions::SitePermissionKind::AppLinks => {
+            scheme.is_some_and(zephium_core::navigation::app_link_scheme)
+        }
+        _ => scheme.is_none(),
+    }
 }
 
 #[tauri::command]
@@ -7800,6 +7808,34 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_an_app_link_grant_names_a_scheme() {
+        use zephium_core::permissions::SitePermissionKind as Kind;
+        assert!(super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("zoommtg")
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            None
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("javascript")
+        ));
+        assert!(super::site_permission_scheme_admitted(Kind::Camera, None));
+        for scheme in ["zoommtg", "javascript", "NOT A SCHEME"] {
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Camera,
+                Some(scheme)
+            ));
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Downloads,
+                Some(scheme)
+            ));
+        }
+    }
 
     use tauri::Url;
     use zephium_ipc::{
