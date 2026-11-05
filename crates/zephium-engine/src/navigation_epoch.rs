@@ -221,6 +221,22 @@ impl NavigationEpochTracker {
         ours.then_some(current.request).flatten()
     }
 
+    /// The shell's request behind native navigation `id`, while that very
+    /// navigation is still in flight: a refusal reported for it, wherever it
+    /// redirected, is what the person asked for. An older navigation's names
+    /// nothing.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn request_in_flight(&self, id: NavigationId) -> Option<NavigationRequestId> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = state.current.as_ref()?;
+        (current.phase == TrackedNavigationPhase::Started && current.native_id == Some(id))
+            .then_some(current.request)
+            .flatten()
+    }
+
     /// A synchronous native load refusal must not strand the still-rendered
     /// previous document behind an uncommitted epoch. This is generation- and
     /// epoch-exact, so a re-entrant replacement navigation is never rolled
@@ -706,6 +722,37 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_navigation_names_its_request_only_while_it_is_the_one_in_flight() {
+        let tracker = NavigationEpochTracker::new();
+        tracker
+            .begin_request("https://fine.example/", NavigationRequestId(7))
+            .unwrap();
+        tracker.observe_navigation(&event(
+            3,
+            NavigationEventPhase::Started,
+            "https://fine.example/",
+        ));
+        tracker.observe_navigation(&event(
+            3,
+            NavigationEventPhase::Redirected,
+            "https://scam.example/win",
+        ));
+        assert_eq!(
+            tracker.request_in_flight(NavigationId::from_raw(3)),
+            Some(NavigationRequestId(7))
+        );
+        // Another native navigation, such as an older one, is not it.
+        assert_eq!(tracker.request_in_flight(NavigationId::from_raw(2)), None);
+        commit(
+            &tracker,
+            3,
+            "https://fine.example/",
+            "https://fine.example/",
+        );
+        assert_eq!(tracker.request_in_flight(NavigationId::from_raw(3)), None);
+    }
 
     #[test]
     fn a_refusal_names_the_request_in_flight_wherever_it_redirects() {

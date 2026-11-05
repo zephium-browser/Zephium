@@ -24,6 +24,16 @@ const RELEASE_SEED_UBLOCK_FILTERS: &[u8] =
     include_bytes!("../../assets/blocker-seed/v1/ublock-filters.txt.gz");
 const RELEASE_SEED_UBLOCK_QUICK_FIXES: &[u8] =
     include_bytes!("../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz");
+const RELEASE_SEED_UBLOCK_LINK_SHORTENERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz");
+const RELEASE_SEED_UBLOCK_PRIVACY: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-privacy.txt.gz");
+const RELEASE_SEED_UBLOCK_RESOURCE_ABUSE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz");
+const RELEASE_SEED_UBLOCK_UNBREAK: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-unbreak.txt.gz");
+const RELEASE_SEED_UBLOCK_BADWARE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-badware.txt.gz");
 
 pub(crate) fn start_with_updates(
     data_dir: &Path,
@@ -70,7 +80,7 @@ fn release_seed_from_embedded(
 ) -> std::io::Result<ReleaseCatalogSeed> {
     let limits = UpdateLimits {
         max_manifest_bytes: RELEASE_SEED_MAX_MANIFEST_BYTES,
-        max_sources: 4,
+        max_sources: 9,
         max_source_bytes: RELEASE_SEED_MAX_SOURCE_BYTES,
         max_total_source_bytes: RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES,
         ..UpdateLimits::default()
@@ -87,6 +97,17 @@ fn embedded_release_assets() -> Vec<EmbeddedReleaseAsset> {
         EmbeddedReleaseAsset::new("easyprivacy.txt", RELEASE_SEED_EASYPRIVACY),
         EmbeddedReleaseAsset::new("ublock-filters.txt", RELEASE_SEED_UBLOCK_FILTERS),
         EmbeddedReleaseAsset::new("ublock-quick-fixes.txt", RELEASE_SEED_UBLOCK_QUICK_FIXES),
+        EmbeddedReleaseAsset::new(
+            "ublock-link-shorteners.txt",
+            RELEASE_SEED_UBLOCK_LINK_SHORTENERS,
+        ),
+        EmbeddedReleaseAsset::new("ublock-privacy.txt", RELEASE_SEED_UBLOCK_PRIVACY),
+        EmbeddedReleaseAsset::new(
+            "ublock-resource-abuse.txt",
+            RELEASE_SEED_UBLOCK_RESOURCE_ABUSE,
+        ),
+        EmbeddedReleaseAsset::new("ublock-unbreak.txt", RELEASE_SEED_UBLOCK_UNBREAK),
+        EmbeddedReleaseAsset::new("ublock-badware.txt", RELEASE_SEED_UBLOCK_BADWARE),
     ]
 }
 
@@ -107,15 +128,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_611_021_408);
-        assert_eq!(identity.source_count, 4);
-        assert_eq!(identity.source_bytes, 4_073_004);
+        assert_eq!(identity.revision, 202_611_041_052);
+        assert_eq!(identity.source_count, 9);
+        assert_eq!(identity.source_bytes, 6_211_955);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0x7f, 0xd2, 0x89, 0x64, 0x9a, 0x92, 0xac, 0xdc, 0xed, 0x9d, 0xf8, 0xdf, 0xc3, 0x1d,
-                0x06, 0x4a, 0xe7, 0xc7, 0xb5, 0xeb, 0x87, 0xdc, 0x56, 0x8d, 0x21, 0xaa, 0x2a, 0x72,
-                0xff, 0x5e, 0x2a, 0xba
+                0x10, 0x59, 0xb9, 0x7e, 0xa1, 0xf7, 0xe6, 0x4c, 0xb2, 0xf4, 0xfa, 0xfa, 0xd5, 0xfe,
+                0xbc, 0x12, 0x54, 0x5d, 0x39, 0x49, 0xd0, 0x36, 0xe6, 0xfc, 0xe8, 0x49, 0xad, 0xcd,
+                0x67, 0x2f, 0x59, 0xef
             ]
         );
     }
@@ -143,7 +164,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_611_021_408));
+        assert_eq!(snapshot.package_revision, Some(202_611_041_052));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -189,14 +210,14 @@ mod tests {
         assert!(rules.coverage().has_blocking_entries());
         // Zephium's own eight exceptions compile with the lists where requests
         // carry their page; on Windows that is the view's main document. The
-        // Windows matcher drops one regex rule its regex engine cannot compile.
+        // Windows matcher drops the regex rules its regex engine cannot compile.
         let own = 8;
         let accepted = if cfg!(target_os = "windows") {
-            104_783
+            116_893
         } else {
-            104_784
+            116_924
         };
-        assert_eq!(rules.coverage().source_rules, 138_127 + own);
+        assert_eq!(rules.coverage().source_rules, 168_465 + own);
         assert_eq!(rules.coverage().accepted_rules, accepted + own);
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),

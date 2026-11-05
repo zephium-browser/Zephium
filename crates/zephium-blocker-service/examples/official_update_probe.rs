@@ -47,6 +47,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ublock-quick-fixes.txt",
                 include_bytes!("../../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"),
             ),
+            EmbeddedReleaseAsset::new(
+                "ublock-link-shorteners.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-privacy.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-privacy.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-resource-abuse.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-unbreak.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-unbreak.txt.gz"),
+            ),
+            EmbeddedReleaseAsset::new(
+                "ublock-badware.txt",
+                include_bytes!("../../../assets/blocker-seed/v1/ublock-badware.txt.gz"),
+            ),
         ],
         UpdateLimits::default(),
         LicensePolicy::new(["CC-BY-SA-3.0", "GPL-3.0-only"])?,

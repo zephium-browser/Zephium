@@ -1151,8 +1151,14 @@ mod tests {
             .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
             .unwrap();
         assert!(same_sources(&package, &result.sources));
-        assert_eq!(result.checked, [0, 1, 2, 3]);
-        assert_eq!(calls, vec![Some("\"stable\"".into()); 4]);
+        assert_eq!(
+            result.checked,
+            (0..OfficialFilter::ALL.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls,
+            vec![Some("\"stable\"".into()); OfficialFilter::ALL.len()]
+        );
     }
 
     #[test]
@@ -1170,10 +1176,8 @@ mod tests {
                 bytes: test_list(OfficialFilter::EasyList),
                 validators: FilterValidators::default(),
             },
-            FilterResponse::NotModified,
-            FilterResponse::NotModified,
-            FilterResponse::NotModified,
         ]);
+        responses.extend((1..OfficialFilter::ALL.len()).map(|_| FilterResponse::NotModified));
         let mut calls = Vec::new();
         let mut fetch = |_, validators: Option<FilterValidators>| {
             calls.push(validators.is_some());
@@ -1184,7 +1188,9 @@ mod tests {
             .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
             .unwrap();
         assert!(same_sources(&package, &result.sources));
-        assert_eq!(calls, vec![false, false, true, true, true]);
+        let mut expected = vec![false, false];
+        expected.resize(OfficialFilter::ALL.len() + 1, true);
+        assert_eq!(calls, expected);
         assert!(store.cached_bytes(&package.sources[0]).is_ok());
     }
 
@@ -1207,7 +1213,7 @@ mod tests {
             Err((FailureKind::Target, None))
         ));
         // Each list keeps its copy and fails; none was checked, so the refresh fails.
-        assert_eq!(calls, 8);
+        assert_eq!(calls, 2 * OfficialFilter::ALL.len());
     }
 
     #[test]
@@ -1332,7 +1338,12 @@ mod tests {
             .block_on(fetch_sources(&store, &mut fetch, &mut cancelled, false))
             .unwrap();
         assert!(same_sources(&package, &result.sources));
-        assert_eq!(result.checked, [0, 1, 3]);
+        assert_eq!(
+            result.checked,
+            (0..OfficialFilter::ALL.len())
+                .filter(|&index| index != 2)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(result.failed, [(2, (FailureKind::Transport, Some(7200)))]);
         let mut next = store.record.clone();
         let at = now();
@@ -1394,12 +1405,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             calls,
-            [
-                (OfficialFilter::EasyList, true),
-                (OfficialFilter::EasyPrivacy, true),
-                (OfficialFilter::UblockFilters, false),
-                (OfficialFilter::UblockQuickFixes, false),
-            ]
+            OfficialFilter::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, filter)| (filter, index < 2))
+                .collect::<Vec<_>>()
         );
         assert_eq!(result.sources[..2], package.sources[..2]);
     }
@@ -1600,8 +1610,9 @@ mod tests {
         next.schedule[0].due = started;
         next.schedule[0].failure_streak = 2;
         next.schedule[1].due = started + 1_800;
-        next.schedule[2].due = started + DAY;
-        next.schedule[3].due = started + DAY;
+        for schedule in &mut next.schedule[2..] {
+            schedule.due = started + DAY;
+        }
         store.persist(next).unwrap();
         let (_sender, mut cancelled) = watch::channel(false);
         let mut fetch = serve_bad_easylist_and(&bad, None);
@@ -1631,8 +1642,9 @@ mod tests {
         next.schedule[0].due = started - 20;
         // Due after the refresh started: the next refresh's, like its backoff.
         next.schedule[1].due = started - 5;
-        next.schedule[2].due = started + DAY;
-        next.schedule[3].due = started + DAY;
+        for schedule in &mut next.schedule[2..] {
+            schedule.due = started + DAY;
+        }
         store.persist(next).unwrap();
         let (_sender, mut cancelled) = watch::channel(false);
         let mut calls = Vec::new();
@@ -1759,7 +1771,9 @@ mod tests {
         }
         let failed_list = Fetched {
             sources: package.sources.clone(),
-            checked: vec![0, 1, 3],
+            checked: (0..OfficialFilter::ALL.len())
+                .filter(|&index| index != 2)
+                .collect(),
             failed: vec![(2, (FailureKind::Transport, None))],
             stale: Vec::new(),
         };

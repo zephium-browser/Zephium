@@ -72,7 +72,7 @@ const PATCH_SET_NAMES: [&str; 9] = [
     "fork regression tests",
     "fixture-free test surface",
 ];
-const PATCH_PATHS: [&str; 21] = [
+const PATCH_PATHS: [&str; 20] = [
     "Cargo.toml",
     "src/blocker.rs",
     "src/content_blocking.rs",
@@ -81,7 +81,6 @@ const PATCH_PATHS: [&str; 21] = [
     "src/filters/fb_network.rs",
     "src/filters/fb_network_builder.rs",
     "src/filters/network.rs",
-    "src/filters/network_matchers.rs",
     "src/network_filter_list.rs",
     "src/regex_manager.rs",
     "src/request.rs",
