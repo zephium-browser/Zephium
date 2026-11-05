@@ -202,6 +202,25 @@ impl NavigationEpochTracker {
         Some(epoch)
     }
 
+    /// The shell's request a main-frame refusal of `target` belongs to, so
+    /// the refusal can name what it refuses. Before the load starts only its
+    /// own address is it; once started, a redirect anywhere still is. Nothing
+    /// is named after commit, when the request is fulfilled.
+    pub(crate) fn refused_request(&self, target: &str) -> Option<NavigationRequestId> {
+        let target = canonical_navigation_target(target)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current = state.current.as_ref()?;
+        let ours = match current.phase {
+            TrackedNavigationPhase::AwaitingStart => current.target == target,
+            TrackedNavigationPhase::Started => true,
+            TrackedNavigationPhase::Committed => false,
+        };
+        ours.then_some(current.request).flatten()
+    }
+
     /// A synchronous native load refusal must not strand the still-rendered
     /// previous document behind an uncommitted epoch. This is generation- and
     /// epoch-exact, so a re-entrant replacement navigation is never rolled
@@ -687,6 +706,48 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_names_the_request_in_flight_wherever_it_redirects() {
+        let tracker = NavigationEpochTracker::new();
+        tracker
+            .begin_request("https://fine.example/", NavigationRequestId(5))
+            .unwrap();
+        assert_eq!(
+            tracker.refused_request("https://fine.example/"),
+            Some(NavigationRequestId(5))
+        );
+        // Before it starts, a load elsewhere is not the request.
+        assert_eq!(tracker.refused_request("https://other.example/"), None);
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Started,
+            "https://fine.example/",
+        ));
+        // A redirect is judged before the engine hears of it, and after.
+        assert_eq!(
+            tracker.refused_request("https://scam.example/win"),
+            Some(NavigationRequestId(5))
+        );
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Redirected,
+            "https://scam.example/win",
+        ));
+        assert_eq!(
+            tracker.refused_request("https://scam.example/win"),
+            Some(NavigationRequestId(5))
+        );
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Committed,
+            "https://scam.example/win",
+        ));
+        assert_eq!(tracker.refused_request("https://scam.example/win"), None);
+        // A navigation the engine began on its own names none.
+        tracker.begin("https://scam.example/win").unwrap();
+        assert_eq!(tracker.refused_request("https://scam.example/win"), None);
+    }
 
     #[test]
     fn native_provider_redirects_keep_auth_cleanup_but_user_navigation_releases_it() {

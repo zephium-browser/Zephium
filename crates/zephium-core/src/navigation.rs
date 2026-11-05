@@ -224,6 +224,44 @@ const NOT_FOR_APPS: &[&str] = &[
     "zephium",
 ];
 
+/// Application link grants one profile keeps.
+pub const MAX_APP_LINK_SITES: usize = 512;
+
+/// A scheme an application link grant may name: one `external_app_link`
+/// itself would hand on.
+pub fn app_link_scheme(scheme: &str) -> bool {
+    scheme.len() <= 64
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        && scheme.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
+        })
+        && !NOT_FOR_APPS.contains(&scheme)
+        && !scheme.starts_with("zephium")
+}
+
+/// The https address an `http` page is first tried at, as Chrome's HTTPS
+/// upgrades do: a public DNS name on the default port. Addresses on the
+/// person's own network, IP literals and other ports stay as asked.
+pub fn https_upgrade(url: &Url) -> Option<Url> {
+    if url.scheme() != "http" || url.port().is_some() || !url.username().is_empty() {
+        return None;
+    }
+    let url::Host::Domain(host) = url.host()? else {
+        return None;
+    };
+    if !host.contains('.') || crate::certificates::is_local_host(host) {
+        return None;
+    }
+    let mut upgraded = url.clone();
+    upgraded.set_scheme("https").ok()?;
+    // One byte longer can pass what a page may be opened at; it then loads as
+    // asked.
+    (upgraded.as_str().len() <= MAX_URL_BYTES).then_some(upgraded)
+}
+
 /// A link meant for an application on this computer, such as `zoommtg:`,
 /// `mailto:` or `slack:`. It never loads in a tab; the person decides
 /// whether the application it names may open it.
@@ -259,6 +297,20 @@ pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
         (false, true) => AppLinkOutcome::Show,
         (false, false) => AppLinkOutcome::Silent,
     }
+}
+
+/// Which document asked to open an application link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppLinkSource {
+    /// The tab's own document.
+    Page,
+    /// A frame from another site; it is named on the card and its own
+    /// answers are kept apart from the tab's.
+    Frame(crate::permissions::PageOrigin),
+    /// The engine cannot say which document asked, as for a link opened
+    /// into a new tab. A kept answer never opens it, and the card names no
+    /// site.
+    Unknown,
 }
 
 /// Syntactic browser-tab target. Windows extension documents additionally
@@ -354,6 +406,39 @@ mod tests {
         ] {
             assert!(!super::is_subframe_document(frame), "{frame}");
         }
+    }
+
+    #[test]
+    fn only_public_names_on_the_default_port_are_tried_over_https_first() {
+        for (from, to) in [
+            (
+                "http://example.com/a?b#c",
+                Some("https://example.com/a?b#c"),
+            ),
+            (
+                "http://www.example.co.uk/",
+                Some("https://www.example.co.uk/"),
+            ),
+            ("https://example.com/", None),
+            ("http://example.com:8080/", None),
+            ("http://93.184.216.34/", None),
+            ("http://[2001:db8::1]/", None),
+            ("http://router.lan/", None),
+            ("http://printer.local/", None),
+            ("http://intranet/", None),
+            ("http://localhost/", None),
+        ] {
+            let url = Url::parse(from).unwrap();
+            assert_eq!(
+                super::https_upgrade(&url).map(|url| url.to_string()),
+                to.map(str::to_owned),
+                "{from}"
+            );
+        }
+        // An address at the limit is not pushed past it by the extra "s".
+        let longest = format!("http://example.com/{}", "a".repeat(MAX_URL_BYTES - 19));
+        assert_eq!(longest.len(), MAX_URL_BYTES);
+        assert_eq!(super::https_upgrade(&Url::parse(&longest).unwrap()), None);
     }
 
     #[test]

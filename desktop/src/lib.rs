@@ -117,6 +117,7 @@ mod private_window;
 mod privileged_runtime_windows;
 mod profiles;
 mod recently_closed;
+mod relaunch;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod renderer_recovery;
 mod resource_close;
@@ -700,8 +701,42 @@ fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
+        #[cfg(target_os = "windows")]
+        fit_to_work_area(window);
         window.show().map_err(|error| error.to_string())
     }
+}
+
+/// The default size is taller than a scaled 1080p screen's work area, which
+/// would leave the window under the taskbar; it shrinks to fit and is centred.
+#[cfg(target_os = "windows")]
+fn fit_to_work_area(window: &WebviewWindow) {
+    let (Ok(Some(monitor)), Ok(outer), Ok(inner)) = (
+        window.current_monitor(),
+        window.outer_size(),
+        window.inner_size(),
+    ) else {
+        return;
+    };
+    let work = monitor.work_area();
+    if outer.width <= work.size.width && outer.height <= work.size.height {
+        return;
+    }
+    let width = outer.width.min(work.size.width);
+    let height = outer.height.min(work.size.height);
+    let frame = (
+        outer.width.saturating_sub(inner.width),
+        outer.height.saturating_sub(inner.height),
+    );
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        width.saturating_sub(frame.0),
+        height.saturating_sub(frame.1),
+    ));
+    let offset = |room: u32, used: u32| i32::try_from(room.saturating_sub(used) / 2).unwrap_or(0);
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        work.position.x + offset(work.size.width, width),
+        work.position.y + offset(work.size.height, height),
+    ));
 }
 
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
@@ -1758,6 +1793,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_answer_page_request,
             tabs_answer_sign_in,
             tabs_continue_past_certificate,
+            tabs_continue_past_block,
+            tabs_leave_blocked_page,
             diagnostics_show_logs,
             diagnostic_report::diagnostics_report,
             tabs_back,
@@ -1867,6 +1904,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             updates::update_status,
             updates::update_check,
             updates::update_relaunch,
+            relaunch::app_relaunch,
             updates::update_highlights,
             updates::open_software_update,
             browser_open_url,
@@ -2249,10 +2287,15 @@ pub(crate) fn restore_browser_chrome(
         if (row.dataset.zephiumTabUrl !== (active.url ?? '') || row.dataset.zephiumProjectionRevision !== active.projection_revision || row.querySelector('[data-zephium-tab-label]')?.textContent !== active.title) return '';
         const address = document.querySelector('[data-zephium-address]');
         if (!(address instanceof HTMLInputElement)) return '';
-        const host = active.url ? new URL(active.url).host : '';
+        // A failure filling the pane names its own address, on failedPane's terms.
+        const failure = active.failure;
+        const failed = !!failure && (failure.covers_page || (!active.loading && (!active.url || active.availability?.state === 'sleeping')));
+        const shown = failed ? failure.url : active.url;
+        let host = '';
+        try {{ host = shown ? new URL(shown).host : ''; }} catch {{ return ''; }}
         if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
         if (address.value !== host) return '';
-        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading)) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading && !failed)) return '';
       }}
       void document.documentElement.getBoundingClientRect();
       return {expected};
@@ -2961,6 +3004,7 @@ fn tabs_answer_page_request(
     caller: WebviewWindow,
     shell: State<'_, Handle>,
     id: String,
+    request: u32,
     answer: zephium_ipc::PageRequestAnswer,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(&caller, CallerPolicy::Main, "tabs_answer_page_request") {
@@ -2974,7 +3018,11 @@ fn tabs_answer_page_request(
         zephium_ipc::PageRequestAnswer::Dismiss => zephium_app::PageRequestDecision::Dismiss,
     };
     dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
-        Command::AnswerPageRequest { id, decision }
+        Command::AnswerPageRequest {
+            id,
+            request,
+            decision,
+        }
     })
 }
 
@@ -3027,6 +3075,41 @@ fn tabs_continue_past_certificate(
         &id,
         Command::ContinuePastCertificate,
     )
+}
+
+/// Opens the page the filter lists refused anyway; its host stays allowed
+/// until the app quits.
+#[tauri::command]
+#[specta::specta]
+fn tabs_continue_past_block(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    url: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_continue_past_block") {
+        return rejected_operation();
+    }
+    if !bounded(&url, MAX_NAVIGATION_INPUT_BYTES) {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
+        Command::ContinuePastBlock { id, url }
+    })
+}
+
+/// Leaves the page the filter lists refused.
+#[tauri::command]
+#[specta::specta]
+fn tabs_leave_blocked_page(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_leave_blocked_page") {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, Command::LeaveBlockedPage)
 }
 
 #[tauri::command]
@@ -3505,6 +3588,7 @@ fn site_permission_set(
     origin: String,
     kind: zephium_ipc::SitePermissionKindView,
     decision: Option<zephium_ipc::SitePermissionDecisionView>,
+    scheme: Option<String>,
 ) -> zephium_ipc::OperationAdmission {
     use zephium_core::permissions::{RememberedPagePermission, SitePermissionKind as Kind};
     use zephium_ipc::SitePermissionKindView as View;
@@ -3527,7 +3611,12 @@ fn site_permission_set(
         View::LocalFonts => Kind::LocalFonts,
         View::AutomaticDownloads => Kind::AutomaticDownloads,
         View::Popups => Kind::Popups,
+        View::Downloads => Kind::Downloads,
+        View::AppLinks => Kind::AppLinks,
     };
+    if !site_permission_scheme_admitted(kind, scheme.as_deref()) {
+        return rejected_operation();
+    }
     let decision = decision.map(|decision| match decision {
         zephium_ipc::SitePermissionDecisionView::Allow => RememberedPagePermission::Allow,
         zephium_ipc::SitePermissionDecisionView::Block => RememberedPagePermission::Deny,
@@ -3539,8 +3628,23 @@ fn site_permission_set(
             origin,
             kind,
             decision,
+            scheme,
         },
     )
+}
+
+/// Only an application link grant names a scheme, and only one an
+/// application link could use; every other kind names none.
+fn site_permission_scheme_admitted(
+    kind: zephium_core::permissions::SitePermissionKind,
+    scheme: Option<&str>,
+) -> bool {
+    match kind {
+        zephium_core::permissions::SitePermissionKind::AppLinks => {
+            scheme.is_some_and(zephium_core::navigation::app_link_scheme)
+        }
+        _ => scheme.is_none(),
+    }
 }
 
 #[tauri::command]
@@ -6321,6 +6425,10 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     if matches!(&event, tauri::RunEvent::Exit) {
         updates::finish_on_exit(app);
     }
+    #[cfg(not(target_os = "windows"))]
+    if matches!(&event, tauri::RunEvent::Exit) {
+        relaunch::finish_on_exit(app);
+    }
     #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Opened { urls } = &event {
         external_links::hand_off(app, urls.iter().map(|url| url.to_string()), true);
@@ -6331,6 +6439,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     };
     if code != Some(1) && updates::blocks_exit(app) {
         api.prevent_exit();
+        relaunch::exit_refused();
         return;
     }
     let Some(coordinator) = app.try_state::<ShutdownCoordinator>() else {
@@ -7136,6 +7245,8 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
                 }
                 Projection::OperationProcessed(disposition) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::operation_processed(&disposition);
                     let panel_result=disposition.clone();
                     if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
                         work_product::preference_processed(&emit_handle, disposition);
@@ -7753,6 +7864,7 @@ pub fn run() {
         // exact process HANDLE authorize deletion of these private UDFs. A
         // failure remains visible in the process status and quarantines the
         // generation for a later verified cleanup pass.
+        let handle = app.handle().clone();
         let exit_code = app.run_return(handle_run_event);
         // Setup can fail after zero or one privileged environment exists.
         // Every attempted build may have created native state before returning
@@ -7771,6 +7883,7 @@ pub fn run() {
             );
         }
         updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
+        relaunch::finish_after_cleanup(&handle, cleanup_succeeded && exit_code == 0);
         std::process::exit(if cleanup_succeeded || exit_code != 0 {
             exit_code
         } else {
@@ -7787,6 +7900,34 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_an_app_link_grant_names_a_scheme() {
+        use zephium_core::permissions::SitePermissionKind as Kind;
+        assert!(super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("zoommtg")
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            None
+        ));
+        assert!(!super::site_permission_scheme_admitted(
+            Kind::AppLinks,
+            Some("javascript")
+        ));
+        assert!(super::site_permission_scheme_admitted(Kind::Camera, None));
+        for scheme in ["zoommtg", "javascript", "NOT A SCHEME"] {
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Camera,
+                Some(scheme)
+            ));
+            assert!(!super::site_permission_scheme_admitted(
+                Kind::Downloads,
+                Some(scheme)
+            ));
+        }
+    }
 
     use tauri::Url;
     use zephium_ipc::{

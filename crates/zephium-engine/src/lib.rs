@@ -40,6 +40,8 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(target_os = "macos", feature = "blocker-bench"))]
+pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
@@ -1099,6 +1101,7 @@ impl RetirementGate {
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
             }
+            event @ EngineEvent::ProfileRestartRequired { .. } => Some(event),
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1191,7 +1194,11 @@ impl RetirementGate {
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::DownloadPermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadPermissionEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
+            | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -2376,6 +2383,18 @@ impl Engine for WebviewEngine {
             let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
         });
     }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_download_sites(profile, sites));
+        });
+    }
     fn site_permissions(
         &self,
         profile: ProfileId,
@@ -2919,6 +2938,10 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.allow_blocked_navigation(item, &url))
+    }
+
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
@@ -2953,6 +2976,25 @@ impl Engine for WebviewEngine {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (item, request, credentials);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.answer_download_permission(item, request, allow)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, allow);
             NativeDispatch::Unsupported
         }
     }
@@ -3340,6 +3382,24 @@ impl Engine for WebviewEngine {
     #[cfg(target_os = "macos")]
     fn autofill_password(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.autofill_password(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn upgrades_https_natively(&self) -> bool {
+        // WebKit names the policy human tabs set from macOS 15.2.
+        static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NATIVE.get_or_init(|| {
+            objc2::runtime::AnyClass::get(c"WKWebpagePreferences").is_some_and(|class| {
+                class
+                    .instance_method(objc2::sel!(setPreferredHTTPSNavigationPolicy:))
+                    .is_some()
+            })
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
     }
 
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {

@@ -3232,7 +3232,8 @@ path authority. A profile-scoped native WKDownload coordinator owns transfers,
 Store-backed metadata/preferences and bounded progress snapshots. Private transfers
 remain memory-only. Filesystem workers mediate staging, quarantine, exclusive
 publication and file-identity checks. Trusted UI actions carry download IDs;
-paths and native completions stay in Rust. Linux download adapters remain outstanding (Linux does not ship). Local-document viewing is outside this delivery's scope.
+paths and native completions stay in Rust. A site needs the person's permission before it may
+save files; the decision is kept per profile in the profile database (`download_sites`). Linux download adapters remain outstanding (Linux does not ship). Local-document viewing is outside this delivery's scope.
 
 ---
 
