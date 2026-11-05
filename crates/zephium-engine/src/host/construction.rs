@@ -783,19 +783,18 @@ impl EngineHost {
             Rc::new(
                 move |target: &str,
                       user_gesture: bool,
-                      initiator: Option<zephium_core::permissions::PageOrigin>|
+                      initiator: zephium_core::navigation::AppLinkSource|
                       -> bool {
                     use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
                     let Some(link) = zephium_core::navigation::external_app_link(target) else {
                         return false;
                     };
-                    // A frame from another site, such as an ad, is heard only
-                    // when the person clicked in it, and is named on the card.
                     let committed = committed_origin(&app_link_navigation);
-                    let initiator = initiator.filter(|origin| committed.as_ref() != Some(origin));
-                    if initiator.is_some() && !user_gesture {
+                    let Some(initiator) =
+                        heard_app_link_source(initiator, committed.as_ref(), user_gesture)
+                    else {
                         return true;
-                    }
+                    };
                     // A page acting alone is heard once per kind of link until
                     // the person follows one themselves; checked before the app
                     // lookup so a looping script costs nothing.
@@ -1164,7 +1163,11 @@ impl EngineHost {
                 // shared one-per-second limit keeps that to one request.
                 #[cfg(target_os = "windows")]
                 if !admitted {
-                    navigation_app_link(&target, false, None);
+                    navigation_app_link(
+                        &target,
+                        false,
+                        zephium_core::navigation::AppLinkSource::Page,
+                    );
                 }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
@@ -1255,16 +1258,20 @@ impl EngineHost {
                     action.navigation_type,
                     wry::AppleNavigationType::LinkActivated
                 );
-                let initiator = action.source.as_ref().and_then(|source| {
-                    zephium_core::permissions::PageOrigin::from_native_components(
-                        &source.scheme,
-                        &source.host,
-                        (source.port != 0).then_some(source.port),
-                    )
-                    .ok()
-                });
-                if !admitted && action_app_link(&target, gesture, initiator) {
-                    return false;
+                if !admitted {
+                    match apple_app_link_source(action.source.as_ref()) {
+                        Some(initiator) => {
+                            if action_app_link(&target, gesture, initiator) {
+                                return false;
+                            }
+                        }
+                        // A frame whose site cannot be named never opens an
+                        // application, so no site's answer stands in for it.
+                        None if zephium_core::navigation::external_app_link(&target).is_some() => {
+                            return false;
+                        }
+                        None => {}
+                    }
                 }
                 if admitted
                     && super::webext::intercept_auth_redirect(
@@ -1349,7 +1356,11 @@ impl EngineHost {
                         .as_ref()
                         .map(|(_, committed)| committed.as_str()),
                 );
-                if features.user_initiated && popup_app_link(&url, true, None) {
+                // A new window does not say which frame asked, so no kept
+                // answer opens it.
+                if features.user_initiated
+                    && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
+                {
                     return wry::NewWindowResponse::Deny;
                 }
                 // Bound script-triggered bursts without delaying ordinary rapid
@@ -2149,12 +2160,7 @@ impl EngineHost {
             let link = app_link.clone();
             if let Err(error) =
                 security_policy.route_external_uris(move |uri, user_gesture, initiator| {
-                    let initiator = initiator
-                        .and_then(|origin| url::Url::parse(origin).ok())
-                        .and_then(|origin| {
-                            zephium_core::permissions::PageOrigin::from_url(&origin).ok()
-                        });
-                    link(uri, user_gesture, initiator);
+                    link(uri, user_gesture, webview2_app_link_source(initiator));
                 })
             {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
@@ -3135,6 +3141,57 @@ fn download_ask(
         sink: sink.clone(),
         site: committed_origin(navigation),
     }
+}
+
+/// What the shell hears about an app link's source, or None when it is not
+/// heard at all: a frame from another site, such as an ad, only when the
+/// person clicked in it. A frame of the tab's own site speaks for the tab.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn heard_app_link_source(
+    source: zephium_core::navigation::AppLinkSource,
+    committed: Option<&zephium_core::permissions::PageOrigin>,
+    user_gesture: bool,
+) -> Option<zephium_core::navigation::AppLinkSource> {
+    use zephium_core::navigation::AppLinkSource;
+    match source {
+        AppLinkSource::Frame(origin) if committed == Some(&origin) => Some(AppLinkSource::Page),
+        AppLinkSource::Frame(_) if !user_gesture => None,
+        source => Some(source),
+    }
+}
+
+/// Who asked, from WebKit's source frame. None for a frame other than the
+/// main one whose site cannot be named.
+#[cfg(target_os = "macos")]
+fn apple_app_link_source(
+    source: Option<&wry::AppleNavigationSource>,
+) -> Option<zephium_core::navigation::AppLinkSource> {
+    use zephium_core::navigation::AppLinkSource;
+    let Some(source) = source else {
+        return Some(AppLinkSource::Unknown);
+    };
+    match zephium_core::permissions::PageOrigin::from_native_components(
+        &source.scheme,
+        &source.host,
+        (source.port != 0).then_some(source.port),
+    ) {
+        Ok(origin) => Some(AppLinkSource::Frame(origin)),
+        Err(_) if source.is_main_frame => Some(AppLinkSource::Page),
+        Err(_) => None,
+    }
+}
+
+/// Who asked, from WebView2's `InitiatingOrigin`. It names the top document
+/// and frames alike, so an origin that is no site cannot be told apart from
+/// the tab's own and is treated as unknown; empty means the browser itself
+/// navigated.
+#[cfg(any(target_os = "windows", test))]
+fn webview2_app_link_source(origin: Option<&str>) -> zephium_core::navigation::AppLinkSource {
+    use zephium_core::navigation::AppLinkSource;
+    origin
+        .and_then(|origin| url::Url::parse(origin).ok())
+        .and_then(|origin| zephium_core::permissions::PageOrigin::from_url(&origin).ok())
+        .map_or(AppLinkSource::Unknown, AppLinkSource::Frame)
 }
 
 /// The origin of the document the view has committed, if any.

@@ -55,7 +55,7 @@ impl Shell {
         url: String,
         app: Option<String>,
         user_gesture: bool,
-        initiator: Option<PageOrigin>,
+        initiator: navigation::AppLinkSource,
     ) {
         let Some(url) = navigation::external_app_link(&url) else {
             return;
@@ -68,7 +68,13 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return;
         }
-        let site = initiator.or_else(|| self.tab_origin(id));
+        // Only a site the engine can name may open by a kept answer; one it
+        // cannot name is asked about without naming any site.
+        let site = match initiator {
+            navigation::AppLinkSource::Page => self.tab_origin(id),
+            navigation::AppLinkSource::Frame(origin) => Some(origin),
+            navigation::AppLinkSource::Unknown => None,
+        };
         if site
             .as_ref()
             .is_some_and(|site| self.app_link_allowed(id, site, url.scheme()))

@@ -380,7 +380,7 @@ fn a_link_for_another_app_waits_for_the_person() {
             url: url.into(),
             app: Some("Anything".into()),
             user_gesture: true,
-            initiator: None,
+            initiator: zephium_core::navigation::AppLinkSource::Page,
         }));
     }
     assert_eq!(
@@ -394,7 +394,7 @@ fn a_link_for_another_app_waits_for_the_person() {
         url: "zoommtg://zoom.us/join?confno=1".into(),
         app: Some("zoom.us".into()),
         user_gesture: true,
-        initiator: None,
+        initiator: zephium_core::navigation::AppLinkSource::Page,
     }));
     assert_eq!(
         request(&screen),
@@ -422,7 +422,7 @@ fn a_link_for_another_app_waits_for_the_person() {
         url: "zoommtg://zoom.us/join?confno=2".into(),
         app: Some("zoom.us".into()),
         user_gesture: true,
-        initiator: None,
+        initiator: zephium_core::navigation::AppLinkSource::Page,
     }));
     assert_eq!(
         request(&screen),
@@ -437,7 +437,7 @@ fn a_link_for_another_app_waits_for_the_person() {
             url: "slack://open".into(),
             app,
             user_gesture,
-            initiator: None,
+            initiator: zephium_core::navigation::AppLinkSource::Page,
         }));
         assert_eq!(request(&screen).is_some(), shown);
         shell.handle(Command::AnswerPageRequest {
@@ -451,7 +451,7 @@ fn a_link_for_another_app_waits_for_the_person() {
         url: "slack://open".into(),
         app: Some("Slack".into()),
         user_gesture: true,
-        initiator: None,
+        initiator: zephium_core::navigation::AppLinkSource::Page,
     }));
     shell.handle(Command::AnswerPageRequest {
         id,

@@ -920,15 +920,26 @@ pub(crate) fn navigation_policy(
         .HTTPMethod()
         .and_then(|method| bounded_nsstring(&method, CUSTOM_PROTOCOL_METHOD_LIMIT))
         .is_some_and(|method| method == "GET");
-      let source = action.sourceFrame().and_then(|frame| {
+      let source = action.sourceFrame().map(|frame| {
         let origin = frame.securityOrigin();
-        let port = u16::try_from(origin.port()).ok()?;
-        Some(crate::AppleNavigationSource {
+        // An origin that does not fit is left empty: the frame is still
+        // known, its site is not.
+        let (scheme, host, port) = u16::try_from(origin.port())
+          .ok()
+          .and_then(|port| {
+            Some((
+              bounded_nsstring(&origin.protocol(), ORIGIN_PART_LIMIT)?,
+              bounded_nsstring(&origin.host(), ORIGIN_PART_LIMIT)?,
+              port,
+            ))
+          })
+          .unwrap_or_default();
+        crate::AppleNavigationSource {
           is_main_frame: frame.isMainFrame(),
-          scheme: bounded_nsstring(&origin.protocol(), ORIGIN_PART_LIMIT)?,
-          host: bounded_nsstring(&origin.host(), ORIGIN_PART_LIMIT)?,
+          scheme,
+          host,
           port,
-        })
+        }
       });
       let policy_allows = function(
         url.clone(),

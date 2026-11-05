@@ -249,7 +249,7 @@ fn a_private_profile_never_reads_kept_download_or_app_link_decisions() {
         url: "zoommtg://zoom.us/join?confno=1".into(),
         app: Some("Meetings".into()),
         user_gesture: true,
-        initiator: None,
+        initiator: zephium_core::navigation::AppLinkSource::Page,
     }));
     assert!(
         engine.calls().iter().all(|call| !call.starts_with("open-app ")),
@@ -701,6 +701,7 @@ mod downloads {
 
 mod app_links {
     use super::*;
+    use zephium_core::navigation::AppLinkSource;
     use zephium_ipc::{PageRequestView, SitePermissionKindView};
 
     fn shown(screen: &Screen, id: ItemId) -> Option<PageRequestView> {
@@ -725,8 +726,87 @@ mod app_links {
             url: url.into(),
             app: Some("Meetings".into()),
             user_gesture: true,
-            initiator: initiator.map(origin),
+            initiator: initiator.map_or(AppLinkSource::Page, |site| {
+                AppLinkSource::Frame(origin(site))
+            }),
         }));
+    }
+
+    fn grant_meet(store: &FakeStore, shell: &mut Shell) {
+        let profile = shell.windows.focused().unwrap().profile;
+        store.app_link_sites.lock().unwrap().insert(
+            profile,
+            vec![(origin("https://meet.example"), "zoommtg".to_owned())],
+        );
+        shell.app_link_sites.clear();
+    }
+
+    #[test]
+    fn a_kept_answer_opens_nothing_for_another_site() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        grant_meet(&store, &mut shell);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        ask(
+            &mut shell,
+            id,
+            "zoommtg://zoom.us/join",
+            Some("https://widget.example"),
+        );
+        assert_eq!(opened(&engine), 0, "a frame from another site still asks");
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp { site: Some(site), .. }) if site == "widget.example"
+        ));
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            decision: crate::PageRequestDecision::Dismiss,
+        });
+
+        navigate_and_commit(&mut shell, id, "https://other.example/");
+        ask(&mut shell, id, "zoommtg://zoom.us/join", None);
+        assert_eq!(opened(&engine), 0, "another tab's site still asks");
+        assert!(matches!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp { site: Some(site), .. }) if site == "other.example"
+        ));
+    }
+
+    #[test]
+    fn a_link_from_an_unknown_frame_asks_without_naming_a_site() {
+        let store = Arc::new(FakeStore::default());
+        let (mut shell, engine, screen, _operations, _queue) = ready(store.clone());
+        grant_meet(&store, &mut shell);
+        let profile = shell.windows.focused().unwrap().profile;
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, "https://meet.example/room");
+        shell.handle(Command::Engine(EngineEvent::ExternalAppRequested {
+            id,
+            url: "zoommtg://zoom.us/join".into(),
+            app: Some("Meetings".into()),
+            user_gesture: true,
+            initiator: AppLinkSource::Unknown,
+        }));
+        assert_eq!(opened(&engine), 0, "the tab's kept answer is not used");
+        assert_eq!(
+            shown(&screen, id),
+            Some(PageRequestView::ExternalApp {
+                site: None,
+                scheme: "zoommtg".into(),
+                app: Some("Meetings".into()),
+            })
+        );
+        shell.handle(Command::AnswerPageRequest {
+            id,
+            decision: crate::PageRequestDecision::AlwaysAllow,
+        });
+        assert_eq!(opened(&engine), 1);
+        assert_eq!(
+            store.app_link_sites.lock().unwrap().get(&profile).cloned(),
+            Some(vec![(origin("https://meet.example"), "zoommtg".to_owned())]),
+            "nothing new is kept for a site nobody named"
+        );
     }
 
     #[test]

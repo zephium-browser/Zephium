@@ -700,15 +700,7 @@ fn tab_view(
         page_request: tab.page_request.as_deref().map(|request| match request {
             zephium_core::item::PageRequest::ExternalApp { url, app, site } => {
                 zephium_ipc::PageRequestView::ExternalApp {
-                    site: site
-                        .as_ref()
-                        .map(|site| origin_label(site.as_str()))
-                        .or_else(|| {
-                            tab.url
-                                .as_ref()
-                                .filter(|url| url.host_str().is_some())
-                                .map(|url| origin_label(&url.origin().ascii_serialization()))
-                        }),
+                    site: site.as_ref().map(|site| origin_label(site.as_str())),
                     scheme: url.scheme().to_owned(),
                     app: app.clone(),
                 }

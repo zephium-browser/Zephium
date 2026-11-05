@@ -3547,6 +3547,7 @@ pub enum AppleNavigationType {
 }
 
 /// The frame a navigation came from, as WebKit's security origin names it.
+/// Scheme and host are empty when WebKit's origin does not fit.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppleNavigationSource {
@@ -3568,7 +3569,7 @@ pub struct AppleNavigationAction {
   /// Whether WebKit identified the target as the main frame. `None` denotes a
   /// target-less/new-window action and must not be treated as main-frame work.
   pub target_is_main_frame: Option<bool>,
-  /// The frame that asked, when WebKit names a well-formed origin for it.
+  /// The frame that asked, when WebKit names one.
   pub source: Option<AppleNavigationSource>,
 }
 

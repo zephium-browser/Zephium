@@ -224,9 +224,6 @@ const NOT_FOR_APPS: &[&str] = &[
     "zephium",
 ];
 
-/// A link meant for an application on this computer, such as `zoommtg:`,
-/// `mailto:` or `slack:`. It never loads in a tab; the person decides
-/// whether the application it names may open it.
 /// Application link grants one profile keeps.
 pub const MAX_APP_LINK_SITES: usize = 512;
 
@@ -245,6 +242,9 @@ pub fn app_link_scheme(scheme: &str) -> bool {
         && !scheme.starts_with("zephium")
 }
 
+/// A link meant for an application on this computer, such as `zoommtg:`,
+/// `mailto:` or `slack:`. It never loads in a tab; the person decides
+/// whether the application it names may open it.
 pub fn external_app_link(target: &str) -> Option<Url> {
     if target.len() > MAX_URL_BYTES {
         return None;
@@ -277,6 +277,20 @@ pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
         (false, true) => AppLinkOutcome::Show,
         (false, false) => AppLinkOutcome::Silent,
     }
+}
+
+/// Which document asked to open an application link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppLinkSource {
+    /// The tab's own document.
+    Page,
+    /// A frame from another site; it is named on the card and its own
+    /// answers are kept apart from the tab's.
+    Frame(crate::permissions::PageOrigin),
+    /// The engine cannot say which document asked, as for a link opened
+    /// into a new tab. A kept answer never opens it, and the card names no
+    /// site.
+    Unknown,
 }
 
 /// Syntactic browser-tab target. Windows extension documents additionally
