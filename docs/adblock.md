@@ -117,6 +117,16 @@ Known limit: the candidate is rejected as a whole, so every list that changed
 in it is withheld, including those that compiled fine. Each recovers when its
 publisher next changes it (quick fixes within about 8 hours, the others daily).
 
+An app that last updated the four lists of earlier releases has no package
+that holds all nine, so after upgrading it uses the bundled seed until its
+first refresh commits, even where its own copies were newer. Every list is due
+at once, from six hours after the new seed was built, so the first maintenance
+pass after the upgrade refreshes. It reuses the EasyList, EasyPrivacy and
+quick-fixes copies it kept while their bytes verify. The five new lists and
+uBlock filters, whose `filters.txt` copy lacked its includes, have no copy and
+must all download in one refresh; until they do, as when offline, the seed
+stays in use and the refresh backs off from 15 minutes to a day.
+
 The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,

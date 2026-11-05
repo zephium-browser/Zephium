@@ -358,7 +358,11 @@ const SCHEMA_2_LISTS: [OfficialFilter; 4] = [
 
 /// A schema-2 record, from before uBlock Origin's other lists: every list it
 /// downloaded that still verifies is kept for reuse, and every list is due now.
-/// A list's rejected copy stays rejected until that list is checked past it.
+/// Its packages lack five of the lists, so none is current and the bundled
+/// seed stays in use until a refresh commits. Its uBlock filters came from
+/// `filters.txt` without its includes, a smaller list than `filters.min.txt`,
+/// so that copy is never reused. A list's rejected copy stays rejected until
+/// that list is checked past it.
 fn migrate_lists(old: Record, now: u64, intact: impl Fn(&Source) -> bool) -> Record {
     let mut record = Record::fresh(old.highest_revision, now);
     record.jitter = old.jitter;
@@ -375,7 +379,7 @@ fn migrate_lists(old: Record, now: u64, intact: impl Fn(&Source) -> bool) -> Rec
         .flat_map(|package| package.sources)
         .chain(old.retained)
     {
-        if filter_for(&source.id).is_some()
+        if filter_for(&source.id).is_some_and(|filter| filter != OfficialFilter::UblockFilters)
             && !record.retained.iter().any(|kept| kept.id == source.id)
             && intact(&source)
         {
@@ -1325,10 +1329,12 @@ mod tests {
             .iter()
             .map(|s| s.id.as_str())
             .collect();
-        assert_eq!(kept, ["easylist", "ublock-filters", "ublock-quick-fixes"]);
+        // EasyPrivacy's bytes are gone; uBlock Origin's filters were a different list.
+        assert_eq!(kept, ["easylist", "ublock-quick-fixes"]);
         for source in &store.record.retained {
             assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
         }
+        assert!(store.record.prior(OfficialFilter::UblockFilters).is_none());
         // uBlock Origin's filters keep their rejected copy; no other list has one.
         for (filter, schedule) in OfficialFilter::ALL.iter().zip(&store.record.schedule) {
             let expected = (*filter == OfficialFilter::UblockFilters).then_some([9u8; 32]);
