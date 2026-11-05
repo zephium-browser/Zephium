@@ -35,8 +35,16 @@
     other: m.navigation_error_certificate_other,
   };
 
-  function restart() {
-    void commands.appRelaunch().catch(() => false);
+  let restarting = $state(false);
+  let restartFailed = $state(false);
+
+  // A restart that starts ends this page; one that does not says so.
+  async function restart() {
+    restarting = true;
+    restartFailed = false;
+    const started = await commands.appRelaunch().catch(() => false);
+    restarting = false;
+    restartFailed = !started;
   }
 
   function continueUnsafe() {
@@ -64,7 +72,8 @@
   <p>{help[failure.reason]()}</p>
   {#if failure.certificate}<p>{certificate[failure.certificate]()}</p>{/if}
   {#if failure.reason === "restart_required"}
-    <Button onclick={restart}>{m.navigation_error_restart()}</Button>
+    <Button pending={restarting} onclick={restart}>{m.navigation_error_restart()}</Button>
+    {#if restartFailed}<p>{m.navigation_error_restart_failed()}</p>{/if}
   {:else}
     <Button onclick={() => tabs.navigate(tab.id, failure.url)}
       >{failure.reason === "crashed" ? m.navigation_error_reload() : m.surface_retry()}</Button

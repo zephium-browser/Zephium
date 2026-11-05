@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium을 다시 시작해야 해요",
   "navigation_error_restart_required": "이 프로필에서 안전하게 계속 탐색하려면 Zephium을 다시 시작해야 해요.",
   "navigation_error_restart": "Zephium 다시 시작",
+  "navigation_error_restart_failed": "Zephium을 다시 시작하지 못했습니다. 다시 시도하세요.",
   "navigation_error_crashed": "페이지가 예기치 않게 종료됐어요. 새로고침하면 대부분 다시 열려요.",
   "navigation_error_reload": "새로고침",
   "navigation_error_notice": "{host} 페이지를 열지 못했어요",

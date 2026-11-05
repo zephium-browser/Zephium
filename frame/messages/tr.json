@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium'un yeniden başlatılması gerekiyor",
   "navigation_error_restart_required": "Bu profilde güvenle gezinmeye devam etmek için Zephium'un yeniden başlatılması gerekiyor.",
   "navigation_error_restart": "Zephium'u yeniden başlat",
+  "navigation_error_restart_failed": "Zephium yeniden başlatılamadı. Tekrar deneyin.",
   "navigation_error_crashed": "Sayfa beklenmedik şekilde kapandı. Yeniden yüklemek genellikle düzeltir.",
   "navigation_error_reload": "Yeniden yükle",
   "navigation_error_notice": "{host} açılamadı",

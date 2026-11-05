@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium necesita reiniciarse",
   "navigation_error_restart_required": "Zephium necesita reiniciarse para seguir navegando de forma segura en este perfil.",
   "navigation_error_restart": "Reiniciar Zephium",
+  "navigation_error_restart_failed": "Zephium no se pudo reiniciar. Inténtalo de nuevo.",
   "navigation_error_crashed": "La página se cerró de forma inesperada. Volver a cargarla suele solucionarlo.",
   "navigation_error_reload": "Volver a cargar",
   "navigation_error_notice": "No se pudo abrir {host}",

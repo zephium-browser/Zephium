@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium нужно перезапустить",
   "navigation_error_restart_required": "Чтобы безопасно продолжить работу в этом профиле, Zephium нужно перезапустить.",
   "navigation_error_restart": "Перезапустить Zephium",
+  "navigation_error_restart_failed": "Не удалось перезапустить Zephium. Повторите попытку.",
   "navigation_error_crashed": "Страница неожиданно закрылась. Обычно помогает перезагрузка.",
   "navigation_error_reload": "Перезагрузить",
   "navigation_error_notice": "Не удалось открыть {host}",

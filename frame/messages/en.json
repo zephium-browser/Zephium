@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium needs to restart",
   "navigation_error_restart_required": "Zephium needs to restart to keep browsing safely in this profile.",
   "navigation_error_restart": "Restart Zephium",
+  "navigation_error_restart_failed": "Zephium couldn't restart. Try again.",
   "navigation_error_crashed": "The page closed unexpectedly. Reloading it usually brings it back.",
   "navigation_error_reload": "Reload",
   "navigation_error_notice": "Couldn't open {host}",

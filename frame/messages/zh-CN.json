@@ -3043,6 +3043,7 @@
   "navigation_error_restart_required_title": "Zephium 需要重新启动",
   "navigation_error_restart_required": "Zephium 需要重新启动，才能在此个人资料中继续安全浏览。",
   "navigation_error_restart": "重新启动 Zephium",
+  "navigation_error_restart_failed": "Zephium 无法重新启动。请重试。",
   "navigation_error_crashed": "页面意外关闭。重新加载通常可以恢复。",
   "navigation_error_reload": "重新加载",
   "navigation_error_notice": "无法打开 {host}",

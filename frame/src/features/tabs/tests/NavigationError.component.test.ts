@@ -74,3 +74,17 @@ test("a profile only a restart can trust offers the restart, never the address",
   await page.getByRole("button", { name: "Restart Zephium" }).click();
   expect(relaunched).toHaveBeenCalledOnce();
 });
+
+test("a restart that does not start says so and can be tried again", async () => {
+  relaunched.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("ipc"));
+  show({ url: "https://example.com/", reason: "restart_required", covers_page: true });
+  const button = page.getByRole("button", { name: "Restart Zephium" });
+  const failed = page.getByText("Zephium couldn't restart. Try again.");
+  await button.click();
+  await expect.element(failed).toBeInTheDocument();
+  await button.click();
+  await expect.element(failed).toBeInTheDocument();
+  await button.click();
+  await expect.element(failed).not.toBeInTheDocument();
+  expect(relaunched).toHaveBeenCalledTimes(3);
+});
