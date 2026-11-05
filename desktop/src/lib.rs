@@ -700,8 +700,42 @@ fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
     }
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
+        #[cfg(target_os = "windows")]
+        fit_to_work_area(window);
         window.show().map_err(|error| error.to_string())
     }
+}
+
+/// The default size is taller than a scaled 1080p screen's work area, which
+/// would leave the window under the taskbar; it shrinks to fit and is centred.
+#[cfg(target_os = "windows")]
+fn fit_to_work_area(window: &WebviewWindow) {
+    let (Ok(Some(monitor)), Ok(outer), Ok(inner)) = (
+        window.current_monitor(),
+        window.outer_size(),
+        window.inner_size(),
+    ) else {
+        return;
+    };
+    let work = monitor.work_area();
+    if outer.width <= work.size.width && outer.height <= work.size.height {
+        return;
+    }
+    let width = outer.width.min(work.size.width);
+    let height = outer.height.min(work.size.height);
+    let frame = (
+        outer.width.saturating_sub(inner.width),
+        outer.height.saturating_sub(inner.height),
+    );
+    let _ = window.set_size(tauri::PhysicalSize::new(
+        width.saturating_sub(frame.0),
+        height.saturating_sub(frame.1),
+    ));
+    let offset = |room: u32, used: u32| i32::try_from(room.saturating_sub(used) / 2).unwrap_or(0);
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        work.position.x + offset(work.size.width, width),
+        work.position.y + offset(work.size.height, height),
+    ));
 }
 
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
@@ -1758,6 +1792,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_answer_page_request,
             tabs_answer_sign_in,
             tabs_continue_past_certificate,
+            tabs_continue_past_block,
+            tabs_leave_blocked_page,
             diagnostics_show_logs,
             diagnostic_report::diagnostics_report,
             tabs_back,
@@ -2249,10 +2285,15 @@ pub(crate) fn restore_browser_chrome(
         if (row.dataset.zephiumTabUrl !== (active.url ?? '') || row.dataset.zephiumProjectionRevision !== active.projection_revision || row.querySelector('[data-zephium-tab-label]')?.textContent !== active.title) return '';
         const address = document.querySelector('[data-zephium-address]');
         if (!(address instanceof HTMLInputElement)) return '';
-        const host = active.url ? new URL(active.url).host : '';
+        // A failure filling the pane names its own address, on failedPane's terms.
+        const failure = active.failure;
+        const failed = !!failure && (failure.covers_page || (!active.loading && (!active.url || active.availability?.state === 'sleeping')));
+        const shown = failed ? failure.url : active.url;
+        let host = '';
+        try {{ host = shown ? new URL(shown).host : ''; }} catch {{ return ''; }}
         if (address.value !== host) {{ address.value = host; address.dispatchEvent(new Event('input', {{ bubbles: true }})); }}
         if (address.value !== host) return '';
-        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading)) return '';
+        if (!!document.querySelector('[data-zephium-new-tab]') !== ((active.content ?? 'web') === 'web' && !active.url && !active.loading && !failed)) return '';
       }}
       void document.documentElement.getBoundingClientRect();
       return {expected};
@@ -3027,6 +3068,41 @@ fn tabs_continue_past_certificate(
         &id,
         Command::ContinuePastCertificate,
     )
+}
+
+/// Opens the page the filter lists refused anyway; its host stays allowed
+/// until the app quits.
+#[tauri::command]
+#[specta::specta]
+fn tabs_continue_past_block(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+    url: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_continue_past_block") {
+        return rejected_operation();
+    }
+    if !bounded(&url, MAX_NAVIGATION_INPUT_BYTES) {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, |id| {
+        Command::ContinuePastBlock { id, url }
+    })
+}
+
+/// Leaves the page the filter lists refused.
+#[tauri::command]
+#[specta::specta]
+fn tabs_leave_blocked_page(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "tabs_leave_blocked_page") {
+        return rejected_operation();
+    }
+    dispatch_with_id(caller.app_handle(), &shell, &id, Command::LeaveBlockedPage)
 }
 
 #[tauri::command]
@@ -7136,6 +7212,8 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
                 }
                 Projection::OperationProcessed(disposition) => {
+                    #[cfg(feature = "adblock-qa")]
+                    blocker_bench::operation_processed(&disposition);
                     let panel_result=disposition.clone();
                     if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
                         work_product::preference_processed(&emit_handle, disposition);

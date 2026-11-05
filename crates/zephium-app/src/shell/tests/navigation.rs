@@ -711,3 +711,334 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
         "another port is another origin"
     );
 }
+
+#[test]
+fn a_tab_opened_at_a_refused_address_shows_why_over_its_blank_page() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    use zephium_ipc::TabBlockReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://scam.example/win".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("create {id}"))));
+    // The engine names the refusal before it builds the view, then builds
+    // it on a blank page.
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+        request: None,
+        can_continue: true,
+    }));
+    commit_url(&mut shell, id, "about:blank");
+    present_committed(&mut shell, id, "about:blank");
+    let shown = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    let failure = shown.failure.expect("the refusal is explained");
+    assert_eq!(failure.blocked, Some(TabBlockReason::Badware));
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.covers_page);
+    assert_eq!(shown.title, "scam.example");
+    assert_eq!(shown.url, None);
+    assert!(!shown.loading);
+}
+
+#[test]
+fn an_address_opened_in_a_new_tab_that_redirects_into_a_refused_host_shows_why() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let blocked = |id| {
+        Command::Engine(EngineEvent::NavigationBlocked {
+            id,
+            url: "https://scam.example/win".into(),
+            reason: NavigationBlockReason::Badware,
+            request: None,
+            can_continue: true,
+        })
+    };
+    let failure = |screen: &Screen, id: ItemId| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+            .failure
+    };
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://fine.example/".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    shell.handle(blocked(id));
+    let shown = failure(&screen, id).expect("the redirect's refusal is explained");
+    assert_eq!(shown.url, "https://scam.example/win");
+    assert!(shown.can_continue);
+
+    // Once the person asks for another page, the first load's refusal is stale.
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::OpenUrl {
+        input: "https://fine.example/".into(),
+        new_tab: true,
+    });
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "other.example".into(),
+    });
+    shell.handle(blocked(id));
+    assert_eq!(failure(&screen, id), None);
+}
+
+#[test]
+fn a_refused_page_covers_the_tab_until_the_person_leaves_or_continues() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    use zephium_ipc::{TabBlockReason, TabFailureReason};
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    let tab = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+    };
+    shell.handle(Command::Navigate {
+        id,
+        input: "news.example".into(),
+    });
+    commit_url(&mut shell, id, "https://news.example/");
+    present_committed(&mut shell, id, "https://news.example/");
+    shell.handle(Command::Engine(EngineEvent::FaviconPixels {
+        id,
+        page_url: "https://news.example/".into(),
+        rgba: vec![9; zephium_core::icon::RGBA32_BYTES],
+    }));
+    assert!(tab(&screen).icon.is_some());
+    let page_title = tab(&screen).title;
+    let block_for = |shell: &mut Shell, url: &str, reason| {
+        shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+            id,
+            url: url.into(),
+            reason,
+            request: None,
+            can_continue: true,
+        }))
+    };
+    let block = |shell: &mut Shell| {
+        block_for(
+            shell,
+            "https://scam.example/win",
+            NavigationBlockReason::Badware,
+        )
+    };
+
+    // A link on the page leads to a refused site: the page stays under the
+    // explanation, which the tab is titled for, and nothing is loading.
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: true,
+    }));
+    block(&mut shell);
+    let shown = tab(&screen);
+    let failure = shown.failure.expect("the refusal is explained");
+    assert_eq!(failure.reason, TabFailureReason::Blocked);
+    assert_eq!(failure.blocked, Some(TabBlockReason::Badware));
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.covers_page);
+    assert_eq!(shown.title, "scam.example");
+    assert!(!shown.loading);
+    assert_eq!(shown.icon, None, "the blocked page wears no site's icon");
+    shell.handle(Command::LeaveBlockedPage(id));
+    let shown = tab(&screen);
+    assert_eq!(shown.failure, None);
+    assert_eq!(shown.url.as_deref(), Some("https://news.example/"));
+    assert_eq!(shown.title, page_title);
+    assert!(shown.icon.is_some(), "the page's icon returns with it");
+
+    // A second refusal in the same session, for the lists' own reason, is
+    // explained the same way.
+    block_for(
+        &mut shell,
+        "https://ads.example/",
+        NavigationBlockReason::FilterLists,
+    );
+    let shown = tab(&screen);
+    let failure = shown.failure.expect("the second refusal is explained");
+    assert_eq!(failure.blocked, Some(TabBlockReason::FilterLists));
+    assert_eq!(failure.url, "https://ads.example/");
+    assert_eq!(shown.title, "ads.example");
+    shell.handle(Command::LeaveBlockedPage(id));
+
+    // Continue lifts only the refusal the person was shown.
+    block(&mut shell);
+    let allowed = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("allow-blocked"))
+            .count()
+    };
+    shell.handle(Command::ContinuePastBlock {
+        id,
+        url: "https://other.example/".into(),
+    });
+    assert_eq!(allowed(&engine), 0, "a refusal the person never saw stays");
+    shell.handle(Command::ContinuePastBlock {
+        id,
+        url: "https://scam.example/win".into(),
+    });
+    assert!(engine
+        .calls()
+        .contains(&format!("allow-blocked {id} https://scam.example/win")));
+    commit_url(&mut shell, id, "https://scam.example/win");
+    assert_eq!(tab(&screen).failure, None);
+}
+
+#[test]
+fn going_back_from_a_restored_tab_s_refused_page_leaves_no_address_behind() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    // A restored tab holds its last address, and its view is refused it.
+    commit_url(&mut shell, id, "https://scam.example/win");
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+        request: None,
+        can_continue: true,
+    }));
+    shell.handle(Command::LeaveBlockedPage(id));
+    let shown = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert_eq!(shown.failure, None);
+    assert_eq!(shown.url, None);
+    assert_eq!(shown.title, "New Tab");
+}
+
+#[test]
+fn a_refusal_the_engine_itself_enforces_offers_no_way_past() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "news.example");
+    // WebKit's content rules refused the page: allowing the host cannot open it.
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://ads.example/".into(),
+        reason: NavigationBlockReason::FilterLists,
+        request: None,
+        can_continue: false,
+    }));
+    let failure = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap()
+        .failure
+        .expect("the refusal is explained");
+    assert!(!failure.can_continue);
+    shell.handle(Command::ContinuePastBlock {
+        id,
+        url: "https://ads.example/".into(),
+    });
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("allow-blocked")));
+}
+
+#[test]
+fn a_refusal_of_what_the_person_no_longer_asks_for_is_dropped() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "news.example".into(),
+    });
+    let old = shell.items.pending_navigation_request(id).unwrap();
+    // The person has since asked for another page.
+    shell.handle(Command::Navigate {
+        id,
+        input: "fine.example".into(),
+    });
+    let failure = |screen: &Screen| {
+        last(screen)
+            .tabs
+            .into_iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+            .failure
+    };
+    // A redirect of the earlier request, and a load the old page began.
+    for (url, request) in [
+        ("https://scam.example/", Some(old)),
+        ("https://scam.example/", None),
+    ] {
+        shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+            id,
+            url: url.into(),
+            reason: NavigationBlockReason::Badware,
+            request,
+            can_continue: true,
+        }));
+        assert_eq!(failure(&screen), None, "{request:?}");
+    }
+    // A refusal of the page now asked for is shown.
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://fine.example/".into(),
+        reason: NavigationBlockReason::Badware,
+        request: None,
+        can_continue: true,
+    }));
+    assert!(failure(&screen).is_some());
+}
+
+#[test]
+fn a_typed_address_that_redirects_into_a_refused_host_shows_why() {
+    use zephium_core::ports::engine::NavigationBlockReason;
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "fine.example".into(),
+    });
+    let typed = shell.items.pending_navigation_request(id).unwrap();
+    shell.handle(Command::Engine(EngineEvent::NavigationBlocked {
+        id,
+        url: "https://scam.example/win".into(),
+        reason: NavigationBlockReason::Badware,
+        request: Some(typed),
+        can_continue: true,
+    }));
+    let failure = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap()
+        .failure
+        .unwrap();
+    assert_eq!(failure.url, "https://scam.example/win");
+    assert!(failure.can_continue);
+}
