@@ -291,7 +291,8 @@ export function createSearchSurface(options: {
     let next = at + offset;
     // Up from the first row reaches the last; Down still stops at the end.
     if (next < 0) next = rows.length - 1;
-    if (next >= rows.length) return;
+    // A single row wraps to itself, which is not an explicit selection.
+    if (next >= rows.length || next === at) return;
     moved = true;
     selected = rows[next]!.id;
     await tick();

@@ -175,6 +175,26 @@ test("Enter pressed before the answer runs what was typed once it lands", async 
   );
 });
 
+test.each([
+  { scenario: "one row", suggestions: [] },
+  { scenario: "a surviving suggestion", suggestions: [tab("Rust docs")] },
+])("ArrowUp then Enter while a new answer is pending: $scenario", async ({ suggestions }) => {
+  const screen = await mount({ tabId: "tab" });
+  const input = screen.getByRole("combobox");
+  await input.fill("rus");
+  await reply("rus", [search("rus"), ...suggestions]);
+  await expect.element(screen.getByRole("option")).toHaveLength(1 + suggestions.length);
+  const seen = issued();
+  await userEvent.type(input, "t");
+  await userEvent.keyboard("{ArrowUp}{Enter}");
+  expect(native.run).not.toHaveBeenCalled();
+  const typed = search("rust");
+  const context = await replyToNew(seen, "rust", [typed, ...suggestions]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith((suggestions[0] ?? typed).action, context),
+  );
+});
+
 test("an Enter that commits a composition does not run the row", async () => {
   const screen = await mount({ tabId: "tab" });
   const field = screen.getByRole("combobox");
