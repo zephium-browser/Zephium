@@ -1827,6 +1827,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
             page_permission_card_host,
+            chrome_modal,
             tab_set_muted,
             media_player,
             site_permissions,
@@ -3536,6 +3537,19 @@ fn page_permission_card_host(caller: WebviewWindow, shell: State<'_, Handle>, av
         return;
     }
     shell.dispatch(Command::SetPagePermissionCardHost(available));
+}
+
+/// Whether one of the browser's own dialogs is open over the window. Pages
+/// are native views above chrome, so they leave the screen while it shows.
+#[tauri::command]
+#[specta::specta]
+fn chrome_modal(caller: WebviewWindow, shell: State<'_, Handle>, open: bool) {
+    if !authorize(&caller, CallerPolicy::Main, "chrome_modal")
+        || shutdown_started(caller.app_handle())
+    {
+        return;
+    }
+    shell.dispatch(Command::SetChromeModal(open));
 }
 
 static SITE_PERMISSIONS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
