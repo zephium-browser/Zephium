@@ -193,8 +193,9 @@ Any change that breaks one of these invariants must fail review and release:
    a new renderer process for it. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
    event, and the native launch of an OS-registered URI scheme is always cancelled.
-   The request is then routed to Zephium's own app-link card, which names the app
-   and asks; nothing opens without the person's answer.
+   `main` and `panel` cancel it silently. Only a person's tab routes the request on,
+   to Zephium's own app-link card, which names the app and asks; nothing opens
+   without the person's answer.
 3. Application-requested tab navigation is checked in core and again before the native
    load; page-initiated navigation is checked by Wry's navigation handler. Only `http`,
    `https`, and exact `about:blank` are allowed. URLs are limited to 8 KiB; credentials,
@@ -324,7 +325,10 @@ application, and the host opens the application only after the person's answer. 
 page that acts by itself with no registered application is ignored. A frame from
 another site (WebKit's source frame, WebView2's `InitiatingOrigin`) is heard only when
 the person clicked in it, and the card then names that frame's site rather than the
-tab's. An Always allow answer is kept per profile, canonical site origin and scheme in
+tab's. A WebKit subframe whose site cannot be named is refused. A link whose source
+cannot be named at all (one reaching the new-window path, or a WebView2 origin that is
+no site) is asked about with a card that names no site and never opens by a kept
+answer. An Always allow answer is kept per profile, canonical site origin and scheme in
 the profile database (`app_link_sites`, profile migration 41, at most 512) and listed
 under Links to apps in Site settings; a private profile keeps it in memory until the
 session ends. Human macOS/Windows new windows require
@@ -603,19 +607,27 @@ card under the address field with the file name. Allow keeps the site allowed; N
 now cancels that download only. Further downloads from the same tab and site join the
 waiting card, and a different request while one card waits on that tab is cancelled.
 The wait ends after five minutes, when the page that started it navigates away or its
-view goes (switching to another tab does not end it), or when a sign-in card takes the
-slot, which refuses the download. Block is set from Settings ▸ Privacy ▸ Site settings
+view goes (switching to another tab does not end it), or when another card (a sign-in,
+an app link, a blocked pop-up, a hung page) takes the slot, which refuses the download.
+An Allow that arrives after the wait, or for a site blocked while the card waited, is
+taken as Not now and keeps nothing. Each card answer carries the per-tab serial of the
+request it showed, and the shell refuses one that does not match the request waiting. Block is set from Settings ▸ Privacy ▸ Site settings
 or the address field's site panel. Downloads the person starts from the browser itself
 (WebKit's context-menu download, WebView2's Save link/image as, extension downloads)
 skip the question. A download that a native new tab starts at once is asked about on
 the tab that opened it, keyed by that tab's site.
 
-**Downloads nobody clicked.** On macOS a download that WebKit does not report as
-user-initiated (`WKDownload.isUserInitiated`), or any download when the OS lacks that
-API, is confirmed on the same card even on an allowed site. The card says the site
-wants to download a file and that nothing the person clicked starts it; the choices
-are Download and Cancel, and the answer is never remembered. A download from a
-cross-origin subframe that nobody clicked in is refused outright. On Windows
+**Downloads nobody clicked.** On macOS 15.2 and later a download that WebKit does not
+report as user-initiated (`WKDownload.isUserInitiated`) is confirmed on the same card
+even on an allowed site. The card says the site wants to download a file and that
+nothing the person clicked starts it; the choices are Download and Cancel, and the
+answer is never remembered. A download from a cross-origin subframe
+(`WKDownload.originatingFrame`) that nobody clicked in is refused outright. macOS 14.0
+to 15.1 have neither API, so neither check runs there: the download is keyed to the
+tab's site, a site with no decision still gets the site question, and every download
+not just allowed on that card goes through the save sheet, which names the file and
+its folder before anything is written. Refusing every unattributed download there
+would refuse them all. On Windows
 `DownloadStarting` reports neither the click nor the frame, so the site permission is
 the guard there, together with WebView2's multiple-automatic-download prompt.
 
@@ -624,7 +636,7 @@ macro (programs, installers, disk images, help, shell and installer formats, mac
 location files) is received in full and then held, not placed among the person's
 files, until the person chooses Keep or Delete. The list is `is_dangerous_file`. A
 download whose response URL (macOS, after redirects) or download URI (Windows) is
-plain `http` to a host outside the person's own network, by the same local-host rule
+plain `http` to a host outside the person's own network, or on macOS cannot be read, by the same local-host rule
 as certificate exceptions, is held the same way, and the card says the file came over
 a connection that isn't encrypted. The record stores that flag only when it is true.
 A hold is a prompt, not a scan, and no download reputation check runs on macOS.
@@ -1476,8 +1488,9 @@ These inherited properties must not be overstated:
   service.
 - Every view also requires CoreWebView2_18. Raw and privileged subframe navigations are
   checked by native handlers, and the native launch of OS-registered external URI
-  schemes is always cancelled; the request goes to the app-link card, which names
-  the app and asks. Client-certificate selection is also cancelled before WebView2 can fall
+  schemes is always cancelled. The privileged main and panel views cancel it silently;
+  only a person's tab sends the request on to the app-link card, which names the app
+  and asks. Client-certificate selection is also cancelled before WebView2 can fall
   back to its native certificate dialog, and HTTP authentication is cancelled
   except on tabs a person reads, which defer it to the sign-in card described above. A
   missing interface or failed registration rejects the raw view or aborts
