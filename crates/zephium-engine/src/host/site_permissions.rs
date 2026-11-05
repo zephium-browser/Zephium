@@ -167,8 +167,9 @@ impl EngineHost {
                         // SAFETY: the collection is live for this callback.
                         unsafe { settings.Count(&mut count)? };
                         let mut entries = Vec::new();
+                        // One past the cap, so the listing knows it is cut short.
                         let limit =
-                            count.min(zephium_core::permissions::MAX_SITE_PERMISSIONS as u32);
+                            count.min(zephium_core::permissions::MAX_SITE_PERMISSIONS as u32 + 1);
                         for index in 0..limit {
                             // SAFETY: index is below the collection's Count.
                             let setting = unsafe { settings.GetValueAtIndex(index)? };

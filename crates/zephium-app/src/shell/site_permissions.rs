@@ -70,14 +70,17 @@ pub(super) fn kind_view(kind: SitePermissionKind) -> SitePermissionKindView {
     }
 }
 
+/// The listing, and whether it holds every decision rather than stopping at
+/// the cap.
 fn entries(
     mut decisions: Vec<SitePermission>,
     origin: Option<&PageOrigin>,
-) -> Vec<SitePermissionView> {
+) -> (Vec<SitePermissionView>, bool) {
     decisions.retain(|entry| origin.is_none_or(|origin| entry.origin == *origin));
     decisions.sort_by(|a, b| (a.kind, &a.origin, &a.scheme).cmp(&(b.kind, &b.origin, &b.scheme)));
     decisions.dedup_by(|a, b| a.kind == b.kind && a.origin == b.origin && a.scheme == b.scheme);
-    decisions
+    let whole = decisions.len() <= zephium_core::permissions::MAX_SITE_PERMISSIONS;
+    let listed = decisions
         .into_iter()
         .take(zephium_core::permissions::MAX_SITE_PERMISSIONS)
         .map(|entry| SitePermissionView {
@@ -89,7 +92,8 @@ fn entries(
             },
             scheme: entry.scheme,
         })
-        .collect()
+        .collect();
+    (listed, whole)
 }
 
 fn catalog_change(
@@ -384,14 +388,15 @@ impl Shell {
             )
             .collect();
         let finish = move |native: Option<Vec<SitePermission>>| {
-            let complete = popups_read && native.is_some();
+            let read = popups_read && native.is_some();
             let mut decisions = native.unwrap_or_default();
             decisions.extend(popups);
+            let (entries, whole) = entries(decisions, origin.as_ref());
             let _ = reply.try_send(Some(SitePermissionsView {
                 private: false,
-                complete,
+                complete: read && whole,
                 kinds,
-                entries: entries(decisions, origin.as_ref()),
+                entries,
             }));
         };
         if ENGINE_KEEPS_DECISIONS {
@@ -714,7 +719,7 @@ mod tests {
             kind,
             decision: RememberedPagePermission::Allow,
         };
-        let listed = entries(
+        let (listed, whole) = entries(
             vec![
                 decision("https://b.example", SitePermissionKind::Popups),
                 decision("https://a.example", SitePermissionKind::Camera),
@@ -723,6 +728,7 @@ mod tests {
             ],
             None,
         );
+        assert!(whole);
         assert_eq!(
             listed
                 .iter()
@@ -734,7 +740,7 @@ mod tests {
                 ("https://b.example", SitePermissionKindView::Popups),
             ]
         );
-        let one = entries(
+        let (one, _) = entries(
             vec![
                 decision("https://a.example", SitePermissionKind::Camera),
                 decision("https://b.example", SitePermissionKind::Popups),
@@ -743,5 +749,24 @@ mod tests {
         );
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].kind, SitePermissionKindView::Popups);
+    }
+
+    #[test]
+    fn a_listing_past_the_cap_says_it_is_not_whole() {
+        let many = |count: usize| {
+            (0..count)
+                .map(|index| SitePermission {
+                    scheme: None,
+                    origin: origin(&format!("https://site-{index}.example")),
+                    kind: SitePermissionKind::Popups,
+                    decision: RememberedPagePermission::Allow,
+                })
+                .collect::<Vec<_>>()
+        };
+        let cap = zephium_core::permissions::MAX_SITE_PERMISSIONS;
+        assert!(entries(many(cap), None).1);
+        let (listed, whole) = entries(many(cap + 1), None);
+        assert_eq!(listed.len(), cap);
+        assert!(!whole);
     }
 }
