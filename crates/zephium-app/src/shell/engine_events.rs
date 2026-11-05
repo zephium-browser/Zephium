@@ -565,8 +565,16 @@ impl Shell {
                     });
                 // An https try that failed loads over http next; its error
                 // never shows.
-                if self.https_first_failed(id) {
-                    return;
+                match self.https_first_failed(id) {
+                    super::https_first::HttpsFallback::NotATry => {}
+                    super::https_first::HttpsFallback::LoadingOverHttp => return,
+                    super::https_first::HttpsFallback::Refused(asked) => {
+                        if self.items.record_failure_at(id, reason, asked) {
+                            let _ = self.relayout();
+                            self.project_tab(id);
+                        }
+                        return;
+                    }
                 }
                 let covered = self
                     .items

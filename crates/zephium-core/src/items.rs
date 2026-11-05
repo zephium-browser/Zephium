@@ -819,6 +819,26 @@ impl Items {
         true
     }
 
+    /// A failure of `url` the tab no longer waits on, such as an https try
+    /// whose http load could not be sent: it shows as any failed load does.
+    pub fn record_failure_at(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationFailureReason,
+        url: Url,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.failure = Some(Box::new(crate::item::NavigationFailure {
+            url,
+            reason,
+            covers_page: false,
+            can_continue: false,
+        }));
+        true
+    }
+
     /// A page the lists refused covers the tab. A refusal is dropped when the
     /// person has since asked for something else: it must name the pending
     /// request, or, unattributed, the very address that request is for.

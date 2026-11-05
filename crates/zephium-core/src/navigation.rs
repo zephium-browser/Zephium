@@ -239,7 +239,9 @@ pub fn https_upgrade(url: &Url) -> Option<Url> {
     }
     let mut upgraded = url.clone();
     upgraded.set_scheme("https").ok()?;
-    Some(upgraded)
+    // One byte longer can pass what a page may be opened at; it then loads as
+    // asked.
+    (upgraded.as_str().len() <= MAX_URL_BYTES).then_some(upgraded)
 }
 
 /// A link meant for an application on this computer, such as `zoommtg:`,
@@ -401,6 +403,10 @@ mod tests {
                 "{from}"
             );
         }
+        // An address at the limit is not pushed past it by the extra "s".
+        let longest = format!("http://example.com/{}", "a".repeat(MAX_URL_BYTES - 19));
+        assert_eq!(longest.len(), MAX_URL_BYTES);
+        assert_eq!(super::https_upgrade(&Url::parse(&longest).unwrap()), None);
     }
 
     #[test]

@@ -1043,6 +1043,7 @@ fn a_typed_address_that_redirects_into_a_refused_host_shows_why() {
     assert!(failure.can_continue);
 }
 
+#[test]
 fn a_first_view_closed_with_its_https_try_loads_over_http_in_a_new_view() {
     use zephium_core::ports::engine::NavigationFailureReason;
     let (mut shell, engine, screen) = setup();
@@ -1093,6 +1094,7 @@ fn a_first_view_closed_with_its_https_try_loads_over_http_in_a_new_view() {
     );
 }
 
+#[test]
 fn an_http_page_is_tried_over_https_first_and_falls_back_once() {
     use zephium_core::ports::engine::NavigationFailureReason;
     let (mut shell, engine, screen) = setup();
@@ -1156,4 +1158,70 @@ fn an_http_page_is_tried_over_https_first_and_falls_back_once() {
         Some("http://router.lan/"),
         "the person's own network stays as asked"
     );
+}
+
+#[test]
+fn an_https_try_that_redirected_to_another_host_is_over_when_it_commits() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "a.example");
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://example.com/".into(),
+    });
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("navigate {id} https://example.com/"))));
+    commit_url(&mut shell, id, "https://www.example.com/");
+    // A link on that page then fails on its own.
+    let before = engine.calls().len();
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Unreachable,
+        url: Some("https://www.example.com/next".into()),
+        replaced_page: true,
+    }));
+    assert!(
+        !engine.calls()[before..]
+            .iter()
+            .any(|call| call.contains("http://example.com/")),
+        "a later failure is not taken for the try"
+    );
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert!(tab.failure.is_some(), "and it shows");
+}
+
+#[test]
+fn an_https_try_whose_http_load_cannot_be_sent_shows_its_failure() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "a.example");
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/".into(),
+    });
+    engine
+        .reject_navigation_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: NavigationFailureReason::Unreachable,
+        url: None,
+        replaced_page: false,
+    }));
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert!(tab.failure.is_some());
 }
