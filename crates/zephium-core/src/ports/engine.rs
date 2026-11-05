@@ -909,6 +909,17 @@ pub trait Engine {
     fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Whether the engine itself tries every top-level `http` page over
+    /// https first and falls back on failure, so the browser does not.
+    fn upgrades_https_natively(&self) -> bool {
+        false
+    }
+    /// Opens the passwords panel on a page that is not encrypted, once the
+    /// person has said to fill there anyway; the page gets the keyboard back
+    /// first.
+    fn autofill_insecure_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Starts watching the committed document's icon links: what they name
     /// arrives as `EngineEvent::FaviconCandidates` when the head first has
     /// icons and whenever they change until the page has loaded. One call per
@@ -1100,6 +1111,11 @@ pub trait Engine {
     /// refused at `url`. The engine accepts only an https address on a local
     /// host, with the exact leaf it refused there; anything else is ignored.
     fn allow_certificate_exception(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// The person chose to open the page the lists refused at `url` anyway.
+    /// Its host stays allowed in the tab's profile until the app quits.
+    fn allow_blocked_navigation(&self, _item: ItemId, _url: String) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
     /// Answers the tab's sign-in prompt with credentials, or cancels it with
@@ -1316,7 +1332,18 @@ pub enum NavigationFailureReason {
     /// The server's certificate was refused, and what the engine could tell
     /// about why.
     Certificate(crate::certificates::CertificateProblem),
+    /// The person's filter lists refused the page.
+    Blocked(NavigationBlockReason),
     Other,
+}
+
+/// Why the filter lists refused a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1436,6 +1463,12 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// The engine can no longer prove which browser process owns this
+    /// profile's data, so it retired the profile's views and refuses new ones
+    /// until Zephium restarts. Sticky for the life of the process.
+    ProfileRestartRequired {
+        profile: ProfileId,
+    },
     /// One exact native content-policy installation attempt settled.
     ///
     /// Replacement failure reports `Retained` with the prior known-good
@@ -1757,6 +1790,19 @@ pub enum EngineEvent {
         id: ItemId,
         url: String,
     },
+    /// The filter lists refused the page the view's main frame was about to
+    /// load; the page that was showing stays, and nothing was requested.
+    NavigationBlocked {
+        id: ItemId,
+        url: String,
+        reason: NavigationBlockReason,
+        /// The navigation the shell asked for that this refuses, when the
+        /// engine can tell; a refused link or redirect names none.
+        request: Option<NavigationRequestId>,
+        /// False where the engine itself refuses the page (WebKit's content
+        /// rules), which allowing the host cannot lift.
+        can_continue: bool,
+    },
     LinkedDownloadStarted {
         id: ItemId,
     },
@@ -1796,6 +1842,11 @@ pub enum EngineEvent {
     DownloadPermissionEnded {
         id: ItemId,
         request: u32,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; nothing is
+    /// filled until the person says to.
+    InsecureAutofillRequested {
+        id: ItemId,
     },
     DownloadRequested {
         id: ItemId,

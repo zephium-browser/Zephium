@@ -314,6 +314,7 @@ fn configure_with_credential_denied(
         core5: core5.clone(),
         core14: core14.clone(),
         frame_token: None,
+        judged_frame_token: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
@@ -489,6 +490,7 @@ pub struct SecurityPolicy {
     core5: ICoreWebView2_5,
     core14: ICoreWebView2_14,
     frame_token: Option<i64>,
+    judged_frame_token: Option<i64>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
@@ -541,11 +543,51 @@ impl SecurityPolicy {
         }
         Ok(())
     }
+
+    /// Cancels each frame navigation `blocks` refuses. The security handler
+    /// runs first, so a frame it cancelled stays cancelled.
+    pub fn judge_frame_navigations(
+        &mut self,
+        blocks: impl Fn(&str) -> bool + 'static,
+    ) -> windows_core::Result<()> {
+        let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            unsafe {
+                let mut uri = PWSTR::null();
+                let uri = args.Uri(&mut uri).ok().and_then(|()| {
+                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                });
+                if frame_refused(uri.as_deref(), &blocks) {
+                    args.SetCancel(true)?;
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        unsafe {
+            self.core
+                .add_FrameNavigationStarting(&handler, &mut token)?
+        };
+        if let Some(previous) = self.judged_frame_token.replace(token) {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
+        }
+        Ok(())
+    }
+}
+
+/// A frame whose address cannot be read is refused, never let through.
+fn frame_refused(uri: Option<&str>, blocks: impl Fn(&str) -> bool) -> bool {
+    uri.is_none_or(blocks)
 }
 
 impl Drop for SecurityPolicy {
     fn drop(&mut self) {
         if let Some(token) = self.frame_token.take() {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
+        }
+        if let Some(token) = self.judged_frame_token.take() {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
         }
         if let Some(token) = self.external_token.take() {
@@ -2599,5 +2641,18 @@ mod bootstrap_history_tests {
             &["https://a.test/", "https://b.test/"]
         )));
         assert!(!blank_bootstrap_only("not json"));
+    }
+}
+
+#[cfg(test)]
+mod frame_judge_tests {
+    use super::frame_refused;
+
+    #[test]
+    fn a_frame_whose_address_cannot_be_read_is_refused() {
+        let blocks = |uri: &str| uri.contains("scam");
+        assert!(frame_refused(None, blocks));
+        assert!(frame_refused(Some("https://scam.example/"), blocks));
+        assert!(!frame_refused(Some("https://fine.example/"), blocks));
     }
 }

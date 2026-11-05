@@ -456,6 +456,7 @@ pub(crate) fn install(
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            blocker_navigation: HashMap::new(),
             popup_sites: HashMap::new(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             native_tab_download_ask: None,

@@ -920,6 +920,10 @@ impl Engine for FakeEngine {
         self.log(format!("autofill {id}"));
         self.native_admission()
     }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
+        self.native_admission()
+    }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("discover {id}"));
         self.native_admission()
@@ -965,6 +969,10 @@ impl Engine for FakeEngine {
     }
     fn open_external_app(&self, url: &str) -> NativeDispatch {
         self.log(format!("open-app {url}"));
+        self.native_admission()
+    }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
         self.native_admission()
     }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {

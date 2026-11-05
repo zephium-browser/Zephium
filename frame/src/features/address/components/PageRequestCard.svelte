@@ -65,37 +65,44 @@
   // A site that wants to save a file: asked once per site, or for a download
   // nobody clicked even where the site is allowed.
   let download = $derived(request.kind === "download" ? request : null);
+  // AutoFill on a page that is not encrypted: a password filled there
+  // crosses the network readable.
+  let fill = $derived(request.kind === "insecure_autofill" ? request : null);
   let title = $derived(
     download
       ? download.allowed
         ? m.page_request_download_unclicked_title({ site: download.site })
         : m.page_request_download_title({ site: download.site })
-      : auth
-        ? auth.proxy
-          ? m.page_request_sign_in_proxy_title({ host: auth.host })
-          : m.page_request_sign_in_title({ host: auth.host })
-        : app
-          ? app.app
-            ? m.page_request_app_title({ app: app.app })
-            : m.page_request_app_missing({ scheme: app.scheme })
-          : hung
-            ? m.page_request_unresponsive_title()
-            : m.page_request_popup_title(),
+      : fill
+        ? m.page_request_autofill_insecure_title()
+        : auth
+          ? auth.proxy
+            ? m.page_request_sign_in_proxy_title({ host: auth.host })
+            : m.page_request_sign_in_title({ host: auth.host })
+          : app
+            ? app.app
+              ? m.page_request_app_title({ app: app.app })
+              : m.page_request_app_missing({ scheme: app.scheme })
+            : hung
+              ? m.page_request_unresponsive_title()
+              : m.page_request_popup_title(),
   );
   let detail = $derived(
     download
       ? download.filename
-      : app
-        ? app.app
-          ? app.site
-            ? m.page_request_app_detail({ site: app.site })
-            : m.page_request_app_detail_page()
-          : null
-        : hung
-          ? m.page_request_unresponsive_detail()
-          : request.kind === "popup" && request.host
-            ? request.host
-            : null,
+      : fill
+        ? m.page_request_autofill_insecure_detail({ host: fill.host })
+        : app
+          ? app.app
+            ? app.site
+              ? m.page_request_app_detail({ site: app.site })
+              : m.page_request_app_detail_page()
+            : null
+          : hung
+            ? m.page_request_unresponsive_detail()
+            : request.kind === "popup" && request.host
+              ? request.host
+              : null,
   );
   let openable = $derived(
     app ? app.app !== null : request.kind === "popup" && request.host !== null,
@@ -170,6 +177,18 @@
       </Button>
       <Button size="compact" variant="primary" onclick={() => answer("allow")}>
         {download.allowed ? m.page_request_download_once() : m.page_request_download_allow()}
+      </Button>
+    </div>
+  {:else if fill}
+    {#if failed}
+      <p class="notice" role="alert">{m.page_request_failed()}</p>
+    {/if}
+    <div class="actions">
+      <Button size="compact" variant="ghost" onclick={() => answer("dismiss")}>
+        {m.page_request_cancel()}
+      </Button>
+      <Button size="compact" variant="primary" onclick={() => answer("allow")}>
+        {m.page_request_autofill_insecure_fill()}
       </Button>
     </div>
   {:else if hung}

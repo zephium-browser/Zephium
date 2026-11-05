@@ -199,6 +199,10 @@ struct ObservedView {
     // Which icon watch of this view's document is current; an older watch's
     // reports are ignored.
     favicon_watch: Cell<u64>,
+    // The document an AutoFill warning was shown for; an approval fills only
+    // that document.
+    #[cfg(target_os = "macos")]
+    insecure_autofill: Cell<Option<crate::navigation_epoch::NavigationEpoch>>,
     // The media watch's generation, and whether it is running.
     media_watch: Cell<(u64, bool)>,
     replay_safety: Rc<discard::ReplaySafety>,
@@ -462,6 +466,8 @@ struct AppliedContentPolicy {
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
     cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
+    navigation: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+    lists: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
     superseded: bool,
 }
 
@@ -596,6 +602,7 @@ pub(crate) struct EngineHost {
     /// views already open without touching them.
     focus_gate: focus::SharedFocusGate,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    blocker_navigation: HashMap<ProfileId, content_styles::NavigationSlot>,
     popup_sites: HashMap<ProfileId, Rc<popup_sites::PopupSites>>,
     /// Handed from a native new-tab request to the view it builds, so a
     /// download that tab starts at once is asked about on its opener.

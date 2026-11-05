@@ -185,3 +185,26 @@ test("an answer that does not land says so and can be given again", async () => 
   expect(pageAnswers).toHaveBeenCalledTimes(2);
   await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
 });
+
+test("AutoFill on a page that is not encrypted asks before filling", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    serial: 5,
+    request: { kind: "insecure_autofill", host: "shop.example" },
+  });
+  const card = page.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("This page isn't secure");
+  await expect.element(card).toHaveTextContent("shop.example doesn't encrypt its connection");
+  await page.getByRole("button", { name: "Fill Anyway" }).click();
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 5, "allow");
+});
+
+test("Cancel on the AutoFill warning fills nothing", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    serial: 5,
+    request: { kind: "insecure_autofill", host: "shop.example" },
+  });
+  await page.getByRole("button", { name: "Cancel" }).click();
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 5, "dismiss");
+});

@@ -163,6 +163,8 @@ pub enum PageRequest {
     HttpAuth(crate::http_auth::HttpAuthPrompt),
     /// The site wants to save a file; the engine holds the download.
     Download(crate::permissions::DownloadPermissionPrompt),
+    /// AutoFill was asked for on a page that is not encrypted.
+    InsecureAutofill,
     /// The page stopped responding; the person may wait or end it.
     Unresponsive,
 }
@@ -175,6 +177,9 @@ pub struct NavigationFailure {
     /// stays out of the layout, history intact, until another document
     /// commits in it.
     pub covers_page: bool,
+    /// A refused page the person may open anyway: only where the refusal is
+    /// Zephium's own check, which an allowance lifts.
+    pub can_continue: bool,
 }
 
 impl TabState {

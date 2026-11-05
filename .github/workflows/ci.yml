@@ -216,6 +216,12 @@ jobs:
       - name: Check the built-in scriptlet extension in WebKit
         timeout-minutes: 10
         run: scripts/blocker-scriptlets/run.sh
+      # The page-corpus recorder against a loopback server: a redirect and a
+      # frame to a host off the reviewed list are refused, logged and never
+      # recorded.
+      - name: Check the page-corpus recorder refuses off-list hosts
+        timeout-minutes: 5
+        run: scripts/blocker-corpus/test-record.sh
 
   windows:
     name: Rust (Windows)

@@ -2,6 +2,7 @@
 
 mod archive;
 mod audio;
+mod blocked;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -21,6 +22,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod https_first;
 mod media;
 mod network;
 mod operations;
@@ -273,6 +275,7 @@ pub struct Shell {
     /// past, for this run only; their pages never look secure.
     continued_certificates:
         std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
+    https_first: https_first::HttpsFirst,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -293,6 +296,8 @@ pub struct Shell {
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// Profiles whose browser engine only a restart can trust again.
+    restart_profiles: std::collections::HashSet<ProfileId>,
     /// The saved session could not be restored this launch and was set aside.
     session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
@@ -518,6 +523,7 @@ impl Shell {
             popup_sites: std::collections::HashMap::new(),
             download_sites: std::collections::HashMap::new(),
             continued_certificates: std::collections::HashSet::new(),
+            https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
@@ -534,6 +540,7 @@ impl Shell {
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            restart_profiles: std::collections::HashSet::new(),
             session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -897,6 +904,12 @@ impl Shell {
             }
             Command::ContinuePastCertificate(id) => {
                 let _ = self.operation_continue_past_certificate(id);
+            }
+            Command::ContinuePastBlock { id, url } => {
+                let _ = self.operation_continue_past_block(id, &url);
+            }
+            Command::LeaveBlockedPage(id) => {
+                let _ = self.operation_leave_blocked_page(id);
             }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);

@@ -1,8 +1,9 @@
-import type { RuntimeStatus } from "$shared/ipc/bindings";
+import { commands, type RuntimeStatus } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 
 let state = $state.raw<RuntimeStatus>({
   restart_required: false,
+  restart_reason: null,
   session_set_aside: false,
   user_content_degraded_scope_count: 0,
   security_advisories: [],
@@ -14,6 +15,18 @@ let initializing: Promise<void> | null = null;
 let unlisten: (() => void) | null = null;
 
 export const status = () => state;
+
+let relaunching = $state(false);
+export const pendingRelaunch = () => relaunching;
+
+/** Closes Zephium as a quit does and starts it again, when a restart is due. */
+export async function relaunch(): Promise<boolean> {
+  if (relaunching || !state.restart_required) return false;
+  relaunching = true;
+  const accepted = await commands.appRelaunch().catch(() => false);
+  relaunching = false;
+  return accepted;
+}
 
 async function initialize(generation: number) {
   const stop = await events.runtimeStatusChanged.listen((event) => {
@@ -57,6 +70,7 @@ export function dispose() {
   unlisten = null;
   state = {
     restart_required: false,
+    restart_reason: null,
     session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: [],

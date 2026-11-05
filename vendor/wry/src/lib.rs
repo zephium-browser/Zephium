@@ -1928,9 +1928,22 @@ impl<'a> WebViewBuilder<'a> {
   }
 }
 
+/// How a top-level `http` navigation is upgraded to `https` (macOS 15.2 and
+/// later; ignored before).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleHttpsUpgrade {
+  /// Try https, and load over http when that fails.
+  AutomaticFallback,
+  /// Try https, and show WebKit's warning before falling back to http.
+  UserMediatedFallback,
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) struct PlatformSpecificWebViewAttributes {
   data_store_identifier: Option<[u8; 16]>,
+  #[cfg(target_os = "macos")]
+  https_upgrade: Option<AppleHttpsUpgrade>,
   traffic_light_inset: Option<dpi::Position>,
   allow_link_preview: bool,
   on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
@@ -1971,6 +1984,8 @@ impl Default for PlatformSpecificWebViewAttributes {
   fn default() -> Self {
     Self {
       data_store_identifier: None,
+      #[cfg(target_os = "macos")]
+      https_upgrade: None,
       traffic_light_inset: None,
       // platform default for this is true
       allow_link_preview: true,
@@ -2053,6 +2068,9 @@ impl WebViewBuilderExtDarwin for WebViewBuilder<'_> {
 
 #[cfg(target_os = "macos")]
 pub trait WebViewBuilderExtMacos {
+  /// Upgrades top-level `http` navigations to `https` as `policy` says,
+  /// where WebKit can (macOS 15.2 and later).
+  fn with_https_upgrade(self, policy: AppleHttpsUpgrade) -> Self;
   /// Set the webview configuration that must be used to create the new webview.
   fn with_webview_configuration(
     self,
@@ -2127,6 +2145,11 @@ pub trait WebViewBuilderExtMacos {
 
 #[cfg(target_os = "macos")]
 impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
+  fn with_https_upgrade(mut self, policy: AppleHttpsUpgrade) -> Self {
+    self.platform_specific.https_upgrade = Some(policy);
+    self
+  }
+
   fn with_webview_configuration(
     mut self,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
@@ -3477,6 +3500,8 @@ pub enum NavigationFailure {
   /// The server's certificate was refused, and what the engine could tell
   /// about why.
   Certificate(CertificateProblem),
+  /// macOS: the view's content rules refused the page.
+  Blocked,
   /// Any other failure.
   Other,
 }
@@ -3490,6 +3515,9 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
+  /// macOS: a content rule refused the navigation to `url`, taken from the
+  /// error itself; the document shown before is still there.
+  Refused { url: String },
 }
 
 /// Why a server certificate was refused, as a category; never native text.

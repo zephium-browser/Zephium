@@ -52,6 +52,8 @@ impl Shell {
                 credentials,
             } => self.operation_answer_http_auth(id, request, credentials),
             Command::ContinuePastCertificate(id) => self.operation_continue_past_certificate(id),
+            Command::ContinuePastBlock { id, url } => self.operation_continue_past_block(id, &url),
+            Command::LeaveBlockedPage(id) => self.operation_leave_blocked_page(id),
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
             Command::GoToHistoryEntry { id, offset, url } => {

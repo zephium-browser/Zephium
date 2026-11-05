@@ -579,6 +579,16 @@ pub struct ContentRules {
     coverage: ContentRuleCoverage,
     payload: ContentRulesPayload,
     cosmetics: Option<Arc<dyn DocumentStyleProvider>>,
+    navigation: Option<NavigationPolicy>,
+}
+
+#[derive(Clone)]
+struct NavigationPolicy(Arc<dyn NetworkRequestPolicy>);
+
+impl fmt::Debug for NavigationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<bounded matcher>")
+    }
 }
 
 impl ContentRules {
@@ -588,6 +598,7 @@ impl ContentRules {
             coverage: ContentRuleCoverage::default(),
             payload: ContentRulesPayload::AllowAll,
             cosmetics: None,
+            navigation: None,
         })
     }
 
@@ -602,6 +613,7 @@ impl ContentRules {
                 coverage,
                 payload: ContentRulesPayload::Runtime(policy),
                 cosmetics: None,
+                navigation: None,
             })
         })
     }
@@ -629,6 +641,7 @@ impl ContentRules {
                 encoded: Arc::new(encoded),
             },
             cosmetics: None,
+            navigation: None,
         }))
     }
 
@@ -658,6 +671,7 @@ impl ContentRules {
                 encoded,
             },
             cosmetics: None,
+            navigation: None,
         }))
     }
 
@@ -676,6 +690,24 @@ impl ContentRules {
 
     pub fn cosmetics(&self) -> Option<&Arc<dyn DocumentStyleProvider>> {
         self.cosmetics.as_ref()
+    }
+
+    /// Attaches the policy that judges a page or frame before it loads.
+    pub fn with_navigation(
+        mut self: Arc<Self>,
+        policy: Arc<dyn NetworkRequestPolicy>,
+    ) -> Arc<Self> {
+        if self.enabled() {
+            let rules = Arc::make_mut(&mut self);
+            rules.navigation = Some(NavigationPolicy(policy));
+        }
+        self
+    }
+
+    /// uBlock Origin's badware list alone, which judges each page and frame
+    /// as it starts loading.
+    pub fn navigation_policy(&self) -> Option<&Arc<dyn NetworkRequestPolicy>> {
+        self.navigation.as_ref().map(|navigation| &navigation.0)
     }
 
     pub const fn digest(&self) -> ContentRuleDigest {
