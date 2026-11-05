@@ -19,7 +19,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
-    GA_ROOT, SW_SHOWNORMAL,
+    GA_ROOT, GA_ROOTOWNER, SW_SHOWNORMAL,
 };
 
 #[derive(Clone)]
@@ -86,8 +86,16 @@ impl Source {
     }
     fn key(&self) -> bool {
         self.live()
-            && unsafe { GetForegroundWindow() == self.root && IsWindowEnabled(self.root).as_bool() }
+            && unsafe { IsWindowEnabled(self.root).as_bool() }
+            && fronts(self.root, unsafe { GetForegroundWindow() })
     }
+}
+
+/// The window is in front, or a popup it owns is: WebView2's own permission
+/// prompt takes the foreground while the page's downloads wait on it.
+fn fronts(root: HWND, foreground: HWND) -> bool {
+    !foreground.is_invalid()
+        && (foreground == root || unsafe { GetAncestor(foreground, GA_ROOTOWNER) } == root)
 }
 
 fn wide(path: &Path) -> Result<Vec<u16>, DownloadError> {
@@ -1182,6 +1190,44 @@ mod tests {
             ),
         ] {
             assert_eq!(interrupt_error(reason), expected);
+        }
+    }
+
+    #[test]
+    fn only_the_window_or_a_popup_it_owns_holds_the_foreground_for_it() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WS_OVERLAPPEDWINDOW,
+            WS_POPUP,
+        };
+        let create = |owner: Option<HWND>, style: WINDOW_STYLE| unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!(""),
+                style,
+                0,
+                0,
+                10,
+                10,
+                owner,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let root = create(None, WS_OVERLAPPEDWINDOW);
+        let prompt = create(Some(root), WS_POPUP);
+        let other = create(None, WS_OVERLAPPEDWINDOW);
+        let other_prompt = create(Some(other), WS_POPUP);
+        assert!(fronts(root, root));
+        assert!(fronts(root, prompt));
+        assert!(!fronts(root, other));
+        assert!(!fronts(root, other_prompt));
+        assert!(!fronts(root, HWND::default()));
+        for window in [other_prompt, other, prompt, root] {
+            unsafe { DestroyWindow(window).unwrap() };
         }
     }
 
