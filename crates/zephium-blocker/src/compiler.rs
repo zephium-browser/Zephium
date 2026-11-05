@@ -1198,7 +1198,16 @@ fn compile_webkit_with(
             } else {
                 unsplit
             };
+            // The navigation check judges only page and frame loads, so only a
+            // rule for those alone may leave WebKit for it; any other type keeps
+            // its blocking here.
             if source.id.as_str() == NAVIGATION_CHECKED_SOURCE
+                && resource_types.iter().all(|resource| {
+                    matches!(
+                        resource,
+                        WebKitResourceType::TopDocument | WebKitResourceType::ChildDocument
+                    )
+                })
                 && natives.iter().any(|native| {
                     matches!(native.action.typ, CbType::Block)
                         && native.trigger.url_filter.contains(".*")

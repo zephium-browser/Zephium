@@ -1615,7 +1615,15 @@ fn the_runtime_target_ignores_pruned_rules() {
 
 #[cfg(feature = "webkit")]
 #[test]
-fn badware_wildcard_rules_are_left_to_the_navigation_check() {
+fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
+    let rules = concat!(
+        "||scam.example^$doc\n",
+        "||cdn.example/*/alarm.mp3\n",
+        "||scam.example/*/winpage$doc\n",
+        "||scam.example/*/framepage$subdocument\n",
+        "||scam.example/*/both$doc,script\n",
+        "/track/*/pixel$image,xhr\n",
+    );
     let compile = |id_text: &str| {
         Compiler::default()
             .compile(
@@ -1623,20 +1631,23 @@ fn badware_wildcard_rules_are_left_to_the_navigation_check() {
                 vec![FilterSource::new(
                     id(id_text),
                     SourceFormat::Standard,
-                    "||scam.example^$doc\n||cdn.example/*/alarm.mp3\n".to_owned(),
+                    rules.to_owned(),
                 )],
             )
             .unwrap()
     };
     let badware = compile("ublock-badware");
     let coverage = badware.report().webkit().unwrap();
-    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 1);
-    assert_eq!(coverage.converted_input_rules(), 1);
-    assert!(!badware.webkit().unwrap().json().contains(".*"));
+    // The navigation check judges only these two; every other type stays blocked here.
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 2);
+    assert_eq!(coverage.converted_input_rules(), 4);
+    let json = badware.webkit().unwrap().json();
+    assert!(json.contains("alarm") && json.contains("both") && json.contains("pixel"));
+    assert!(!json.contains("winpage") && !json.contains("framepage"));
     let other = compile("ublock-filters");
     let coverage = other.report().webkit().unwrap();
     assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
-    assert_eq!(coverage.converted_input_rules(), 2);
+    assert_eq!(coverage.converted_input_rules(), 6);
 }
 
 #[cfg(feature = "webkit")]

@@ -402,9 +402,14 @@ unsupported.
   the same rule, since url-filters are case-insensitive, and stays pruned.
 - The Windows runtime matcher has no such per-rule cost and compiles every rule.
 - uBlock Origin's badware list names scam and malware sites, which no corpus
-  visits, so its wildcard rules are never pruned: they are left out of the
-  WebKit list (counted as `navigation_checked`) and judged when a page or frame
-  starts loading. Its rules without `.*` cost WebKit almost nothing and stay.
+  visits, so its wildcard rules are never pruned. Those for page and frame loads
+  alone are left out of the WebKit list (counted as `navigation_checked`, 310 in
+  the seed) and judged when a page or frame starts loading. Every rule for any
+  other type stays in WebKit, since that check never sees subresources. Keeping
+  the 151 such wildcard rules adds 151 WebKit rules (114,818 to 114,969) and no
+  measurable compile time: a cold `WKContentRuleListStore` compile of the seed
+  took 2.66–2.71 s before and 2.69–2.70 s after (macOS 27.2, Mac mini, three
+  runs each). Its rules without `.*` cost WebKit almost nothing and stay.
 - The corpus covers the benchmark sites, YouTube, ad-heavy news sites, the top
   sites and pages where exceptions apply (`scripts/blocker-corpus/pages/`), and
   those hosts the wildcard rules name that are on the reviewed list. Only hosts
