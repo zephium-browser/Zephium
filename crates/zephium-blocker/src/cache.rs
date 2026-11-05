@@ -160,10 +160,18 @@ impl CacheKey {
 }
 
 fn cache_key_prefix(target: CompileTarget, limits: CompileLimits) -> Sha256 {
+    cache_key_prefix_for(POLICY_FORMAT_VERSION, target, limits)
+}
+
+fn cache_key_prefix_for(
+    policy_format_version: u32,
+    target: CompileTarget,
+    limits: CompileLimits,
+) -> Sha256 {
     let mut digest = Sha256::new();
     digest.update(CACHE_KEY_DOMAIN);
     digest.update(CACHE_FORMAT_VERSION.to_be_bytes());
-    digest.update(POLICY_FORMAT_VERSION.to_be_bytes());
+    digest.update(policy_format_version.to_be_bytes());
     digest.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
     digest.update(ADBLOCK_ENGINE_VERSION.as_bytes());
     digest.update([target_tag(target)]);
@@ -1778,6 +1786,32 @@ mod tests {
                 + RECORD_CHECKSUM_BYTES;
             assert!(fullest <= max_record_bytes(target), "{target:?}");
         }
+    }
+
+    #[test]
+    fn a_new_policy_format_misses_the_cache_and_retries_rejected_packages() {
+        let limits = CompileLimits::default();
+        let older = POLICY_FORMAT_VERSION - 1;
+        for target in [CompileTarget::Runtime, CompileTarget::WebKit] {
+            let key = |prefix: Sha256| prefix.finalize();
+            assert_eq!(
+                key(cache_key_prefix(target, limits)),
+                key(cache_key_prefix_for(POLICY_FORMAT_VERSION, target, limits))
+            );
+            assert_ne!(
+                key(cache_key_prefix(target, limits)),
+                key(cache_key_prefix_for(older, target, limits)),
+                "{target:?}"
+            );
+        }
+        assert_eq!(
+            crate::compiler_policy_fingerprint(),
+            crate::policy_fingerprint(POLICY_FORMAT_VERSION)
+        );
+        assert_ne!(
+            crate::compiler_policy_fingerprint(),
+            crate::policy_fingerprint(older)
+        );
     }
 
     pub(super) fn private_root() -> tempfile::TempDir {
