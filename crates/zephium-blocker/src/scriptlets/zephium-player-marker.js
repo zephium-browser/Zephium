@@ -1,5 +1,5 @@
-// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried with the same marker, at most twice per video. A player counts as trying to play while playing or buffering, or unstarted with its video asked to play, as after a consent dialog stopped it. A playlist's video is reloaded through the playlist when the player holds that list, so its place there is kept. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
-function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, requested) {
+// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried with the same marker, at most twice per video. A player counts as trying to play while playing or buffering, or unstarted with its video asked to play, as after a consent dialog stopped it. A playlist's video is reloaded through the playlist when the player holds that list, so its place there is kept. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request, and the player event that announces a hold, which ends the wait at once, once per video, when the player's stats show the hold. See docs/adblock.md.
+function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, requested, holdEvent) {
     const names = String(markers ?? '').split(/\s+/).filter((name) => /^[a-z0-9][a-z0-9-]*$/.test(name));
     const pairs = (spec, operator) => String(spec ?? '').split('|').map((pair) => {
         const at = pair.indexOf(operator);
@@ -11,7 +11,8 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     const premiumAt = String(premium ?? '').indexOf('=');
     const blocked = String(blockText ?? '');
     const tagAt = String(requested ?? '').indexOf('*=');
-    if (names.length === 0 || held.includes(undefined) || excused.includes(undefined) || !Number.isFinite(wait) || wait < 0 || premiumAt <= 0 || tagAt <= 0) {
+    const announced = String(holdEvent ?? '');
+    if (names.length === 0 || held.includes(undefined) || excused.includes(undefined) || !Number.isFinite(wait) || wait < 0 || premiumAt <= 0 || tagAt <= 0 || !/^[A-Za-z]*$/.test(announced)) {
         return;
     }
     const tagPath = String(requested).slice(0, tagAt).split('.');
@@ -21,6 +22,8 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     const platform = /^(Mozilla\/5\.0 \([^)]*)/;
     // Watching ends a minute after a video is asked for: a hold that long is not one this can end.
     const WATCH_MS = 60000;
+    // A navigation that never finished, as one given up, stops guarding the player after this long.
+    const NAVIGATE_MS = 10000;
     let index = 0;
     let restarted = false;
     // Whether a video on this page has really played: once one has, a hidden
@@ -160,13 +163,18 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     const RETRIES = 2;
     let retries = 0;
     let counted;
-    let navigating = false;
+    let navigating;
+    // The video the last navigation left, and the one the player's event last
+    // ended a wait for.
+    let leaving;
+    let hastened;
     const stop = () => {
         clearInterval(timer);
         timer = undefined;
     };
-    const sample = () => {
-        if (navigating) {
+    const sample = (signalled = false) => {
+        const guarded = navigating !== undefined && Date.now() - navigating < NAVIGATE_MS;
+        if (guarded && !signalled) {
             return;
         }
         if (Date.now() - since > WATCH_MS) {
@@ -183,6 +191,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         if (!location.pathname.startsWith('/watch') || player === null) {
             return;
         }
+        listen(player);
         let id;
         let now;
         let stats;
@@ -193,7 +202,9 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         } catch (e) {
             return;
         }
-        if (typeof id !== 'string' || id === '') {
+        // The player's event names the next video's hold while a navigation
+        // is still finishing; the video being left is still not reloaded.
+        if (typeof id !== 'string' || id === '' || (guarded && (leaving === undefined || id === leaving))) {
             return;
         }
         if (id !== video) {
@@ -228,6 +239,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         } catch (e) {
             return;
         }
+        const reloading = pending === id;
         if (state === 1 || state === 3) {
             pending = undefined;
         }
@@ -236,8 +248,12 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             return;
         }
         heldSince ??= Date.now();
-        if (!refusing && Date.now() - heldSince < wait) {
+        const early = signalled && !reloading && (state === 1 || state === 3) && hastened !== id;
+        if (!refusing && !early && Date.now() - heldSince < wait) {
             return;
+        }
+        if (early) {
+            hastened = id;
         }
         heldSince = undefined;
         if (!refusing && !edited(player)) {
@@ -264,25 +280,73 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             stop();
         }
     };
+    // Each player element gets the listener once its API is ready; YouTube
+    // announces a hold as soon as the player exists, so it is looked for
+    // often until found.
+    const listened = new WeakSet();
+    const listen = (player) => {
+        if (announced === '' || listened.has(player)) {
+            return true;
+        }
+        if (typeof player.getPlayerState !== 'function' || typeof player.addEventListener !== 'function') {
+            return false;
+        }
+        listened.add(player);
+        try {
+            player.addEventListener(announced, () => {
+                if (timer === undefined && navigating === undefined) {
+                    watch();
+                }
+                if (active && timer !== undefined) {
+                    sample(true);
+                }
+            });
+        } catch (e) {}
+        return true;
+    };
+    let finding;
+    let findingSince;
+    const find = () => {
+        const player = document.getElementById('movie_player');
+        if ((player !== null && listen(player)) || Date.now() - findingSince > WATCH_MS) {
+            clearInterval(finding);
+            finding = undefined;
+        }
+    };
+    const look = () => {
+        if (announced === '' || finding !== undefined) {
+            return;
+        }
+        findingSince = Date.now();
+        finding = setInterval(find, 50);
+    };
     const watch = () => {
-        navigating = false;
+        navigating = undefined;
         if (!active) {
             return;
         }
         since = Date.now();
         video = undefined;
+        look();
         if (timer === undefined) {
-            timer = setInterval(sample, 250);
+            timer = setInterval(() => sample(), 250);
         }
     };
     // A navigation's old player is not reloaded while the next video loads.
     document.addEventListener('yt-navigate-start', () => {
-        navigating = true;
+        navigating = Date.now();
         heldSince = undefined;
+        try {
+            leaving = document.getElementById('movie_player')?.getVideoData?.()?.video_id;
+        } catch (e) {
+            leaving = undefined;
+        }
     });
     document.addEventListener('yt-navigate-finish', watch);
-    // Playback asked for after watching ended, as after a long dialog.
+    // Playback asked for after watching ended, as after a long dialog, or
+    // after a navigation that never finished.
     document.addEventListener('play', () => {
+        navigating = undefined;
         if (timer === undefined) {
             watch();
         }
@@ -292,6 +356,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             watch();
         }
     });
+    look();
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', watch, { once: true });
     } else {
