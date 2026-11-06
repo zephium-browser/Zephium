@@ -58,6 +58,9 @@ pub enum CosmeticError {
     /// The document is not a bounded HTTP(S) URL with a hostname.
     #[error("cosmetic document URL is invalid")]
     InvalidDocument,
+    /// The policy's encoding was released once its cache record was written.
+    #[error("cosmetic policy encoding was released")]
+    EncodingReleased,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -92,7 +95,10 @@ const DATA_VERSION: u32 = 3;
 /// inspect generic rules and rules indexed under the document's domain labels.
 pub struct CosmeticPolicy {
     report: CosmeticReport,
-    encoded: Arc<[u8]>,
+    /// The canonical encoding, held until the compiled-artifact cache has
+    /// written it: see [`Self::release_encoding`].
+    encoded: Mutex<Option<Arc<[u8]>>>,
+    /// SHA-256 of the canonical encoding.
     fingerprint: [u8; 32],
     selective: Engine,
     generic_index: Arc<str>,
@@ -106,13 +112,22 @@ pub struct CosmeticPolicy {
 // after the temporary network JSON envelope has been released.
 static LIVE_POLICY: Mutex<Weak<CosmeticPolicy>> = Mutex::new(Weak::new());
 
+#[cfg(test)]
+pub(crate) fn live_policy() -> Option<Arc<CosmeticPolicy>> {
+    LIVE_POLICY
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .upgrade()
+}
+
 fn reuse_live_policy(bytes: &[u8]) -> Option<Arc<CosmeticPolicy>> {
     let policy = LIVE_POLICY
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .upgrade()?;
-    // Exact validated bytes, not a caller-supplied digest or profile identity.
-    (policy.encoded.as_ref() == bytes).then_some(policy)
+    // The digest of exactly these bytes, computed here: never a
+    // caller-supplied digest or a profile identity.
+    (policy.fingerprint == Sha256::digest(bytes)).then_some(policy)
 }
 
 impl std::fmt::Debug for CosmeticPolicy {
@@ -244,7 +259,18 @@ impl CosmeticPolicy {
     /// Serializes portable policy data; no browsing decisions or document URLs
     /// are retained in this representation.
     pub fn encode(&self) -> Result<Vec<u8>, CosmeticError> {
-        Ok(self.encoded.to_vec())
+        self.encoded
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            .map(<[u8]>::to_vec)
+            .ok_or(CosmeticError::EncodingReleased)
+    }
+
+    /// Drops the canonical encoding, which only a cache write reads. The
+    /// policy is still found again by those exact bytes.
+    pub(crate) fn release_encoding(&self) {
+        *self.encoded.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Revalidates persisted data, including selectors and domain boundaries.
@@ -461,7 +487,7 @@ impl CosmeticPolicy {
         let policy = Arc::new(Self {
             report: data.report,
             fingerprint: Sha256::digest(&encoded),
-            encoded: encoded.into(),
+            encoded: Mutex::new(Some(encoded.into())),
             selective,
             generic_index_digest: zephium_core::blocker::ContentRuleDigest::from_bytes(
                 Sha256::digest(generic_index.as_bytes()),
@@ -983,6 +1009,25 @@ mod tests {
             .scriptlets
             .retain(|rule| !rule.line.contains("createCommentParams"));
         assert!(CosmeticPolicy::decode(&serde_json::to_vec(&stripped).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_released_policy_is_still_found_by_its_exact_bytes() {
+        let policy = CosmeticPolicy::compile(["##.released-ad\nexample.com##.banner"]).unwrap();
+        let bytes = policy.encode().unwrap();
+        policy.release_encoding();
+        assert_eq!(policy.encode(), Err(CosmeticError::EncodingReleased));
+        let found = CosmeticPolicy::decode(&bytes).unwrap();
+        assert!(Arc::ptr_eq(&found, &policy));
+        // Other valid bytes build their own policy.
+        let other = CosmeticPolicy::compile(["##.another-ad"])
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &CosmeticPolicy::decode(&other).unwrap(),
+            &policy
+        ));
     }
 
     #[test]

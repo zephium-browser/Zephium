@@ -1295,6 +1295,7 @@ impl ArtifactCache {
                         }
                         None => false,
                     };
+                    release_cosmetic_encoding(policy.lists.cosmetics());
                     let artifact = CachedArtifact::compiled(&policy.rules, durably_cached);
                     let retain_catalog = artifact.retains_reload_recipe();
                     self.artifact = Some(artifact);
@@ -1640,7 +1641,15 @@ fn attach_cosmetics(
     }
 }
 
+/// Only a cache write reads a cosmetic policy's encoding.
+fn release_cosmetic_encoding(cosmetics: Option<&crate::cosmetics::PreparedCosmetics>) {
+    if let Some(cosmetics) = cosmetics {
+        cosmetics.policy.release_encoding();
+    }
+}
+
 fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
+    release_cosmetic_encoding(loaded.cosmetics());
     match loaded {
         #[cfg(feature = "runtime")]
         LoadedArtifact::Runtime {
@@ -3926,6 +3935,49 @@ mod tests {
             assert!(warm.catalog.is_none());
             assert!(matches!(warm.artifact, Some(CachedArtifact::Strong(_))));
         }
+    }
+
+    #[cfg(any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    ))]
+    #[test]
+    fn the_cosmetic_encoding_is_released_once_cached_or_loaded() {
+        let root = crate::cache::private_test_root();
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^\n##.released-banner"),
+        )])
+        .unwrap();
+        let released = || {
+            crate::cosmetics::live_policy()
+                .expect("a live cosmetic policy")
+                .encode()
+                == Err(crate::CosmeticError::EncodingReleased)
+        };
+        let mut cold = ArtifactCache::new(PolicyCatalog::eager(catalog.clone()));
+        let mut cold_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(compiled) =
+            cold.resolve(Compiler::default(), &mut cold_persistent)
+        else {
+            panic!("the policy compiles");
+        };
+        assert!(compiled.cosmetics().is_some());
+        assert!(released());
+        drop((compiled, cold, cold_persistent));
+
+        let mut warm = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut warm_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(loaded) =
+            warm.resolve(Compiler::default(), &mut warm_persistent)
+        else {
+            panic!("the policy loads");
+        };
+        assert_eq!(warm.persistent_hits, 1);
+        assert!(loaded.cosmetics().is_some());
+        assert!(released());
     }
 
     #[cfg(all(unix, feature = "webkit"))]

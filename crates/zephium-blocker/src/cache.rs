@@ -216,6 +216,17 @@ pub(crate) enum LoadedArtifact {
     },
 }
 
+impl LoadedArtifact {
+    pub(crate) const fn cosmetics(&self) -> Option<&PreparedCosmetics> {
+        match self {
+            #[cfg(feature = "runtime")]
+            Self::Runtime { cosmetics, .. } => cosmetics.as_ref(),
+            #[cfg(feature = "webkit")]
+            Self::WebKit { cosmetics, .. } => cosmetics.as_ref(),
+        }
+    }
+}
+
 pub(crate) struct PersistentArtifactCache {
     root: PathBuf,
     _lock: File,

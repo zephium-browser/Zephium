@@ -230,6 +230,10 @@ subscription identity instead of resending this payload. Removing the page copy
 altogether remains performance work, not a completed optimization.
 A bounded weak reference also reuses an identical live public cosmetic policy
 across later profile restores without retaining it after the last owner exits.
+It is found by the SHA-256 of the presented bytes, computed on the spot. The
+policy keeps its canonical encoding (about 2.9 MB for the shipped lists) only
+until the compiled cache has written it, or, for a policy read from the cache,
+not past loading.
 
 A bounded worker handles document lookup, hashing and script serialization.
 Completion returns through the existing main-thread dispatcher before native
