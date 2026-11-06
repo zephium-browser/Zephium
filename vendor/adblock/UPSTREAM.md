@@ -111,6 +111,20 @@ request callback:
   byte class. A final separator emits separate separator-byte and exact-end
   rules because WebKit rejects regex alternation; callers must include both in
   their rule and byte ceilings.
+- Prepared regexes are built with `regex-automata`'s meta engine directly,
+  with the limits, match kinds and byte syntax `regex::bytes` applies, but
+  with its fully compiled DFA and capture slots switched off. `regex` builds
+  a full DFA for every small regex whenever any crate in the graph enables
+  `regex-automata/dfa-build`, and the desktop graph does through `bstr`. With
+  the shipped seed the full DFAs held 12.2 MB of the runtime matcher's
+  40.5 MB and 2.5 MB of the badware navigation matcher's 7.6 MB. The lazy DFA
+  matches the same rules: on a 475-request page corpus the decisions were
+  identical, compile time fell from 1.13 s to 0.59 s, median match time was
+  unchanged, and the 99th percentile rose 2% for exact and 4% for
+  source-independent attribution. The switch is explicit in the
+  configuration, so a feature change elsewhere cannot bring the full DFA back.
+  The fork's tests enable `dfa-build` through a test-only dependency, as the
+  desktop graph does, and check the compiled regexes' configuration.
 
 The changed filter-bucket representation is serialization-incompatible with
 upstream 0.13.2. This fork increments the internal data version from 5 to 6
