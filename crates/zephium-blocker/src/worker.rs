@@ -2060,6 +2060,20 @@ mod tests {
             frame("https://s.adsystem.example/kept", shop),
             NetworkDecision::Allow
         );
+        // The exception is for frames on shop.example only.
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", "https://news.example/"),
+            NetworkDecision::Block
+        );
+        let script = CoreRequest::top_level_approximation(
+            "https://s.adsystem.example/kept",
+            shop,
+            "GET",
+            NetworkResourceType::Script,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&script), NetworkDecision::Block);
         assert_eq!(
             frame("https://tracker.example/frame", shop),
             NetworkDecision::Block
