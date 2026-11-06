@@ -8,12 +8,15 @@ set -euo pipefail
 here=${0:A:h}
 repo=${here:h:h}
 out=${1:?usage: run.sh OUT_DIR}
+if [[ ${out:A} == $here ]]; then
+  print -u2 "run.sh: OUT_DIR must not be scripts/blocker-corpus itself"
+  exit 2
+fi
 mkdir -p "$out"
 out=${out:A}
 # The run reads only its own copy of the reviewed host list, taken now, so an
-# edit during the run cannot widen what it loads.
-hosts=$out/hosts-allowed.txt
-rm -f "$hosts"
+# edit during the run, or another run, cannot widen what it loads.
+hosts=$(mktemp "$out/hosts-allowed.XXXXXX")
 cp "$here/hosts-allowed.txt" "$hosts"
 chmod 444 "$hosts"
 

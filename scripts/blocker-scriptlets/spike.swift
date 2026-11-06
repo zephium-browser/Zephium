@@ -114,6 +114,10 @@ final class Probe: KeyedDelegate, WKScriptMessageHandler, WKNavigationDelegate {
         var cleared = false
         defaultStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { cleared = true }
         spin(10) { cleared }
+        guard cleared else {
+            print("the default data store was not cleared within 10 s")
+            exit(1)
+        }
         let controller = WKWebExtensionController(configuration: .nonPersistent())
         func context(_ webExtension: WKWebExtension) -> WKWebExtensionContext {
             let context = WKWebExtensionContext(for: webExtension)
