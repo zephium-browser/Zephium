@@ -1672,10 +1672,12 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                     &feed,
                     EVAL_TIMEOUT_MS + 10_000,
                 ),
+                // Opened from the one video that is not music, whose related
+                // links are less likely to be mixes, which the clicks skip.
                 (
                     "inpage",
-                    Some(VIDEOS[0].0),
-                    format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0),
+                    Some(VIDEOS[4].0),
+                    format!("https://www.youtube.com/watch?v={}", VIDEOS[4].0),
                     &inpage,
                     2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
                 ),
@@ -1789,9 +1791,9 @@ fn youtube_background_step(
         if let Some(behind) = soft(&mut record.errors, "open behind", open_behind(driver, &url))? {
             record.nav_ms = behind.load_ms;
             record.timed_out = behind.timed_out;
+            record.load_wait = behind.load_wait;
             std::thread::sleep(BACKGROUND_WAIT);
             let result = eval(
-            record.load_wait = behind.load_wait;
                 driver,
                 &behind.tab,
                 sites::YOUTUBE_BACKGROUND,
@@ -1841,9 +1843,9 @@ fn youtube_hidden_next_step(
         };
         record.nav_ms = watch.load_ms;
         record.timed_out = watch.timed_out;
+        record.load_wait = watch.load_wait.clone();
         let play = sites::play_script(PLAY_IN_VIEW_SECONDS);
         let played = eval(
-        record.load_wait = watch.load_wait.clone();
             driver,
             &watch.tab,
             &play,
@@ -1914,9 +1916,9 @@ fn youtube_step(
         let tab = opened.tab.clone();
         record.nav_ms = opened.load_ms;
         record.timed_out = opened.timed_out;
+        record.load_wait = opened.load_wait.clone();
         let page = (|| -> Result<(), Failure> {
             let opened_at = Instant::now();
-        record.load_wait = opened.load_wait.clone();
             let wait_ms = if *consent_pending {
                 YOUTUBE_DIALOG_WAIT_MS
             } else {

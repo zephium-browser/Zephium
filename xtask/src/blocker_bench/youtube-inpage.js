@@ -20,6 +20,7 @@ const visible = (element) => {
 };
 const ENFORCEMENT = 'ytd-enforcement-message-view-model, #enforcement-message';
 const INTERRUPTIONS = /experiencing interruptions/i;
+const ADS = 'ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer';
 // The notice's text and what surrounds it, or null.
 const notice = () => {
   const text = document.body.innerText;
@@ -102,19 +103,27 @@ const related = () => until(() => [...document.querySelectorAll('#secondary a[hr
   .find((element) => {
     const url = new URL(element.href, location.href);
     return visible(element) && !seen.has(url.searchParams.get('v')) && !url.searchParams.has('list')
-      && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer');
+      && !element.closest(ADS);
   }), 20000);
-// Why no link qualified: how many the page had, visible, and not yet seen.
+// Why no link qualified: how many the page had, visible, not yet seen, and of
+// those how many were in a playlist or an ad slot.
 const candidates = () => {
   const links = [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')];
   const shown = links.filter(visible);
-  return { links: links.length, visible: shown.length, unseen: shown.filter((element) => !seen.has(new URL(element.href, location.href).searchParams.get('v'))).length };
+  const unseen = shown.filter((element) => !seen.has(new URL(element.href, location.href).searchParams.get('v')));
+  return {
+    links: links.length,
+    visible: shown.length,
+    unseen: unseen.length,
+    list: unseen.filter((element) => new URL(element.href, location.href).searchParams.has('list')).length,
+    adSlot: unseen.filter((element) => element.closest(ADS)).length,
+  };
 };
 const navigations = [];
 for (let i = 0; i < 2; i += 1) {
   const link = await related();
   if (!link) {
-    if (i === 0) throw new Error('the watch page links no other video');
+    if (i === 0) throw new Error(`the watch page links no other video: ${JSON.stringify(candidates())}`);
     navigations.push({ error: 'no second link', candidates: candidates() });
     break;
   }

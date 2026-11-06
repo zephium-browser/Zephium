@@ -12,13 +12,25 @@ const tail = () => {
   } catch { return null; }
 };
 const before = new URLSearchParams(location.search).get('v');
-const link = [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')]
-  .find((element) => {
-    const url = new URL(element.href, location.href);
-    return url.searchParams.get('v') !== before && !url.searchParams.has('list')
-      && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer');
-  });
-if (!link) throw new Error('the watch page links no other video');
+const ADS = 'ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer';
+const links = () => [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')]
+  .filter((element) => new URL(element.href, location.href).searchParams.get('v') !== before);
+const qualifies = (element) => !new URL(element.href, location.href).searchParams.has('list') && !element.closest(ADS);
+const waited = performance.now();
+let link = links().find(qualifies);
+while (!link && performance.now() - waited < 20000) {
+  await sleep(250);
+  link = links().find(qualifies);
+}
+if (!link) {
+  const other = links();
+  const candidates = {
+    links: other.length,
+    list: other.filter((element) => new URL(element.href, location.href).searchParams.has('list')).length,
+    adSlot: other.filter((element) => element.closest(ADS)).length,
+  };
+  throw new Error(`the watch page links no other video: ${JSON.stringify(candidates)}`);
+}
 const markers = [tail()];
 const requests = (window.__benchPlayerRequests ?? []).length;
 const clicked = performance.now();
