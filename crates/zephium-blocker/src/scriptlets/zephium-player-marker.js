@@ -147,8 +147,21 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
             stop();
             return;
         }
+        // Only a page in view whose player is trying to play can be held: a
+        // hidden page's player may wait to start with the same stats, and an
+        // unstarted or paused one was never asked to play.
+        if (document.visibilityState !== 'visible') {
+            heldSince = undefined;
+            return;
+        }
         const refusing = refused(player);
-        if (!refusing && !holds(stats)) {
+        let state;
+        try {
+            state = player.getPlayerState?.();
+        } catch (e) {
+            return;
+        }
+        if (!refusing && !((state === 1 || state === 3) && holds(stats))) {
             heldSince = undefined;
             return;
         }
@@ -188,6 +201,11 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
         }
     };
     document.addEventListener('yt-navigate-finish', watch);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            watch();
+        }
+    });
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', watch, { once: true });
     } else {

@@ -598,9 +598,10 @@ const playerText = () => JSON.stringify({
     const listeners = {};
     let interval;
     const player = {
-      id: 'v1', time: 0, loads: [], response: { playabilityStatus: { status: 'OK' } },
+      id: 'v1', time: 0, state: 3, loads: [], response: { playabilityStatus: { status: 'OK' } },
       stats: { buffer_health_seconds: '0.00 s', resolution: '0x0', debug_info: 'USDAI, SABR, s:49' },
       getVideoData() { return { video_id: this.id }; },
+      getPlayerState() { return this.state; },
       getCurrentTime() { return this.time; },
       getStatsForNerds() { return this.stats; },
       getPlayerResponse() { return this.response; },
@@ -612,6 +613,7 @@ const playerText = () => JSON.stringify({
       location: { pathname: '/watch', search },
       document: {
         readyState,
+        visibilityState: 'visible',
         addEventListener: (type, handler) => { (listeners[type] ??= []).push(handler); },
         getElementById: (id) => (id === 'movie_player' ? player : null),
       },
@@ -668,6 +670,30 @@ const playerText = () => JSON.stringify({
   inlined.at(3000);
   assert.equal(inlined.agent(), marked('lactmilli'));
   assert.equal(inlined.player.loads.length, 2);
+
+  // A video nobody asked to play, or one in a hidden page, is never reloaded:
+  // only a page in view whose player is trying to play can be held.
+  for (const state of [-1, 2, 5]) {
+    const idle = youtube();
+    idle.player.state = state;
+    for (let ms = 0; ms <= 5000; ms += 250) { idle.at(ms); }
+    assert.deepEqual(idle.player.loads, [], `state ${state}`);
+    assert.equal(idle.agent(), marked('channel'));
+  }
+  const hidden = youtube();
+  hidden.context.document.visibilityState = 'hidden';
+  hidden.player.response = { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } };
+  for (let ms = 0; ms <= 61000; ms += 1000) { hidden.at(ms); }
+  assert.deepEqual(hidden.player.loads, []);
+  assert.ok(!hidden.watching());
+  // Shown after the watch window: it is watched again from then on.
+  hidden.player.response = { playabilityStatus: { status: 'OK' } };
+  hidden.context.document.visibilityState = 'visible';
+  hidden.fire('visibilitychange');
+  assert.ok(hidden.watching());
+  hidden.at(62000);
+  hidden.at(63000);
+  assert.deepEqual(hidden.player.loads, [['v1', 0]]);
 
   // A server-inserted ad is not a hold, and a video that has started is left alone.
   const ad = youtube();
