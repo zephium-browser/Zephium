@@ -146,4 +146,5 @@ return {
   apiCalls: window.__benchApiCalls ?? null,
   holdStates: window.__benchHoldStates ?? null,
   markers: window.__benchMarkers ?? null,
+  snackbar: window.__benchSnackbar ?? null,
 };

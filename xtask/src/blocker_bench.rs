@@ -251,6 +251,9 @@ struct Options {
     /// Zephium only: whether a playlist keeps its place and order when the
     /// player reloads a video.
     youtube_playlist: bool,
+    /// Zephium only: when the player's own "onSnackbarMessage" event fires,
+    /// against its stats, holds and requests.
+    youtube_snackbar: bool,
     youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
@@ -343,6 +346,10 @@ impl Options {
                     options.youtube = true;
                     options.youtube_playlist = true;
                 }
+                "--youtube-snackbar" => {
+                    options.youtube = true;
+                    options.youtube_snackbar = true;
+                }
                 "--youtube-consent" => {
                     options.youtube_consent = match value()?.as_str() {
                         "reject" => YoutubeConsent::Reject,
@@ -377,6 +384,12 @@ impl Options {
         }
         if options.youtube_playlist && options.browsers.iter().any(|config| !config.zephium()) {
             return Err("--youtube-playlist measures Zephium only".into());
+        }
+        if options.youtube_snackbar && options.browsers.iter().any(|config| !config.zephium()) {
+            return Err("--youtube-snackbar measures Zephium only".into());
+        }
+        if options.youtube_playlist && options.youtube_snackbar {
+            return Err("--youtube-playlist and --youtube-snackbar are separate passes".into());
         }
         if options.speedometer_warm && options.speedometer.is_none() {
             return Err("--speedometer-warm needs --speedometer".into());
@@ -1710,6 +1723,9 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
     if context.options.youtube_playlist {
         return run_youtube_playlist(context, results, saved);
     }
+    if context.options.youtube_snackbar {
+        return run_youtube_snackbar(context, results, saved);
+    }
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
             let name = config.name();
@@ -1838,6 +1854,97 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             if let Some(profile) = &session._profile {
                 results.launches[launch_at].components =
                     Some(profile_components(profile.path(), launched));
+            }
+            session.driver.quit();
+            drop(session);
+            drop(qa);
+            results.save(saved)?;
+        }
+    }
+    Ok(())
+}
+
+/// `--youtube-snackbar`: a fresh profile's first watch page, where its consent
+/// prompt is answered, each video opened directly, then two opened in the page,
+/// with a listener on the player's "onSnackbarMessage" event that records each
+/// call and the player's stats around it.
+fn run_youtube_snackbar(
+    context: &Context,
+    results: &mut Results,
+    saved: &Path,
+) -> Result<(), String> {
+    let step = "snackbar";
+    for run in 1..=context.options.runs {
+        for config in &context.options.browsers {
+            let name = config.name();
+            eprintln!("run {run}/{} {name} {step}", context.options.runs);
+            let qa = QaSession::new(*config, &format!("s{run}"));
+            let mut launch = Launch {
+                config: name.to_string(),
+                run,
+                phase: step.into(),
+                ..Launch::default()
+            };
+            let mut session =
+                match context.launch(*config, Some(&qa), &format!("{name}-{step}-r{run}")) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("  {name} did not start: {error}");
+                        launch.error = Some(error);
+                        results.launches.push(launch);
+                        continue;
+                    }
+                };
+            if let Err(failure) = session.driver.call(
+                "preload",
+                json!({ "js": sites::YOUTUBE_SNACKBAR_PRELOAD }),
+                Duration::from_secs(30),
+            ) {
+                launch.error = Some(format!("the listener: {}", failure.message()));
+                results.launches.push(launch);
+                session.driver.quit();
+                continue;
+            }
+            record_session(&mut launch, &session);
+            results.launches.push(launch);
+            let plan = context.plan(*config);
+            let first = sites::first_watch_script(25);
+            let direct = sites::first_watch_script(20);
+            let inpage = sites::inpage_script(WATCH_SECONDS);
+            let mut pages: Vec<(&str, &str, &str, u64)> =
+                vec![("first-watch", VIDEOS[0].0, &first, 25_000 + 60_000)];
+            for (id, _) in VIDEOS {
+                pages.push(("direct", id, &direct, 20_000 + 60_000));
+            }
+            pages.push((
+                "inpage",
+                VIDEOS[4].0,
+                &inpage,
+                2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
+            ));
+            let mut consent_pending = true;
+            for (page, id, script, timeout_ms) in pages {
+                let url = format!("https://www.youtube.com/watch?v={id}");
+                let (record, gone) = youtube_step(
+                    &mut session,
+                    &plan,
+                    (*config, run),
+                    (page, Some(id), &url),
+                    (script, timeout_ms),
+                    &mut consent_pending,
+                );
+                eprintln!(
+                    "  {page} {id}  {}",
+                    record
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("snackbar"))
+                        .map_or(record.errors.join("; "), Value::to_string)
+                );
+                results.youtube.push(record);
+                if gone {
+                    break;
+                }
             }
             session.driver.quit();
             drop(session);
@@ -2707,6 +2814,8 @@ mod tests {
             "--speedometer-warm",
             "--youtube-consent maybe",
             "--youtube-consent",
+            "--youtube-snackbar --browsers zephium-on,brave",
+            "--youtube-snackbar --youtube-playlist --browsers zephium-on",
         ] {
             assert!(Options::parse(&arguments(bad)).is_err(), "{bad}");
         }
