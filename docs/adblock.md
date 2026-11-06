@@ -359,6 +359,14 @@ reported upstream when it applies there.
   when the held data came from a request the quick fixes edited, which their
   `#reloadxhr` tag in the response's tracking URL shows; data inlined in the
   page or fetched ahead of a click is reloaded once with the same marker.
+  An unstarted player whose video was asked to play counts as held too: a
+  consent prompt answered on the watch page leaves the player that way, and
+  without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2). A
+  video in a playlist the player holds is reloaded through the playlist,
+  which keeps the player's list and place; a mix has no list in the player
+  and is reloaded as a video. In both, the next item played in order through
+  every kind of reload (2 runs, a mix and a playlist, 16 of 16), and loop and
+  shuffle were kept.
 
 ## Budgets and evidence
 
