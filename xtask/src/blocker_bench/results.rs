@@ -69,6 +69,11 @@ pub(super) struct Launch {
     /// The wait after Firefox was ready, in milliseconds.
     pub(super) settle_ms: Option<u64>,
     pub(super) error: Option<String>,
+    /// The components a Chromium profile held when its YouTube pass ended:
+    /// each one's name, version and when it was written, in seconds from the
+    /// launch, so a list fetched during the pass shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) components: Option<Vec<Value>>,
 }
 
 /// One page of a `--youtube` pass, with the script's raw result.

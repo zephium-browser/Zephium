@@ -788,6 +788,49 @@ fn shields_down(profile: &Path) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// The browser components a Chromium profile holds, from their manifests:
+/// name, version, and when each manifest was written in seconds from `since`
+/// (a component copied from the template is written just before it).
+fn profile_components(profile: &Path, since: SystemTime) -> Vec<Value> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(profile) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id.len() != 32 || !id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+            continue;
+        }
+        let Ok(versions) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let manifest = version.path().join("manifest.json");
+            let Some(value) = std::fs::read(&manifest)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            else {
+                continue;
+            };
+            let written = std::fs::metadata(&manifest)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .map(|time| match time.duration_since(since) {
+                    Ok(after) => after.as_secs_f64(),
+                    Err(before) => -before.duration().as_secs_f64(),
+                });
+            found.push(json!({
+                "id": id,
+                "name": value.get("name"),
+                "version": value.get("version"),
+                "writtenS": written.map(|seconds| (seconds * 10.0).round() / 10.0),
+            }));
+        }
+    }
+    found.sort_by_key(|component| component["name"].as_str().unwrap_or_default().to_owned());
+    found
+}
+
 /// Copies a profile, leaving out the locks and the port file a running
 /// browser keeps in it.
 fn copy_profile(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -1594,6 +1637,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 phase: "run".into(),
                 ..Launch::default()
             };
+            let launched = SystemTime::now();
             let mut session =
                 match context.launch(config, qa.as_ref(), &format!("{name}-youtube-r{run}")) {
                     Ok(session) => session,
@@ -1605,6 +1649,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                     }
                 };
             record_session(&mut launch, &session);
+            let launch_at = results.launches.len();
             results.launches.push(launch);
             let plan = context.plan(config);
             let feed = sites::YOUTUBE_FEED.to_string();
@@ -1680,6 +1725,10 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                         .map_or(record.errors.join("; "), Value::to_string)
                 );
                 results.youtube.push(record);
+            }
+            if let Some(profile) = &session._profile {
+                results.launches[launch_at].components =
+                    Some(profile_components(profile.path(), launched));
             }
             session.driver.quit();
             drop(session);
