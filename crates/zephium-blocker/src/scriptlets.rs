@@ -1061,7 +1061,7 @@ mod tests {
         }
     }
 
-    const MARKER: &str = r"www.youtube.com##+js(zephium-player-marker, channel lactmilli yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x)";
+    const MARKER: &str = r"www.youtube.com##+js(zephium-player-marker, channel lactmilli yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x, a.b*=t)";
 
     fn marker_rule(trust: ScriptletTrust) -> ScriptletRule {
         ScriptletRule {

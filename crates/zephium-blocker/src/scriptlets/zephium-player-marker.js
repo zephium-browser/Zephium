@@ -1,5 +1,5 @@
-// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, and text that marks a playability error as a block. See docs/adblock.md.
-function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) {
+// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried once with the same marker. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
+function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, requested) {
     const names = String(markers ?? '').split(/\s+/).filter((name) => /^[a-z0-9]+$/.test(name));
     const pairs = (spec, operator) => String(spec ?? '').split('|').map((pair) => {
         const at = pair.indexOf(operator);
@@ -10,9 +10,12 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
     const wait = Number(holdMs);
     const premiumAt = String(premium ?? '').indexOf('=');
     const blocked = String(blockText ?? '');
-    if (names.length === 0 || held.includes(undefined) || excused.includes(undefined) || !Number.isFinite(wait) || wait < 0 || premiumAt <= 0) {
+    const tagAt = String(requested ?? '').indexOf('*=');
+    if (names.length === 0 || held.includes(undefined) || excused.includes(undefined) || !Number.isFinite(wait) || wait < 0 || premiumAt <= 0 || tagAt <= 0) {
         return;
     }
+    const tagPath = String(requested).slice(0, tagAt).split('.');
+    const tag = String(requested).slice(tagAt + 2);
     const premiumPath = String(premium).slice(0, premiumAt).split('.');
     const premiumValue = String(premium).slice(premiumAt + 1);
     const platform = /^(Mozilla\/5\.0 \([^)]*)/;
@@ -76,15 +79,24 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
         return;
     }
 
-    const isPremium = () => {
-        let value = globalThis;
-        for (const key of premiumPath) {
+    const read = (root, path) => {
+        let value = root;
+        for (const key of path) {
             if (value === null || typeof value !== 'object') {
-                return false;
+                return undefined;
             }
             value = value[key];
         }
-        return value === premiumValue;
+        return value;
+    };
+    const isPremium = () => read(globalThis, premiumPath) === premiumValue;
+    const edited = (player) => {
+        try {
+            const value = read(player.getPlayerResponse?.(), tagPath);
+            return typeof value === 'string' && tag !== '' && value.includes(tag);
+        } catch (e) {
+            return false;
+        }
     };
     const holds = (stats) => stats !== null && typeof stats === 'object'
         && held.every(([key, value]) => stats[key] === value)
@@ -105,10 +117,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
     let video;
     let base;
     let heldSince;
-    // The page's own video came with its player data inlined in the page, so
-    // no request carried the marker: its first hold is retried with the same
-    // marker before moving on.
-    let inlined = new URLSearchParams(location.search).get('v');
+    let retried;
     const stop = () => {
         clearInterval(timer);
         timer = undefined;
@@ -177,8 +186,8 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
             return;
         }
         heldSince = undefined;
-        if (id === inlined) {
-            inlined = undefined;
+        if (!refusing && !edited(player) && retried !== id) {
+            retried = id;
         } else if (index + 1 < names.length) {
             index += 1;
         } else if (!restarted) {

@@ -594,6 +594,8 @@ const playerText = () => JSON.stringify({
 {
   const AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
   const marked = (marker) => AGENT.replace(') AppleWebKit', `; ${marker}) AppleWebKit`);
+  // A response to a request the quick fixes edited carries their tag in its tracking URL.
+  const TAGGED = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F%23reloadxhr' } } };
   const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '' } = {}) => {
     const listeners = {};
     let interval;
@@ -605,7 +607,7 @@ const playerText = () => JSON.stringify({
       getCurrentTime() { return this.time; },
       getStatsForNerds() { return this.stats; },
       getPlayerResponse() { return this.response; },
-      loadVideoById(id, start) { this.loads.push([id, start]); },
+      loadVideoById(id, start) { this.loads.push([id, start]); this.response = TAGGED; },
     };
     const context = {
       console,
@@ -624,7 +626,7 @@ const playerText = () => JSON.stringify({
     vm.createContext(context);
     vm.runInContext(files.map(source).join('\n'), context);
     vm.runInContext('Date.now = () => clock;', context);
-    context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019');
+    context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019', 'playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr');
     vm.runInContext(`var ytcfg = { data_: {}, get(key) { return this.data_[key]; }, set(values) { Object.assign(this.data_, values); } };
       ytcfg.set({ INNERTUBE_CONTEXT: { client: { clientName: 'WEB', userAgent: ${JSON.stringify(AGENT)} } } });`, context);
     const agent = () => vm.runInContext('ytcfg.get("INNERTUBE_CONTEXT").client.userAgent', context);
@@ -633,6 +635,8 @@ const playerText = () => JSON.stringify({
     return { context, player, agent, at, fire, watching: () => interval !== undefined };
   };
 
+  // The page's own data was inlined, so no marker reached it: its hold is
+  // retried with the same marker, and a hold on the edited request's data moves on.
   const page = youtube();
   assert.equal(page.agent(), marked('channel'));
   assert.ok(page.watching());
@@ -640,36 +644,52 @@ const playerText = () => JSON.stringify({
   page.at(999);
   assert.deepEqual(page.player.loads, []);
   page.at(1000);
-  assert.equal(page.agent(), marked('lactmilli'));
+  assert.equal(page.agent(), marked('channel'));
   assert.deepEqual(page.player.loads, [['v1', 0]]);
+  page.at(2000);
+  page.at(3000);
+  assert.equal(page.agent(), marked('lactmilli'));
+  assert.equal(page.player.loads.length, 2);
   // The marker that played is kept for the page's next video.
   page.fire('yt-navigate-start');
   assert.equal(page.agent(), marked('lactmilli'));
   // Every marker held: the list starts over once, then the page is left unmarked.
-  for (const [ms, marker] of [[2000, 'yahi'], [3000, 'inline'], [4000, 'channel'], [5000, 'lactmilli'], [6000, 'yahi'], [7000, 'inline']]) {
+  for (const [ms, marker] of [[4000, 'yahi'], [5000, 'inline'], [6000, 'channel'], [7000, 'lactmilli'], [8000, 'yahi'], [9000, 'inline']]) {
     page.at(ms);
     page.at(ms + 1000);
     assert.equal(page.agent(), marked(marker), marker);
   }
-  page.at(8000);
-  page.at(9000);
+  page.at(10000);
+  page.at(11000);
   assert.equal(page.agent(), AGENT);
-  assert.equal(page.player.loads.length, 7);
+  assert.equal(page.player.loads.length, 8);
   assert.ok(!page.watching());
   page.fire('yt-navigate-finish');
   assert.ok(!page.watching());
 
-  // The page's own video had its data inlined, which no marker reached: its
-  // first hold is retried with the same marker, the next one moves on.
-  const inlined = youtube({ search: '?v=v1&t=0' });
-  inlined.at(0);
-  inlined.at(1000);
-  assert.equal(inlined.agent(), marked('channel'));
-  assert.deepEqual(inlined.player.loads, [['v1', 0]]);
-  inlined.at(2000);
-  inlined.at(3000);
-  assert.equal(inlined.agent(), marked('lactmilli'));
-  assert.equal(inlined.player.loads.length, 2);
+  // Data YouTube fetched ahead of a click is retried once with the kept
+  // marker; when no edited response ever shows the tag, the next hold moves on.
+  const clicked = youtube();
+  clicked.at(0);
+  clicked.at(1000);
+  clicked.at(2000);
+  clicked.at(3000);
+  assert.equal(clicked.agent(), marked('lactmilli'));
+  Object.assign(clicked.player, { time: 0.5, state: 1 });
+  clicked.at(3250);
+  assert.ok(!clicked.watching());
+  const untagged = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F' } } };
+  Object.assign(clicked.player, { id: 'v2', time: 0, state: 3, response: untagged });
+  clicked.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
+  clicked.fire('yt-navigate-finish');
+  clicked.at(4000);
+  clicked.at(5000);
+  assert.equal(clicked.agent(), marked('lactmilli'));
+  assert.deepEqual(clicked.player.loads.slice(2), [['v2', 0]]);
+  clicked.at(6000);
+  clicked.at(7000);
+  assert.equal(clicked.agent(), marked('yahi'));
+  assert.deepEqual(clicked.player.loads.slice(2), [['v2', 0], ['v2', 0]]);
 
   // A video nobody asked to play, or one in a hidden page, is never reloaded:
   // only a page in view whose player is trying to play can be held.
@@ -709,10 +729,25 @@ const playerText = () => JSON.stringify({
   music.at(1000);
   assert.deepEqual(music.player.loads, [['v2', 0]]);
   assert.equal(music.agent(), marked('lactmilli'));
-  Object.assign(music.player, { state: 3, response: { playabilityStatus: { status: 'OK' } } });
+  // The refused marker's successor was asked for, so its hold moves on.
+  music.player.state = 3;
   music.at(2000);
   music.at(3000);
   assert.deepEqual(music.player.loads, [['v2', 0], ['v2', 0]]);
+  assert.equal(music.agent(), marked('yahi'));
+  // A hidden page's next video, fetched ahead, keeps the marker that played.
+  const next = youtube();
+  for (const ms of [0, 1000, 2000, 3000]) { next.at(ms); }
+  assert.equal(next.agent(), marked('lactmilli'));
+  Object.assign(next.player, { time: 0.5, state: 1 });
+  next.at(3250);
+  next.context.document.visibilityState = 'hidden';
+  Object.assign(next.player, { id: 'v2', time: 0, state: 3, response: { playabilityStatus: { status: 'OK' } } });
+  next.fire('yt-navigate-finish');
+  next.at(4000);
+  next.at(5000);
+  assert.equal(next.agent(), marked('lactmilli'));
+  assert.deepEqual(next.player.loads.slice(2), [['v2', 0]]);
 
   // A server-inserted ad is not a hold, and a video that has started is left alone.
   const ad = youtube();
@@ -736,6 +771,10 @@ const playerText = () => JSON.stringify({
   refused.at(0);
   assert.deepEqual(refused.player.loads, [['v1', 42]]);
   assert.equal(refused.agent(), marked('lactmilli'));
+  // Even on data no marker reached, and again on the next.
+  refused.player.response = { playabilityStatus: { status: 'UNPLAYABLE', errorScreen: { text: 'see support.google.com/youtube/answer/3037019' } } };
+  refused.at(250);
+  assert.equal(refused.agent(), marked('yahi'));
 
   // Premium is never marked; a fresh context from YouTube is marked again.
   const premium = youtube();
@@ -755,10 +794,12 @@ const playerText = () => JSON.stringify({
   vm.createContext(context);
   vm.runInContext(files.map(source).join('\n'), context);
   for (const args of [
-    ['', 'a=b', '', '1000', 'x=y', ''],
-    ['channel', 'nonsense', '', '1000', 'x=y', ''],
-    ['channel', 'a=b', '', 'soon', 'x=y', ''],
-    ['channel', 'a=b', '', '1000', 'premium', ''],
+    ['', 'a=b', '', '1000', 'x=y', '', 'a*=t'],
+    ['channel', 'nonsense', '', '1000', 'x=y', '', 'a*=t'],
+    ['channel', 'a=b', '', 'soon', 'x=y', '', 'a*=t'],
+    ['channel', 'a=b', '', '1000', 'premium', '', 'a*=t'],
+    ['channel', 'a=b', '', '1000', 'x=y', '', 'a=t'],
+    ['channel', 'a=b', '', '1000', 'x=y', ''],
   ]) {
     context.zephiumPlayerMarker(...args);
     assert.equal(Object.getOwnPropertyDescriptor(vm.runInContext('globalThis', context), 'ytcfg'), undefined, args.join(','));
