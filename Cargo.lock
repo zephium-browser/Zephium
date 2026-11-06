@@ -24,6 +24,7 @@ dependencies = [
  "percent-encoding",
  "precomputed-hash",
  "regex",
+ "regex-automata",
  "rustc-hash",
  "seahash",
  "selectors 0.32.0",
