@@ -14,36 +14,36 @@ controls product intent.
 
 ## Browser features
 
-- [Interface design](design/interface.md): why the browser chrome is shaped the way it is.
-- [Interface system](design/system.md): tokens, shared components and how to inspect them.
-- [Settings](design/settings.md): settings structure, search and navigation.
-- [Launcher](design/launcher.md): the floating search window and what it hands off.
-- [History](design/history.md): the history module, omnibox queries and site icons.
-- [Tasks](design/tasks-redesign.md): the shared Tasks surface for people and agents.
-- [Charts](design/charts.md): the chart kit used by Work results and Activity.
+- [Interface design](frontend.md#native-surfaces-and-presentation): why the browser chrome is shaped the way it is.
+- [Interface system](frontend.md#interface-rules): tokens, shared components and how to inspect them.
+- [Settings](frontend.md#ownership-ipc-and-lifetimes): settings structure, search and navigation.
+- [Launcher](architecture.md#6-history-navigation-and-launcher): the floating search window and what it hands off.
+- [History](architecture.md#6-history-navigation-and-launcher): the history module, omnibox queries and site icons.
+- [Tasks](frontend.md#interface-rules): the shared Tasks surface for people and agents.
+- [Charts](frontend.md#charts): the chart kit used by Work results and Activity.
 - [File workflows](file-workflows-windows-qa.md): upload and download ownership, recovery, and Windows acceptance checks.
 
 ## Work and AI
 
 - [Agentic browsing](agentic-browsing.md): the browser-execution layer behind Work and how it is qualified.
-- [Bounded browser session](agent-browser-session.md): the semantic locate/act controller session.
+- [Bounded browser session](agentic-browsing.md#contexts-resources-and-leases): the semantic locate/act controller session.
 - Work runtime subsystems:
-  [execution](agent-work-execution.md),
-  [scoped runtime](agent-work-scoped-runtime.md),
-  [composition](agent-work-composition.md),
-  [native lifetimes](agent-work-lifetimes.md),
-  [persistence](agent-work-persistence.md),
-  [retained resources](agent-work-resources.md),
-  [discovery](agent-work-discovery.md),
-  [inspection](agent-work-inspection.md),
-  [retained inspection evidence](agent-work-retained-inspection-evidence.md),
-  [native actions](agent-work-native-actions.md),
-  [retained actions](agent-work-retained-actions.md),
-  [forms](agent-work-forms.md),
-  [results](agent-work-results.md),
-  [artifacts](agent-work-artifacts.md),
-  [evidence](agent-work-evidence.md),
-  [review](agent-work-review.md).
+  [execution](work.md#authoring-planning-and-execution),
+  [scoped runtime](work.md#authoring-planning-and-execution),
+  [composition](work.md#ownership-and-entry-points),
+  [native lifetimes](work.md#retained-pages-and-execution-leases),
+  [persistence](work.md#persistence-and-recovery),
+  [retained resources](work.md#retained-pages-and-execution-leases),
+  [discovery](agentic-browsing.md#observation-and-references),
+  [inspection](agentic-browsing.md#observation-and-references),
+  [retained inspection evidence](work.md#results-and-evidence),
+  [native actions](agentic-browsing.md#actions-and-effect-verification),
+  [retained actions](work.md#retained-pages-and-execution-leases),
+  [forms](work.md#authoring-planning-and-execution),
+  [results](work.md#results-and-evidence),
+  [artifacts](work.md#results-and-evidence),
+  [evidence](work.md#results-and-evidence),
+  [review](work.md#confirmation-and-human-decisions).
 - [Evidence tooling](../eval/agentic-browsing/README.md): committed qualification manifests and the probes that produce them.
 
 ## Extensions
