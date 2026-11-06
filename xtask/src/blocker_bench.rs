@@ -251,6 +251,9 @@ struct Options {
     /// Zephium only: whether a playlist keeps its place and order when the
     /// player reloads a video.
     youtube_playlist: bool,
+    /// Zephium only: when the player's own "onSnackbarMessage" event fires,
+    /// against its stats, holds and requests.
+    youtube_snackbar: bool,
     youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
@@ -343,6 +346,10 @@ impl Options {
                     options.youtube = true;
                     options.youtube_playlist = true;
                 }
+                "--youtube-snackbar" => {
+                    options.youtube = true;
+                    options.youtube_snackbar = true;
+                }
                 "--youtube-consent" => {
                     options.youtube_consent = match value()?.as_str() {
                         "reject" => YoutubeConsent::Reject,
@@ -377,6 +384,12 @@ impl Options {
         }
         if options.youtube_playlist && options.browsers.iter().any(|config| !config.zephium()) {
             return Err("--youtube-playlist measures Zephium only".into());
+        }
+        if options.youtube_snackbar && options.browsers.iter().any(|config| !config.zephium()) {
+            return Err("--youtube-snackbar measures Zephium only".into());
+        }
+        if options.youtube_playlist && options.youtube_snackbar {
+            return Err("--youtube-playlist and --youtube-snackbar are separate passes".into());
         }
         if options.speedometer_warm && options.speedometer.is_none() {
             return Err("--speedometer-warm needs --speedometer".into());
@@ -1346,17 +1359,34 @@ fn youtube_consent_present(driver: &mut Driver, tab: &Value) -> Result<bool, Fai
         .unwrap_or(true))
 }
 
+/// `attempt`, again every `every` while it fails with the browser still
+/// there, as while a navigation replaces the page, until `within` has passed;
+/// then its last failure.
+fn retried<T>(
+    within: Duration,
+    every: Duration,
+    mut attempt: impl FnMut() -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let deadline = Instant::now() + within;
+    loop {
+        match attempt() {
+            Err(failure) if !failure.is_gone() && Instant::now() + every <= deadline => {
+                std::thread::sleep(every);
+            }
+            done => return done,
+        }
+    }
+}
+
 /// As [`youtube_consent_present`], retried while a navigation the answer
 /// caused makes the check fail; `None` if the page never gave a result.
 fn youtube_consent_settled(driver: &mut Driver, tab: &Value) -> Result<Option<bool>, Failure> {
-    let deadline = Instant::now() + CONSENT_RETRY_WITHIN;
-    loop {
-        match youtube_consent_present(driver, tab) {
-            Ok(present) => return Ok(Some(present)),
-            Err(failure) if failure.is_gone() => return Err(failure),
-            Err(_) if Instant::now() + CONSENT_RETRY > deadline => return Ok(None),
-            Err(_) => std::thread::sleep(CONSENT_RETRY),
-        }
+    match retried(CONSENT_RETRY_WITHIN, CONSENT_RETRY, || {
+        youtube_consent_present(driver, tab)
+    }) {
+        Ok(present) => Ok(Some(present)),
+        Err(failure) if failure.is_gone() => Err(failure),
+        Err(_) => Ok(None),
     }
 }
 
@@ -1369,12 +1399,12 @@ fn answer_youtube_consent(
     wait_ms: u64,
     answer: YoutubeConsent,
 ) -> Result<Option<YoutubeConsentOutcome>, Failure> {
-    let seen = eval(
-        driver,
-        tab,
-        &youtube_consent_script(wait_ms, answer),
-        EVAL_TIMEOUT_MS,
-    )?;
+    // The page may replace itself while the prompt is looked for, as when
+    // YouTube or a blocker reloads it; the new page is asked again.
+    let script = youtube_consent_script(wait_ms, answer);
+    let seen = retried(CONSENT_RETRY_WITHIN, CONSENT_RETRY, || {
+        eval(driver, tab, &script, EVAL_TIMEOUT_MS)
+    })?;
     let answered = seen.get("answered").and_then(Value::as_bool) == Some(true);
     match seen.get("page").and_then(Value::as_str) {
         Some("consent") => {
@@ -1710,6 +1740,9 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
     if context.options.youtube_playlist {
         return run_youtube_playlist(context, results, saved);
     }
+    if context.options.youtube_snackbar {
+        return run_youtube_snackbar(context, results, saved);
+    }
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
             let name = config.name();
@@ -1838,6 +1871,98 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             if let Some(profile) = &session._profile {
                 results.launches[launch_at].components =
                     Some(profile_components(profile.path(), launched));
+            }
+            session.driver.quit();
+            drop(session);
+            drop(qa);
+            results.save(saved)?;
+        }
+    }
+    Ok(())
+}
+
+/// `--youtube-snackbar`: a fresh profile's first watch page, where its consent
+/// prompt is answered, each video opened directly, then two opened in the page,
+/// with listeners on the player's "onSnackbarMessage" event, attached by a
+/// 50 ms look and by an observer on the player's container, that record each
+/// call and the player's stats around it.
+fn run_youtube_snackbar(
+    context: &Context,
+    results: &mut Results,
+    saved: &Path,
+) -> Result<(), String> {
+    let step = "snackbar";
+    for run in 1..=context.options.runs {
+        for config in &context.options.browsers {
+            let name = config.name();
+            eprintln!("run {run}/{} {name} {step}", context.options.runs);
+            let qa = QaSession::new(*config, &format!("s{run}"));
+            let mut launch = Launch {
+                config: name.to_string(),
+                run,
+                phase: step.into(),
+                ..Launch::default()
+            };
+            let mut session =
+                match context.launch(*config, Some(&qa), &format!("{name}-{step}-r{run}")) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("  {name} did not start: {error}");
+                        launch.error = Some(error);
+                        results.launches.push(launch);
+                        continue;
+                    }
+                };
+            if let Err(failure) = session.driver.call(
+                "preload",
+                json!({ "js": sites::YOUTUBE_SNACKBAR_PRELOAD }),
+                Duration::from_secs(30),
+            ) {
+                launch.error = Some(format!("the listener: {}", failure.message()));
+                results.launches.push(launch);
+                session.driver.quit();
+                continue;
+            }
+            record_session(&mut launch, &session);
+            results.launches.push(launch);
+            let plan = context.plan(*config);
+            let first = sites::first_watch_script(25);
+            let direct = sites::first_watch_script(20);
+            let inpage = sites::inpage_script(WATCH_SECONDS);
+            let mut pages: Vec<(&str, &str, &str, u64)> =
+                vec![("first-watch", VIDEOS[0].0, &first, 25_000 + 60_000)];
+            for (id, _) in VIDEOS {
+                pages.push(("direct", id, &direct, 20_000 + 60_000));
+            }
+            pages.push((
+                "inpage",
+                VIDEOS[4].0,
+                &inpage,
+                2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
+            ));
+            let mut consent_pending = true;
+            for (page, id, script, timeout_ms) in pages {
+                let url = format!("https://www.youtube.com/watch?v={id}");
+                let (record, gone) = youtube_step(
+                    &mut session,
+                    &plan,
+                    (*config, run),
+                    (page, Some(id), &url),
+                    (script, timeout_ms),
+                    &mut consent_pending,
+                );
+                eprintln!(
+                    "  {page} {id}  {}",
+                    record
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("snackbar"))
+                        .map_or(record.errors.join("; "), Value::to_string)
+                );
+                results.youtube.push(record);
+                if gone {
+                    break;
+                }
             }
             session.driver.quit();
             drop(session);
@@ -2022,12 +2147,13 @@ fn youtube_background_step(
 /// A video played in view for `PLAY_IN_VIEW_SECONDS`, its tab then sent
 /// behind the home feed, where the page moves on to a related video as
 /// autoplay would: a page that has played keeps playing hidden, so a hold
-/// there must still be ended.
+/// there must still be ended. Opened from the one video that is not music,
+/// whose related videos are not all mixes, which the move skips.
 fn youtube_hidden_next_step(
     session: &mut Session,
     (config, run): (Config, usize),
 ) -> (YoutubeStep, bool) {
-    let id = VIDEOS[2].0;
+    let id = VIDEOS[4].0;
     let url = format!("https://www.youtube.com/watch?v={id}");
     let mut record = YoutubeStep {
         config: config.name().to_string(),
@@ -2694,6 +2820,35 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_the_browser_survived_is_retried_until_the_window_ends() {
+        let mut calls = 0;
+        let answered = retried(Duration::from_secs(5), Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err(Failure::Rejected("navigated".into()))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(answered.unwrap(), 3);
+        let mut calls = 0;
+        let gone: Result<(), _> = retried(Duration::from_secs(5), Duration::ZERO, || {
+            calls += 1;
+            Err(Failure::Gone("closed".into()))
+        });
+        assert!(gone.unwrap_err().is_gone());
+        assert_eq!(calls, 1);
+        let mut calls = 0;
+        let late: Result<(), _> =
+            retried(Duration::from_millis(30), Duration::from_millis(10), || {
+                calls += 1;
+                Err(Failure::Rejected("navigated".into()))
+            });
+        assert!(!late.unwrap_err().is_gone());
+        assert!((2..=4).contains(&calls), "{calls}");
+    }
+
+    #[test]
     fn bad_options_are_refused() {
         for bad in [
             "--browsers brave,safari",
@@ -2707,6 +2862,8 @@ mod tests {
             "--speedometer-warm",
             "--youtube-consent maybe",
             "--youtube-consent",
+            "--youtube-snackbar --browsers zephium-on,brave",
+            "--youtube-snackbar --youtube-playlist --browsers zephium-on",
         ] {
             assert!(Options::parse(&arguments(bad)).is_err(), "{bad}");
         }

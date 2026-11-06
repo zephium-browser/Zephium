@@ -44,11 +44,14 @@
 ! before the next marker; a Premium page, which is never marked; and the text
 ! of the playability error YouTube shows a blocker; and the tag the quick
 ! fixes' referer edit leaves in the response's tracking URL, without which a
-! hold is on data no marker reached and is retried once with the same marker.
+! hold is on data no marker reached and is retried once with the same marker;
+! and the player event that announces a hold, which ends the wait at once.
 ! A marker no admitted quick fix edits on and strips is left out when compiling.
 ! Evidence, 2026-11-06, 5 videos x 5 runs, macOS: Brave marked 18/18 not held,
 ! unmarked 7/7 held; Zephium unmarked 25/25 held, stall median 8.5 s. On a
 ! direct load the first quick-fix marker, channel, was held in every run and
 ! lactmilli never (Brave 28/28 runs ended on lactmilli), so lactmilli comes
-! first.
-www.youtube.com##+js(zephium-player-marker, lactmilli channel yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019, playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr)
+! first. The player raised onSnackbarMessage at every hold the listener was on
+! in time (7 of 9 loads, the other 2 before it attached), about 1.5 s before
+! the poll acted, and never on a load that played.
+www.youtube.com##+js(zephium-player-marker, lactmilli channel yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019, playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr, onSnackbarMessage)

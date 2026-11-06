@@ -78,6 +78,8 @@ const watch = async (open) => {
   } catch {}
   return {
     videoId: id,
+    // When the link was clicked, on the page's clock, as the requests' times are.
+    openedAtMs: Math.round(openedMs),
     contentFrameMs,
     stalledMs,
     holdMs,
@@ -146,4 +148,5 @@ return {
   apiCalls: window.__benchApiCalls ?? null,
   holdStates: window.__benchHoldStates ?? null,
   markers: window.__benchMarkers ?? null,
+  snackbar: window.__benchSnackbar ?? null,
 };
