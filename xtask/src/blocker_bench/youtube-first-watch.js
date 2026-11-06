@@ -51,5 +51,6 @@ return {
   holdStates: (window.__benchHoldStates ?? []).slice(0, 8),
   holdSamples: (window.__benchHoldStates ?? []).length,
   consent: window.__benchConsent ?? null,
+  snackbar: window.__benchSnackbar ?? null,
   playability: (() => { try { return document.getElementById('movie_player')?.getPlayerResponse?.()?.playabilityStatus?.status ?? null; } catch { return null; } })(),
 };

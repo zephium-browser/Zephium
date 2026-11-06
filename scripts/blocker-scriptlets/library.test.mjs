@@ -607,44 +607,58 @@ const playerText = () => JSON.stringify({
   const HOLD = { buffer_health_seconds: '0.00 s', resolution: '0x0', debug_info: 'USDAI, SABR, s:49' };
   const PLAYING = { buffer_health_seconds: '4.20 s', resolution: '1280x720', debug_info: 'USDAI, SABR, s:49' };
   const TAGGED = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F%23reloadxhr' } } };
-  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '', prelude = '' } = {}) => {
+  const EVENT = 'onSnackbarMessage';
+  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '', prelude = '', pathname = '/watch' } = {}) => {
     const listeners = {};
-    let interval;
-    const player = {
+    const intervals = new Map();
+    let intervalId = 0;
+    const every = (delay) => [...intervals.values()].find((entry) => entry.delay === delay)?.handler;
+    const makePlayer = () => ({
       id: 'v1', time: 0, state: 3, loads: [], response: { playabilityStatus: { status: 'OK' } },
-      stats: { ...HOLD },
+      stats: { ...HOLD }, events: {},
+      addEventListener(type, handler) { (this.events[type] ??= []).push(handler); },
       getVideoData() { return { video_id: this.id }; },
       getPlayerState() { return this.state; },
       getCurrentTime() { return this.time; },
       getStatsForNerds() { return this.stats; },
       getPlayerResponse() { return this.response; },
       loadVideoById(id, start) { this.loads.push([id, start]); this.response = TAGGED; },
-    };
+    });
+    const page = { player: makePlayer() };
     const context = {
       console,
       URLSearchParams,
-      location: { pathname: '/watch', search },
+      location: { pathname, search },
       document: {
         readyState,
         visibilityState: 'visible',
         addEventListener: (type, handler) => { (listeners[type] ??= []).push(handler); },
-        getElementById: (id) => (id === 'movie_player' ? player : null),
+        getElementById: (id) => (id === 'movie_player' ? page.player : null),
       },
-      setInterval: (handler, delay) => { assert.equal(delay, 250); interval = handler; return 1; },
-      clearInterval: () => { interval = undefined; },
+      setInterval: (handler, delay) => { assert.ok(delay === 250 || delay === 50, String(delay)); intervals.set(++intervalId, { handler, delay }); return intervalId; },
+      clearInterval: (id) => { intervals.delete(id); },
       clock: 0,
     };
     vm.createContext(context);
     vm.runInContext(files.map(source).join('\n'), context);
     vm.runInContext('Date.now = () => clock;', context);
     vm.runInContext(prelude, context);
-    context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019', 'playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr');
+    context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019', 'playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr', EVENT);
     vm.runInContext(`var ytcfg = { data_: {}, get(key) { return this.data_[key]; }, set(values) { Object.assign(this.data_, values); } };
       ytcfg.set({ INNERTUBE_CONTEXT: { client: { clientName: 'WEB', userAgent: ${JSON.stringify(AGENT)} } } });`, context);
     const agent = () => vm.runInContext('ytcfg.get("INNERTUBE_CONTEXT").client.userAgent', context);
-    const at = (ms) => { context.clock = ms; interval?.(); };
+    const at = (ms) => { context.clock = ms; every(250)?.(); };
     const fire = (type) => listeners[type]?.forEach((handler) => handler());
-    return { context, player, agent, at, fire, watching: () => interval !== undefined };
+    // The 50 ms look for the player, and the player's hold event.
+    const find = () => every(50)?.();
+    const signal = () => page.player.events[EVENT]?.forEach((handler) => handler(1));
+    return {
+      context, agent, at, fire, find, signal, makePlayer,
+      get player() { return page.player; },
+      set player(value) { page.player = value; },
+      watching: () => every(250) !== undefined,
+      finding: () => every(50) !== undefined,
+    };
   };
 
   // The page's own data was inlined, so no marker reached it: its hold is
@@ -783,6 +797,165 @@ const playerText = () => JSON.stringify({
   late.at(62000);
   late.at(63000);
   assert.deepEqual(late.player.loads, [['v1', 0]]);
+
+  // A navigation that never finished guards the player only for a while,
+  // and not past playback asked for again.
+  const abandoned = youtube();
+  abandoned.fire('yt-navigate-start');
+  for (const ms of [0, 1000, 5000, 9750]) { abandoned.at(ms); }
+  assert.deepEqual(abandoned.player.loads, []);
+  abandoned.at(10000);
+  abandoned.at(11000);
+  assert.deepEqual(abandoned.player.loads, [['v1', 0]]);
+  const replayed = youtube();
+  replayed.fire('yt-navigate-start');
+  replayed.at(0);
+  replayed.fire('play');
+  replayed.at(250);
+  replayed.at(1250);
+  assert.deepEqual(replayed.player.loads, [['v1', 0]]);
+
+  // The player's hold event ends the wait at once when its stats show the
+  // hold, under the same retry and marker rules as the poll.
+  const announced = youtube();
+  announced.find();
+  assert.ok(!announced.finding());
+  assert.equal(announced.player.events[EVENT].length, 1);
+  announced.at(0);
+  announced.signal();
+  assert.deepEqual(announced.player.loads, [['v1', 0]]);
+  assert.equal(announced.agent(), marked('channel'));
+
+  // Normal stats, or a player that is not trying to play, are no hold.
+  const normal = youtube();
+  normal.find();
+  Object.assign(normal.player, { state: 1, stats: PLAYING });
+  normal.signal();
+  Object.assign(normal.player, { state: 2, stats: HOLD });
+  normal.signal();
+  assert.deepEqual(normal.player.loads, []);
+  // An unstarted player asked to play is left to the poll.
+  const unstarted = youtube();
+  unstarted.find();
+  Object.assign(unstarted.player, { state: -1, querySelector: () => ({ paused: false }) });
+  unstarted.at(0);
+  unstarted.signal();
+  assert.deepEqual(unstarted.player.loads, []);
+  unstarted.at(1000);
+  assert.deepEqual(unstarted.player.loads, [['v1', 0]]);
+
+  // Not while a reload of its own is pending, and once per video: later
+  // holds of that video wait for the poll.
+  const pendingReload = youtube();
+  pendingReload.find();
+  pendingReload.at(0);
+  pendingReload.at(1000);
+  assert.equal(pendingReload.player.loads.length, 1);
+  pendingReload.signal();
+  assert.equal(pendingReload.player.loads.length, 1);
+  pendingReload.at(1250);
+  pendingReload.signal();
+  assert.equal(pendingReload.player.loads.length, 2);
+  pendingReload.at(1500);
+  pendingReload.signal();
+  assert.equal(pendingReload.player.loads.length, 2);
+  pendingReload.at(2500);
+  assert.equal(pendingReload.player.loads.length, 3);
+
+  // A recreated player gets its own listener, from the look a navigation
+  // starts or from the poll.
+  const recreated = youtube();
+  recreated.find();
+  const first = recreated.player;
+  recreated.player = recreated.makePlayer();
+  recreated.fire('yt-navigate-finish');
+  assert.ok(recreated.finding());
+  recreated.find();
+  assert.equal(recreated.player.events[EVENT].length, 1);
+  assert.equal(first.events[EVENT].length, 1);
+  recreated.signal();
+  assert.deepEqual(recreated.player.loads, [['v1', 0]]);
+  const polled = youtube();
+  polled.player = polled.makePlayer();
+  polled.at(0);
+  assert.equal(polled.player.events[EVENT].length, 1);
+
+  // A player whose API is not ready yet is looked for again.
+  const unready = youtube();
+  unready.player = { ...unready.makePlayer(), getPlayerState: undefined };
+  unready.find();
+  assert.ok(unready.finding());
+  assert.equal(unready.player.events[EVENT], undefined);
+  unready.player.getPlayerState = function () { return this.state; };
+  unready.find();
+  assert.ok(!unready.finding());
+  assert.equal(unready.player.events[EVENT].length, 1);
+
+  // A player found after its event was raised still has the poll.
+  const missed = youtube();
+  missed.player = { ...missed.makePlayer(), addEventListener: undefined };
+  missed.find();
+  assert.ok(missed.finding());
+  missed.at(0);
+  missed.at(999);
+  assert.deepEqual(missed.player.loads, []);
+  missed.at(1000);
+  assert.deepEqual(missed.player.loads, [['v1', 0]]);
+
+  // During a navigation the event acts for the next video, never the one left.
+  const navigated = youtube();
+  navigated.find();
+  navigated.fire('yt-navigate-start');
+  navigated.signal();
+  assert.deepEqual(navigated.player.loads, []);
+  navigated.player.id = 'v2';
+  navigated.signal();
+  assert.deepEqual(navigated.player.loads, [['v2', 0]]);
+
+  // Leaving a video and coming back gives it the event again, as it gives
+  // it its retries.
+  const revisit = youtube();
+  revisit.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
+  revisit.find();
+  for (const ms of [0, 1000, 2000, 3000, 4000, 5000]) { revisit.at(ms); }
+  assert.equal(revisit.player.loads.length, 2);
+  revisit.signal();
+  assert.equal(revisit.player.loads.length, 2);
+  revisit.fire('yt-navigate-start');
+  revisit.player.id = 'v2';
+  revisit.fire('yt-navigate-finish');
+  revisit.at(5250);
+  revisit.player.id = 'v1';
+  revisit.at(5500);
+  revisit.signal();
+  assert.equal(revisit.player.loads.length, 3);
+
+  // A page with no video looks for no player, unless a navigation may lead
+  // to one; one that ends elsewhere stops the look.
+  const home = youtube({ pathname: '/' });
+  home.player = null;
+  assert.ok(!home.finding());
+  home.fire('yt-navigate-start');
+  home.find();
+  assert.ok(home.finding());
+  home.fire('yt-navigate-finish');
+  home.find();
+  assert.ok(!home.finding());
+  home.fire('yt-navigate-start');
+  home.context.location.pathname = '/watch';
+  home.fire('yt-navigate-finish');
+  home.player = home.makePlayer();
+  home.find();
+  assert.ok(!home.finding());
+  assert.equal(home.player.events[EVENT].length, 1);
+
+  // An event before watching began starts it.
+  const beforeWatch = youtube({ readyState: 'loading' });
+  beforeWatch.find();
+  assert.ok(!beforeWatch.watching());
+  beforeWatch.signal();
+  assert.ok(beforeWatch.watching());
+  assert.deepEqual(beforeWatch.player.loads, [['v1', 0]]);
 
   // Each video has its own allowance of same-marker retries.
   const revisited = youtube();
@@ -943,6 +1116,7 @@ const playerText = () => JSON.stringify({
     ['channel', 'a=b', '', '1000', 'premium', '', 'a*=t'],
     ['channel', 'a=b', '', '1000', 'x=y', '', 'a=t'],
     ['channel', 'a=b', '', '1000', 'x=y', ''],
+    ['channel', 'a=b', '', '1000', 'x=y', '', 'a*=t', 'on-hold'],
   ]) {
     context.zephiumPlayerMarker(...args);
     assert.equal(Object.getOwnPropertyDescriptor(vm.runInContext('globalThis', context), 'ytcfg'), undefined, args.join(','));

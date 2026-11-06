@@ -1559,6 +1559,7 @@ fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
             marked.contains(r#"zephiumPlayerMarker("lactmilli channel yahi inline", "#),
             "{target:?}"
         );
+        assert!(marked.contains(r#"baseUrl*=reloadxhr", "onSnackbarMessage")"#));
         assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
         assert!(program(false).is_none_or(|script| !script.contains("zephiumPlayerMarker(\"")));
     }

@@ -360,7 +360,24 @@ reported upstream when it applies there.
   `#reloadxhr` tag in the response's tracking URL shows; data inlined in the
   page or fetched ahead of a click is reloaded with the same marker, at most
   twice per video, and never moves it. While a reload it asked for is still
-  unanswered, the player's wait is not counted as a hold.
+  unanswered, the player's wait is not counted as a hold. The player's own
+  `onSnackbarMessage` event, a scriptlet argument, ends the wait at once,
+  once per video, when the player's stats show the hold; the poll stays for
+  holds the listener misses. In a probe (macOS, 2026-11-06, 9 loads, every one
+  held) the event came at every hold the listener was attached for, 7 of 9,
+  about 1.5 s before the poll acted, and on none of the 8 loads that played;
+  the other 2 were raised before the listener attached. No global function is
+  wrapped: a wrapped `Map.prototype.has` would show in its `toString`.
+  With it (macOS, 2026-11-06, 5 videos x 5 runs and two in-page clicks per
+  run): no in-page video was held 1 s or more (0 of 10, against 10 of 10
+  before), and the event ended 10 of 25 direct-load holds, with a stall of
+  0 to 500 ms. YouTube often raises it within 2 ms of the player's API
+  appearing, before any listener can be attached, so the other 15 waited for
+  the poll (stall 1000 to 1750 ms) and the direct-load stall median stayed
+  1250 ms. Observing the player's container instead attached later: the
+  container appears after the player.
+  A navigation that never finishes stops guarding the player after 10 s, or
+  when playback is asked for again.
   An unstarted player whose video was asked to play counts as held too: a
   consent prompt answered on the watch page leaves the player that way:
   without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2), and
