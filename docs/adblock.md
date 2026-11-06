@@ -362,13 +362,16 @@ reported upstream when it applies there.
   twice per video, and never moves it. While a reload it asked for is still
   unanswered, the player's wait is not counted as a hold.
   An unstarted player whose video was asked to play counts as held too: a
-  consent prompt answered on the watch page leaves the player that way, and
-  without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2). A
+  consent prompt answered on the watch page leaves the player that way:
+  without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2), and
+  with it played 1.8 to 2.0 s after the answer (4 of 4), never reloaded while
+  the prompt showed. A
   video in a playlist the player holds is reloaded through the playlist,
   which keeps the player's list and place; a mix has no list in the player
   and is reloaded as a video. In both, the next item played in order through
   every kind of reload (2 runs, a mix and a playlist, 16 of 16), and loop and
-  shuffle were kept.
+  shuffle were kept. In a later run, YouTube's mix once went on to a video
+  outside its panel with no request from Zephium.
 
 ## Budgets and evidence
 
