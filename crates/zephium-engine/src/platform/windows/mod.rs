@@ -76,6 +76,7 @@ mod native_paths;
 pub(crate) use apps::{external_app_name, open_external_app};
 mod page_memory;
 mod paint;
+mod refused_frames;
 pub(crate) use page_memory::{main_frame_id, sample_renderers};
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
@@ -315,6 +316,8 @@ fn configure_with_credential_denied(
         core14: core14.clone(),
         frame_token: None,
         judged_frame_token: None,
+        refused_frames: Rc::default(),
+        refused_frame_requests: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
@@ -491,6 +494,8 @@ pub struct SecurityPolicy {
     core14: ICoreWebView2_14,
     frame_token: Option<i64>,
     judged_frame_token: Option<i64>,
+    refused_frames: Rc<RefCell<refused_frames::RefusedFrameDocuments>>,
+    refused_frame_requests: Option<refused_frames::RefusedFrameRequests>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
@@ -546,10 +551,16 @@ impl SecurityPolicy {
 
     /// Cancels each frame navigation `blocks` refuses. The security handler
     /// runs first, so a frame it cancelled stays cancelled.
+    ///
+    /// WebView2 sends the frame's request without waiting for this answer,
+    /// so each refused address is also handed to the view's request filter,
+    /// which answers that request itself before it leaves. A redirect hop is
+    /// judged and handed over the same way.
     pub fn judge_frame_navigations(
         &mut self,
         blocks: impl Fn(&str) -> bool + 'static,
     ) -> windows_core::Result<()> {
+        let refused = self.refused_frames.clone();
         let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
                 return Ok(());
@@ -561,6 +572,10 @@ impl SecurityPolicy {
                 });
                 if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
+                    if let (Some(uri), Ok(mut refused)) = (uri.as_deref(), refused.try_borrow_mut())
+                    {
+                        refused.record(uri, std::time::Instant::now());
+                    }
                 }
             }
             Ok(())
@@ -572,6 +587,19 @@ impl SecurityPolicy {
         };
         if let Some(previous) = self.judged_frame_token.replace(token) {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
+        }
+        if self.refused_frame_requests.is_none() {
+            // Without it a refused frame is still never shown; only its
+            // request goes out, as it did before.
+            match refused_frames::RefusedFrameRequests::hold(
+                &self.core,
+                self.refused_frames.clone(),
+            ) {
+                Ok(held) => self.refused_frame_requests = Some(held),
+                Err(error) => {
+                    eprintln!("content blocker: refused frame requests are not held: {error}")
+                }
+            }
         }
         Ok(())
     }
@@ -590,6 +618,7 @@ impl Drop for SecurityPolicy {
         if let Some(token) = self.judged_frame_token.take() {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
         }
+        self.refused_frame_requests = None;
         if let Some(token) = self.external_token.take() {
             let _ = unsafe { self.core18.remove_LaunchingExternalUriScheme(token) };
         }
