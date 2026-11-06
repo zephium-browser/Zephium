@@ -969,28 +969,34 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
         return 0;
     }
     let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
-    let related = |one: &str, other: &str| {
-        one == other
-            || one
-                .strip_suffix(other)
-                .is_some_and(|rest| rest.ends_with('.'))
-            || other
-                .strip_suffix(one)
-                .is_some_and(|rest| rest.ends_with('.'))
-    };
-    // An exception that names a related host on a path that may overlap.
+    // Each block under its host and under every domain above it, so an
+    // exception looks up blocks on related hosts only, not every block.
+    let mut by_host: std::collections::HashMap<&str, Vec<&Parsed>> = Default::default();
+    let mut below: std::collections::HashMap<&str, Vec<&Parsed>> = Default::default();
+    for block in &blocks {
+        let Some(host) = block.host.as_deref() else {
+            continue;
+        };
+        by_host.entry(host).or_default().push(block);
+        for (dot, _) in host.match_indices('.') {
+            below.entry(&host[dot + 1..]).or_default().push(block);
+        }
+    }
+    // An exception that names a related host (the same, one above or one
+    // below) on a path that may overlap.
     let overlaps = |exception: &Parsed| {
-        let Some(host) = &exception.host else {
+        let Some(host) = exception.host.as_deref() else {
             return false;
         };
-        blocks.iter().any(|block| {
-            block
-                .host
-                .as_deref()
-                .is_some_and(|blocked| related(host, blocked))
-                && (block.path.starts_with(&exception.path)
-                    || exception.path.starts_with(&block.path))
-        })
+        let same_or_above =
+            std::iter::once(host).chain(host.match_indices('.').map(|(dot, _)| &host[dot + 1..]));
+        same_or_above
+            .filter_map(|domain| by_host.get(domain))
+            .chain(below.get(host))
+            .flatten()
+            .any(|block| {
+                block.path.starts_with(&exception.path) || exception.path.starts_with(&block.path)
+            })
     };
     prepared
         .iter()

@@ -1831,16 +1831,17 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
         FilterSource::new(
             id("ublock-badware"),
             SourceFormat::Standard,
-            "||cdn.example/bad/*$script\n||scam.example^$all\n||landing.example^$doc\n||gone.example^$all,badfilter"
+            "||cdn.example/bad/*$script\n||scam.example^$all\n||landing.example^$doc\n||gone.example^$all,badfilter\n||evil.hosting.example^$script"
                 .to_owned(),
         )
     };
     let other_rules = [
         "||ads.example^",
-        // Counted: the blocked path, a host below the blocked one, and a
-        // $badfilter for the badware rule itself.
+        // Counted: the blocked path, a host below the blocked one, a host
+        // above it, and a $badfilter for the badware rule itself.
         "@@||cdn.example/bad/ok.js",
         "@@||sub.scam.example^$script",
+        "@@||hosting.example/js/$script",
         "||scam.example^$all,badfilter",
         // Not counted: another path, a page-only badware host, no host
         // named, an exception for page styles only, and a $badfilter for
@@ -1866,7 +1867,7 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
         .unwrap();
     let shadowed =
         |rules: &crate::CompiledRules| rules.report().runtime().unwrap().badware_shadowed_rules();
-    assert_eq!(shadowed(&compiled), 3);
+    assert_eq!(shadowed(&compiled), 4);
     // Without the badware list nothing is shadowed.
     let alone = Compiler::default()
         .compile(CompileTarget::Runtime, vec![other()])
