@@ -57,7 +57,8 @@ const requests = () => (window.__benchPlayerRequests ?? []).length;
 const ending = async () => {
   const before = context();
   const sent = requests();
-  const expected = items()[before.panelAt + 1] ?? null;
+  // Unknown when the current video is not in the panel, so order is not claimed.
+  const expected = before.panelAt >= 0 ? (items()[before.panelAt + 1] ?? null) : null;
   const duration = call('getDuration') ?? video.duration;
   call('seekTo', Math.max(0, duration - 3), true);
   call('playVideo');

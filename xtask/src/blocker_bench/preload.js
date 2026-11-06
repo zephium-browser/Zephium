@@ -111,11 +111,14 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   Object.defineProperty(window, '__benchHoldStates', { value: holds });
   Object.defineProperty(window, '__benchMarkers', { value: markers });
   Object.defineProperty(window, '__benchConsent', { value: consent });
+  // Shown when any match is visible: a hidden copy may come first.
   const shown = (selector) => {
-    const element = document.querySelector(selector);
-    if (!element) return 'absent';
-    const box = element.getBoundingClientRect();
-    return box.width > 0 && box.height > 0 && (!element.checkVisibility || element.checkVisibility()) ? 'shown' : 'hidden';
+    const elements = [...document.querySelectorAll(selector)];
+    if (elements.length === 0) return 'absent';
+    return elements.some((element) => {
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && box.height > 0 && (!element.checkVisibility || element.checkVisibility());
+    }) ? 'shown' : 'hidden';
   };
   document.addEventListener('click', (event) => {
     if (consent.length < 120) {

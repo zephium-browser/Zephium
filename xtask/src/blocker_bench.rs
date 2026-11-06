@@ -2854,6 +2854,42 @@ mod tests {
     }
 
     #[test]
+    fn profile_components_read_valid_manifests_and_skip_the_rest() {
+        let profile = tempfile::tempdir().unwrap();
+        let component = |id: &str, version: &str, manifest: Option<&str>| {
+            let directory = profile.path().join(id).join(version);
+            std::fs::create_dir_all(&directory).unwrap();
+            if let Some(manifest) = manifest {
+                std::fs::write(directory.join("manifest.json"), manifest).unwrap();
+            }
+        };
+        let id = "a".repeat(32);
+        component(
+            &id,
+            "1.0.2",
+            Some(r#"{"name":"Filters","version":"1.0.2"}"#),
+        );
+        component(&"b".repeat(32), "1", Some("{not json"));
+        component(&"c".repeat(32), "1", None);
+        component(
+            &"z".repeat(32),
+            "1",
+            Some(r#"{"name":"Not a component id"}"#),
+        );
+        component("Default", "1", Some(r#"{"name":"A profile folder"}"#));
+        let since = SystemTime::now() - Duration::from_secs(60);
+        let found = profile_components(profile.path(), since);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["id"], id);
+        assert_eq!(found[0]["name"], "Filters");
+        assert_eq!(found[0]["version"], "1.0.2");
+        assert!(found[0]["writtenS"]
+            .as_f64()
+            .is_some_and(|seconds| seconds > 0.0));
+        assert!(profile_components(&profile.path().join("missing"), since).is_empty());
+    }
+
+    #[test]
     fn a_shared_brave_template_uses_the_requested_brave_binary() {
         let context = Context {
             executables: BTreeMap::from([("brave-off", PathBuf::from("/x/brave"))]),
