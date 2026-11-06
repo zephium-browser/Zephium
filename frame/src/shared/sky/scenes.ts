@@ -55,10 +55,25 @@ export const seen = (scene: Scene) => shown.has(scene);
 /** Whether this picture is decoded, so it can be shown at once. */
 export const isDecoded = (url: string) => decoded.has(url);
 
-/** Decodes the picture a sky is drawn from, off the main thread, so it is
- *  shown whole or not at all: the one for `width`, or the whole sky. */
-export function decode(scene: Scene, width?: number): Promise<void> {
-  const url = width === undefined ? SCENES[scene] : skyImage(scene, width);
+/** The decoded picture to draw a sky `width` page pixels across from: the
+ *  narrowest decoded one that covers it, else the widest decoded one, else
+ *  none. `covers` says whether it is wide enough to keep. */
+export function decodedFor(
+  scene: Scene,
+  width: number,
+  density: number = globalThis.devicePixelRatio || 1,
+): { url: string; covers: boolean } | null {
+  const needed = width * density;
+  const held = SIZES[scene].filter(([, url]) => decoded.has(url));
+  const covering = held.find(([kept]) => kept >= needed);
+  if (covering) return { url: covering[1], covers: true };
+  const widest = held.at(-1);
+  return widest ? { url: widest[1], covers: false } : null;
+}
+
+/** Decodes a picture a sky is drawn from, off the main thread, so it is
+ *  shown whole or not at all: by default the whole sky. */
+export function decode(scene: Scene, url: string = SCENES[scene]): Promise<void> {
   if (decoded.has(url)) return Promise.resolve();
   const pending = decoding.get(url);
   if (pending) return pending;

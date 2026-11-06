@@ -26,8 +26,8 @@
   import { reducedMotion } from "$shared/lib/motion";
   import {
     decode,
+    decodedFor,
     FROSTS,
-    isDecoded,
     placeSky,
     placeSkyInWindow,
     skyImage,
@@ -196,28 +196,43 @@
   // The sky arrives once a session, as the first new tab opens, and is simply
   // there on every one after.
   const arriving = !seen(untrack(() => scene));
-  // The sky on show is always a picture already decoded: a resize or a new
-  // scene keeps the last one until its replacement has decoded.
-  let shown = $state<{ scene: Scene; url: string } | null>(null);
+  // Only a decoded picture is ever drawn. A later new tab starts from one this
+  // session already decoded, and a resize or a new scene keeps the last one
+  // until its replacement has decoded.
+  type Shown = { scene: Scene; url: string | null };
+  const held = (scene: Scene, width: number): Shown | null => {
+    const picture = decodedFor(scene, width);
+    return picture && { scene, url: picture.url };
+  };
+  let shown = $state<Shown | null>(
+    held(
+      untrack(() => scene),
+      0,
+    ),
+  );
   $effect(() => {
     // Nothing is decoded before the page is measured, so no picture is
     // decoded for a width the page never has.
     if (!useSky || !measured) return;
-    const wanted = { scene, url: skyPicture };
-    if (isDecoded(wanted.url)) {
-      shown = wanted;
-      return;
-    }
+    const wantedScene = scene;
+    const wanted = skyPicture;
+    const ready = decodedFor(
+      wantedScene,
+      untrack(() => sky.w),
+    );
+    if (ready) shown = { scene: wantedScene, url: ready.url };
+    if (ready?.covers) return;
     let live = true;
     // A sky that cannot be decoded leaves the page its own colour; it never
     // keeps the name and the controls hidden.
-    const reveal = () => {
-      if (live) shown = wanted;
-    };
-    void decode(
-      wanted.scene,
-      untrack(() => sky.w),
-    ).then(reveal, reveal);
+    void decode(wantedScene, wanted).then(
+      () => {
+        if (live) shown = { scene: wantedScene, url: wanted };
+      },
+      () => {
+        if (live) shown = { scene: wantedScene, url: ready?.url ?? null };
+      },
+    );
     return () => {
       live = false;
     };
@@ -359,7 +374,7 @@
         {/key}
       {:else if useSky}<div
           class="sky"
-          style:background-image={`url("${shown?.url ?? skyPicture}")`}
+          style:background-image={shown?.url ? `url("${shown.url}")` : null}
           style:background-size={`${sky.w}px ${sky.h}px`}
           style:background-position={`${sky.x}px ${sky.y}px`}
         ></div>{/if}

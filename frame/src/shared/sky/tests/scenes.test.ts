@@ -53,12 +53,12 @@ describe("decode", () => {
     const narrow = skyImage("day", 1000, 1);
     const wide = skyImage("day", 2400, 1);
 
-    await Promise.all([decode("day", 1000), decode("day", 1000)]);
+    await Promise.all([decode("day", narrow), decode("day", narrow)]);
     expect(isDecoded(narrow)).toBe(true);
     expect(isDecoded(wide)).toBe(false);
 
-    await decode("day", 2400);
-    await decode("day", 1000);
+    await decode("day", wide);
+    await decode("day", narrow);
     expect(isDecoded(wide)).toBe(true);
     expect(decoded).toEqual([narrow, wide]);
   });
@@ -67,11 +67,26 @@ describe("decode", () => {
     const decoded = images(1);
     const url = skyImage("night", 1000, 1);
 
-    await expect(decode("night", 1000)).rejects.toThrow("undecodable");
+    await expect(decode("night", url)).rejects.toThrow("undecodable");
     expect(isDecoded(url)).toBe(false);
 
-    await decode("night", 1000);
+    await decode("night", url);
     expect(isDecoded(url)).toBe(true);
     expect(decoded).toEqual([url, url]);
+  });
+
+  it("draws from the narrowest decoded picture that covers the sky, else the widest decoded one", async () => {
+    images();
+    // A session of its own, with nothing decoded yet.
+    vi.resetModules();
+    const { decode, decodedFor, SCENES, skyImage } = await import("../scenes");
+    expect(decodedFor("night", 1000, 1)).toBeNull();
+    const middle = skyImage("night", 2400, 1);
+    await decode("night", middle);
+    expect(decodedFor("night", 1000, 1)).toEqual({ url: middle, covers: true });
+    expect(decodedFor("night", 3000, 1)).toEqual({ url: middle, covers: false });
+    await decode("night", SCENES.night);
+    expect(decodedFor("night", 3000, 1)).toEqual({ url: SCENES.night, covers: true });
+    expect(decodedFor("night", 2000, 1)).toEqual({ url: middle, covers: true });
   });
 });

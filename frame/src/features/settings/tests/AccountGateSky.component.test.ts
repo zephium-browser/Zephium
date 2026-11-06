@@ -1,46 +1,68 @@
 import "$styles/global.css";
 import { createRawSnippet } from "svelte";
-import { expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { skyImage, type Scene } from "$shared/sky";
+import { isDecoded } from "$shared/sky";
 import AccountGate from "../components/account/AccountGate.svelte";
 
-const decodes = vi.hoisted(() => [] as { width: number | undefined; finish: () => void }[]);
-vi.mock("$shared/sky", async (original) => {
-  const real = await original<typeof import("$shared/sky")>();
-  return {
-    ...real,
-    isDecoded: () => false,
-    decode: (_scene: Scene, width?: number) =>
-      new Promise<void>((finish) => {
-        decodes.push({ width, finish });
-      }),
-  };
+/** Each picture's decode, finished when the test says so. */
+const decodes: { url: string; finish: () => void }[] = [];
+beforeEach(() => {
+  vi.stubGlobal(
+    "Image",
+    class {
+      src = "";
+      decode() {
+        return new Promise<void>((finish) => {
+          decodes.push({ url: this.src, finish });
+        });
+      }
+    },
+  );
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
-test("a resize to a wider picture keeps the decoded sky on show until the wider one has decoded", async () => {
-  const screen = await render(AccountGate, {
-    children: createRawSnippet(() => ({ render: () => "<p>Sign in</p>" })),
+const children = createRawSnippet(() => ({ render: () => "<p>Sign in</p>" }));
+const pictureOf = (element: HTMLElement) =>
+  /url\("(.+)"\)/u.exec(element.style.backgroundImage)?.[1] ?? null;
+
+test("the sky is only ever drawn from a decoded picture, through a resize and on the next page", async () => {
+  const first = await render(AccountGate, { children });
+  first.container.style.cssText = "inline-size:600px;block-size:300px";
+  const sky = first.container.querySelector<HTMLElement>(".sky")!;
+  const gate = first.container.querySelector<HTMLElement>(".account-gate")!;
+  const drawn: { url: string; decoded: boolean }[] = [];
+  const watch = new MutationObserver(() => {
+    const url = pictureOf(sky);
+    if (url) drawn.push({ url, decoded: isDecoded(url) });
   });
-  screen.container.style.cssText = "inline-size:600px;block-size:300px";
-  const gate = () => screen.container.querySelector<HTMLElement>(".account-gate")!;
-  const sky = () => screen.container.querySelector<HTMLElement>(".sky")!.style.backgroundImage;
-  const picture = (width: number | undefined) =>
-    `url("${skyImage(gate().dataset.sky as Scene, width ?? 0)}")`;
+  watch.observe(sky, { attributes: true, attributeFilter: ["style"] });
 
   await expect.poll(() => decodes.length).toBe(1);
-  expect(decodes[0]!.width).toBeGreaterThan(0);
+  expect(pictureOf(sky)).toBeNull();
   decodes[0]!.finish();
-  await expect.poll(() => gate().dataset.ready).toBe("true");
-  const narrow = sky();
-  expect(narrow).toBe(picture(decodes[0]!.width));
+  await expect.poll(() => pictureOf(sky)).toBe(decodes[0]!.url);
+  expect(gate.dataset.ready).toBe("true");
 
-  screen.container.style.inlineSize = "3000px";
+  first.container.style.inlineSize = "3000px";
   await expect.poll(() => decodes.length).toBe(2);
-  expect(picture(decodes[1]!.width)).not.toBe(narrow);
-  expect(sky()).toBe(narrow);
-  expect(gate().dataset.ready).toBe("true");
-
+  expect(decodes[1]!.url).not.toBe(decodes[0]!.url);
+  expect(pictureOf(sky)).toBe(decodes[0]!.url);
+  expect(gate.dataset.ready).toBe("true");
   decodes[1]!.finish();
-  await expect.poll(() => sky()).toBe(picture(decodes[1]!.width));
+  await expect.poll(() => pictureOf(sky)).toBe(decodes[1]!.url);
+
+  watch.disconnect();
+  expect(drawn.length).toBeGreaterThan(0);
+  expect(drawn.filter((picture) => !picture.decoded)).toEqual([]);
+  first.unmount();
+
+  const next = await render(AccountGate, { children });
+  const nextSky = next.container.querySelector<HTMLElement>(".sky")!;
+  const firstPaint = pictureOf(nextSky);
+  expect(firstPaint).not.toBeNull();
+  expect(isDecoded(firstPaint!)).toBe(true);
+  expect(next.container.querySelector<HTMLElement>(".account-gate")!.dataset.ready).toBe("true");
 });

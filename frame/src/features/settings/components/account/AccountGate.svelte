@@ -2,7 +2,7 @@
   import { untrack, type Snippet } from "svelte";
   import {
     decode,
-    isDecoded,
+    decodedFor,
     placeSky,
     scene as skyScene,
     skyImage,
@@ -22,23 +22,32 @@
   const picture = $derived(skyImage(scene, sky.w));
   const measured = $derived(width > 0);
 
-  // The sky on show is always a picture already decoded: a resize or a new
-  // scene keeps the last one until its replacement has decoded. Nothing is
-  // decoded before the page is measured.
-  let shown = $state<{ scene: Scene; url: string } | null>(null);
+  // Only a decoded picture is ever drawn: the page starts from one this
+  // session already decoded, and a resize or a new scene keeps the last one
+  // until its replacement has decoded. Nothing is decoded before the page is
+  // measured.
+  const held = (scene: Scene, width: number) => {
+    const ready = decodedFor(scene, width);
+    return ready && { scene, url: ready.url };
+  };
+  let shown = $state<{ scene: Scene; url: string } | null>(
+    held(
+      untrack(() => scene),
+      0,
+    ),
+  );
   let failed = $state<Scene | null>(null);
   $effect(() => {
     if (!measured) return;
     const wanted = { scene, url: picture };
-    if (isDecoded(wanted.url)) {
-      shown = wanted;
-      return;
-    }
-    let live = true;
-    void decode(
+    const ready = decodedFor(
       wanted.scene,
       untrack(() => sky.w),
-    ).then(
+    );
+    if (ready) shown = { scene: wanted.scene, url: ready.url };
+    if (ready?.covers) return;
+    let live = true;
+    void decode(wanted.scene, wanted.url).then(
       () => {
         if (live) shown = wanted;
       },
@@ -68,7 +77,7 @@
   <div
     class="sky"
     aria-hidden="true"
-    style:background-image={`url("${shown?.url ?? picture}")`}
+    style:background-image={shown ? `url("${shown.url}")` : null}
     style:background-size={`${sky.w}px ${sky.h}px`}
     style:background-position={`${sky.x}px ${sky.y}px`}
   ></div>
