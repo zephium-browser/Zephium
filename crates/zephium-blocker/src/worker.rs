@@ -23,6 +23,7 @@ use crate::cache::{
 };
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
+use crate::rules::RuntimeEngine;
 #[cfg(feature = "runtime-exact")]
 use crate::rules::SourceDocument;
 use crate::{
@@ -1270,60 +1271,78 @@ impl ArtifactCache {
         let failure = if catalog.is_empty() {
             BlockerCompileFailure::SourceUnavailable
         } else {
-            match compiler.compile(target, with_own_rules(catalog.instantiate(), target)) {
-                Ok(compiled) => {
-                    let persistent_copy = compiled.clone();
-                    match adapt_rules(compiled) {
-                        Ok(rules) => {
-                            // Badware in the catalog that cannot be compiled
-                            // fails the generation: the policy applied before
-                            // stays, never one without the navigation check.
-                            let navigation = match compile_navigation(&catalog, compiler) {
-                                Ok(navigation) => navigation,
-                                Err(failure) => {
-                                    self.artifact = Some(CachedArtifact::Failed(failure));
-                                    self.catalog = None;
-                                    return BlockerCompileOutcome::Failed(failure);
-                                }
-                            };
-                            let rules = with_navigation(rules, navigation.clone());
-                            let durably_cached = match persistent.as_ref() {
-                                Some(cache)
-                                    if cache
-                                        .store(
-                                            cache_key,
-                                            &persistent_copy,
-                                            &rules,
-                                            navigation.as_ref(),
-                                        )
-                                        .is_ok() =>
-                                {
-                                    true
-                                }
-                                Some(_) => {
-                                    *persistent = None;
-                                    false
-                                }
-                                None => false,
-                            };
-                            let artifact = CachedArtifact::compiled(&rules, durably_cached);
-                            let retain_catalog = artifact.retains_reload_recipe();
-                            self.artifact = Some(artifact);
-                            if !retain_catalog {
-                                self.catalog = None;
-                            }
-                            return BlockerCompileOutcome::Compiled(rules);
+            match compile_policy(&catalog, compiler, target) {
+                Ok(policy) => {
+                    let durably_cached = match persistent.as_ref() {
+                        Some(cache)
+                            if cache
+                                .store(
+                                    cache_key,
+                                    &policy.lists,
+                                    &policy.rules,
+                                    policy
+                                        .navigation
+                                        .as_deref()
+                                        .and_then(RuntimePolicyArtifact::compiled_rules),
+                                )
+                                .is_ok() =>
+                        {
+                            true
                         }
-                        Err(failure) => failure,
+                        Some(_) => {
+                            *persistent = None;
+                            false
+                        }
+                        None => false,
+                    };
+                    let artifact = CachedArtifact::compiled(&policy.rules, durably_cached);
+                    let retain_catalog = artifact.retains_reload_recipe();
+                    self.artifact = Some(artifact);
+                    if !retain_catalog {
+                        self.catalog = None;
                     }
+                    return BlockerCompileOutcome::Compiled(policy.rules);
                 }
-                Err(error) => map_compile_error(&error),
+                Err(failure) => failure,
             }
         };
         self.artifact = Some(CachedArtifact::Failed(failure));
         self.catalog = None;
         BlockerCompileOutcome::Failed(failure)
     }
+}
+
+/// A compiled policy with what the persistent cache keeps of it: the lists'
+/// matcher and the navigation check's.
+struct CompiledPolicy {
+    rules: Arc<ContentRules>,
+    lists: CompiledRules,
+    navigation: Option<Arc<RuntimePolicyArtifact>>,
+}
+
+fn compile_policy(
+    catalog: &StaticPolicyCatalog,
+    compiler: Compiler,
+    target: CompileTarget,
+) -> Result<CompiledPolicy, BlockerCompileFailure> {
+    // Badware in the catalog that cannot be compiled fails the generation: the
+    // policy applied before stays, never one without the navigation check.
+    let navigation = compile_navigation(catalog, compiler)?;
+    // A runtime matcher leaves the badware list to the navigation check's
+    // matcher, and asks it about what the other lists allow.
+    let badware = navigation
+        .as_ref()
+        .filter(|_| target == CompileTarget::Runtime);
+    let sources = without_badware(catalog.instantiate(), badware.is_some());
+    let lists = compiler
+        .compile(target, with_own_rules(sources, target))
+        .map_err(|error| map_compile_error(&error))?;
+    let rules = adapt_rules_with(lists.clone(), badware)?;
+    Ok(CompiledPolicy {
+        rules: with_navigation(rules, navigation.clone()),
+        lists,
+        navigation,
+    })
 }
 
 fn complete_job(
@@ -1368,7 +1387,7 @@ const NAVIGATION_SOURCE: &str = "ublock-badware";
 fn compile_navigation(
     catalog: &StaticPolicyCatalog,
     compiler: Compiler,
-) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+) -> Result<Option<Arc<RuntimePolicyArtifact>>, BlockerCompileFailure> {
     #[allow(unused_mut)]
     let mut sources: Vec<_> = catalog
         .instantiate()
@@ -1386,7 +1405,7 @@ fn compile_navigation(
     }
     compiler
         .compile(CompileTarget::Runtime, sources)
-        .map(Some)
+        .map(|rules| Some(Arc::new(RuntimePolicyArtifact::Compiled(rules))))
         .map_err(|error| {
             eprintln!("content blocker: navigation check unavailable: {error}");
             map_compile_error(&error)
@@ -1397,26 +1416,33 @@ fn compile_navigation(
 fn compile_navigation(
     _: &StaticPolicyCatalog,
     _: Compiler,
-) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+) -> Result<Option<Arc<RuntimePolicyArtifact>>, BlockerCompileFailure> {
     Ok(None)
 }
 
 #[cfg(feature = "runtime")]
-fn with_navigation(
-    rules: Arc<ContentRules>,
-    navigation: Option<CompiledRules>,
-) -> Arc<ContentRules> {
-    match navigation {
-        Some(navigation) if rules.enabled() => {
-            rules.with_navigation(Arc::new(RuntimePolicy::compiled(navigation)))
-        }
-        _ => rules,
-    }
+fn without_badware(sources: Vec<FilterSource>, split: bool) -> Vec<FilterSource> {
+    sources
+        .into_iter()
+        .filter(|source| !split || source.id().as_str() != NAVIGATION_SOURCE)
+        .collect()
 }
 
 #[cfg(not(feature = "runtime"))]
-fn with_navigation(rules: Arc<ContentRules>, _: Option<CompiledRules>) -> Arc<ContentRules> {
-    rules
+fn without_badware(sources: Vec<FilterSource>, _: bool) -> Vec<FilterSource> {
+    sources
+}
+
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<Arc<RuntimePolicyArtifact>>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) if rules.enabled() => {
+            rules.with_navigation(Arc::new(RuntimePolicy::new(navigation)))
+        }
+        _ => rules,
+    }
 }
 
 fn with_own_rules(mut sources: Vec<FilterSource>, target: CompileTarget) -> Vec<FilterSource> {
@@ -1436,8 +1462,29 @@ const fn native_target() -> CompileTarget {
     CompileTarget::WebKit
 }
 
+#[cfg(test)]
 pub(crate) fn adapt_rules(
     rules: CompiledRules,
+) -> Result<Arc<ContentRules>, BlockerCompileFailure> {
+    adapt_rules_with(rules, None)
+}
+
+/// `lists` as a runtime policy that leaves the badware list to `badware`.
+#[cfg(all(test, feature = "runtime", feature = "webkit"))]
+pub(crate) fn adapt_split_rules(lists: CompiledRules, badware: CompiledRules) -> Arc<ContentRules> {
+    adapt_rules_with(
+        lists,
+        Some(&Arc::new(RuntimePolicyArtifact::Compiled(badware))),
+    )
+    .unwrap()
+}
+
+/// `rules` as content rules. A runtime matcher given `badware`, the matcher
+/// the navigation check shares, holds every other list and asks it about
+/// what they allow; the badware list's rules still count in its coverage.
+fn adapt_rules_with(
+    rules: CompiledRules,
+    badware: Option<&Arc<RuntimePolicyArtifact>>,
 ) -> Result<Arc<ContentRules>, BlockerCompileFailure> {
     let cosmetics = rules.cosmetics().cloned();
     let report = rules.report();
@@ -1501,6 +1548,13 @@ pub(crate) fn adapt_rules(
         blocking_rule_entries: u64::try_from(report.native_blocking_rule_entries())
             .map_err(|_| BlockerCompileFailure::ResourceLimit)?,
     };
+    let coverage = match badware
+        .and_then(|badware| badware.compiled_rules())
+        .filter(|_| rules.target() == CompileTarget::Runtime)
+    {
+        Some(badware) => with_runtime_coverage(coverage, badware.report())?,
+        None => coverage,
+    };
     let result = match rules.target() {
         CompileTarget::Runtime => {
             if let Err(error) = rules.verify_official_canary() {
@@ -1508,7 +1562,8 @@ pub(crate) fn adapt_rules(
                 return Err(BlockerCompileFailure::InvalidSource);
             }
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
-            ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
+            let policy = RuntimePolicy::compiled(rules).with_badware(badware.cloned());
+            ContentRules::runtime(digest, coverage, Arc::new(policy))
                 .ok_or(BlockerCompileFailure::Internal)
         }
         CompileTarget::WebKit => {
@@ -1536,6 +1591,45 @@ pub(crate) fn adapt_rules(
     Ok(attach_cosmetics(result, cosmetics))
 }
 
+/// `coverage` with a separately compiled runtime matcher's rules counted in.
+fn with_runtime_coverage(
+    coverage: ContentRuleCoverage,
+    report: &crate::CompilationReport,
+) -> Result<ContentRuleCoverage, BlockerCompileFailure> {
+    let add = |total: u64, more: usize| {
+        u64::try_from(more)
+            .ok()
+            .and_then(|more| total.checked_add(more))
+            .ok_or(BlockerCompileFailure::ResourceLimit)
+    };
+    Ok(ContentRuleCoverage {
+        source_rules: add(coverage.source_rules, report.candidate_rules())?,
+        accepted_rules: add(coverage.accepted_rules, report.accepted_rules())?,
+        rejected_rules: add(coverage.rejected_rules, report.rejected_rules())?,
+        platform_omitted_rules: add(
+            coverage.platform_omitted_rules,
+            report.runtime_omitted_rules(),
+        )?,
+        platform_approximated_rules: add(
+            coverage.platform_approximated_rules,
+            report.runtime_approximated_rules(),
+        )?,
+        platform_resource_approximated_rules: add(
+            coverage.platform_resource_approximated_rules,
+            report.runtime_resource_approximated_rules(),
+        )?,
+        platform_source_kind_approximated_rules: add(
+            coverage.platform_source_kind_approximated_rules,
+            report.runtime_source_kind_approximated_rules(),
+        )?,
+        platform_attribution_approximated_rules: coverage.platform_attribution_approximated_rules,
+        blocking_rule_entries: add(
+            coverage.blocking_rule_entries,
+            report.native_blocking_rule_entries(),
+        )?,
+    })
+}
+
 fn attach_cosmetics(
     rules: Arc<ContentRules>,
     cosmetics: Option<crate::cosmetics::PreparedCosmetics>,
@@ -1555,8 +1649,13 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             rules,
             cosmetics,
             navigation,
-        } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
-            .map(|rules| attach_loaded_navigation(attach_cosmetics(rules, cosmetics), navigation)),
+        } => {
+            let badware = navigation
+                .map(|navigation| Arc::new(RuntimePolicyArtifact::Persistent(navigation)));
+            let policy = RuntimePolicy::persistent(rules).with_badware(badware.clone());
+            ContentRules::runtime(digest, coverage, Arc::new(policy))
+                .map(|rules| with_navigation(attach_cosmetics(rules, cosmetics), badware))
+        }
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
@@ -1576,20 +1675,13 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             )?;
             let rules = attach_cosmetics(rules, cosmetics);
             #[cfg(feature = "runtime")]
-            let rules = attach_loaded_navigation(rules, navigation);
+            let rules = with_navigation(
+                rules,
+                navigation
+                    .map(|navigation| Arc::new(RuntimePolicyArtifact::Persistent(navigation))),
+            );
             Some(rules)
         }
-    }
-}
-
-#[cfg(feature = "runtime")]
-fn attach_loaded_navigation(
-    rules: Arc<ContentRules>,
-    navigation: Option<Box<CachedRuntimeRules>>,
-) -> Arc<ContentRules> {
-    match navigation {
-        Some(navigation) => rules.with_navigation(Arc::new(RuntimePolicy::persistent(navigation))),
-        None => rules,
     }
 }
 
@@ -1597,6 +1689,24 @@ enum RuntimePolicyArtifact {
     Compiled(CompiledRules),
     #[cfg(feature = "runtime")]
     Persistent(Box<CachedRuntimeRules>),
+}
+
+impl RuntimePolicyArtifact {
+    const fn compiled_rules(&self) -> Option<&CompiledRules> {
+        match self {
+            Self::Compiled(rules) => Some(rules),
+            #[cfg(feature = "runtime")]
+            Self::Persistent(_) => None,
+        }
+    }
+
+    fn engine(&self) -> Result<RuntimeEngine<'_>, crate::MatchError> {
+        match self {
+            Self::Compiled(rules) => rules.runtime_engine(),
+            #[cfg(feature = "runtime")]
+            Self::Persistent(rules) => Ok(rules.runtime_engine()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1658,7 +1768,10 @@ impl RuntimePolicyCounters {
 }
 
 struct RuntimePolicy {
-    artifact: RuntimePolicyArtifact,
+    artifact: Arc<RuntimePolicyArtifact>,
+    /// The badware list's matcher, which the navigation check shares, for
+    /// what `artifact` lets through.
+    badware: Option<Arc<RuntimePolicyArtifact>>,
     counters: RuntimePolicyCounters,
     #[cfg(feature = "runtime-exact")]
     sources: Mutex<RecentSources>,
@@ -1695,17 +1808,23 @@ impl RecentSources {
 
 impl RuntimePolicy {
     fn compiled(rules: CompiledRules) -> Self {
-        Self::new(RuntimePolicyArtifact::Compiled(rules))
+        Self::new(Arc::new(RuntimePolicyArtifact::Compiled(rules)))
     }
 
     #[cfg(feature = "runtime")]
     fn persistent(rules: Box<CachedRuntimeRules>) -> Self {
-        Self::new(RuntimePolicyArtifact::Persistent(rules))
+        Self::new(Arc::new(RuntimePolicyArtifact::Persistent(rules)))
     }
 
-    fn new(artifact: RuntimePolicyArtifact) -> Self {
+    fn with_badware(mut self, badware: Option<Arc<RuntimePolicyArtifact>>) -> Self {
+        self.badware = badware;
+        self
+    }
+
+    fn new(artifact: Arc<RuntimePolicyArtifact>) -> Self {
         Self {
             artifact,
+            badware: None,
             counters: RuntimePolicyCounters::default(),
             #[cfg(feature = "runtime-exact")]
             sources: Mutex::default(),
@@ -1721,7 +1840,17 @@ impl RuntimePolicy {
         method: RequestMethod,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
         let source = self.source_document(source_url)?;
-        match &self.artifact {
+        if let Some(badware) = &self.badware {
+            return crate::rules::evaluate_split_from(
+                self.artifact.engine()?,
+                badware.engine()?,
+                url,
+                &source,
+                resource_type,
+                method,
+            );
+        }
+        match &*self.artifact {
             RuntimePolicyArtifact::Compiled(rules) => {
                 rules.evaluate_from(url, &source, resource_type, method)
             }
@@ -1744,7 +1873,7 @@ impl RuntimePolicy {
         if let Some(source) = recent.as_mut().and_then(|recent| recent.get(url)) {
             return Ok(source);
         }
-        let source = Arc::new(match &self.artifact {
+        let source = Arc::new(match &*self.artifact {
             RuntimePolicyArtifact::Compiled(rules) => rules.source_document(url),
             #[cfg(feature = "runtime")]
             RuntimePolicyArtifact::Persistent(rules) => rules.source_document(url),
@@ -1759,7 +1888,15 @@ impl RuntimePolicy {
         &self,
         request: NetworkRequest<'_>,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
-        match &self.artifact {
+        if let Some(badware) = &self.badware {
+            return crate::rules::evaluate_split(
+                self.artifact.engine()?,
+                badware.engine()?,
+                request,
+                true,
+            );
+        }
+        match &*self.artifact {
             RuntimePolicyArtifact::Compiled(rules) => rules.evaluate_source_independent(request),
             #[cfg(feature = "runtime")]
             RuntimePolicyArtifact::Persistent(rules) => rules.evaluate_source_independent(request),
@@ -1930,7 +2067,7 @@ mod tests {
             Arc::from("||ads.example^"),
         )])
         .unwrap();
-        let navigation = RuntimePolicy::compiled(
+        let navigation = RuntimePolicy::new(
             compile_navigation(&catalog, Compiler::default())
                 .expect("the QA host compiles")
                 .expect("the QA host"),
@@ -2148,6 +2285,211 @@ mod tests {
             without.navigation_policy().is_some(),
             cfg!(feature = "qa-test-hosts")
         );
+    }
+
+    /// A runtime policy whose lists leave the badware list to the navigation
+    /// check's matcher, as compiled and as a restart loads it.
+    #[cfg(feature = "runtime-exact")]
+    fn split_policies() -> Vec<(&'static str, Arc<ContentRules>)> {
+        let source = |id: &str, rules: &str| {
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from(rules),
+            )
+        };
+        let catalog = StaticPolicyCatalog::new(vec![
+            source(
+                "maintained",
+                "||ads.example^\n@@||ads.example/ok.js\n||tracker.example^$document",
+            ),
+            source("maintained-unbreak", "@@||scam.example/ok.js"),
+            source(
+                "ublock-badware",
+                "||scam.example^$all\n@@||scam.example/landing$doc\n||cdn.example/x.js$script",
+            ),
+        ])
+        .unwrap();
+        let policy = compile_policy(&catalog, Compiler::default(), CompileTarget::Runtime).unwrap();
+        // One badware matcher: the lists' policy and the navigation check share it.
+        assert_eq!(Arc::strong_count(policy.navigation.as_ref().unwrap()), 3);
+        // Lists alone: what the policy would decide without the badware matcher.
+        let lists = Arc::new(RuntimePolicy::compiled(policy.lists.clone()))
+            as Arc<dyn NetworkRequestPolicy>;
+        let lists_only = ContentRules::runtime(
+            ContentRuleDigest::from_bytes([0; 32]),
+            policy.rules.coverage(),
+            lists,
+        )
+        .unwrap();
+        #[allow(unused_mut)]
+        let mut policies = vec![
+            ("compiled", policy.rules.clone()),
+            ("lists alone", lists_only),
+        ];
+        #[cfg(any(
+            all(target_os = "windows", feature = "runtime"),
+            all(not(target_os = "windows"), feature = "webkit")
+        ))]
+        policies.push(("loaded", loaded_split_policy(&policy)));
+        policies
+    }
+
+    /// `policy` stored in the compiled-artifact cache and loaded back.
+    #[cfg(all(
+        feature = "runtime-exact",
+        any(
+            all(target_os = "windows", feature = "runtime"),
+            all(not(target_os = "windows"), feature = "webkit")
+        )
+    ))]
+    fn loaded_split_policy(policy: &CompiledPolicy) -> Arc<ContentRules> {
+        let root = crate::cache::private_test_root();
+        let cache =
+            PersistentArtifactCache::open(&CompiledArtifactCacheConfig::new(root.path()).unwrap())
+                .unwrap();
+        let key = CacheKey::for_catalog(
+            CompileTarget::Runtime,
+            Compiler::default().limits(),
+            [("split", 0, "split")],
+        );
+        cache
+            .store(
+                key,
+                &policy.lists,
+                &policy.rules,
+                policy
+                    .navigation
+                    .as_deref()
+                    .and_then(RuntimePolicyArtifact::compiled_rules),
+            )
+            .unwrap();
+        let loaded = cache
+            .load(key, CompileTarget::Runtime, Compiler::default().limits())
+            .unwrap()
+            .and_then(adapt_loaded_rules)
+            .expect("the split policy loads");
+        assert_eq!(loaded.coverage(), policy.rules.coverage());
+        loaded
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    fn split_request(
+        url: &str,
+        page: &str,
+        kind: zephium_core::blocker::NetworkResourceType,
+    ) -> zephium_core::blocker::NetworkRequest<'static> {
+        zephium_core::blocker::NetworkRequest::exact(
+            Box::leak(url.to_owned().into_boxed_str()),
+            Box::leak(page.to_owned().into_boxed_str()),
+            "GET",
+            kind,
+            zephium_core::blocker::NetworkRequestSourceKind::Document,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn badware_blocks_subresources_from_the_navigation_check_s_matcher() {
+        use zephium_core::blocker::NetworkDecision::{Allow, Block};
+        use zephium_core::blocker::NetworkResourceType::{Image, Script, XmlHttpRequest};
+        let page = "https://news.example/";
+        for (name, rules) in split_policies() {
+            let decide = |url: &str, kind| {
+                rules
+                    .runtime_policy()
+                    .unwrap()
+                    .decide(&split_request(url, page, kind))
+            };
+            let badware = if name == "lists alone" { Allow } else { Block };
+            // A badware rule for every type blocks every subresource; one for
+            // scripts blocks only scripts.
+            for kind in [Script, XmlHttpRequest, Image] {
+                assert_eq!(
+                    decide("https://scam.example/a", kind),
+                    badware,
+                    "{name} {kind:?}"
+                );
+            }
+            assert_eq!(
+                decide("https://cdn.example/x.js", Script),
+                badware,
+                "{name}"
+            );
+            assert_eq!(decide("https://cdn.example/x.js", Image), Allow, "{name}");
+            // The other lists decide as before, their own exceptions included.
+            assert_eq!(decide("https://ads.example/a.js", Script), Block, "{name}");
+            assert_eq!(decide("https://ads.example/ok.js", Script), Allow, "{name}");
+            // Unlike uBlock Origin, another list's exception does not lift a
+            // badware block.
+            assert_eq!(
+                decide("https://scam.example/ok.js", Script),
+                badware,
+                "{name}"
+            );
+            // As when no page is known.
+            let unattributed = zephium_core::blocker::NetworkRequest::source_independent(
+                "https://scam.example/a",
+                "GET",
+                Script,
+                zephium_core::blocker::NetworkRequestSourceKind::Document,
+            )
+            .unwrap();
+            assert_eq!(
+                rules.runtime_policy().unwrap().decide(&unattributed),
+                badware,
+                "{name}"
+            );
+        }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn navigations_are_judged_as_before_the_split() {
+        use zephium_core::blocker::NetworkDecision::{Allow, Block};
+        use zephium_core::blocker::NetworkResourceType::{Document, Subdocument};
+        for (name, rules) in split_policies() {
+            if name == "lists alone" {
+                continue;
+            }
+            let navigation = rules.navigation_policy().expect("a navigation check");
+            let lists = rules.runtime_policy().unwrap();
+            let page = |url: &str| split_request(url, url, Document);
+            // The badware list refuses the page as badware.
+            assert_eq!(
+                navigation.decide(&page("https://scam.example/")),
+                Block,
+                "{name}"
+            );
+            // Its own document exception lets that page open.
+            assert_eq!(
+                navigation.decide(&page("https://scam.example/landing")),
+                Allow,
+                "{name}"
+            );
+            // A page only another list refuses is left to that list.
+            assert_eq!(
+                navigation.decide(&page("https://tracker.example/")),
+                Allow,
+                "{name}"
+            );
+            assert_eq!(
+                lists.decide(&page("https://tracker.example/")),
+                Block,
+                "{name}"
+            );
+            // A frame is judged against the top page.
+            let frame = zephium_core::blocker::NetworkRequest::top_level_approximation(
+                "https://scam.example/frame",
+                "https://news.example/",
+                "GET",
+                Subdocument,
+                zephium_core::blocker::NetworkRequestSourceKind::Document,
+            )
+            .unwrap();
+            assert_eq!(navigation.decide(&frame), Block, "{name}");
+        }
     }
 
     fn compiler_with_post_ack_exit_gate() -> (Arc<WorkerBlocker>, SyncSender<()>, Receiver<()>) {

@@ -284,6 +284,18 @@ impl CompiledRules {
         SourceDocument::parse(url, self.0.limits)
     }
 
+    pub(crate) fn runtime_engine(&self) -> Result<RuntimeEngine<'_>, MatchError> {
+        let engine = self
+            .0
+            .engine
+            .as_ref()
+            .ok_or(MatchError::WrongArtifactTarget)?;
+        Ok(RuntimeEngine {
+            engine,
+            limits: self.0.limits,
+        })
+    }
+
     /// Evaluates a request from a document parsed by [`Self::source_document`],
     /// with the same result as [`Self::evaluate`] given that document's URL.
     #[cfg(feature = "runtime-exact")]
@@ -341,6 +353,13 @@ impl CachedRuntimeRules {
         Self { engine, limits }
     }
 
+    pub(crate) const fn runtime_engine(&self) -> RuntimeEngine<'_> {
+        RuntimeEngine {
+            engine: &self.engine,
+            limits: self.limits,
+        }
+    }
+
     #[cfg(feature = "runtime-exact")]
     pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
         SourceDocument::parse(url, self.limits)
@@ -378,13 +397,74 @@ fn evaluate_runtime_engine(
     request: NetworkRequest<'_>,
     source_independent_only: bool,
 ) -> Result<NetworkDecision, MatchError> {
+    let native = native_request(limits, request, source_independent_only)?;
+    match_native(engine, &native, source_independent_only)
+}
+
+/// A compiled or cached runtime matcher, as a policy split across two reads it.
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeEngine<'a> {
+    engine: &'a Engine,
+    limits: CompileLimits,
+}
+
+/// A policy split across two matchers, the request parsed once under the
+/// first one's limits: the first decides unless it lets the request through,
+/// or cannot judge it, and the second blocks it. Otherwise the first one's
+/// result stands, an error included.
+pub(crate) fn evaluate_split(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    request: NetworkRequest<'_>,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
+    let native = native_request(first.limits, request, source_independent_only)?;
+    split_decision(first, second, &native, source_independent_only)
+}
+
+/// As [`evaluate_split`], for a request from a parsed document.
+#[cfg(feature = "runtime-exact")]
+pub(crate) fn evaluate_split_from(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+) -> Result<NetworkDecision, MatchError> {
+    with_native_request_from(first.limits, url, source, resource_type, method, |native| {
+        split_decision(first, second, native, false)
+    })
+}
+
+fn split_decision(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    native: &Request,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
+    let decided = match_native(first.engine, native, source_independent_only);
+    if matches!(decided, Ok(decision) if decision.action == NetworkAction::Block) {
+        return decided;
+    }
+    match match_native(second.engine, native, source_independent_only) {
+        Ok(decision) if decision.action == NetworkAction::Block => Ok(decision),
+        _ => decided,
+    }
+}
+
+fn native_request(
+    limits: CompileLimits,
+    request: NetworkRequest<'_>,
+    source_independent_only: bool,
+) -> Result<Request, MatchError> {
     if request.url.len() > limits.max_request_url_bytes() {
         return Err(MatchError::RequestUrlTooLong {
             actual: request.url.len(),
             limit: limits.max_request_url_bytes(),
         });
     }
-    let native = if source_independent_only {
+    if source_independent_only {
         if request.source_url.is_some() {
             return Err(MatchError::InvalidRequest);
         }
@@ -415,8 +495,7 @@ fn evaluate_runtime_engine(
             )
         }
     }
-    .map_err(|_| MatchError::InvalidRequest)?;
-    match_native(engine, &native, source_independent_only)
+    .map_err(|_| MatchError::InvalidRequest)
 }
 
 #[cfg(feature = "runtime-exact")]
@@ -428,6 +507,20 @@ fn evaluate_runtime_engine_from(
     resource_type: ResourceType,
     method: RequestMethod,
 ) -> Result<NetworkDecision, MatchError> {
+    with_native_request_from(limits, url, source, resource_type, method, |native| {
+        match_native(engine, native, false)
+    })
+}
+
+#[cfg(feature = "runtime-exact")]
+fn with_native_request_from<T>(
+    limits: CompileLimits,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+    decide: impl FnOnce(&Request) -> Result<T, MatchError>,
+) -> Result<T, MatchError> {
     if url.len() > limits.max_request_url_bytes() {
         return Err(MatchError::RequestUrlTooLong {
             actual: url.len(),
@@ -445,7 +538,7 @@ fn evaluate_runtime_engine_from(
         parsed.domain() != &*source.domain,
         method.as_adblock_str(),
     );
-    match_native(engine, &native, false)
+    decide(&native)
 }
 
 fn match_native(

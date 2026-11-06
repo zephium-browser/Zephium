@@ -35,7 +35,7 @@ use crate::{
 };
 
 const CACHE_MAGIC: &[u8; 8] = b"ZPHBLK01";
-const CACHE_FORMAT_VERSION: u32 = 4;
+const CACHE_FORMAT_VERSION: u32 = 5;
 const CACHE_KEY_DOMAIN: &[u8] = b"zephium-compiled-blocker-cache-key";
 #[cfg(feature = "webkit")]
 const WEBKIT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
@@ -649,17 +649,21 @@ fn decode_record(
 /// The badware list's matcher kept with a record, re-validated like the
 /// runtime payload. An empty section is a record without one.
 #[cfg(feature = "runtime")]
+/// The badware matcher a record keeps, with its blocking entries.
 fn decode_navigation(
     bytes: &[u8],
     limits: CompileLimits,
-) -> Option<Option<Box<CachedRuntimeRules>>> {
+) -> Option<Option<(Box<CachedRuntimeRules>, usize)>> {
     if bytes.is_empty() {
         return Some(None);
     }
     let mut engine = adblock::Engine::default();
     engine.deserialize(bytes).ok()?;
-    prepare_and_validate_runtime_engine(&engine, limits).ok()?;
-    Some(Some(Box::new(CachedRuntimeRules::new(engine, limits))))
+    let (blocking_entries, _) = prepare_and_validate_runtime_engine(&engine, limits).ok()?;
+    Some(Some((
+        Box::new(CachedRuntimeRules::new(engine, limits)),
+        blocking_entries,
+    )))
 }
 
 /// Checks a WebKit record without bringing its rule text into memory: one
@@ -734,6 +738,8 @@ fn load_webkit_record(
     let Some(navigation) = decode_navigation(&navigation, limits) else {
         return Ok(None);
     };
+    #[cfg(feature = "runtime")]
+    let navigation = navigation.map(|(rules, _)| rules);
     #[cfg(not(feature = "runtime"))]
     let _ = navigation;
     let cosmetics = if cosmetics.is_empty() {
@@ -857,10 +863,15 @@ fn validate_runtime_payload(
     let mut engine = adblock::Engine::default();
     engine.deserialize(record.payload).ok()?;
     let (blocking_entries, _) = prepare_and_validate_runtime_engine(&engine, limits).ok()?;
+    // The lists' matcher leaves the badware list to the kept navigation
+    // matcher, and the coverage counts both.
+    let navigation = decode_navigation(record.navigation, limits)?;
+    let blocking_entries =
+        blocking_entries.checked_add(navigation.as_ref().map_or(0, |(_, entries)| *entries))?;
     if u64::try_from(blocking_entries).ok()? != record.coverage.blocking_rule_entries {
         return None;
     }
-    let navigation = decode_navigation(record.navigation, limits)?;
+    let navigation = navigation.map(|(rules, _)| rules);
     Some(LoadedArtifact::Runtime {
         digest: ContentRuleDigest::from_bytes(record.policy_digest),
         coverage: record.coverage,
@@ -2215,6 +2226,14 @@ mod tests {
         ] {
             let (compiled, rules) = compiled_artifact(target, "cache-navigation");
             for kept in [None, Some(&navigation)] {
+                // A runtime policy that keeps the badware matcher leaves that
+                // list to it, and counts its rules.
+                let rules = match (target, kept) {
+                    (CompileTarget::Runtime, Some(navigation)) => {
+                        crate::worker::adapt_split_rules(compiled.clone(), navigation.clone())
+                    }
+                    _ => rules.clone(),
+                };
                 let record = encode_compiled_record(cache_key, &compiled, &rules, kept).unwrap();
                 let loaded_navigation = match target {
                     CompileTarget::Runtime => {
