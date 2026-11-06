@@ -1823,3 +1823,53 @@ fn a_list_that_fits_only_unsplit_is_compiled_unsplit_whole() {
         "the split form is past the byte limit"
     );
 }
+
+#[cfg(feature = "runtime")]
+#[test]
+fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
+    let badware = || {
+        FilterSource::new(
+            id("ublock-badware"),
+            SourceFormat::Standard,
+            "||cdn.example/bad/*$script\n||scam.example^$all\n||landing.example^$doc\n||gone.example^$all,badfilter"
+                .to_owned(),
+        )
+    };
+    let other_rules = [
+        "||ads.example^",
+        // Counted: the blocked path, a host below the blocked one, and a
+        // $badfilter for the badware rule itself.
+        "@@||cdn.example/bad/ok.js",
+        "@@||sub.scam.example^$script",
+        "||scam.example^$all,badfilter",
+        // Not counted: another path, a page-only badware host, no host
+        // named, an exception for page styles only, and a $badfilter for
+        // another rule on the blocked host.
+        "@@||cdn.example/good/",
+        "@@||landing.example^",
+        "@@*$script,domain=news.example",
+        "@@||scam.example^$generichide",
+        "||scam.example/x.js$badfilter",
+        // A badware $badfilter blocks nothing to shadow.
+        "@@||gone.example^$script",
+    ]
+    .join("\n");
+    let other = || {
+        FilterSource::new(
+            id("maintained"),
+            SourceFormat::Standard,
+            other_rules.clone(),
+        )
+    };
+    let compiled = Compiler::default()
+        .compile(CompileTarget::Runtime, vec![badware(), other()])
+        .unwrap();
+    let shadowed =
+        |rules: &crate::CompiledRules| rules.report().runtime().unwrap().badware_shadowed_rules();
+    assert_eq!(shadowed(&compiled), 3);
+    // Without the badware list nothing is shadowed.
+    let alone = Compiler::default()
+        .compile(CompileTarget::Runtime, vec![other()])
+        .unwrap();
+    assert_eq!(shadowed(&alone), 0);
+}

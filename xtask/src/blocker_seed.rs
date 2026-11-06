@@ -16,7 +16,7 @@ const QUALITY_FILE: &str = "compile-report.json";
 const NOTICE_FILE: &str = "NOTICE";
 const METADATA_FILES: [&str; 4] = [CATALOG_FILE, NOTICE_FILE, QUALITY_FILE, SEED_FILE];
 const SEED_SCHEMA_VERSION: u32 = 2;
-const QUALITY_SCHEMA_VERSION: u32 = 4;
+const QUALITY_SCHEMA_VERSION: u32 = 5;
 const REDISTRIBUTION: &str = "Unmodified upstream subscription; deterministic gzip packaging only";
 const HOUR: u64 = 60 * 60;
 const DAY: u64 = 24 * HOUR;
@@ -439,6 +439,7 @@ struct RuntimeGolden {
     regex_size_limit_bytes: usize,
     regex_dfa_size_limit_bytes: usize,
     max_filter_checks_per_request: usize,
+    badware_shadowed_rules: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1923,6 +1924,7 @@ pub(crate) fn compile_hidden(
         regex_size_limit_bytes: coverage.regex_size_limit_bytes(),
         regex_dfa_size_limit_bytes: coverage.regex_dfa_size_limit_bytes(),
         max_filter_checks_per_request: coverage.max_filter_checks_per_request(),
+        badware_shadowed_rules: coverage.badware_shadowed_rules(),
     });
     #[cfg(not(feature = "blocker-seed-runtime"))]
     let runtime = None;

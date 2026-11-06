@@ -17,9 +17,20 @@ pub struct RuntimeCoverage {
     pub(crate) regex_size_limit_bytes: usize,
     pub(crate) regex_dfa_size_limit_bytes: usize,
     pub(crate) max_filter_checks_per_request: usize,
+    pub(crate) badware_shadowed_rules: usize,
 }
 
 impl RuntimeCoverage {
+    /// Returns other lists' rules that could lift a block of the badware
+    /// list on a subresource if they shared one matcher: exceptions that name
+    /// a host where it blocks subresources, or one above or below it, on a path
+    /// that may overlap, and `$badfilter` rules for one of its rules. The
+    /// runtime matcher keeps that list apart, where they do not. Exceptions
+    /// that name no host are not counted.
+    pub const fn badware_shadowed_rules(self) -> usize {
+        self.badware_shadowed_rules
+    }
+
     /// Returns eagerly prepared regular-expression entries, the omitted ones
     /// that never match included.
     pub const fn regexes(self) -> usize {

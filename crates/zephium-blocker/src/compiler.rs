@@ -47,7 +47,6 @@ const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
 /// Its wildcard rules never reach WebKit or its pruning.
-#[cfg(feature = "webkit")]
 const NAVIGATION_CHECKED_SOURCE: &str = "ublock-badware";
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_REGEXES: usize = 4_096;
@@ -404,8 +403,10 @@ impl Compiler {
                 CompileTarget::Runtime => {
                     #[cfg(feature = "runtime")]
                     {
-                        let (runtime, blocking_entries, coverage) =
+                        let badware_shadowed_rules = badware_shadowed_rules(&prepared);
+                        let (runtime, blocking_entries, mut coverage) =
                             compile_runtime(&mut prepared, self.limits)?;
+                        coverage.badware_shadowed_rules = badware_shadowed_rules;
                         (Some(runtime), Some(coverage), None, None, blocking_entries)
                     }
                     #[cfg(not(feature = "runtime"))]
@@ -926,6 +927,91 @@ fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
     }
 }
 
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
+    use adblock::filters::network::{FilterPart, NetworkFilter, NetworkFilterMaskHelper};
+    // A rule for subresources: its host, if it names one, and the literal
+    // start of its path, up to the first wildcard.
+    struct Parsed {
+        exception: bool,
+        badfilter: bool,
+        id: u64,
+        host: Option<String>,
+        path: String,
+    }
+    let parse = |source: &PreparedSource, line: &str| {
+        let filter = NetworkFilter::parse(line, false, parse_options(source.format)).ok()?;
+        if !filter.mask.intersects(WEBVIEW2_AUDITED_REQUEST_TYPES) {
+            return None;
+        }
+        let path = match &filter.filter {
+            FilterPart::Simple(part) => part.split(['*', '^']).next().unwrap_or("").to_owned(),
+            FilterPart::Empty | FilterPart::AnyOf(_) => String::new(),
+        };
+        Some(Parsed {
+            exception: filter.mask.is_exception(),
+            badfilter: filter.is_badfilter(),
+            // Leaves out `$badfilter`, so a badfilter has its target's ID.
+            id: filter.get_id(),
+            host: filter.hostname.as_deref().map(str::to_ascii_lowercase),
+            path,
+        })
+    };
+    let badware = |source: &&PreparedSource| source.id.as_str() == NAVIGATION_CHECKED_SOURCE;
+    let blocks: Vec<Parsed> = prepared
+        .iter()
+        .filter(badware)
+        .flat_map(|source| source.rules.lines().filter_map(|line| parse(source, line)))
+        .filter(|rule| !rule.exception && !rule.badfilter)
+        .collect();
+    if blocks.is_empty() {
+        return 0;
+    }
+    let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
+    let related = |one: &str, other: &str| {
+        one == other
+            || one
+                .strip_suffix(other)
+                .is_some_and(|rest| rest.ends_with('.'))
+            || other
+                .strip_suffix(one)
+                .is_some_and(|rest| rest.ends_with('.'))
+    };
+    // An exception that names a related host on a path that may overlap.
+    let overlaps = |exception: &Parsed| {
+        let Some(host) = &exception.host else {
+            return false;
+        };
+        blocks.iter().any(|block| {
+            block
+                .host
+                .as_deref()
+                .is_some_and(|blocked| related(host, blocked))
+                && (block.path.starts_with(&exception.path)
+                    || exception.path.starts_with(&block.path))
+        })
+    };
+    prepared
+        .iter()
+        .filter(|source| !badware(source))
+        .flat_map(|source| {
+            source
+                .rules
+                .lines()
+                .filter(|line| line.starts_with("@@") || line.contains("badfilter"))
+                .filter_map(|line| parse(source, line))
+        })
+        .filter(|rule| {
+            if rule.badfilter {
+                ids.contains(&rule.id)
+            } else {
+                rule.exception && overlaps(rule)
+            }
+        })
+        .count()
+}
+
 fn parse_options(format: SourceFormat) -> ParseOptions {
     ParseOptions {
         format: format.adblock(),
@@ -1091,6 +1177,7 @@ pub(crate) fn prepare_and_validate_runtime_engine(
             regex_size_limit_bytes: preparation.regex_size_limit_bytes,
             regex_dfa_size_limit_bytes: preparation.regex_dfa_size_limit_bytes,
             max_filter_checks_per_request: preparation.max_filter_checks_per_request,
+            badware_shadowed_rules: 0,
         },
     ))
 }

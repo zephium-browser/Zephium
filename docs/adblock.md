@@ -300,6 +300,18 @@ one the lists refuse:
   for the runtime matcher, on both platforms, and kept in the compiled cache
   with the lists so a restart reads no source. WebKit never gets its wildcard
   rules.
+- On Windows the other lists' runtime matcher leaves the badware list out and
+  asks that same badware matcher about each request it allows, the request
+  parsed once, so the list is compiled and held once. A badware block of a
+  subresource stands even where another list has an exception for it. In
+  uBlock Origin, which keeps every list in one matcher, that exception would
+  lift it. The compile report's `badware_shadowed_rules` counts the other
+  lists' exceptions that name a host where badware blocks subresources on a
+  path that may overlap, and their `$badfilter` rules for a badware rule: 34
+  for the shipped lists, mostly exceptions on shared content-delivery and
+  hosting domains (jsDelivr, CloudFront, Azure, Amazon S3, GitHub Pages and
+  the like) where badware blocks particular paths or subdomains. Exceptions
+  that name no host are not counted.
 - On Windows the full runtime policy then judges the document against the
   lists' `$document` rules, which WebView2's request filter never sees. On
   macOS WebKit's content rules apply them, and their refusal is reported the
