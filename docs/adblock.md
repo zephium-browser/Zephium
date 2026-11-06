@@ -358,7 +358,9 @@ reported upstream when it applies there.
   sent and the worst case is the hold. A hold moves to the next marker only
   when the held data came from a request the quick fixes edited, which their
   `#reloadxhr` tag in the response's tracking URL shows; data inlined in the
-  page or fetched ahead of a click is reloaded once with the same marker.
+  page or fetched ahead of a click is reloaded with the same marker, at most
+  twice per video, and never moves it. While a reload it asked for is still
+  unanswered, the player's wait is not counted as a hold.
   An unstarted player whose video was asked to play counts as held too: a
   consent prompt answered on the watch page leaves the player that way, and
   without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2). A
