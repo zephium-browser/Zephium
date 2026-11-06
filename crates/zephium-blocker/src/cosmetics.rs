@@ -41,6 +41,9 @@ pub struct CosmeticReport {
     /// Scriptlet rules left out: generic, overlong, or a hostname form the
     /// program cannot key.
     pub unsupported_scriptlet_rules: usize,
+    /// Markers left out of Zephium's player-marker rules because no admitted
+    /// uBlock Origin rule both edits on and strips them.
+    pub dropped_player_markers: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -83,7 +86,7 @@ struct Data {
     report: CosmeticReport,
 }
 
-const DATA_VERSION: u32 = 2;
+const DATA_VERSION: u32 = 3;
 
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
@@ -126,12 +129,16 @@ impl CosmeticPolicy {
     pub fn compile<'a>(
         sources: impl IntoIterator<Item = &'a str>,
     ) -> Result<Arc<Self>, CosmeticError> {
-        Self::compile_with_trust(sources.into_iter().map(|source| (source, false)))
+        Self::compile_with_trust(
+            sources
+                .into_iter()
+                .map(|source| (source, crate::ScriptletTrust::Plain)),
+        )
     }
 
     /// As [`Self::compile`], with each source's scriptlet trust.
     pub fn compile_with_trust<'a>(
-        sources: impl IntoIterator<Item = (&'a str, bool)>,
+        sources: impl IntoIterator<Item = (&'a str, crate::ScriptletTrust)>,
     ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
             version: DATA_VERSION,
@@ -143,7 +150,7 @@ impl CosmeticPolicy {
         let mut bytes = 0usize;
         let mut lines = 0usize;
         let mut predicates = 0usize;
-        for (source_index, (source, trusted)) in sources.into_iter().enumerate() {
+        for (source_index, (source, trust)) in sources.into_iter().enumerate() {
             if source_index >= 32 {
                 return Err(CosmeticError::ResourceLimit);
             }
@@ -176,7 +183,7 @@ impl CosmeticPolicy {
                         if !unknown {
                             data.scriptlets.push(crate::scriptlets::ScriptletRule {
                                 line: line.to_owned(),
-                                trusted,
+                                trust,
                             });
                         }
                         data.report.scriptlet_rules += 1;
@@ -227,6 +234,8 @@ impl CosmeticPolicy {
         data.rules.dedup();
         data.controls.sort();
         data.controls.dedup();
+        data.report.dropped_player_markers =
+            crate::scriptlets::keep_edited_markers(&mut data.scriptlets);
         data.scriptlets.sort();
         data.scriptlets.dedup();
         Self::from_data(data)

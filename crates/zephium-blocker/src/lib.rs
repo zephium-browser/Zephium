@@ -43,6 +43,7 @@ pub use rules::{
     ArtifactDigest, CompiledRules, MatchError, NetworkAction, NetworkDecision, NetworkRequest,
     PolicyDigest, RequestMethod, ResourceType, WebKitRules,
 };
+pub use scriptlets::ScriptletTrust;
 #[doc(hidden)]
 pub use sha256::Sha256;
 #[cfg(feature = "webkit")]

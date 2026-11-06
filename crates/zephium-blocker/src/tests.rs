@@ -1519,14 +1519,62 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     assert_eq!(probe_sites, ["*mirror.co.uk", "*tomsguide.com"]);
 }
 
+/// The built-in list marks YouTube's client for the quick fixes' edits, and
+/// only when those edits are admitted from uBO's own list.
 #[test]
-fn the_built_in_rules_are_exceptions_only() {
+fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
+    let edits = [
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|lactmilli|inline|yahi|eafg|yaf4/].playbackContext.contentPlaybackContext.lactMilliseconds="${now}")"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"#,
+    ]
+    .join("\n");
+    let targets = [
+        #[cfg(feature = "runtime-exact")]
+        CompileTarget::Runtime,
+        #[cfg(feature = "webkit")]
+        CompileTarget::WebKit,
+    ];
+    for target in targets {
+        let program = |trusted: bool| {
+            let quick_fixes = FilterSource::new(
+                id("ublock-quick-fixes"),
+                SourceFormat::Standard,
+                format!("||ads.example^\n{edits}"),
+            );
+            let quick_fixes = if trusted {
+                quick_fixes.trusting_scriptlets()
+            } else {
+                quick_fixes
+            };
+            let rules = Compiler::default()
+                .compile(target, vec![quick_fixes, crate::builtin::source()])
+                .unwrap();
+            rules
+                .cosmetic_policy()
+                .and_then(|policy| policy.scriptlet_program().map(str::to_owned))
+        };
+        let marked = program(true).unwrap();
+        assert!(
+            marked.contains(r#"zephiumPlayerMarker("channel lactmilli yahi inline", "#),
+            "{target:?}"
+        );
+        assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
+        assert!(program(false).is_none_or(|script| !script.contains("zephiumPlayerMarker(\"")));
+    }
+}
+
+#[test]
+fn the_built_in_rules_add_no_block() {
     let rules = include_str!("zephium_rules.txt")
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('!'));
     for rule in rules {
-        assert!(rule.starts_with("@@"), "{rule}");
+        assert!(
+            rule.starts_with("@@") || rule.contains("##+js(zephium-"),
+            "{rule}"
+        );
     }
 }
 

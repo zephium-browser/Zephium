@@ -10,7 +10,8 @@ const source = (name) => readFileSync(new URL(name, library), 'utf8')
 const files = ['pattern.js', 'json-pruner.js', 'request-matcher.js', 'timer-booster.js', 'text-replacer.js',
   'json-prune.js', 'json-prune-fetch-response.js', 'json-prune-xhr-response.js', 'nano-settimeout-booster.js',
   'nano-setinterval-booster.js', 'trusted-replace-fetch-response.js', 'trusted-replace-xhr-response.js',
-  'trusted-prevent-dom-bypass.js', 'no-xhr-if.js', 'object-editor.js', 'trusted-edit-inbound-object.js'];
+  'trusted-prevent-dom-bypass.js', 'no-xhr-if.js', 'object-editor.js', 'trusted-edit-inbound-object.js',
+  'zephium-player-marker.js'];
 
 const page = (fetchBody) => {
   class FakeXhr extends EventTarget {
@@ -587,6 +588,119 @@ const playerText = () => JSON.stringify({
   assert.deepEqual(edit('v2:$.store.book[0].author=repl({"pattern":"o","replacement":"0"})', store()).store.book[0].author, 'R0b');
   assert.deepEqual(edit('v2:$.missing=1', store()), store());
   assert.equal(context.zephiumObjectEditor('v2:$.a=call([null,"alert","x"])'), undefined);
+}
+
+// zephium-player-marker: marks the client after ytcfg.set, moves on from a hold, and leaves ads, started videos and Premium alone.
+{
+  const AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
+  const marked = (marker) => AGENT.replace(') AppleWebKit', `; ${marker}) AppleWebKit`);
+  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete' } = {}) => {
+    const listeners = {};
+    let interval;
+    const player = {
+      id: 'v1', time: 0, loads: [], response: { playabilityStatus: { status: 'OK' } },
+      stats: { buffer_health_seconds: '0.00 s', resolution: '0x0', debug_info: 'USDAI, SABR, s:49' },
+      getVideoData() { return { video_id: this.id }; },
+      getCurrentTime() { return this.time; },
+      getStatsForNerds() { return this.stats; },
+      getPlayerResponse() { return this.response; },
+      loadVideoById(id, start) { this.loads.push([id, start]); },
+    };
+    const context = {
+      console,
+      location: { pathname: '/watch' },
+      document: {
+        readyState,
+        addEventListener: (type, handler) => { (listeners[type] ??= []).push(handler); },
+        getElementById: (id) => (id === 'movie_player' ? player : null),
+      },
+      setInterval: (handler, delay) => { assert.equal(delay, 250); interval = handler; return 1; },
+      clearInterval: () => { interval = undefined; },
+      clock: 0,
+    };
+    vm.createContext(context);
+    vm.runInContext(files.map(source).join('\n'), context);
+    vm.runInContext('Date.now = () => clock;', context);
+    context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019');
+    vm.runInContext(`var ytcfg = { data_: {}, get(key) { return this.data_[key]; }, set(values) { Object.assign(this.data_, values); } };
+      ytcfg.set({ INNERTUBE_CONTEXT: { client: { clientName: 'WEB', userAgent: ${JSON.stringify(AGENT)} } } });`, context);
+    const agent = () => vm.runInContext('ytcfg.get("INNERTUBE_CONTEXT").client.userAgent', context);
+    const at = (ms) => { context.clock = ms; interval?.(); };
+    const fire = (type) => listeners[type]?.forEach((handler) => handler());
+    return { context, player, agent, at, fire, watching: () => interval !== undefined };
+  };
+
+  const page = youtube();
+  assert.equal(page.agent(), marked('channel'));
+  assert.ok(page.watching());
+  page.at(0);
+  page.at(999);
+  assert.deepEqual(page.player.loads, []);
+  page.at(1000);
+  assert.equal(page.agent(), marked('lactmilli'));
+  assert.deepEqual(page.player.loads, [['v1', 0]]);
+  page.fire('yt-navigate-start');
+  assert.equal(page.agent(), marked('channel'));
+  for (const [ms, marker] of [[2000, 'lactmilli'], [3000, 'yahi'], [4000, 'inline']]) {
+    page.at(ms);
+    page.at(ms + 1000);
+    assert.equal(page.agent(), marked(marker), marker);
+  }
+  page.at(6000);
+  page.at(7000);
+  assert.equal(page.agent(), AGENT);
+  assert.equal(page.player.loads.length, 4);
+  assert.ok(!page.watching());
+
+  // A server-inserted ad is not a hold, and a video that has started is left alone.
+  const ad = youtube();
+  ad.player.stats = { ...ad.player.stats, debug_info: 'SSAP, AD, s:49' };
+  for (let ms = 0; ms <= 5000; ms += 250) { ad.at(ms); }
+  assert.equal(ad.agent(), marked('channel'));
+  assert.deepEqual(ad.player.loads, []);
+  ad.player.time = 0.5;
+  ad.at(5250);
+  assert.ok(!ad.watching());
+  const started = youtube();
+  started.player.stats = { ...started.player.stats, buffer_health_seconds: '4.20 s', resolution: '1280x720' };
+  for (let ms = 0; ms <= 3000; ms += 250) { started.at(ms); }
+  assert.deepEqual(started.player.loads, []);
+
+  // YouTube's blocker error moves on at once; a URL start time is kept.
+  const refused = youtube();
+  refused.player.stats = {};
+  refused.player.time = 42;
+  refused.player.response = { playabilityStatus: { status: 'UNPLAYABLE', errorScreen: { text: 'see support.google.com/youtube/answer/3037019' } } };
+  refused.at(0);
+  assert.deepEqual(refused.player.loads, [['v1', 42]]);
+  assert.equal(refused.agent(), marked('lactmilli'));
+
+  // Premium is never marked; a fresh context from YouTube is marked again.
+  const premium = youtube();
+  vm.runInContext('var ytInitialData = { logo: "PREMIUM" };', premium.context);
+  premium.at(0);
+  assert.equal(premium.agent(), AGENT);
+  assert.ok(!premium.watching());
+  const fresh = youtube({ readyState: 'loading' });
+  assert.ok(!fresh.watching());
+  vm.runInContext(`ytcfg.set({ INNERTUBE_CONTEXT: { client: { userAgent: ${JSON.stringify(AGENT)} } } })`, fresh.context);
+  assert.equal(fresh.agent(), marked('channel'));
+  fresh.fire('DOMContentLoaded');
+  assert.ok(fresh.watching());
+
+  // Arguments it cannot read leave the page untouched.
+  const context = { console, document: { addEventListener() {} }, location: { pathname: '/watch' } };
+  vm.createContext(context);
+  vm.runInContext(files.map(source).join('\n'), context);
+  for (const args of [
+    ['', 'a=b', '', '1000', 'x=y', ''],
+    ['channel', 'nonsense', '', '1000', 'x=y', ''],
+    ['channel', 'a=b', '', 'soon', 'x=y', ''],
+    ['channel', 'a=b', '', '1000', 'premium', ''],
+  ]) {
+    context.zephiumPlayerMarker(...args);
+    assert.equal(Object.getOwnPropertyDescriptor(vm.runInContext('globalThis', context), 'ytcfg'), undefined, args.join(','));
+  }
 }
 
 console.log('scriptlet library: all checks passed');
