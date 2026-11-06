@@ -20,6 +20,12 @@ const visible = (element) => {
 };
 const ENFORCEMENT = 'ytd-enforcement-message-view-model, #enforcement-message';
 const INTERRUPTIONS = /experiencing interruptions/i;
+// The notice's text and what surrounds it, or null.
+const notice = () => {
+  const text = document.body.innerText;
+  const at = text.search(INTERRUPTIONS);
+  return at < 0 ? null : text.slice(Math.max(0, at - 80), at + 120).replace(/\s+/g, ' ');
+};
 const videoId = () => new URLSearchParams(location.search).get('v');
 const consent = document.querySelector('form[action*="consent"] button');
 if (location.hostname.startsWith('consent.') && consent) return { consent: true };
@@ -39,7 +45,7 @@ const watch = async (open) => {
   if (!player) return { videoId: id, error: 'the player did not load the video' };
   const video = player.querySelector('video');
   try { player.mute(); player.playVideo(); } catch {}
-  let adMs = 0, adSeen = false, enforcement = false, interruptions = false, stalledMs = 0, holdMs = 0, ssapAdMs = 0;
+  let adMs = 0, adSeen = false, enforcement = false, interruptionsText = null, stalledMs = 0, holdMs = 0, ssapAdMs = 0;
   let contentFrameMs = null, debugAtFirstStall = null, last = video.currentTime;
   const step = 250;
   for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
@@ -47,7 +53,7 @@ const watch = async (open) => {
     const showing = player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting');
     if (showing) { adMs += step; adSeen = true; }
     enforcement ||= [...document.querySelectorAll(ENFORCEMENT)].some(visible);
-    if (elapsed % 2000 === 0) interruptions ||= INTERRUPTIONS.test(document.body.innerText);
+    if (elapsed % 2000 === 0) interruptionsText ??= notice();
     let nerds = null;
     try { nerds = player.getStatsForNerds?.() ?? null; } catch {}
     const debug = typeof nerds?.debug_info === 'string' ? nerds.debug_info : null;
@@ -63,7 +69,7 @@ const watch = async (open) => {
     }
     last = now;
   }
-  interruptions ||= INTERRUPTIONS.test(document.body.innerText);
+  interruptionsText ??= notice();
   let playability = null;
   try {
     const status = player.getPlayerResponse?.()?.playabilityStatus;
@@ -78,7 +84,8 @@ const watch = async (open) => {
     adSeen,
     adMs,
     enforcement,
-    interruptions,
+    interruptions: interruptionsText !== null,
+    interruptionsText,
     playability,
     played: Math.round(video.currentTime * 10) / 10,
     debugAtFirstStall,
@@ -99,7 +106,9 @@ const link = await until(() => [...document.querySelectorAll('#secondary a[href^
     && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer')), 20000);
 if (!link) throw new Error('the watch page links no other video');
 const navigations = [await watch(() => link.click())];
-const next = await until(() => [...document.querySelectorAll('#movie_player .ytp-next-button')].find(visible), 5000);
+// The player hides its controls while playing; the button is there all the same.
+const next = await until(() => [...document.querySelectorAll('#movie_player .ytp-next-button')]
+  .find((element) => element.getAttribute('aria-disabled') !== 'true' && element.style.display !== 'none'), 5000);
 if (next && !navigations[0].error) navigations.push(await watch(() => next.click()));
 const first = navigations[0];
 return {
@@ -112,4 +121,5 @@ return {
   enforcement: navigations.some((navigation) => navigation.enforcement),
   interruptions: navigations.some((navigation) => navigation.interruptions),
   played: first.played ?? null,
+  apiCalls: window.__benchApiCalls ?? null,
 };

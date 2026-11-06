@@ -22,7 +22,14 @@ const COMPANION = '#player-ads, ytd-companion-slot-renderer, ytd-action-companio
 let adMs = 0, adSeen = false, adUi = false, companion = false, enforcement = false, stalledMs = 0, started = false;
 // YouTube's notice for a player it slows down for a blocker.
 const INTERRUPTIONS = /experiencing interruptions/i;
-let interruptions = false;
+let interruptions = false, interruptionsText = null;
+// The notice's text and what surrounds it, the first time it shows.
+const notice = () => {
+  const text = document.body.innerText;
+  const at = text.search(INTERRUPTIONS);
+  if (at >= 0) interruptionsText ??= text.slice(Math.max(0, at - 80), at + 120).replace(/\s+/g, ' ');
+  return at >= 0;
+};
 // The player's own view: `debug_info` starts with "SSAP, AD" while the server
 // plays an inserted ad, and a hold shows as no buffer at no resolution.
 const innertubeUserAgent = () => { try { return window.ytcfg?.data_?.INNERTUBE_CONTEXT?.client?.userAgent ?? null; } catch { return null; } };
@@ -38,7 +45,7 @@ for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
   adUi ||= visible(AD_UI);
   companion ||= visible(COMPANION);
   enforcement ||= visible(ENFORCEMENT);
-  if (elapsed % 2000 === 0) interruptions ||= INTERRUPTIONS.test(document.body.innerText);
+  if (elapsed % 2000 === 0) interruptions ||= notice();
   const now = video?.currentTime ?? 0;
   started ||= now > last;
   const nerds = stats();
@@ -85,7 +92,7 @@ const seek = (fraction) => new Promise((resolve) => {
   try { player.playVideo(); } catch {}
 });
 const seekMs = [await seek(0.4), await seek(0.7)];
-interruptions ||= INTERRUPTIONS.test(document.body.innerText);
+interruptions ||= notice();
 const playability = (() => {
   try {
     const status = player.getPlayerResponse?.()?.playabilityStatus;
@@ -129,6 +136,8 @@ return {
   companion,
   enforcement,
   interruptions,
+  interruptionsText,
+  apiCalls: window.__benchApiCalls ?? null,
   playability,
   played,
   stalledMs,

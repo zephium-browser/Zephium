@@ -29,8 +29,30 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   const nexts = [];
   Object.defineProperty(window, '__benchPlayerRequests', { value: requests });
   Object.defineProperty(window, '__benchNextRequests', { value: nexts });
+  // Every `youtubei/v1` call by path and how its body was given, so a call the
+  // readers below cannot see is still counted.
+  const calls = {};
+  Object.defineProperty(window, '__benchApiCalls', { value: calls });
   const PLAYER = /\/youtubei\/v1\/player(?:\?|$)/;
   const NEXT = /\/youtubei\/v1\/next(?:\?|$)/;
+  const API = /\/youtubei\/v1\/([a-z_/]+)/;
+  const kind = (body) => body === undefined || body === null ? 'none' : typeof body === 'string' ? 'string'
+    : body instanceof Blob ? 'blob' : body instanceof ArrayBuffer || ArrayBuffer.isView(body) ? 'bytes'
+    : body instanceof ReadableStream ? 'stream' : body instanceof Request ? 'request' : 'other';
+  const count = (url, body) => {
+    const path = API.exec(String(url))?.[1];
+    if (path === undefined) return;
+    const entry = (calls[path] ??= {});
+    const type = kind(body);
+    entry[type] = (entry[type] ?? 0) + 1;
+  };
+  // Bodies the page gave as bytes or a blob are read as text too.
+  const read = (url, body) => {
+    count(url, body);
+    if (body instanceof Blob) body.text().then((text) => note(url, text), () => {});
+    else if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) note(url, new TextDecoder().decode(body));
+    else note(url, body);
+  };
   const tail = (client) => /^Mozilla\/5\.0 \(([^)]*)\)/.exec(String(client.userAgent ?? ''))?.[1].split('; ').at(-1) ?? null;
   const note = (url, body) => {
     const player = PLAYER.test(String(url));
@@ -63,10 +85,17 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
         const [input, init] = args;
         if (input instanceof Request) {
           if ((PLAYER.test(input.url) || NEXT.test(input.url)) && init?.body === undefined) {
+            count(input.url, input);
             input.clone().text().then((body) => note(input.url, body), () => {});
-          } else note(input.url, init?.body);
-        } else note(input, init?.body);
+          } else read(input.url, init?.body);
+        } else read(input, init?.body);
       } catch {}
+      return Reflect.apply(target, self, args);
+    },
+  });
+  navigator.sendBeacon = new Proxy(navigator.sendBeacon, {
+    apply(target, self, args) {
+      try { count(args[0], args[1]); } catch {}
       return Reflect.apply(target, self, args);
     },
   });
@@ -80,7 +109,7 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   });
   prototype.send = new Proxy(prototype.send, {
     apply(target, self, args) {
-      try { note(urls.get(self) ?? '', args[0]); } catch {}
+      try { read(urls.get(self) ?? '', args[0]); } catch {}
       return Reflect.apply(target, self, args);
     },
   });
