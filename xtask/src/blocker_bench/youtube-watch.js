@@ -20,6 +20,9 @@ const ENFORCEMENT = 'ytd-enforcement-message-view-model, #enforcement-message, t
 const AD_UI = '.ytp-ad-player-overlay, .ytp-ad-player-overlay-layout, .ytp-ad-text, .ytp-ad-preview-container, .ytp-skip-ad-button, .ytp-ad-skip-button-modern';
 const COMPANION = '#player-ads, ytd-companion-slot-renderer, ytd-action-companion-ad-renderer, ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-ads"]';
 let adMs = 0, adSeen = false, adUi = false, companion = false, enforcement = false, stalledMs = 0, started = false;
+// YouTube's notice for a player it slows down for a blocker.
+const INTERRUPTIONS = /experiencing interruptions/i;
+let interruptions = false;
 // The player's own view: `debug_info` starts with "SSAP, AD" while the server
 // plays an inserted ad, and a hold shows as no buffer at no resolution.
 const innertubeUserAgent = () => { try { return window.ytcfg?.data_?.INNERTUBE_CONTEXT?.client?.userAgent ?? null; } catch { return null; } };
@@ -35,6 +38,7 @@ for (let elapsed = 0; elapsed < seconds * 1000; elapsed += step) {
   adUi ||= visible(AD_UI);
   companion ||= visible(COMPANION);
   enforcement ||= visible(ENFORCEMENT);
+  if (elapsed % 2000 === 0) interruptions ||= INTERRUPTIONS.test(document.body.innerText);
   const now = video?.currentTime ?? 0;
   started ||= now > last;
   const nerds = stats();
@@ -81,6 +85,13 @@ const seek = (fraction) => new Promise((resolve) => {
   try { player.playVideo(); } catch {}
 });
 const seekMs = [await seek(0.4), await seek(0.7)];
+interruptions ||= INTERRUPTIONS.test(document.body.innerText);
+const playability = (() => {
+  try {
+    const status = player.getPlayerResponse?.()?.playabilityStatus;
+    return status ? { status: status.status ?? null, reason: String(status.reason ?? '').slice(0, 120) } : null;
+  } catch { return null; }
+})();
 const start = window.__benchVideo ?? {};
 // The page's own timeline of YouTube's API and media requests, in ms since
 // navigation, with the protocol each used.
@@ -117,6 +128,8 @@ return {
   adUi,
   companion,
   enforcement,
+  interruptions,
+  playability,
   played,
   stalledMs,
   playCalledMs,

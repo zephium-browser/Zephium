@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 const SITES: &str = include_str!("sites.json");
 const PROBE: &str = include_str!("probe.js");
 const YOUTUBE_WATCH: &str = include_str!("youtube-watch.js");
+const YOUTUBE_INPAGE: &str = include_str!("youtube-inpage.js");
 pub(super) const YOUTUBE_FEED: &str = include_str!("youtube-feed.js");
 pub(super) const YOUTUBE_SHORTS: &str = include_str!("youtube-shorts.js");
 const CONSENT: &str = include_str!("consent.js");
@@ -52,6 +53,14 @@ pub(super) fn probe_script(site: &Site) -> String {
     PROBE.replacen(
         "const siteSelectors = __SITE__;",
         &format!("const siteSelectors = {selectors};"),
+        1,
+    )
+}
+
+pub(super) fn inpage_script(seconds: u64) -> String {
+    YOUTUBE_INPAGE.replacen(
+        "const seconds = __SECONDS__;",
+        &format!("const seconds = {seconds};"),
         1,
     )
 }

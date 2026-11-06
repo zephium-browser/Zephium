@@ -1559,7 +1559,8 @@ fn visit_line(visit: &Visit) -> String {
     )
 }
 
-/// The YouTube pass: the home feed, five videos and one Shorts page.
+/// The YouTube pass: the home feed, two videos opened from it in the page,
+/// five videos and one Shorts page.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
@@ -1589,13 +1590,23 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             let plan = context.plan(config);
             let feed = sites::YOUTUBE_FEED.to_string();
             let watch = sites::watch_script(WATCH_SECONDS, SEEK_WITHIN_MS);
-            let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![(
-                "feed",
-                None,
-                "https://www.youtube.com/".to_string(),
-                &feed,
-                EVAL_TIMEOUT_MS + 10_000,
-            )];
+            let inpage = sites::inpage_script(WATCH_SECONDS);
+            let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![
+                (
+                    "feed",
+                    None,
+                    "https://www.youtube.com/".to_string(),
+                    &feed,
+                    EVAL_TIMEOUT_MS + 10_000,
+                ),
+                (
+                    "inpage",
+                    None,
+                    "https://www.youtube.com/".to_string(),
+                    &inpage,
+                    2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
+                ),
+            ];
             for (id, _) in VIDEOS {
                 pages.push((
                     "watch",

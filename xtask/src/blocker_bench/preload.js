@@ -21,17 +21,27 @@ performance.setResourceTimingBufferSize(10000);
 })();
 // On YouTube, what each player request asked for, read from its JSON body as
 // sent, after anything a blocker edited: the fields uBlock Origin's quick
-// fixes set to ask for no server-inserted ad. Reads only; the calls go on
-// unchanged.
+// fixes set to ask for no server-inserted ad; and the user agent of the first
+// `next` requests, which carry comments and continuations. Reads only; the
+// calls go on unchanged.
 if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   const requests = [];
+  const nexts = [];
   Object.defineProperty(window, '__benchPlayerRequests', { value: requests });
+  Object.defineProperty(window, '__benchNextRequests', { value: nexts });
   const PLAYER = /\/youtubei\/v1\/player(?:\?|$)/;
+  const NEXT = /\/youtubei\/v1\/next(?:\?|$)/;
+  const tail = (client) => /^Mozilla\/5\.0 \(([^)]*)\)/.exec(String(client.userAgent ?? ''))?.[1].split('; ').at(-1) ?? null;
   const note = (url, body) => {
-    if (typeof body !== 'string' || !PLAYER.test(String(url))) return;
+    const player = PLAYER.test(String(url));
+    if (typeof body !== 'string' || !(player || (NEXT.test(String(url)) && nexts.length < 20))) return;
     let value;
     try { value = JSON.parse(body); } catch { return; }
     const client = value?.context?.client ?? {};
+    if (!player) {
+      nexts.push({ atMs: Math.round(performance.now()), userAgentTail: tail(client), clientScreen: client.clientScreen ?? null });
+      return;
+    }
     const playback = value?.playbackContext?.contentPlaybackContext ?? {};
     requests.push({
       atMs: Math.round(performance.now()),
@@ -40,8 +50,9 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
       params: value?.params ?? null,
       inlineNoAd: playback.isInlinePlaybackNoAd ?? null,
       lactMilliseconds: playback.lactMilliseconds ?? null,
+      refererReload: String(playback.referer ?? '').endsWith('#reloadxhr'),
       // The last item of the platform part, where the quick fixes add a marker.
-      userAgentTail: /^Mozilla\/5\.0 \(([^)]*)\)/.exec(String(client.userAgent ?? ''))?.[1].split('; ').at(-1) ?? null,
+      userAgentTail: tail(client),
       attestation: Object.hasOwn(value ?? {}, 'attestationRequest'),
       playbackKeys: Object.keys(playback).sort(),
     });
@@ -51,7 +62,7 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
       try {
         const [input, init] = args;
         if (input instanceof Request) {
-          if (PLAYER.test(input.url) && init?.body === undefined) {
+          if ((PLAYER.test(input.url) || NEXT.test(input.url)) && init?.body === undefined) {
             input.clone().text().then((body) => note(input.url, body), () => {});
           } else note(input.url, init?.body);
         } else note(input, init?.body);
