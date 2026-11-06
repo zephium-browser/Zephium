@@ -292,6 +292,8 @@ pub struct Shell {
     browser_return_ready: bool,
     /// Set while the window lays out for a return that a queued command is about to change.
     browser_return_hidden: bool,
+    /// One of the browser's own dialogs is open over the window.
+    chrome_modal: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
@@ -536,6 +538,7 @@ impl Shell {
             browser_after_return: None,
             browser_return_ready: false,
             browser_return_hidden: false,
+            chrome_modal: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
@@ -1023,6 +1026,12 @@ impl Shell {
             }
             Command::SetPagePermissionCardHost(available) => {
                 self.set_page_permission_card_host(available)
+            }
+            Command::SetChromeModal(open) => {
+                if self.chrome_modal != open {
+                    self.chrome_modal = open;
+                    let _ = self.relayout();
+                }
             }
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {

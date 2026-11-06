@@ -553,7 +553,7 @@ fn arguments(body: &str) -> Vec<&str> {
     parts.push(&body[start..]);
     parts
         .into_iter()
-        .map(|part| part.trim().trim_matches(|c| c == '"' || c == '\''))
+        .map(|part| part.trim().trim_matches(|c| matches!(c, '"' | '\'' | '`')))
         .collect()
 }
 
@@ -888,6 +888,26 @@ mod tests {
         assert!(program
             .script
             .contains(&format!("[{},0]", key_hash("youtube.*"))));
+    }
+
+    #[test]
+    fn a_backtick_quoted_name_is_read_as_the_library_reads_it() {
+        assert!(matches!(
+            classify("example.com##+js(`trusted-rpfr`, a, b)"),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            classify("www.youtube.com##+js(`trusted-rpfr`, a, b)"),
+            Kind::Rule { unknown: false, .. }
+        ));
+        let stored = |line: &str| ScriptletRule {
+            line: line.to_owned(),
+            trusted: true,
+        };
+        assert!(matches!(
+            build(&[stored("example.com##+js(`trusted-rpfr`, a, b)")]),
+            Err(crate::CosmeticError::InvalidPolicy)
+        ));
     }
 
     #[test]
