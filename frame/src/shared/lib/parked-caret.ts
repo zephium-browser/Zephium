@@ -4,16 +4,15 @@ import { reducedMotion } from "./motion";
 const IDLE_MS = 4000;
 
 /**
- * WebKit on macOS fades its text caret, and every step of the fade redraws
- * the interface: an empty field left focused on an idle page keeps the
- * window drawing at the display's rate. WebView2 blinks its caret instead,
- * but each blink keeps it drawing for a stretch of frames, about twenty a
- * second. After a quiet spell the field lets go of focus and shows a caret
- * drawn here instead. On macOS it blinks through an opacity animation the
- * system compositor runs without waking the page; elsewhere it stands still,
- * since any animation, even a compositor one, keeps Chromium drawing every
- * frame. The next key the window receives gives the field its focus back
- * before the text arrives.
+ * Replaces a focused empty field's native caret after an idle interval to
+ * reduce caret-driven drawing. The field loses focus and an aria-hidden
+ * caret takes its place. On macOS it animates opacity unless reduced motion
+ * is enabled; elsewhere it remains still.
+ *
+ * Text-producing keys, deletion, composition-related keys and supported
+ * paste input restore focus. Other shortcuts do not generally wake it.
+ * Focus and pointer interaction release the parked caret. Actual idle
+ * rendering behavior depends on the native engine and needs measurement.
  */
 export function parkCaret(input: HTMLInputElement): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;

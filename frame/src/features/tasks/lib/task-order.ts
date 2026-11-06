@@ -1,14 +1,14 @@
 /** Manual position within a column.
  *
- *  Keys are fixed-width decimal strings so that comparing them as text orders
- *  them as numbers — which is what the store's index and `compareRows` both do.
- *  Inserting takes the midpoint of its neighbours, so one card moving is one
- *  write rather than a renumbered column.
+ * Keys are fixed-width decimal strings so text comparison preserves numeric
+ * order in the store index and `compareRows`. A midpoint normally lets a
+ * moved task change position with one write.
  *
- *  The gap is finite: repeatedly dropping between the same two cards halves it,
- *  and after about sixteen it runs out. `orderBetween` says so by returning
- *  null, and the caller keeps the current order and explains that the position
- *  is unavailable. Rebalancing multiple tasks needs an atomic native command.
+ * Gaps are finite. `orderBetween` returns null when no midpoint is available;
+ * board insertion then keeps the current order and reports the unavailable
+ * position. List `reorderKeys` instead rebalances the supplied ordered list
+ * when a midpoint is unavailable or unpositioned neighbours require it,
+ * returning every key that changes for the caller to persist.
  */
 const WIDTH = 12;
 const STEP = 65_536;
