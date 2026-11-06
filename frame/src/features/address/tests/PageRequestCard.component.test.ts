@@ -1,10 +1,12 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
-import type { PageRequestView } from "$shared/ipc/bindings";
+import type { OperationAdmission, PageRequestView } from "$shared/ipc/bindings";
 import PageRequestCard from "../components/PageRequestCard.svelte";
 
-const answers = vi.hoisted(() => vi.fn(async () => ({ outcome: "accepted" })));
+const answers = vi.hoisted(() =>
+  vi.fn(async (): Promise<OperationAdmission> => ({ accepted: true, operation_id: null })),
+);
 const pageAnswers = vi.hoisted(() => vi.fn(async () => ({ accepted: true, operation_id: null })));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -66,6 +68,43 @@ test("Enter signs in with what was typed and clears the fields", async () => {
     password: "hunter2",
   });
   await expect.element(page.getByLabelText("Password")).toHaveValue("");
+});
+
+test("a refused sign-in answer is reported and can be retried", async () => {
+  let finish!: (admission: OperationAdmission) => void;
+  answers.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  signIn();
+  const password = page.getByLabelText("Password");
+  await userEvent.type(page.getByLabelText("Username"), "admin");
+  await userEvent.type(password, "first{Enter}");
+  await userEvent.keyboard("{Escape}");
+  expect(answers).toHaveBeenCalledExactlyOnceWith("tab-1", 7, {
+    username: "admin",
+    password: "first",
+  });
+  finish({ accepted: false, operation_id: null });
+  await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't apply your answer.");
+  await expect.element(password).toHaveValue("");
+  await userEvent.type(page.getByLabelText("Username"), "admin");
+  await userEvent.type(password, "second{Enter}");
+  expect(answers).toHaveBeenCalledTimes(2);
+  expect(answers).toHaveBeenLastCalledWith("tab-1", 7, {
+    username: "admin",
+    password: "second",
+  });
+  await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+});
+
+test("a lost sign-in cancellation is reported and can be retried", async () => {
+  answers.mockRejectedValueOnce(new Error("transport failure"));
+  signIn();
+  const cancel = page.getByRole("button", { name: "Cancel" });
+  await cancel.click();
+  await expect.element(page.getByRole("alert")).toHaveTextContent("Couldn't apply your answer.");
+  await cancel.click();
+  expect(answers).toHaveBeenCalledTimes(2);
+  expect(answers).toHaveBeenLastCalledWith("tab-1", 7, null);
+  await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
 });
 
 test("Enter inside the card never submits the address form around it", async () => {
