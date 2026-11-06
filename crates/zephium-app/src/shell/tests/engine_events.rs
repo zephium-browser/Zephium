@@ -354,3 +354,77 @@ fn a_restart_says_whether_it_finishes_an_update_or_recovers_a_profile() {
         vec![None, Some(RuntimeUpdate), Some(Profile)]
     );
 }
+
+use crate::shell::view_lifecycle::SPARE_IDLE;
+
+fn quiet_for(duration: std::time::Duration) -> std::time::Instant {
+    std::time::Instant::now()
+        .checked_sub(duration)
+        .expect("monotonic clock reaches back that far")
+}
+
+fn finish_load(shell: &mut Shell, id: ItemId) {
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: false,
+    }));
+}
+
+#[test]
+fn a_warm_spare_goes_after_quiet_browsing_and_the_next_load_warms_another() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    finish_load(&mut shell, id);
+    assert_eq!(engine.warm_spare_calls(), 1);
+
+    shell.residency.spare_activity = Some(quiet_for(SPARE_IDLE / 2));
+    shell.handle(Command::Tick);
+    assert_eq!(engine.release_spare_calls(), 0, "not quiet long enough");
+
+    shell.residency.spare_activity = Some(quiet_for(SPARE_IDLE));
+    shell.handle(Command::Tick);
+    assert_eq!(engine.release_spare_calls(), 1);
+    shell.handle(Command::Tick);
+    assert_eq!(engine.release_spare_calls(), 1, "released once");
+
+    finish_load(&mut shell, id);
+    assert_eq!(engine.warm_spare_calls(), 2);
+    shell.handle(Command::Tick);
+    assert_eq!(engine.release_spare_calls(), 1, "a fresh spare stays");
+}
+
+#[test]
+fn browsing_keeps_a_warm_spare_and_memory_pressure_hands_it_to_the_engine() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "example.com".into(),
+    });
+    finish_load(&mut shell, id);
+    assert_eq!(engine.warm_spare_calls(), 1);
+
+    shell.residency.spare_activity = Some(quiet_for(SPARE_IDLE));
+    shell.handle(Command::Activate(id));
+    shell.handle(Command::Tick);
+    assert_eq!(
+        engine.release_spare_calls(),
+        0,
+        "switching tabs is activity"
+    );
+
+    // The engine closes its spare under pressure and builds none until it
+    // ends, so the shell has nothing left to release.
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Warning,
+    ));
+    assert!(shell.residency.spare_activity.is_none());
+    shell.handle(Command::Tick);
+    assert_eq!(engine.release_spare_calls(), 0);
+}

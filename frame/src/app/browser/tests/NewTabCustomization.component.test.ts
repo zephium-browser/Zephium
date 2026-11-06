@@ -9,6 +9,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { resourceTestServer } from "$shared/testing/resources/server";
 import type { MediaImportV1_Deserialize } from "$shared/ipc/bindings";
 import { loadNewTab } from "$features/newtab";
+import { isDecoded } from "$shared/sky";
 import { loadSettings, handleNativeSection } from "$features/settings";
 
 async function settingsScreen() {
@@ -33,9 +34,9 @@ vi.mock("$shared/sky", async (original) => {
   const real = await original<typeof import("$shared/sky")>();
   return {
     ...real,
-    decode: (scene: import("$shared/sky").Scene) => {
+    decode: (scene: import("$shared/sky").Scene, url?: string) => {
       native.decode(scene);
-      return real.decode(scene);
+      return real.decode(scene, url);
     },
   };
 });
@@ -226,7 +227,9 @@ test("a missing or broken image silently restores the sky, including its materia
   expect(newTabImage()).toBeNull();
   expect(ntp.container.querySelector("[role=alert]")).toBeNull();
   expect(ntp.container.querySelector("img")).toBeNull();
-  expect(native.decode).toHaveBeenCalled();
+  await expect
+    .poll(() => ntp.container.querySelector<HTMLElement>(".sky")!.style.backgroundImage)
+    .toMatch(/sky-/u);
 });
 
 test("settings follow the existing dark and light surfaces", async () => {
@@ -241,4 +244,29 @@ test("settings follow the existing dark and light surfaces", async () => {
       .elementLocator(settings.container)
       .screenshot({ path: `../../../../../target/newtab/customization-${theme}.png` });
   }
+});
+
+test("a later new tab draws the sky already decoded as it first appears, never an undecoded one", async () => {
+  await preferences.init();
+  const first = await tab();
+  const drawn = () => first.container.querySelector<HTMLElement>(".sky")?.style.backgroundImage;
+  await expect.poll(drawn).toMatch(/sky-/u);
+  first.unmount();
+
+  const appeared: string[] = [];
+  const watch = new MutationObserver((records) => {
+    for (const node of records.flatMap((record) => [...record.addedNodes])) {
+      if (!(node instanceof HTMLElement)) continue;
+      const sky = node.matches(".sky") ? node : node.querySelector<HTMLElement>(".sky");
+      if (sky) appeared.push(sky.style.backgroundImage);
+    }
+  });
+  watch.observe(document.body, { childList: true, subtree: true });
+  const next = await tab();
+  await expect.poll(() => appeared.length).toBeGreaterThan(0);
+  watch.disconnect();
+  const url = /url\("(.+)"\)/u.exec(appeared[0]!)?.[1];
+  expect(url).toBeDefined();
+  expect(isDecoded(url!)).toBe(true);
+  expect(next.container.querySelector<HTMLElement>(".newtab")!.dataset.ready).toBe("true");
 });

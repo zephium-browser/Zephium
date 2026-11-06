@@ -152,6 +152,22 @@ use zephium_ipc::{
 pub(crate) const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A person opening, switching, closing or navigating tabs, or a page
+/// changing address or loading: what keeps a warm spare worth holding.
+fn browsing_activity(cmd: &Command) -> bool {
+    match cmd {
+        Command::Open
+        | Command::Activate(_)
+        | Command::Close(_)
+        | Command::Navigate { .. }
+        | Command::Reload(_)
+        | Command::Engine(EngineEvent::UrlChanged { .. })
+        | Command::Engine(EngineEvent::LoadingChanged { .. }) => true,
+        Command::Operation { command, .. } => browsing_activity(command),
+        _ => false,
+    }
+}
 #[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume
@@ -629,6 +645,9 @@ impl Shell {
                 let _ = ack.send(outcome);
             }
             return;
+        }
+        if browsing_activity(&cmd) {
+            self.note_browsing_activity();
         }
         match cmd {
             Command::WorkDocument(submission) => self.work_document(submission),
@@ -1467,6 +1486,7 @@ impl Shell {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
                 self.archive_idle_tabs();
+                self.release_idle_spare();
                 if self.maintain_views() {
                     self.project_items();
                 }
