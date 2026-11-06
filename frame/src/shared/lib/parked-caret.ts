@@ -9,9 +9,11 @@ const IDLE_MS = 4000;
  * caret takes its place. On macOS it animates opacity unless reduced motion
  * is enabled; elsewhere it remains still.
  *
- * Text-producing keys, deletion, composition-related keys and Meta+V restore
- * focus. Ctrl shortcuts without AltGraph are ignored, including Ctrl+V;
- * Windows paste therefore does not wake a parked field through this handler.
+ * After modifier filtering, `wake` accepts keys of one UTF-16 code unit,
+ * keys in `STARTS_TEXT`, or events with `isComposing`. Other multi-unit text
+ * keys do not restore focus. Ctrl shortcuts without AltGraph are ignored,
+ * including Ctrl+V; Windows paste therefore does not wake a parked field
+ * through this handler.
  * Focus and pointer interaction release the parked caret. Actual idle
  * rendering behavior depends on the native engine and needs measurement.
  */
@@ -70,8 +72,8 @@ export function parkCaret(input: HTMLInputElement): () => void {
     input.blur();
   }
 
-  // Anything that can start text brings focus back: characters, AltGr and
-  // dead keys, input methods, deletion and Meta+V; plain Ctrl shortcuts don't.
+  // After modifier filtering, accept one-code-unit keys, this explicit set,
+  // or active composition. Other multi-unit text keys do not wake the field.
   const STARTS_TEXT = new Set(["Backspace", "Delete", "Dead", "Process", "Unidentified"]);
   function wake(event: KeyboardEvent) {
     const altGraph = event.getModifierState("AltGraph");
