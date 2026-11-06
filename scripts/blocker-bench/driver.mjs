@@ -210,7 +210,7 @@ class Chromium extends Driver {
 
   // The lifecycle "load" event fires alongside Page.loadEventFired, and its loaderId keeps a late event of the
   // previous document, or of a subframe, from ending the wait early. A navigation the browser restarts commits
-  // under another loaderId, so the main frame's committed documents count too.
+  // under another loaderId, so the main frame's committed documents count too, and the reply says how many did.
   async load(tab, url, timeoutMs) {
     const sessionId = this.session(tab);
     const loaded = new Set();
@@ -232,9 +232,10 @@ class Chromium extends Driver {
         if (navigated.errorText) throw new Error(navigated.errorText);
         while (navigated.loaderId && !done()) await new Promise(resolve => { wake = resolve; });
       })(), timeoutMs);
-      if (!timedOut) return { loadMs: elapsed(start) };
       const restarted = [...committed].filter(id => id !== navigated?.loaderId).length;
-      return { loadMs: elapsed(start), timedOut: true, loadWait: { committed: committed.size, restarted, loads: loaded.size } };
+      const loadWait = { committed: committed.size, restarted, loads: loaded.size };
+      if (!timedOut) return restarted > 0 ? { loadMs: elapsed(start), loadWait } : { loadMs: elapsed(start) };
+      return { loadMs: elapsed(start), timedOut: true, loadWait };
     } finally {
       stop();
     }
