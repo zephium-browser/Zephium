@@ -2147,12 +2147,13 @@ fn youtube_background_step(
 /// A video played in view for `PLAY_IN_VIEW_SECONDS`, its tab then sent
 /// behind the home feed, where the page moves on to a related video as
 /// autoplay would: a page that has played keeps playing hidden, so a hold
-/// there must still be ended.
+/// there must still be ended. Opened from the one video that is not music,
+/// whose related videos are not all mixes, which the move skips.
 fn youtube_hidden_next_step(
     session: &mut Session,
     (config, run): (Config, usize),
 ) -> (YoutubeStep, bool) {
-    let id = VIDEOS[2].0;
+    let id = VIDEOS[4].0;
     let url = format!("https://www.youtube.com/watch?v={id}");
     let mut record = YoutubeStep {
         config: config.name().to_string(),
