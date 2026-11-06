@@ -700,6 +700,17 @@ const playerText = () => JSON.stringify({
     assert.deepEqual(idle.player.loads, [], `state ${state}`);
     assert.equal(idle.agent(), marked('channel'));
   }
+  // An unstarted player whose video was asked to play is held, as when a
+  // consent dialog stopped it and playback was asked for again; one whose
+  // video is paused is not.
+  for (const paused of [true, false]) {
+    const stopped = youtube();
+    stopped.player.state = -1;
+    stopped.player.querySelector = (selector) => (selector === 'video' ? { paused } : null);
+    for (let ms = 0; ms <= 1000; ms += 250) { stopped.at(ms); }
+    assert.deepEqual(stopped.player.loads, paused ? [] : [['v1', 0]], `paused ${paused}`);
+  }
+
   const hidden = youtube();
   hidden.context.document.visibilityState = 'hidden';
   hidden.player.response = { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } };
