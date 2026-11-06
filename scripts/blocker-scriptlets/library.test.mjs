@@ -749,6 +749,35 @@ const playerText = () => JSON.stringify({
   assert.equal(next.agent(), marked('lactmilli'));
   assert.deepEqual(next.player.loads.slice(2), [['v2', 0]]);
 
+  // A playlist's video is reloaded through the playlist, so the player keeps
+  // its list and place; a mix, which the player holds no list for, a list
+  // whose place is another video, and a player that cannot reload a playlist
+  // reload the video alone.
+  const listed = (list, index, items, loadPlaylist) => {
+    const page = youtube();
+    page.player.time = 7;
+    Object.assign(page.player, {
+      playlists: [],
+      getPlaylistId() { return list; },
+      getPlaylistIndex() { return index; },
+      getPlaylist() { return items; },
+      loadPlaylist: loadPlaylist ?? function (options) { this.playlists.push(options); this.response = TAGGED; },
+    });
+    page.at(0);
+    page.at(1000);
+    return page.player;
+  };
+  const playlist = listed('PL1', 1, ['v0', 'v1', 'v2']);
+  assert.equal(JSON.stringify(playlist.playlists), JSON.stringify([{ list: 'PL1', index: 1, startSeconds: 7 }]));
+  assert.deepEqual(playlist.loads, []);
+  for (const [list, index, items] of [[null, -1, undefined], ['PL1', 0, ['v0', 'v1']], ['PL1', 1, undefined]]) {
+    const player = listed(list, index, items);
+    assert.deepEqual(player.playlists, [], `${list} ${index}`);
+    assert.deepEqual(player.loads, [['v1', 7]], `${list} ${index}`);
+  }
+  const failing = listed('PL1', 1, ['v0', 'v1'], () => { throw new Error('no playlist'); });
+  assert.deepEqual(failing.loads, [['v1', 7]]);
+
   // A server-inserted ad is not a hold, and a video that has started is left alone.
   const ad = youtube();
   ad.player.stats = { ...ad.player.stats, debug_info: 'SSAP, AD, s:49' };

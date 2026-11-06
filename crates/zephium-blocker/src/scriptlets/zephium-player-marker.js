@@ -1,4 +1,4 @@
-// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried once with the same marker. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
+// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried once with the same marker. A playlist's video is reloaded through the playlist when the player holds that list, so its place there is kept. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
 function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, requested) {
     const names = String(markers ?? '').split(/\s+/).filter((name) => /^[a-z0-9]+$/.test(name));
     const pairs = (spec, operator) => String(spec ?? '').split('|').map((pair) => {
@@ -112,6 +112,20 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             return false;
         }
     };
+    // A playlist's video is reloaded through the playlist, which keeps the
+    // player's list and place; a mix, which the player holds no list for, and
+    // any player that cannot, reload the video alone.
+    const reload = (player, id, at) => {
+        try {
+            const list = player.getPlaylistId?.();
+            const index = player.getPlaylistIndex?.();
+            if (typeof list === 'string' && list !== '' && player.getPlaylist?.()?.[index] === id) {
+                player.loadPlaylist({ list, index, startSeconds: at });
+                return;
+            }
+        } catch (e) {}
+        player.loadVideoById(id, at);
+    };
     let timer;
     let since;
     let video;
@@ -201,7 +215,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         }
         mark();
         try {
-            player.loadVideoById(id, Math.max(0, Math.floor(base)));
+            reload(player, id, Math.max(0, Math.floor(base)));
         } catch (e) {
             stop();
         }
