@@ -10,6 +10,12 @@ repo=${here:h:h}
 out=${1:?usage: run.sh OUT_DIR}
 mkdir -p "$out"
 out=${out:A}
+# The run reads only its own copy of the reviewed host list, taken now, so an
+# edit during the run cannot widen what it loads.
+hosts=$out/hosts-allowed.txt
+rm -f "$hosts"
+cp "$here/hosts-allowed.txt" "$hosts"
+chmod 444 "$hosts"
 
 for tool in record replay; do
   xcrun swiftc -parse-as-library -O -warnings-as-errors -module-cache-path "$out/swift-cache" \
@@ -36,11 +42,11 @@ corpora=() visits=()
 for list in "$here"/pages/*.txt "$out/rulehosts.txt"; do
   name=${list:t:r}
   # Only reviewed sites load; the rest are printed for review.
-  cargo xtask blocker-prune admit --allowed "$here/hosts-allowed.txt" --pages "$list" \
+  cargo xtask blocker-prune admit --allowed "$hosts" --pages "$list" \
     --output "$out/admitted-$name.txt"
   echo "recording $name ($(grep -c . "$out/admitted-$name.txt") pages)"
   "$out/record" "$out/admitted-$name.txt" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 \
-    "$out/consent.js" "$here/hosts-allowed.txt" 2> "$out/record-$name.log"
+    "$out/consent.js" "$hosts" 2> "$out/record-$name.log"
   grep '^refused ' "$out/record-$name.log" > "$out/refused-$name.txt" || true
   corpora+=("$out/corpus-$name.jsonl") visits+=("$out/visits-$name.jsonl")
   pages=$(( pages + $(grep -c . "$out/admitted-$name.txt") ))

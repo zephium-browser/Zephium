@@ -9,15 +9,37 @@ import AppKit
 import Network
 import WebKit
 
-final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-    // WebKit asks for the key it wraps a page's stored CryptoKeys with; unanswered, it keeps one in
-    // the login keychain, which prompts for a new build. A key for this run only, never stored.
-    let masterKey: Data = { var bytes = [UInt8](repeating: 0, count: 32); _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes); return Data(bytes) }()
+/// The key WebKit wraps a page's stored CryptoKeys with, for this run only. Unanswered, WebKit keeps
+/// one in the login keychain, which prompts for every new build of a tool.
+let runKey: NSData = {
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        FileHandle.standardError.write("no random bytes for the WebCrypto key\n".data(using: .utf8)!)
+        exit(3)
+    }
+    return Data(bytes) as NSData
+}()
+
+/// Answers WebKit's requests for that key: a page's, through its navigation delegate, and a
+/// worker's, through its data store's delegate.
+class KeyedDelegate: NSObject {
     @objc(_webCryptoMasterKeyForWebView:)
-    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { webCryptoKeyAsked(); return masterKey as NSData }
+    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { asked("page"); return runKey }
     @objc(_webCryptoMasterKeyForWebView:completionHandler:)
-    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { webCryptoKeyAsked(); completionHandler(masterKey as NSData) }
-    func webCryptoKeyAsked() { FileHandle.standardError.write("webcrypto key: in memory\n".data(using: .utf8)!) }
+    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { asked("page"); completionHandler(runKey) }
+    @objc(webCryptoMasterKey:)
+    func webCryptoMasterKey(_ completionHandler: @escaping (NSData?) -> Void) { asked("data store"); completionHandler(runKey) }
+    func asked(_ by: String) { FileHandle.standardError.write("webcrypto key: in memory, for the \(by)\n".data(using: .utf8)!) }
+}
+
+/// `store`, with `delegate` answering its workers' requests for the key.
+func keyed(_ store: WKWebsiteDataStore, by delegate: KeyedDelegate) -> WKWebsiteDataStore {
+    let setter = Selector(("set_delegate:"))
+    if store.responds(to: setter) { _ = store.perform(setter, with: delegate) }
+    return store
+}
+
+final class Probe: KeyedDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var blocked = Set<String>()
     var seen: [String: Set<String>] = [:]
     var done = false
@@ -95,6 +117,7 @@ func request(_ type: String) -> String {
         let proxy = NWEndpoint.hostPort(host: "127.0.0.1", port: listener.port!)
         store.proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: proxy), ProxyConfiguration(socksv5Proxy: proxy)]
         let probe = Probe()
+        _ = keyed(store, by: probe)
         // One configuration for every view: each fresh configuration starts its own process pool,
         // and thousands of pools exhaust the system's power-notification registrations.
         let config = WKWebViewConfiguration()

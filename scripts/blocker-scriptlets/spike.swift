@@ -23,7 +23,37 @@ func unoccluded(_ view: WKWebView) {
     }
 }
 
-final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+/// The key WebKit wraps a page's stored CryptoKeys with, for this run only. Unanswered, WebKit keeps
+/// one in the login keychain, which prompts for every new build of a tool.
+let runKey: NSData = {
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        FileHandle.standardError.write("no random bytes for the WebCrypto key\n".data(using: .utf8)!)
+        exit(3)
+    }
+    return Data(bytes) as NSData
+}()
+
+/// Answers WebKit's requests for that key: a page's, through its navigation delegate, and a
+/// worker's, through its data store's delegate.
+class KeyedDelegate: NSObject {
+    @objc(_webCryptoMasterKeyForWebView:)
+    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { asked("page"); return runKey }
+    @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { asked("page"); completionHandler(runKey) }
+    @objc(webCryptoMasterKey:)
+    func webCryptoMasterKey(_ completionHandler: @escaping (NSData?) -> Void) { asked("data store"); completionHandler(runKey) }
+    func asked(_ by: String) { FileHandle.standardError.write("webcrypto key: in memory, for the \(by)\n".data(using: .utf8)!) }
+}
+
+/// `store`, with `delegate` answering its workers' requests for the key.
+func keyed(_ store: WKWebsiteDataStore, by delegate: KeyedDelegate) -> WKWebsiteDataStore {
+    let setter = Selector(("set_delegate:"))
+    if store.responds(to: setter) { _ = store.perform(setter, with: delegate) }
+    return store
+}
+
+final class Probe: KeyedDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     var reports: [String] = []
     var finished = false
     func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) { reports.append("\(message.body)") }
@@ -77,7 +107,14 @@ final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             spin(10) { loaded != nil }
             return loaded!
         }
-        let controller = WKWebExtensionController()
+        // Each run starts clean: the default store loses what an earlier run stored under its own key,
+        // and the extension's storage is kept in memory.
+        let storeKeys = KeyedDelegate()
+        let defaultStore = keyed(.default(), by: storeKeys)
+        var cleared = false
+        defaultStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { cleared = true }
+        spin(10) { cleared }
+        let controller = WKWebExtensionController(configuration: .nonPersistent())
         func context(_ webExtension: WKWebExtension) -> WKWebExtensionContext {
             let context = WKWebExtensionContext(for: webExtension)
             context.setPermissionStatus(.grantedExplicitly, for: WKWebExtension.MatchPattern.allURLs())
@@ -94,7 +131,7 @@ final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             let probe = Probe()
             let config = WKWebViewConfiguration()
             config.webExtensionController = controller
-            if privateStore { config.websiteDataStore = .nonPersistent() }
+            config.websiteDataStore = privateStore ? keyed(.nonPersistent(), by: probe) : defaultStore
             config.userContentController.add(probe, name: "probe")
             let view = WKWebView(frame: window.contentView!.bounds, configuration: config)
             unoccluded(view)
