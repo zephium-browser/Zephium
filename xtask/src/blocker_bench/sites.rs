@@ -11,6 +11,8 @@ pub(super) const YOUTUBE_FEED: &str = include_str!("youtube-feed.js");
 pub(super) const YOUTUBE_BACKGROUND: &str = include_str!("youtube-background.js");
 const YOUTUBE_PLAY: &str = include_str!("youtube-play.js");
 const YOUTUBE_HIDDEN_NEXT: &str = include_str!("youtube-hidden-next.js");
+const YOUTUBE_HOOKS: &str = include_str!("youtube-hooks.js");
+pub(super) const YOUTUBE_HOOKS_PRELOAD: &str = include_str!("youtube-hooks-preload.js");
 
 pub(super) fn play_script(seconds: u64) -> String {
     YOUTUBE_PLAY.replacen(
@@ -72,6 +74,14 @@ pub(super) fn probe_script(site: &Site) -> String {
     PROBE.replacen(
         "const siteSelectors = __SITE__;",
         &format!("const siteSelectors = {selectors};"),
+        1,
+    )
+}
+
+pub(super) fn hooks_script(seconds: u64) -> String {
+    YOUTUBE_HOOKS.replacen(
+        "const seconds = __SECONDS__;",
+        &format!("const seconds = {seconds};"),
         1,
     )
 }

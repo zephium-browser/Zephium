@@ -244,6 +244,9 @@ struct Options {
     only: Vec<String>,
     settle: Duration,
     youtube: bool,
+    /// Zephium only: the watch pages with and without pass-through hooks on
+    /// Array.prototype.push and Map.prototype.has, in alternating launches.
+    youtube_hooks: bool,
     youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
@@ -332,6 +335,10 @@ impl Options {
                         value()?.split_whitespace().map(str::to_string).collect();
                 }
                 "--youtube" => options.youtube = true,
+                "--youtube-hooks" => {
+                    options.youtube = true;
+                    options.youtube_hooks = true;
+                }
                 "--youtube-consent" => {
                     options.youtube_consent = match value()?.as_str() {
                         "reject" => YoutubeConsent::Reject,
@@ -363,6 +370,9 @@ impl Options {
         ];
         if passes.into_iter().filter(|pass| *pass).count() > 1 {
             return Err("--youtube, --startup and --speedometer are separate passes".into());
+        }
+        if options.youtube_hooks && options.browsers.iter().any(|config| !config.zephium()) {
+            return Err("--youtube-hooks measures Zephium only".into());
         }
         if options.speedometer_warm && options.speedometer.is_none() {
             return Err("--speedometer-warm needs --speedometer".into());
@@ -1633,6 +1643,9 @@ fn visit_line(visit: &Visit) -> String {
 /// watch page, five videos, one Shorts page, a video behind another tab, and
 /// a video that played in view moving on to the next one behind another tab.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
+    if context.options.youtube_hooks {
+        return run_youtube_hooks(context, results, saved);
+    }
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
             let name = config.name();
@@ -1756,6 +1769,88 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             drop(session);
             drop(qa);
             results.save(saved)?;
+        }
+    }
+    Ok(())
+}
+
+/// `--youtube-hooks`: each run launches once with the hooks and once without,
+/// in alternating order, and plays every video then scrolls its comments, so
+/// the two launches' CPU time and footprint compare the hooks' cost.
+fn run_youtube_hooks(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
+    let script = sites::hooks_script(WATCH_SECONDS);
+    for run in 1..=context.options.runs {
+        for config in &context.options.browsers {
+            let variants = if run % 2 == 1 {
+                [true, false]
+            } else {
+                [false, true]
+            };
+            for hooked in variants {
+                let step = if hooked { "hooks-on" } else { "hooks-off" };
+                let name = config.name();
+                eprintln!("run {run}/{} {name} {step}", context.options.runs);
+                let qa = QaSession::new(*config, &format!("h{run}{}", u8::from(hooked)));
+                let mut launch = Launch {
+                    config: name.to_string(),
+                    run,
+                    phase: step.into(),
+                    ..Launch::default()
+                };
+                let mut session =
+                    match context.launch(*config, Some(&qa), &format!("{name}-{step}-r{run}")) {
+                        Ok(session) => session,
+                        Err(error) => {
+                            eprintln!("  {name} did not start: {error}");
+                            launch.error = Some(error);
+                            results.launches.push(launch);
+                            continue;
+                        }
+                    };
+                if hooked {
+                    let added = session.driver.call(
+                        "preload",
+                        json!({ "js": sites::YOUTUBE_HOOKS_PRELOAD }),
+                        Duration::from_secs(30),
+                    );
+                    if let Err(failure) = added {
+                        launch.error = Some(format!("the hooks: {}", failure.message()));
+                        results.launches.push(launch);
+                        session.driver.quit();
+                        continue;
+                    }
+                }
+                record_session(&mut launch, &session);
+                results.launches.push(launch);
+                let plan = context.plan(*config);
+                let mut consent_pending = true;
+                for (id, _) in VIDEOS {
+                    let url = format!("https://www.youtube.com/watch?v={id}");
+                    let (record, gone) = youtube_step(
+                        &mut session,
+                        &plan,
+                        (*config, run),
+                        (step, Some(id), &url),
+                        (&script, WATCH_SECONDS * 1000 + 60_000),
+                        &mut consent_pending,
+                    );
+                    eprintln!(
+                        "  {step} {id}  {}",
+                        record
+                            .result
+                            .as_ref()
+                            .map_or(record.errors.join("; "), Value::to_string)
+                    );
+                    results.youtube.push(record);
+                    if gone {
+                        break;
+                    }
+                }
+                session.driver.quit();
+                drop(session);
+                drop(qa);
+                results.save(saved)?;
+            }
         }
     }
     Ok(())
