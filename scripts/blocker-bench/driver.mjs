@@ -188,14 +188,15 @@ class Chromium extends Driver {
     return sessionId;
   }
 
-  async open(url, timeoutMs) {
-    const { targetId } = await this.rpc.send("Target.createTarget", { url: "about:blank" });
+  async open(url, timeoutMs, background = false) {
+    const { targetId } = await this.rpc.send("Target.createTarget", { url: "about:blank", background });
     const { sessionId } = await this.rpc.send("Target.attachToTarget", { targetId, flatten: true });
     this.sessions.set(targetId, sessionId);
     await this.rpc.send("Page.enable", {}, sessionId);
     await this.rpc.send("Page.setLifecycleEventsEnabled", { enabled: true }, sessionId);
-    // A background tab is throttled and loads differently.
-    await this.rpc.send("Page.bringToFront", {}, sessionId);
+    // A background tab is throttled and loads differently, so only a tab
+    // asked for behind the current one stays there.
+    if (!background) await this.rpc.send("Page.bringToFront", {}, sessionId);
     for (const source of this.preloads) await this.rpc.send("Page.addScriptToEvaluateOnNewDocument", { source }, sessionId);
     return this.loadNew(targetId, url, timeoutMs);
   }
@@ -387,7 +388,7 @@ async function run(driver, command) {
   const timeoutMs = toolTimeout(command);
   switch (command.op) {
     case "open":
-      return driver.open(command.url, timeoutMs);
+      return driver.open(command.url, timeoutMs, command.background === true);
     case "navigate":
       return driver.load(command.tab, command.url, timeoutMs);
     case "eval": {

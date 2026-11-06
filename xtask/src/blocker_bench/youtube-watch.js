@@ -138,6 +138,8 @@ return {
   interruptions,
   interruptionsText,
   apiCalls: window.__benchApiCalls ?? null,
+  holdStates: window.__benchHoldStates ?? null,
+  markers: window.__benchMarkers ?? null,
   playability,
   played,
   stalledMs,

@@ -8,6 +8,7 @@ const PROBE: &str = include_str!("probe.js");
 const YOUTUBE_WATCH: &str = include_str!("youtube-watch.js");
 const YOUTUBE_INPAGE: &str = include_str!("youtube-inpage.js");
 pub(super) const YOUTUBE_FEED: &str = include_str!("youtube-feed.js");
+pub(super) const YOUTUBE_BACKGROUND: &str = include_str!("youtube-background.js");
 pub(super) const YOUTUBE_SHORTS: &str = include_str!("youtube-shorts.js");
 const CONSENT: &str = include_str!("consent.js");
 

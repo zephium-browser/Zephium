@@ -98,6 +98,34 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
       return Reflect.apply(target, self, args);
     },
   });
+  // For 30 s: the player's state and whether its video was paused at every
+  // sample that showed YouTube's hold, and each marker the client's user agent
+  // carried, which tells a hold from a video nobody asked to play.
+  const holds = [];
+  const markers = [];
+  Object.defineProperty(window, '__benchHoldStates', { value: holds });
+  Object.defineProperty(window, '__benchMarkers', { value: markers });
+  const sampler = setInterval(() => {
+    if (performance.now() > 30000) {
+      clearInterval(sampler);
+      return;
+    }
+    try {
+      const agent = window.ytcfg?.get?.('INNERTUBE_CONTEXT')?.client?.userAgent;
+      if (typeof agent === 'string' && markers.at(-1)?.tail !== tail({ userAgent: agent })) {
+        markers.push({ atMs: Math.round(performance.now()), tail: tail({ userAgent: agent }) });
+      }
+      const player = document.getElementById('movie_player');
+      const nerds = player?.getStatsForNerds?.();
+      if (nerds?.buffer_health_seconds === '0.00 s' && nerds?.resolution === '0x0' && holds.length < 120) {
+        holds.push({
+          atMs: Math.round(performance.now()),
+          state: player.getPlayerState?.() ?? null,
+          paused: player.querySelector('video')?.paused ?? null,
+        });
+      }
+    } catch {}
+  }, 250);
   navigator.sendBeacon = new Proxy(navigator.sendBeacon, {
     apply(target, self, args) {
       try { count(args[0], args[1]); } catch {}

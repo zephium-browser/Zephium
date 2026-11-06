@@ -104,11 +104,18 @@ const related = () => until(() => [...document.querySelectorAll('#secondary a[hr
     return visible(element) && !seen.has(url.searchParams.get('v')) && !url.searchParams.has('list')
       && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer');
   }), 20000);
+// Why no link qualified: how many the page had, visible, and not yet seen.
+const candidates = () => {
+  const links = [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')];
+  const shown = links.filter(visible);
+  return { links: links.length, visible: shown.length, unseen: shown.filter((element) => !seen.has(new URL(element.href, location.href).searchParams.get('v'))).length };
+};
 const navigations = [];
 for (let i = 0; i < 2; i += 1) {
   const link = await related();
   if (!link) {
     if (i === 0) throw new Error('the watch page links no other video');
+    navigations.push({ error: 'no second link', candidates: candidates() });
     break;
   }
   const navigation = await watch(() => link.click());
@@ -128,4 +135,6 @@ return {
   interruptions: navigations.some((navigation) => navigation.interruptions),
   played: first.played ?? null,
   apiCalls: window.__benchApiCalls ?? null,
+  holdStates: window.__benchHoldStates ?? null,
+  markers: window.__benchMarkers ?? null,
 };

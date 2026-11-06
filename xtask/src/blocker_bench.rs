@@ -59,6 +59,8 @@ const TEMPLATE_WARMUP: Duration = Duration::from_secs(60);
 const TEMPLATE_MARKER: &str = ".blocker-bench-template";
 const CONSENT_SETTLE: Duration = Duration::from_secs(2);
 const BETWEEN_SITES: Duration = Duration::from_secs(1);
+/// How long a watch page opened behind another tab is left before it is read.
+const BACKGROUND_WAIT: Duration = Duration::from_secs(15);
 const UBLOCK_URL: &str =
     "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
 /// What Firefox gets to finish after it is ready. uBlock Origin downloads its
@@ -1086,6 +1088,23 @@ fn open(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
     })
 }
 
+/// As [`open`], in a new tab behind the current one.
+fn open_behind(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
+    let reply = driver.call(
+        "open",
+        json!({ "url": url, "timeoutMs": OPEN_TIMEOUT_MS, "background": true }),
+        Duration::from_millis(OPEN_TIMEOUT_MS) + REPLY_GRACE,
+    )?;
+    Ok(Opened {
+        tab: reply.get("tab").cloned().unwrap_or(Value::Null),
+        load_ms: reply.get("loadMs").and_then(Value::as_f64),
+        timed_out: reply
+            .get("timedOut")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
 fn navigate(driver: &mut Driver, tab: &Value, url: &str) -> Result<Opened, Failure> {
     let reply = driver.call(
         "navigate",
@@ -1560,7 +1579,7 @@ fn visit_line(visit: &Visit) -> String {
 }
 
 /// The YouTube pass: the home feed, two videos opened in the page from a
-/// watch page, five videos and one Shorts page.
+/// watch page, five videos, one Shorts page and a video behind another tab.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
@@ -1627,6 +1646,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             // a full wait saw none, so a dialog the feed missed is still met
             // and later pages are timed alike in every browser.
             let mut consent_pending = true;
+            let mut browser_gone = false;
             for (step, id, url, script, timeout_ms) in pages {
                 let (record, gone) = youtube_step(
                     &mut session,
@@ -1646,8 +1666,20 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 );
                 results.youtube.push(record);
                 if gone {
+                    browser_gone = true;
                     break;
                 }
+            }
+            if !browser_gone {
+                let (record, _) = youtube_background_step(&mut session, (config, run));
+                eprintln!(
+                    "  background  {}",
+                    record
+                        .result
+                        .as_ref()
+                        .map_or(record.errors.join("; "), Value::to_string)
+                );
+                results.youtube.push(record);
             }
             session.driver.quit();
             drop(session);
@@ -1656,6 +1688,62 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
         }
     }
     Ok(())
+}
+
+/// A watch page opened behind the home feed and read after
+/// `BACKGROUND_WAIT`: nobody asked it to play, so nothing may reload or
+/// re-mark it.
+fn youtube_background_step(
+    session: &mut Session,
+    (config, run): (Config, usize),
+) -> (YoutubeStep, bool) {
+    let id = VIDEOS[1].0;
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let mut record = YoutubeStep {
+        config: config.name().to_string(),
+        run,
+        step: "background".into(),
+        id: Some(id.to_string()),
+        url: url.clone(),
+        ..YoutubeStep::default()
+    };
+    let driver = &mut session.driver;
+    let outcome = (|| -> Result<(), Failure> {
+        let Some(front) = soft(
+            &mut record.errors,
+            "open front",
+            open(driver, "https://www.youtube.com/"),
+        )?
+        else {
+            return Ok(());
+        };
+        if let Some(behind) = soft(&mut record.errors, "open behind", open_behind(driver, &url))? {
+            record.nav_ms = behind.load_ms;
+            record.timed_out = behind.timed_out;
+            std::thread::sleep(BACKGROUND_WAIT);
+            let result = eval(
+                driver,
+                &behind.tab,
+                sites::YOUTUBE_BACKGROUND,
+                EVAL_TIMEOUT_MS,
+            );
+            record.result = soft(&mut record.errors, "background", result)?;
+            let closed = close(driver, &behind.tab);
+            soft(&mut record.errors, "close", closed)?;
+        }
+        let closed = close(driver, &front.tab);
+        soft(&mut record.errors, "close", closed)?;
+        std::thread::sleep(BETWEEN_SITES);
+        Ok(())
+    })();
+    let gone = match outcome {
+        Ok(()) => false,
+        Err(failure) => {
+            record.errors.push(failure.message().to_string());
+            failure.is_gone()
+        }
+    };
+    (record, gone)
 }
 
 fn youtube_step(
