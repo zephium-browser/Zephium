@@ -6,6 +6,10 @@
 //! from hashed hostnames to the calls for that host, and the library, which
 //! runs only when the frame's host has an entry. The library is reviewed code
 //! shipped in the app and never fetched.
+//!
+//! The owner approved replacing response text with text from uBO's lists on
+//! YouTube's hosts only: those rules are `trusted-*`, so only uBO's lists can
+//! run them, and a rule naming any other host is not admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,6 +28,14 @@ const CALL_END: &str = "} catch ( e ) { }";
 const MAX_RULES: usize = 20_000;
 const MAX_RULE_BYTES: usize = 8 * 1024;
 const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
+/// Scriptlets that replace response text, and the only sites, each with its
+/// subdomains, they run on.
+const RESPONSE_TEXT: &[&str] = &[
+    "trusted-replace-fetch-response",
+    "trusted-rpfr",
+    "trusted-replace-xhr-response",
+];
+const RESPONSE_TEXT_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
 
 struct Scriptlet {
     name: &'static str,
@@ -70,6 +82,13 @@ const HELPERS: &[Scriptlet] = &[
         dependencies: &["zephium-pattern.fn"],
         source: include_str!("scriptlets/request-matcher.js"),
     },
+    Scriptlet {
+        name: "zephium-text-replacer.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/text-replacer.js"),
+    },
 ];
 
 const SCRIPTLETS: &[Scriptlet] = &[
@@ -108,6 +127,42 @@ const SCRIPTLETS: &[Scriptlet] = &[
             "zephium-request-matcher.fn",
         ],
         source: include_str!("scriptlets/json-prune-xhr-response.js"),
+    },
+    Scriptlet {
+        name: "trusted-replace-fetch-response.js",
+        aliases: &["trusted-rpfr.js"],
+        trusted: true,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-request-matcher.fn",
+            "zephium-text-replacer.fn",
+        ],
+        source: include_str!("scriptlets/trusted-replace-fetch-response.js"),
+    },
+    Scriptlet {
+        name: "trusted-replace-xhr-response.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &[
+            "zephium-pattern.fn",
+            "zephium-request-matcher.fn",
+            "zephium-text-replacer.fn",
+        ],
+        source: include_str!("scriptlets/trusted-replace-xhr-response.js"),
+    },
+    Scriptlet {
+        name: "trusted-prevent-dom-bypass.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &[],
+        source: include_str!("scriptlets/trusted-prevent-dom-bypass.js"),
+    },
+    Scriptlet {
+        name: "no-xhr-if.js",
+        aliases: &["prevent-xhr.js"],
+        trusted: false,
+        dependencies: &["zephium-pattern.fn"],
+        source: include_str!("scriptlets/no-xhr-if.js"),
     },
     Scriptlet {
         name: "nano-setTimeout-booster.js",
@@ -189,37 +244,91 @@ pub(crate) struct ScriptletRule {
 pub(crate) enum Kind {
     /// Not scriptlet syntax.
     None,
-    /// A rule to keep, and whether its scriptlet is one the library lacks.
-    Rule { unknown: bool },
+    /// A rule to keep, whether its scriptlet is one the library lacks, and
+    /// whether it runs with a stand-in for what it names, such as an empty
+    /// body for a resource the app does not ship.
+    Rule { unknown: bool, substituted: bool },
     /// Scriptlet syntax we do not run: too long, no hostname, or a hostname
     /// form other than names and single-label entities.
     Unsupported,
 }
 
+/// A scriptlet line's hostnames and body, and whether it is an exception.
+/// Whichever marker comes first decides, as adblock-rust reads it; a marker
+/// inside an argument is text. Admission and building both split here.
+fn split(line: &str) -> Option<(bool, &str, &str)> {
+    let (exception, at, marker) = match (line.find("##+js("), line.find("#@#+js(")) {
+        (Some(rule), Some(except)) if except < rule => (true, except, "#@#+js("),
+        (Some(rule), _) => (false, rule, "##+js("),
+        (None, Some(except)) => (true, except, "#@#+js("),
+        (None, None) => return None,
+    };
+    Some((exception, &line[..at], &line[at + marker.len()..]))
+}
+
 pub(crate) fn classify(line: &str) -> Kind {
-    let Some((domains, body)) = line
-        .split_once("##+js(")
-        .or_else(|| line.split_once("#@#+js("))
-    else {
+    let Some((exception, domains, body)) = split(line) else {
         return Kind::None;
     };
     if line.len() > MAX_RULE_BYTES || !body.ends_with(')') {
         return Kind::Unsupported;
     }
-    let exception = line.contains("#@#+js(");
     let keys = domain_keys(domains);
     if keys.is_none() || (!exception && domains.is_empty()) {
         return Kind::Unsupported;
     }
-    let name = body[..body.len() - 1]
-        .split(',')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'');
+    let arguments = arguments(&body[..body.len() - 1]);
+    let name = arguments.first().copied().unwrap_or_default();
+    if !exception && RESPONSE_TEXT.contains(&name.strip_suffix(".js").unwrap_or(name)) {
+        let mut named = domains
+            .split(',')
+            .filter(|domain| !domain.is_empty() && !domain.starts_with('~'))
+            .map(str::to_ascii_lowercase)
+            .peekable();
+        let on_sites = named.peek().is_some()
+            && named.all(|domain| {
+                RESPONSE_TEXT_SITES.iter().any(|site| {
+                    domain == *site
+                        || domain
+                            .strip_suffix(site)
+                            .is_some_and(|sub| sub.ends_with('.'))
+                })
+            });
+        if !on_sites {
+            return Kind::Unsupported;
+        }
+    }
+    let bare = name.strip_suffix(".js").unwrap_or(name);
     Kind::Rule {
         unknown: !exception && !known(name),
+        substituted: !exception
+            && matches!(bare, "no-xhr-if" | "prevent-xhr")
+            && arguments
+                .get(2)
+                .is_some_and(|directive| directive.starts_with("war:")),
     }
+}
+
+/// A rule's comma-separated arguments, trimmed and unquoted; `\,` is a comma
+/// inside one.
+fn arguments(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut start, mut escaped) = (0, false);
+    for (index, character) in body.char_indices() {
+        match character {
+            '\\' => escaped = !escaped,
+            ',' if !escaped => {
+                parts.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => escaped = false,
+        }
+    }
+    parts.push(&body[start..]);
+    parts
+        .into_iter()
+        .map(|part| part.trim().trim_matches(|c| matches!(c, '"' | '\'' | '`')))
+        .collect()
 }
 
 /// The hostnames and entities a rule names, negated ones included, or `None`
@@ -320,11 +429,7 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
         if !matches!(classify(&rule.line), Kind::Rule { .. }) {
             return Err(crate::CosmeticError::InvalidPolicy);
         }
-        let Some((domains, _)) = rule
-            .line
-            .split_once("##+js(")
-            .or_else(|| rule.line.split_once("#@#+js("))
-        else {
+        let Some((_, domains, _)) = split(&rule.line) else {
             return Err(crate::CosmeticError::InvalidPolicy);
         };
         keys.extend(domain_keys(domains).ok_or(crate::CosmeticError::InvalidPolicy)?);
@@ -560,18 +665,38 @@ mod tests {
     }
 
     #[test]
+    fn a_backtick_quoted_name_is_read_as_the_library_reads_it() {
+        assert!(matches!(
+            classify("example.com##+js(`trusted-rpfr`, a, b)"),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            classify("www.youtube.com##+js(`trusted-rpfr`, a, b)"),
+            Kind::Rule { unknown: false, .. }
+        ));
+        let stored = |line: &str| ScriptletRule {
+            line: line.to_owned(),
+            trusted: true,
+        };
+        assert!(matches!(
+            build(&[stored("example.com##+js(`trusted-rpfr`, a, b)")]),
+            Err(crate::CosmeticError::InvalidPolicy)
+        ));
+    }
+
+    #[test]
     fn unknown_and_unsupported_rules_are_told_apart() {
         assert!(matches!(
             classify("a.com##+js(set, a, 1)"),
-            Kind::Rule { unknown: false }
+            Kind::Rule { unknown: false, .. }
         ));
         assert!(matches!(
             classify("a.com##+js(no-such-scriptlet, a)"),
-            Kind::Rule { unknown: true }
+            Kind::Rule { unknown: true, .. }
         ));
         assert!(matches!(
             classify("a.com#@#+js()"),
-            Kind::Rule { unknown: false }
+            Kind::Rule { unknown: false, .. }
         ));
         assert!(matches!(classify("##+js(set, a, 1)"), Kind::Unsupported));
         assert!(matches!(
@@ -583,6 +708,133 @@ mod tests {
             Kind::Unsupported
         ));
         assert!(matches!(classify("a.com##.ad"), Kind::None));
+    }
+
+    #[test]
+    fn the_first_marker_decides_and_a_quoted_one_is_text() {
+        // A quoted exception marker does not lift the YouTube host gate.
+        assert!(matches!(
+            classify(r##"example.com##+js(trusted-rpfr, x, "#@#+js(")"##),
+            Kind::Unsupported
+        ));
+        // An exception that quotes the other marker is still an exception.
+        assert!(matches!(
+            classify(r###"a.com#@#+js(trusted-rpfr, x, "##+js(")"###),
+            Kind::Rule {
+                unknown: false,
+                substituted: false
+            }
+        ));
+    }
+
+    #[test]
+    fn every_rule_admission_keeps_also_builds() {
+        let odd = [
+            r###"a.com#@#+js(trusted-rpfr, x, "##+js(")"###,
+            r##"www.youtube.com##+js(trusted-rpfr, x, "#@#+js(")"##,
+            r##"a.com#@#+js(set, "a.com##+js(", 1)"##,
+            "a.com#@#+js(set, b, '##+js(x)')",
+            "a.com##+js(set, b\\, c, 1)",
+        ];
+        for line in odd {
+            assert!(matches!(classify(line), Kind::Rule { .. }), "{line}");
+            for trusted in [false, true] {
+                assert!(build(&[rule(line, trusted)]).is_ok(), "{line}");
+            }
+        }
+        // Through the cosmetic compile, beside an ordinary rule.
+        let source = format!("{}\na.com##+js(set, ok, 1)", odd.join("\n"));
+        let policy = crate::CosmeticPolicy::compile_with_trust([(source.as_str(), true)]).unwrap();
+        assert!(policy.scriptlet_program().is_some());
+    }
+
+    #[test]
+    fn a_resource_no_xhr_if_answers_with_an_empty_body_is_a_loss() {
+        for (line, substituted) in [
+            ("a.com##+js(no-xhr-if, ads.js, war:noop-vast3.xml)", true),
+            (
+                "a.com##+js(prevent-xhr.js, 'ads.js', 'war:noop.json')",
+                true,
+            ),
+            ("a.com##+js(no-xhr-if, ads.js, emptyObj)", false),
+            ("a.com##+js(no-xhr-if, a\\,war:b, true)", false),
+            ("a.com#@#+js(no-xhr-if, ads.js, war:noop-vast3.xml)", false),
+        ] {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false, substituted: s } if s == substituted),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_text_is_replaced_only_on_youtube_s_hosts() {
+        for line in [
+            "www.youtube.com##+js(trusted-rpfr, '\"adSlots\"', '\"no_ads\"', player?)",
+            "youtube.com,~m.youtube.com##+js(trusted-replace-fetch-response.js, *, , x)",
+            "www.youtube-nocookie.com##+js(trusted-replace-xhr-response, a, b)",
+            "example.com#@#+js(trusted-rpfr, a, b)",
+        ] {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false, .. }),
+                "{line}"
+            );
+        }
+        for line in [
+            "example.com##+js(trusted-rpfr, a, b)",
+            "youtube.com,example.com##+js(trusted-replace-fetch-response, a, b)",
+            "youtube.*##+js(trusted-replace-xhr-response, a, b)",
+            "notyoutube.com##+js(trusted-rpfr, a, b)",
+            "~example.com##+js(trusted-rpfr, a, b)",
+        ] {
+            assert!(matches!(classify(line), Kind::Unsupported), "{line}");
+        }
+    }
+
+    #[test]
+    fn response_text_rules_run_only_from_trusted_lists_with_their_arguments_intact() {
+        let line = r#"www.youtube.com##+js(trusted-replace-xhr-response, /"adPlacements.*?("adSlots"|"adBreakHeartbeatParams")/gms, $1, /\/player(?:\?.+)?$/)"#;
+        assert!(build(&[rule(line, false)]).unwrap().is_none());
+        let program = build(&[
+            rule(line, true),
+            rule(
+                "www.youtube.com##+js(trusted-rpfr, '\"adPlacements\"', '\"no_ads\"', player?)",
+                true,
+            ),
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(program.script.contains(r#"zephiumTrustedReplaceXhrResponse("/\"adPlacements.*?(\"adSlots\"|\"adBreakHeartbeatParams\")/gms", "$1", "/\\/player(?:\\?.+)?$/")"#));
+        assert!(program.script.contains(
+            r#"zephiumTrustedReplaceFetchResponse("\"adPlacements\"", "\"no_ads\"", "player?")"#
+        ));
+        assert_eq!(
+            program
+                .script
+                .matches("function zephiumTextReplacer(")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn youtube_s_bypass_and_xhr_rules_reach_their_scriptlets() {
+        let bypass =
+            "www.youtube.com##+js(trusted-prevent-dom-bypass, Node.prototype.appendChild, fetch)";
+        let xhr = r"www.youtube.com##+js(no-xhr-if, /\/api\/stats\/atr\?.+?&fexp=v1%[-%0-9C]{300\,}&/ method:POST)";
+        let untrusted = build(&[rule(bypass, false), rule(xhr, false)])
+            .unwrap()
+            .unwrap();
+        assert!(!untrusted
+            .script
+            .contains("zephiumTrustedPreventDomBypass(\""));
+        assert!(untrusted.script.contains(
+            r#"zephiumNoXhrIf("/\\/api\\/stats\\/atr\\?.+?&fexp=v1%[-%0-9C]{300,}&/ method:POST")"#
+        ));
+        let trusted = build(&[rule(bypass, true)]).unwrap().unwrap();
+        assert!(trusted
+            .script
+            .contains(r#"zephiumTrustedPreventDomBypass("Node.prototype.appendChild", "fetch")"#));
     }
 
     #[test]
@@ -631,6 +883,7 @@ mod tests {
         for line in [
             "##+js(set, a, 1)",
             "a.b.*##+js(set, a, 1)",
+            "example.com##+js(trusted-rpfr, a, b)",
             "a.com##.ad",
             &format!("a.com##+js(set, a, {})", "x".repeat(9 * 1024)),
         ] {
