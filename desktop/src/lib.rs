@@ -260,10 +260,14 @@ const PRE_SHELL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from
 const PRIVILEGED_PERMISSIONS_POLICY: &str = "accelerometer=(), attribution-reporting=(), autoplay=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(self), compute-pressure=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), join-ad-interest-group=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), private-state-token-issuance=(), private-state-token-redemption=(), publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), unload=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()";
 const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
 // The chrome and launcher load their own pages, so a warm spare renderer
-// waiting for another site would mostly sit in memory.
+// waiting for another site would mostly sit in memory. They load nothing from
+// the network either, so their network service runs inside their browser
+// process instead of a utility process of its own. Page environments never
+// take these arguments.
 #[cfg(any(target_os = "windows", test))]
 const PRIVILEGED_WEBVIEW2_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess";
+    "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
+     --enable-features=NetworkServiceInProcess2";
 
 #[derive(Clone)]
 struct ShutdownCoordinator {
@@ -9430,11 +9434,15 @@ mod tests {
     fn privileged_webview2_args_keep_smartscreen_and_process_sandboxes_enabled() {
         assert_eq!(
             super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS,
-            "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess"
+            "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
+             --enable-features=NetworkServiceInProcess2"
         );
         let args = super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS.to_ascii_lowercase();
         assert!(!args.contains("smartscreen"));
         assert!(!args.contains("no-sandbox"));
+        // WebView2 keeps only the last of a repeated feature switch.
+        assert_eq!(args.matches("--enable-features=").count(), 1);
+        assert_eq!(args.matches("--disable-features=").count(), 1);
     }
 
     #[test]
