@@ -695,6 +695,25 @@ const playerText = () => JSON.stringify({
   hidden.at(63000);
   assert.deepEqual(hidden.player.loads, [['v1', 0]]);
 
+  // A page that has played keeps playing hidden, so its next video's hold is
+  // real: a refused marker there moves on without the page being shown.
+  const music = youtube();
+  music.at(0);
+  music.player.state = 1;
+  music.player.time = 0.5;
+  music.at(250);
+  assert.ok(!music.watching());
+  music.context.document.visibilityState = 'hidden';
+  Object.assign(music.player, { id: 'v2', time: 0, state: -1, response: { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } } });
+  music.fire('yt-navigate-finish');
+  music.at(1000);
+  assert.deepEqual(music.player.loads, [['v2', 0]]);
+  assert.equal(music.agent(), marked('lactmilli'));
+  Object.assign(music.player, { state: 3, response: { playabilityStatus: { status: 'OK' } } });
+  music.at(2000);
+  music.at(3000);
+  assert.deepEqual(music.player.loads, [['v2', 0], ['v2', 0]]);
+
   // A server-inserted ad is not a hold, and a video that has started is left alone.
   const ad = youtube();
   ad.player.stats = { ...ad.player.stats, debug_info: 'SSAP, AD, s:49' };

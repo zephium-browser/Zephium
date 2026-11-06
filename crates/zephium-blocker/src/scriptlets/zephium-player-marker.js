@@ -20,6 +20,9 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
     const WATCH_MS = 60000;
     let index = 0;
     let restarted = false;
+    // Whether a video on this page has really played: once one has, a hidden
+    // page keeps playing the next, so a hold there is a real one.
+    let played = false;
     let active = true;
     let config;
     let original;
@@ -144,13 +147,17 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
             heldSince = undefined;
         }
         if (now - base > 0.1) {
+            try {
+                played ||= player.getPlayerState?.() === 1;
+            } catch (e) {}
             stop();
             return;
         }
-        // Only a page in view whose player is trying to play can be held: a
-        // hidden page's player may wait to start with the same stats, and an
-        // unstarted or paused one was never asked to play.
-        if (document.visibilityState !== 'visible') {
+        // Only a player trying to play, on a page in view or one that has
+        // played, can be held: a hidden page that never played may wait to
+        // start with the same stats, and an unstarted or paused player was
+        // never asked to play.
+        if (document.visibilityState !== 'visible' && !played) {
             heldSince = undefined;
             return;
         }
