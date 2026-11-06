@@ -1,11 +1,10 @@
 //! Frame documents the frame check refused, held before their requests leave.
 //! WebView2 starts a frame's request without waiting for
 //! FrameNavigationStarting to answer, so a cancel there only stops the frame
-//! from showing what the server already sent. Each refusal therefore adds a
-//! request filter for that one address, and the request is answered at
-//! WebResourceRequested, which the browser raises after the frame check and
-//! before the request is sent. No other document is filtered, so a main
-//! document never waits on the host.
+//! from showing what the server already sent. The view therefore filters its
+//! document requests from the start, and answers a request for a refused
+//! frame's address itself, before it is sent. Every other document passes
+//! untouched.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -18,7 +17,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
 };
 use webview2_com::{NavigationStartingEventHandler, WebResourceRequestedEventHandler};
-use windows_core::{Interface, HSTRING, PWSTR};
+use windows_core::{Interface, PCWSTR, PWSTR};
 
 use super::{take_pwstr_bounded, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT};
 
@@ -28,69 +27,16 @@ const CAPACITY: usize = 64;
 /// A request follows its frame check within milliseconds; a refusal older
 /// than this belongs to a navigation that never sent one.
 const LIFETIME: Duration = Duration::from_secs(5);
+/// Every web document of the view, cross-origin frames included.
+const PATTERNS: [PCWSTR; 2] = [windows_core::w!("https://*"), windows_core::w!("http://*")];
 
-/// The view's document request filters, one added per refusal. WebView2
-/// counts a filter added twice and needs it removed twice.
-pub(crate) trait DocumentFilters {
-    fn add(&self, url: &str) -> windows_core::Result<()>;
-    fn remove(&self, url: &str) -> windows_core::Result<()>;
-}
-
-impl DocumentFilters for ICoreWebView2_22 {
-    fn add(&self, url: &str) -> windows_core::Result<()> {
-        // SAFETY: a live interface on the view's thread; the string outlives
-        // the call.
-        unsafe {
-            self.AddWebResourceRequestedFilterWithRequestSourceKinds(
-                &HSTRING::from(literal_filter(url)),
-                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
-                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
-            )
-        }
-    }
-
-    fn remove(&self, url: &str) -> windows_core::Result<()> {
-        // SAFETY: as in `add`, for a filter `add` installed from the same
-        // address, so the same escaped string.
-        unsafe {
-            self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
-                &HSTRING::from(literal_filter(url)),
-                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
-                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
-            )
-        }
-    }
-}
-
-/// A filter that matches `url` alone. WebView2 reads `*` and `?` in a filter
-/// as wildcards, and every address with a query has a `?`; a backslash before
-/// each makes it literal.
-fn literal_filter(url: &str) -> String {
-    let mut filter = String::with_capacity(url.len() + 4);
-    for character in url.chars() {
-        if matches!(character, '*' | '?') {
-            filter.push('\\');
-        }
-        filter.push(character);
-    }
-    filter
-}
-
-/// Refused frame documents waiting for their request, each with the filter
-/// that routes that request here.
-pub(crate) struct RefusedFrameDocuments<F: DocumentFilters> {
-    filters: F,
+/// Refused frame documents waiting for their request.
+#[derive(Default)]
+pub(crate) struct RefusedFrameDocuments {
     entries: VecDeque<(String, Instant)>,
 }
 
-impl<F: DocumentFilters> RefusedFrameDocuments<F> {
-    pub(crate) fn new(filters: F) -> Self {
-        Self {
-            filters,
-            entries: VecDeque::new(),
-        }
-    }
-
+impl RefusedFrameDocuments {
     /// Holds the request for a refused frame's `url`; false when it cannot
     /// be held and goes out as before.
     pub(crate) fn record(&mut self, url: &str, now: Instant) -> bool {
@@ -98,11 +44,8 @@ impl<F: DocumentFilters> RefusedFrameDocuments<F> {
         if self.entries.len() == CAPACITY {
             return false;
         }
-        let url = without_fragment(url);
-        if self.filters.add(url).is_err() {
-            return false;
-        }
-        self.entries.push_back((url.to_owned(), now));
+        self.entries
+            .push_back((without_fragment(url).to_owned(), now));
         true
     }
 
@@ -113,7 +56,7 @@ impl<F: DocumentFilters> RefusedFrameDocuments<F> {
         let Some(index) = self.entries.iter().position(|(entry, _)| entry == url) else {
             return false;
         };
-        self.release(index);
+        self.entries.remove(index);
         true
     }
 
@@ -121,19 +64,12 @@ impl<F: DocumentFilters> RefusedFrameDocuments<F> {
     pub(crate) fn forget(&mut self, url: &str, now: Instant) {
         self.expire(now);
         let url = without_fragment(url);
-        while let Some(index) = self.entries.iter().position(|(entry, _)| entry == url) {
-            self.release(index);
-        }
+        self.entries.retain(|(entry, _)| entry != url);
     }
 
+    /// Nothing is waiting, so a request needs no look.
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    pub(crate) fn clear(&mut self) {
-        while !self.entries.is_empty() {
-            self.release(0);
-        }
     }
 
     fn expire(&mut self, now: Instant) {
@@ -142,27 +78,82 @@ impl<F: DocumentFilters> RefusedFrameDocuments<F> {
             .front()
             .is_some_and(|(_, at)| now.saturating_duration_since(*at) >= LIFETIME)
         {
-            self.release(0);
-        }
-    }
-
-    fn release(&mut self, index: usize) {
-        if let Some((url, _)) = self.entries.remove(index) {
-            let _ = self.filters.remove(&url);
+            self.entries.pop_front();
         }
     }
 }
 
-type Held = Rc<RefCell<RefusedFrameDocuments<ICoreWebView2_22>>>;
+/// Where the view's document filter is registered.
+pub(crate) trait DocumentFilterTarget {
+    fn add(&self, pattern: PCWSTR) -> windows_core::Result<()>;
+    fn remove(&self, pattern: PCWSTR) -> windows_core::Result<()>;
+}
+
+impl DocumentFilterTarget for ICoreWebView2_22 {
+    fn add(&self, pattern: PCWSTR) -> windows_core::Result<()> {
+        // SAFETY: a live interface on the view's thread; the pattern is a
+        // static wide string.
+        unsafe {
+            self.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
+            )
+        }
+    }
+
+    fn remove(&self, pattern: PCWSTR) -> windows_core::Result<()> {
+        // SAFETY: as in `add`, for a filter `add` installed.
+        unsafe {
+            self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
+                COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
+            )
+        }
+    }
+}
+
+/// The view's document filter, registered whole or not at all, and taken
+/// off with the view. It is ours alone, so removing it removes no one
+/// else's.
+pub(crate) struct DocumentFilter<T: DocumentFilterTarget> {
+    target: T,
+    added: usize,
+}
+
+impl<T: DocumentFilterTarget> DocumentFilter<T> {
+    pub(crate) fn register(target: T) -> windows_core::Result<Self> {
+        let mut filter = Self { target, added: 0 };
+        for pattern in PATTERNS {
+            filter.target.add(pattern)?;
+            filter.added += 1;
+        }
+        Ok(filter)
+    }
+}
+
+impl<T: DocumentFilterTarget> Drop for DocumentFilter<T> {
+    fn drop(&mut self) {
+        while self.added > 0 {
+            self.added -= 1;
+            let _ = self.target.remove(PATTERNS[self.added]);
+        }
+    }
+}
+
+type Held = Rc<RefCell<RefusedFrameDocuments>>;
 
 /// A view's refused frame requests: answered with an empty 403 when one
-/// arrives, and dropped when the main frame itself goes to that address.
+/// arrives, and never once the main frame itself goes to that address.
 /// It does no matching of its own: the frame check has already judged it.
 pub(crate) struct RefusedFrameRequests {
     core: ICoreWebView2,
     documents: Held,
     request_token: Option<i64>,
     navigation_token: Option<i64>,
+    // Taken off after the handlers, when this is dropped.
+    _filter: Option<DocumentFilter<ICoreWebView2_22>>,
 }
 
 impl RefusedFrameRequests {
@@ -179,15 +170,17 @@ impl RefusedFrameRequests {
         };
         let mut held = Self {
             core: core.clone(),
-            documents: Rc::new(RefCell::new(RefusedFrameDocuments::new(core22))),
+            documents: Rc::default(),
             request_token: None,
             navigation_token: None,
+            _filter: None,
         };
 
         let documents = held.documents.clone();
         let requests = WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
-            // Every request the content filter registers for reaches this
-            // handler too; with no refusal waiting, nothing is read.
+            // Every document of the view, and every request the content
+            // filter registers for, reaches this handler; with no refusal
+            // waiting, nothing is read.
             if documents
                 .try_borrow()
                 .map_or(true, |documents| documents.is_empty())
@@ -245,6 +238,8 @@ impl RefusedFrameRequests {
         let mut token = 0_i64;
         unsafe { held.core.add_NavigationStarting(&navigations, &mut token)? };
         held.navigation_token = Some(token);
+
+        held._filter = Some(DocumentFilter::register(core22)?);
         Ok(held)
     }
 
@@ -255,9 +250,7 @@ impl RefusedFrameRequests {
 
 /// What the frame check keeps of the view's held requests: nothing once the
 /// view lets them go.
-pub(crate) struct RefusedFrameHandle(
-    std::rc::Weak<RefCell<RefusedFrameDocuments<ICoreWebView2_22>>>,
-);
+pub(crate) struct RefusedFrameHandle(std::rc::Weak<RefCell<RefusedFrameDocuments>>);
 
 impl RefusedFrameHandle {
     pub(crate) fn refuse(&self, url: &str) {
@@ -278,7 +271,7 @@ impl Drop for RefusedFrameRequests {
             let _ = unsafe { self.core.remove_NavigationStarting(token) };
         }
         if let Ok(mut documents) = self.documents.try_borrow_mut() {
-            documents.clear();
+            documents.entries.clear();
         }
     }
 }
@@ -292,133 +285,47 @@ fn without_fragment(url: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
 
     const AD: &str = "https://ads.example/frame?slot=1";
 
-    /// Filters as WebView2 counts them: per address, added and removed.
-    #[derive(Default)]
-    struct CountedFilters {
-        live: RefCell<std::collections::HashMap<String, usize>>,
-        fail_adds: std::cell::Cell<bool>,
-    }
-
-    impl CountedFilters {
-        fn count(&self, url: &str) -> usize {
-            self.live.borrow().get(url).copied().unwrap_or(0)
-        }
-        fn total(&self) -> usize {
-            self.live.borrow().values().sum()
-        }
-    }
-
-    impl DocumentFilters for &CountedFilters {
-        fn add(&self, url: &str) -> windows_core::Result<()> {
-            if self.fail_adds.get() {
-                return Err(windows::Win32::Foundation::E_INVALIDARG.into());
-            }
-            *self.live.borrow_mut().entry(url.to_owned()).or_default() += 1;
-            Ok(())
-        }
-        fn remove(&self, url: &str) -> windows_core::Result<()> {
-            let mut live = self.live.borrow_mut();
-            let count = live.get_mut(url).expect("removed a filter never added");
-            *count -= 1;
-            if *count == 0 {
-                live.remove(url);
-            }
-            Ok(())
-        }
-    }
-
     #[test]
-    fn a_refused_frame_document_is_answered_once_and_its_filter_goes() {
-        let filters = CountedFilters::default();
+    fn a_refused_frame_document_is_answered_once() {
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         assert!(refused.record(AD, now));
-        assert_eq!(filters.count(AD), 1);
         assert!(refused.take(AD, now));
-        assert_eq!(filters.count(AD), 0);
         assert!(!refused.take(AD, now));
         assert!(refused.is_empty());
     }
 
     #[test]
-    fn two_refusals_of_one_address_add_and_remove_its_filter_twice() {
-        let filters = CountedFilters::default();
-        let then = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        assert!(refused.record(AD, then));
-        let later = then + Duration::from_secs(3);
-        assert!(refused.record(AD, later));
-        assert_eq!(filters.count(AD), 2);
-
-        // The first lapses while the second is still waiting: the address
-        // stays filtered for it.
-        let lapsed = then + LIFETIME;
-        assert!(!refused.take("https://news.example/", lapsed));
-        assert_eq!(filters.count(AD), 1);
-        assert!(refused.take(AD, lapsed));
-        assert_eq!(filters.count(AD), 0);
-        assert!(!refused.take(AD, lapsed));
-    }
-
-    #[test]
-    fn a_document_matching_only_a_wildcard_in_a_refused_address_passes() {
-        let filters = CountedFilters::default();
+    fn nothing_waiting_needs_no_look() {
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        refused.record("https://ads.example/frame?fields=*", now);
-        assert!(!refused.take("https://ads.example/frameXfields=*", now));
-        assert!(!refused.take("https://ads.example/frame?fields=all", now));
-        assert!(!refused.take("https://ads.example/frame?fields=", now));
-        assert!(refused.take("https://ads.example/frame?fields=*", now));
-    }
-
-    #[test]
-    fn the_filter_for_a_refused_address_matches_that_address_alone() {
-        assert_eq!(
-            literal_filter("https://ads.example/frame?slot=1&fields=*"),
-            r"https://ads.example/frame\?slot=1&fields=\*"
-        );
-        assert_eq!(
-            literal_filter("https://ads.example/a?b?c**"),
-            r"https://ads.example/a\?b\?c\*\*"
-        );
-        assert_eq!(
-            literal_filter("https://ads.example/plain/path"),
-            "https://ads.example/plain/path"
-        );
-    }
-
-    #[test]
-    fn a_main_frame_navigation_elsewhere_lets_a_lapsed_refusal_go() {
-        let filters = CountedFilters::default();
-        let then = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        refused.record(AD, then);
-        refused.forget("https://news.example/", then + LIFETIME);
+        let mut refused = RefusedFrameDocuments::default();
         assert!(refused.is_empty());
-        assert_eq!(filters.total(), 0);
+        refused.record(AD, now);
+        assert!(!refused.is_empty());
+        refused.take(AD, now);
+        assert!(refused.is_empty());
     }
 
     #[test]
     fn an_unrelated_document_passes() {
-        let filters = CountedFilters::default();
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         refused.record(AD, now);
         assert!(!refused.take("https://ads.example/frame?slot=2", now));
+        assert!(!refused.take("https://ads.example/frameXslot=1", now));
         assert!(!refused.take("https://news.example/", now));
         assert!(refused.take(AD, now));
     }
 
     #[test]
     fn a_worker_script_the_page_loads_is_not_taken_for_its_frame() {
-        let filters = CountedFilters::default();
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         refused.record("https://ads.example/frame.html", now);
         assert!(!refused.take("https://ads.example/worker.js", now));
         assert!(!refused.take("https://ads.example/frame.html.js", now));
@@ -427,14 +334,12 @@ mod tests {
 
     #[test]
     fn the_fragment_the_frame_check_sees_is_not_part_of_the_request() {
-        let filters = CountedFilters::default();
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         refused.record(
             "https://ads.example/outer.html#url=https%3A%2F%2Fnews.example",
             now,
         );
-        assert_eq!(filters.count("https://ads.example/outer.html"), 1);
         assert!(refused.take("https://ads.example/outer.html", now));
 
         refused.record(AD, now);
@@ -455,85 +360,124 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_refusal_passes_and_takes_its_filter_with_it() {
-        let filters = CountedFilters::default();
+    fn two_refusals_of_one_address_are_answered_one_each() {
         let then = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
+        refused.record(AD, then);
+        refused.record(AD, then + Duration::from_secs(3));
+        // The first lapses; the second still waits.
+        assert!(refused.take(AD, then + LIFETIME));
+        assert!(!refused.take(AD, then + LIFETIME));
+    }
+
+    #[test]
+    fn an_expired_refusal_passes() {
+        let then = Instant::now();
+        let mut refused = RefusedFrameDocuments::default();
         refused.record(AD, then);
         assert!(!refused.take(AD, then + LIFETIME));
         assert!(refused.is_empty());
-        assert_eq!(filters.total(), 0);
     }
 
     #[test]
     fn the_main_frame_going_to_a_refused_address_is_never_answered() {
-        let filters = CountedFilters::default();
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         refused.record("https://shop.example/", now);
         refused.record("https://shop.example/", now);
+        refused.record(AD, now);
         refused.forget("https://shop.example/#top", now);
-        assert_eq!(filters.total(), 0);
         assert!(!refused.take("https://shop.example/", now));
+        assert!(refused.take(AD, now));
+    }
+
+    #[test]
+    fn a_main_frame_navigation_elsewhere_lets_a_lapsed_refusal_go() {
+        let then = Instant::now();
+        let mut refused = RefusedFrameDocuments::default();
+        refused.record(AD, then);
+        refused.forget("https://news.example/", then + LIFETIME);
+        assert!(refused.is_empty());
     }
 
     #[test]
     fn a_main_document_at_a_stale_refused_address_is_never_answered() {
-        let filters = CountedFilters::default();
         let then = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         refused.record("https://shop.example/", then);
         let later = then + LIFETIME + Duration::from_millis(1);
         assert!(!refused.take("https://shop.example/", later));
-        assert_eq!(filters.total(), 0);
-    }
-
-    #[test]
-    fn an_answered_refusal_leaves_no_filter_for_a_later_load() {
-        let filters = CountedFilters::default();
-        let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        refused.record(AD, now);
-        assert!(refused.take(AD, now));
-        assert_eq!(filters.total(), 0);
-        assert!(!refused.take(AD, now + Duration::from_millis(10)));
     }
 
     #[test]
     fn a_full_view_lets_a_further_refusal_through_and_keeps_those_waiting() {
-        let filters = CountedFilters::default();
         let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
+        let mut refused = RefusedFrameDocuments::default();
         for slot in 0..CAPACITY {
             assert!(refused.record(&format!("https://ads.example/frame?slot={slot}"), now));
         }
         assert!(!refused.record("https://ads.example/frame?slot=late", now));
-        assert_eq!(filters.total(), CAPACITY);
-        assert_eq!(filters.count("https://ads.example/frame?slot=late"), 0);
+        assert!(!refused.take("https://ads.example/frame?slot=late", now));
         assert!(refused.take("https://ads.example/frame?slot=0", now));
         assert!(refused.record("https://ads.example/frame?slot=late", now));
     }
 
-    #[test]
-    fn a_filter_that_cannot_be_added_lets_the_request_through() {
-        let filters = CountedFilters::default();
-        filters.fail_adds.set(true);
-        let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        assert!(!refused.record(AD, now));
-        assert!(refused.is_empty());
-        assert!(!refused.take(AD, now));
+    /// Filters as WebView2 counts them: per pattern, added and removed.
+    #[derive(Default)]
+    struct CountedFilters {
+        live: RefCell<HashMap<String, usize>>,
+        fail_add_at: Cell<Option<usize>>,
+        adds: Cell<usize>,
+    }
+
+    impl CountedFilters {
+        fn total(&self) -> usize {
+            self.live.borrow().values().sum()
+        }
+    }
+
+    impl DocumentFilterTarget for &CountedFilters {
+        fn add(&self, pattern: PCWSTR) -> windows_core::Result<()> {
+            let attempt = self.adds.get();
+            self.adds.set(attempt + 1);
+            if self.fail_add_at.get() == Some(attempt) {
+                return Err(windows::Win32::Foundation::E_INVALIDARG.into());
+            }
+            let pattern = unsafe { pattern.to_string() }.expect("pattern is UTF-16");
+            *self.live.borrow_mut().entry(pattern).or_default() += 1;
+            Ok(())
+        }
+
+        fn remove(&self, pattern: PCWSTR) -> windows_core::Result<()> {
+            let pattern = unsafe { pattern.to_string() }.expect("pattern is UTF-16");
+            let mut live = self.live.borrow_mut();
+            let count = live
+                .get_mut(&pattern)
+                .expect("removed a filter never added");
+            *count -= 1;
+            if *count == 0 {
+                live.remove(&pattern);
+            }
+            Ok(())
+        }
     }
 
     #[test]
-    fn letting_the_view_go_removes_every_filter() {
+    fn the_view_filters_its_web_documents_and_takes_the_filter_off_with_it() {
         let filters = CountedFilters::default();
-        let now = Instant::now();
-        let mut refused = RefusedFrameDocuments::new(&filters);
-        refused.record(AD, now);
-        refused.record(AD, now);
-        refused.record("https://ads.example/other", now);
-        refused.clear();
+        let filter = DocumentFilter::register(&filters).expect("registered");
+        assert_eq!(filters.total(), 2);
+        assert_eq!(filters.live.borrow().get("https://*"), Some(&1));
+        assert_eq!(filters.live.borrow().get("http://*"), Some(&1));
+        drop(filter);
+        assert_eq!(filters.total(), 0);
+    }
+
+    #[test]
+    fn a_filter_that_cannot_be_registered_whole_leaves_none_behind() {
+        let filters = CountedFilters::default();
+        filters.fail_add_at.set(Some(1));
+        assert!(DocumentFilter::register(&filters).is_err());
         assert_eq!(filters.total(), 0);
     }
 }
