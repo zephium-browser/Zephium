@@ -42,7 +42,7 @@ impl DocumentFilters for ICoreWebView2_22 {
         // the call.
         unsafe {
             self.AddWebResourceRequestedFilterWithRequestSourceKinds(
-                &HSTRING::from(url),
+                &HSTRING::from(literal_filter(url)),
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
                 COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
             )
@@ -50,15 +50,30 @@ impl DocumentFilters for ICoreWebView2_22 {
     }
 
     fn remove(&self, url: &str) -> windows_core::Result<()> {
-        // SAFETY: as in `add`, for a filter `add` installed.
+        // SAFETY: as in `add`, for a filter `add` installed from the same
+        // address, so the same escaped string.
         unsafe {
             self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
-                &HSTRING::from(url),
+                &HSTRING::from(literal_filter(url)),
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT,
                 COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_DOCUMENT,
             )
         }
     }
+}
+
+/// A filter that matches `url` alone. WebView2 reads `*` and `?` in a filter
+/// as wildcards, and every address with a query has a `?`; a backslash before
+/// each makes it literal.
+fn literal_filter(url: &str) -> String {
+    let mut filter = String::with_capacity(url.len() + 4);
+    for character in url.chars() {
+        if matches!(character, '*' | '?') {
+            filter.push('\\');
+        }
+        filter.push(character);
+    }
+    filter
 }
 
 /// Refused frame documents waiting for their request, each with the filter
@@ -347,6 +362,45 @@ mod tests {
         assert!(refused.take(AD, lapsed));
         assert_eq!(filters.count(AD), 0);
         assert!(!refused.take(AD, lapsed));
+    }
+
+    #[test]
+    fn a_document_matching_only_a_wildcard_in_a_refused_address_passes() {
+        let filters = CountedFilters::default();
+        let now = Instant::now();
+        let mut refused = RefusedFrameDocuments::new(&filters);
+        refused.record("https://ads.example/frame?fields=*", now);
+        assert!(!refused.take("https://ads.example/frameXfields=*", now));
+        assert!(!refused.take("https://ads.example/frame?fields=all", now));
+        assert!(!refused.take("https://ads.example/frame?fields=", now));
+        assert!(refused.take("https://ads.example/frame?fields=*", now));
+    }
+
+    #[test]
+    fn the_filter_for_a_refused_address_matches_that_address_alone() {
+        assert_eq!(
+            literal_filter("https://ads.example/frame?slot=1&fields=*"),
+            r"https://ads.example/frame\?slot=1&fields=\*"
+        );
+        assert_eq!(
+            literal_filter("https://ads.example/a?b?c**"),
+            r"https://ads.example/a\?b\?c\*\*"
+        );
+        assert_eq!(
+            literal_filter("https://ads.example/plain/path"),
+            "https://ads.example/plain/path"
+        );
+    }
+
+    #[test]
+    fn a_main_frame_navigation_elsewhere_lets_a_lapsed_refusal_go() {
+        let filters = CountedFilters::default();
+        let then = Instant::now();
+        let mut refused = RefusedFrameDocuments::new(&filters);
+        refused.record(AD, then);
+        refused.forget("https://news.example/", then + LIFETIME);
+        assert!(refused.is_empty());
+        assert_eq!(filters.total(), 0);
     }
 
     #[test]
