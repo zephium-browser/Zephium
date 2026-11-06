@@ -27,6 +27,7 @@
   import {
     decode,
     FROSTS,
+    isDecoded,
     placeSky,
     placeSkyInWindow,
     skyImage,
@@ -195,10 +196,18 @@
   // The sky arrives once a session, as the first new tab opens, and is simply
   // there on every one after.
   const arriving = !seen(untrack(() => scene));
-  let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
+  // The sky on show is always a picture already decoded: a resize or a new
+  // scene keeps the last one until its replacement has decoded.
+  let shown = $state<{ scene: Scene; url: string } | null>(null);
   $effect(() => {
-    if (!useSky) return;
-    const wanted = scene;
+    // Nothing is decoded before the page is measured, so no picture is
+    // decoded for a width the page never has.
+    if (!useSky || !measured) return;
+    const wanted = { scene, url: skyPicture };
+    if (isDecoded(wanted.url)) {
+      shown = wanted;
+      return;
+    }
     let live = true;
     // A sky that cannot be decoded leaves the page its own colour; it never
     // keeps the name and the controls hidden.
@@ -206,7 +215,7 @@
       if (live) shown = wanted;
     };
     void decode(
-      wanted,
+      wanted.scene,
       untrack(() => sky.w),
     ).then(reveal, reveal);
     return () => {
@@ -218,6 +227,8 @@
   // page is cut by the notch the field hangs in, so the window's own glass
   // reaches down into it around the field.
   let sky = $derived(placeSky(width, page.horizon));
+  let skyPicture = $derived(skyImage(scene, sky.w));
+  let measured = $derived(width > 0);
   // The glass beside the page is lit from the picture's left edge, so it is
   // told where the picture lies in the window whenever either moves.
   let section = $state<HTMLElement>();
@@ -320,7 +331,7 @@
   class:entering={useSky && !arriving}
   class:custom={!useSky}
   data-scene={scene}
-  data-ready={!useSky || shown === scene}
+  data-ready={!useSky || shown?.scene === scene}
   aria-label={m.new_tab()}
   style:--sky-frost={useSky ? `url("${FROSTS[scene]}")` : undefined}
   style:--sky-frost-size={`${sky.w}px ${sky.h}px`}
@@ -348,7 +359,7 @@
         {/key}
       {:else if useSky}<div
           class="sky"
-          style:background-image={`url("${skyImage(scene, sky.w)}")`}
+          style:background-image={`url("${shown?.url ?? skyPicture}")`}
           style:background-size={`${sky.w}px ${sky.h}px`}
           style:background-position={`${sky.x}px ${sky.y}px`}
         ></div>{/if}

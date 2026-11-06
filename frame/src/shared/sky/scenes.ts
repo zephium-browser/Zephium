@@ -47,19 +47,30 @@ export const FROSTS: Record<Scene, string> = { day: frostDay, night: frostNight 
 
 const shown = new Set<Scene>();
 const decoded = new Set<string>();
+const decoding = new Map<string, Promise<void>>();
 
 /** Whether this session has shown the sky already. */
 export const seen = (scene: Scene) => shown.has(scene);
+
+/** Whether this picture is decoded, so it can be shown at once. */
+export const isDecoded = (url: string) => decoded.has(url);
 
 /** Decodes the picture a sky is drawn from, off the main thread, so it is
  *  shown whole or not at all: the one for `width`, or the whole sky. */
 export function decode(scene: Scene, width?: number): Promise<void> {
   const url = width === undefined ? SCENES[scene] : skyImage(scene, width);
   if (decoded.has(url)) return Promise.resolve();
+  const pending = decoding.get(url);
+  if (pending) return pending;
   const image = new Image();
   image.src = url;
-  return image.decode().then(() => {
-    decoded.add(url);
-    shown.add(scene);
-  });
+  const done = image
+    .decode()
+    .then(() => {
+      decoded.add(url);
+      shown.add(scene);
+    })
+    .finally(() => decoding.delete(url));
+  decoding.set(url, done);
+  return done;
 }

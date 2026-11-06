@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { SCENES, skyImage } from "../scenes";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { decode, isDecoded, SCENES, skyImage } from "../scenes";
 
 describe("skyImage", () => {
   it("draws a sky from the narrowest picture that still covers it", () => {
@@ -19,5 +19,59 @@ describe("skyImage", () => {
 
   it("draws the whole sky past its widest picture", () => {
     expect(skyImage("night", 4000, 2)).toBe(SCENES.night);
+  });
+});
+
+describe("decode", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Images that record each picture they decode, failing the first `fails`. */
+  function images(fails = 0) {
+    const decoded: string[] = [];
+    let left = fails;
+    vi.stubGlobal(
+      "Image",
+      class {
+        src = "";
+        decode() {
+          decoded.push(this.src);
+          if (left > 0) {
+            left -= 1;
+            return Promise.reject(new Error("undecodable"));
+          }
+          return Promise.resolve();
+        }
+      },
+    );
+    return decoded;
+  }
+
+  it("decodes each picture once, and a narrower one never stands in for a wider one", async () => {
+    const decoded = images();
+    const narrow = skyImage("day", 1000, 1);
+    const wide = skyImage("day", 2400, 1);
+
+    await Promise.all([decode("day", 1000), decode("day", 1000)]);
+    expect(isDecoded(narrow)).toBe(true);
+    expect(isDecoded(wide)).toBe(false);
+
+    await decode("day", 2400);
+    await decode("day", 1000);
+    expect(isDecoded(wide)).toBe(true);
+    expect(decoded).toEqual([narrow, wide]);
+  });
+
+  it("tries a picture again after its decode failed", async () => {
+    const decoded = images(1);
+    const url = skyImage("night", 1000, 1);
+
+    await expect(decode("night", 1000)).rejects.toThrow("undecodable");
+    expect(isDecoded(url)).toBe(false);
+
+    await decode("night", 1000);
+    expect(isDecoded(url)).toBe(true);
+    expect(decoded).toEqual([url, url]);
   });
 });

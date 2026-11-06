@@ -1,6 +1,13 @@
 <script lang="ts">
   import { untrack, type Snippet } from "svelte";
-  import { decode, placeSky, scene as skyScene, seen, skyImage, type Scene } from "$shared/sky";
+  import {
+    decode,
+    isDecoded,
+    placeSky,
+    scene as skyScene,
+    skyImage,
+    type Scene,
+  } from "$shared/sky";
 
   let { children, foot }: { children: Snippet; foot?: Snippet } = $props();
 
@@ -12,21 +19,31 @@
   // The horizon sits low enough that the sheet stands over open sky and the
   // clouds have dissolved into the page by its foot.
   const sky = $derived(placeSky(width, Math.round(height * 0.72)));
+  const picture = $derived(skyImage(scene, sky.w));
+  const measured = $derived(width > 0);
 
-  let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
+  // The sky on show is always a picture already decoded: a resize or a new
+  // scene keeps the last one until its replacement has decoded. Nothing is
+  // decoded before the page is measured.
+  let shown = $state<{ scene: Scene; url: string } | null>(null);
   let failed = $state<Scene | null>(null);
   $effect(() => {
-    const wanted = scene;
+    if (!measured) return;
+    const wanted = { scene, url: picture };
+    if (isDecoded(wanted.url)) {
+      shown = wanted;
+      return;
+    }
     let live = true;
     void decode(
-      wanted,
+      wanted.scene,
       untrack(() => sky.w),
     ).then(
       () => {
         if (live) shown = wanted;
       },
       () => {
-        if (live) failed = wanted;
+        if (live) failed = wanted.scene;
       },
     );
     return () => {
@@ -43,7 +60,7 @@
 <div
   class="account-gate"
   data-sky={scene}
-  data-ready={shown === scene}
+  data-ready={shown?.scene === scene}
   data-failed={failed === scene}
   bind:clientWidth={width}
   bind:clientHeight={height}
@@ -51,7 +68,7 @@
   <div
     class="sky"
     aria-hidden="true"
-    style:background-image={`url("${skyImage(scene, sky.w)}")`}
+    style:background-image={`url("${shown?.url ?? picture}")`}
     style:background-size={`${sky.w}px ${sky.h}px`}
     style:background-position={`${sky.x}px ${sky.y}px`}
   ></div>
