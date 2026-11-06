@@ -443,9 +443,11 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
             .filter(|host| !host.is_empty() && !host.starts_with('~'))
             .collect();
         let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
-        let excepted = exceptions
-            .iter()
-            .any(|domains| hosts.iter().any(|host| applies(domains, host)));
+        let excepted = exceptions.iter().any(|domains| {
+            hosts
+                .iter()
+                .any(|host| applies(domains, host) || names_below(domains, host))
+        });
         if !excepted && !hosts.is_empty() {
             for (domains, query) in &edits {
                 if hosts
@@ -518,6 +520,19 @@ fn writable(marker: &str) -> bool {
         && marker
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Whether `domains` names a host below `host`, where a rule for `host`
+/// also runs.
+fn names_below(domains: &str, host: &str) -> bool {
+    domains
+        .split(',')
+        .filter(|entry| !entry.starts_with('~'))
+        .any(|name| {
+            name.to_ascii_lowercase()
+                .strip_suffix(host)
+                .is_some_and(|sub| sub.ends_with('.'))
+        })
 }
 
 /// Whether `domains` negates a host below `host`, where a rule for `host`
@@ -1351,6 +1366,7 @@ mod tests {
         // leaves none, from whichever list.
         for exception in [
             "www.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "sub.www.youtube.com#@#+js(trusted-edit-inbound-object)",
             "youtube.com#@#+js()",
             "#@#+js(trusted-edit-inbound-object.js)",
         ] {
