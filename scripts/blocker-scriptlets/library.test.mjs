@@ -595,13 +595,15 @@ const playerText = () => JSON.stringify({
   const AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
   const marked = (marker) => AGENT.replace(') AppleWebKit', `; ${marker}) AppleWebKit`);
   // A response to a request the quick fixes edited carries their tag in its tracking URL.
+  const HOLD = { buffer_health_seconds: '0.00 s', resolution: '0x0', debug_info: 'USDAI, SABR, s:49' };
+  const PLAYING = { buffer_health_seconds: '4.20 s', resolution: '1280x720', debug_info: 'USDAI, SABR, s:49' };
   const TAGGED = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F%23reloadxhr' } } };
-  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '' } = {}) => {
+  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '', prelude = '' } = {}) => {
     const listeners = {};
     let interval;
     const player = {
       id: 'v1', time: 0, state: 3, loads: [], response: { playabilityStatus: { status: 'OK' } },
-      stats: { buffer_health_seconds: '0.00 s', resolution: '0x0', debug_info: 'USDAI, SABR, s:49' },
+      stats: { ...HOLD },
       getVideoData() { return { video_id: this.id }; },
       getPlayerState() { return this.state; },
       getCurrentTime() { return this.time; },
@@ -626,6 +628,7 @@ const playerText = () => JSON.stringify({
     vm.createContext(context);
     vm.runInContext(files.map(source).join('\n'), context);
     vm.runInContext('Date.now = () => clock;', context);
+    vm.runInContext(prelude, context);
     context.zephiumPlayerMarker('channel lactmilli yahi inline', 'buffer_health_seconds=0.00 s|resolution=0x0', 'debug_info^=SSAP, AD', '1000', premium, 'answer/3037019', 'playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr');
     vm.runInContext(`var ytcfg = { data_: {}, get(key) { return this.data_[key]; }, set(values) { Object.assign(this.data_, values); } };
       ytcfg.set({ INNERTUBE_CONTEXT: { client: { clientName: 'WEB', userAgent: ${JSON.stringify(AGENT)} } } });`, context);
@@ -650,9 +653,14 @@ const playerText = () => JSON.stringify({
   page.at(3000);
   assert.equal(page.agent(), marked('lactmilli'));
   assert.equal(page.player.loads.length, 2);
-  // The marker that played is kept for the page's next video.
+  // The marker that played is kept for the page's next video, and the old
+  // player is not reloaded while the next one loads.
   page.fire('yt-navigate-start');
   assert.equal(page.agent(), marked('lactmilli'));
+  page.at(3500);
+  page.at(4600);
+  assert.equal(page.player.loads.length, 2);
+  page.fire('yt-navigate-finish');
   // Every marker held: the list starts over once, then the page is left unmarked.
   for (const [ms, marker] of [[4000, 'yahi'], [5000, 'inline'], [6000, 'channel'], [7000, 'lactmilli'], [8000, 'yahi'], [9000, 'inline']]) {
     page.at(ms);
@@ -667,19 +675,20 @@ const playerText = () => JSON.stringify({
   page.fire('yt-navigate-finish');
   assert.ok(!page.watching());
 
-  // Data YouTube fetched ahead of a click is retried once with the kept
-  // marker; when no edited response ever shows the tag, the next hold moves on.
+  // Data YouTube fetched ahead of a click is retried with the kept marker;
+  // when no edited response ever shows the tag, no marker can help, so after
+  // two retries the hold is left and the marker kept.
   const clicked = youtube();
   clicked.at(0);
   clicked.at(1000);
   clicked.at(2000);
   clicked.at(3000);
   assert.equal(clicked.agent(), marked('lactmilli'));
-  Object.assign(clicked.player, { time: 0.5, state: 1 });
+  Object.assign(clicked.player, { time: 0.5, state: 1, stats: PLAYING });
   clicked.at(3250);
   assert.ok(!clicked.watching());
   const untagged = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F' } } };
-  Object.assign(clicked.player, { id: 'v2', time: 0, state: 3, response: untagged });
+  Object.assign(clicked.player, { id: 'v2', time: 0, state: 3, stats: HOLD, response: untagged });
   clicked.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
   clicked.fire('yt-navigate-finish');
   clicked.at(4000);
@@ -688,8 +697,12 @@ const playerText = () => JSON.stringify({
   assert.deepEqual(clicked.player.loads.slice(2), [['v2', 0]]);
   clicked.at(6000);
   clicked.at(7000);
-  assert.equal(clicked.agent(), marked('yahi'));
+  assert.equal(clicked.agent(), marked('lactmilli'));
   assert.deepEqual(clicked.player.loads.slice(2), [['v2', 0], ['v2', 0]]);
+  clicked.at(8000);
+  clicked.at(9000);
+  assert.equal(clicked.agent(), marked('lactmilli'));
+  assert.equal(clicked.player.loads.length, 4);
 
   // A video nobody asked to play, or one in a hidden page, is never reloaded:
   // only a page in view whose player is trying to play can be held.
@@ -711,6 +724,74 @@ const playerText = () => JSON.stringify({
     assert.deepEqual(stopped.player.loads, paused ? [] : [['v1', 0]], `paused ${paused}`);
   }
 
+  // A player this reloaded is unstarted until the new request is answered:
+  // that wait is not a hold, so the marker is not moved on from it.
+  const reloaded = youtube();
+  reloaded.player.querySelector = (selector) => (selector === 'video' ? { paused: false } : null);
+  reloaded.player.loadVideoById = function (id, start) { this.loads.push([id, start]); this.state = -1; };
+  reloaded.at(0);
+  reloaded.at(1000);
+  assert.deepEqual(reloaded.player.loads, [['v1', 0]]);
+  for (let ms = 1250; ms <= 3500; ms += 250) { reloaded.at(ms); }
+  assert.equal(reloaded.player.loads.length, 1);
+  assert.equal(reloaded.agent(), marked('channel'));
+  // Once it buffers again, a hold counts as before.
+  Object.assign(reloaded.player, { state: 3, response: TAGGED });
+  reloaded.at(3750);
+  reloaded.at(4750);
+  assert.equal(reloaded.player.loads.length, 2);
+  assert.equal(reloaded.agent(), marked('lactmilli'));
+
+  // Once the reloaded player has started, a stop and a new request to play
+  // count as a hold again.
+  const resumed = youtube();
+  resumed.player.querySelector = (selector) => (selector === 'video' ? { paused: false } : null);
+  resumed.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
+  resumed.at(0);
+  resumed.at(1000);
+  resumed.at(1250);
+  resumed.player.state = -1;
+  resumed.at(2250);
+  assert.equal(resumed.player.loads.length, 2);
+
+  // A seek during a hold moves the time but has not started the video.
+  const sought = youtube();
+  sought.at(0);
+  sought.player.time = 30;
+  sought.at(250);
+  assert.ok(sought.watching());
+  sought.at(1250);
+  assert.deepEqual(sought.player.loads, [['v1', 0]]);
+
+  // Playback asked for after watching ended is watched again.
+  const late = youtube();
+  late.player.state = -1;
+  for (let ms = 0; ms <= 61000; ms += 1000) { late.at(ms); }
+  assert.ok(!late.watching());
+  late.player.state = 3;
+  late.fire('play');
+  assert.ok(late.watching());
+  late.at(62000);
+  late.at(63000);
+  assert.deepEqual(late.player.loads, [['v1', 0]]);
+
+  // Each video has its own allowance of same-marker retries.
+  const revisited = youtube();
+  revisited.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
+  for (const ms of [0, 1000, 2000, 3000, 4000, 5000]) { revisited.at(ms); }
+  assert.equal(revisited.player.loads.length, 2);
+  revisited.fire('yt-navigate-start');
+  Object.assign(revisited.player, { id: 'v2' });
+  revisited.fire('yt-navigate-finish');
+  revisited.at(6000);
+  revisited.fire('yt-navigate-start');
+  Object.assign(revisited.player, { id: 'v1' });
+  revisited.fire('yt-navigate-finish');
+  revisited.at(7000);
+  revisited.at(8000);
+  assert.deepEqual(revisited.player.loads.at(-1), ['v1', 0]);
+  assert.equal(revisited.agent(), marked('channel'));
+
   const hidden = youtube();
   hidden.context.document.visibilityState = 'hidden';
   hidden.player.response = { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } };
@@ -730,12 +811,11 @@ const playerText = () => JSON.stringify({
   // real: a refused marker there moves on without the page being shown.
   const music = youtube();
   music.at(0);
-  music.player.state = 1;
-  music.player.time = 0.5;
+  Object.assign(music.player, { state: 1, time: 0.5, stats: PLAYING });
   music.at(250);
   assert.ok(!music.watching());
   music.context.document.visibilityState = 'hidden';
-  Object.assign(music.player, { id: 'v2', time: 0, state: -1, response: { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } } });
+  Object.assign(music.player, { id: 'v2', time: 0, state: -1, stats: HOLD, response: { playabilityStatus: { status: 'UNPLAYABLE', reason: 'answer/3037019' } } });
   music.fire('yt-navigate-finish');
   music.at(1000);
   assert.deepEqual(music.player.loads, [['v2', 0]]);
@@ -750,10 +830,10 @@ const playerText = () => JSON.stringify({
   const next = youtube();
   for (const ms of [0, 1000, 2000, 3000]) { next.at(ms); }
   assert.equal(next.agent(), marked('lactmilli'));
-  Object.assign(next.player, { time: 0.5, state: 1 });
+  Object.assign(next.player, { time: 0.5, state: 1, stats: PLAYING });
   next.at(3250);
   next.context.document.visibilityState = 'hidden';
-  Object.assign(next.player, { id: 'v2', time: 0, state: 3, response: { playabilityStatus: { status: 'OK' } } });
+  Object.assign(next.player, { id: 'v2', time: 0, state: 3, stats: HOLD, response: { playabilityStatus: { status: 'OK' } } });
   next.fire('yt-navigate-finish');
   next.at(4000);
   next.at(5000);
@@ -799,7 +879,7 @@ const playerText = () => JSON.stringify({
   ad.at(5250);
   assert.ok(!ad.watching());
   const started = youtube();
-  started.player.stats = { ...started.player.stats, buffer_health_seconds: '4.20 s', resolution: '1280x720' };
+  started.player.stats = PLAYING;
   for (let ms = 0; ms <= 3000; ms += 250) { started.at(ms); }
   assert.deepEqual(started.player.loads, []);
 
@@ -816,6 +896,9 @@ const playerText = () => JSON.stringify({
   refused.at(250);
   assert.equal(refused.agent(), marked('yahi'));
 
+  // Premium is never marked, even before the first sample.
+  const early = youtube({ prelude: 'var ytInitialData = { logo: "PREMIUM" };' });
+  assert.equal(early.agent(), AGENT);
   // Premium is never marked; a fresh context from YouTube is marked again.
   const premium = youtube();
   vm.runInContext('var ytInitialData = { logo: "PREMIUM" };', premium.context);

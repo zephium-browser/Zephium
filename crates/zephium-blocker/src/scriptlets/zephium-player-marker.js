@@ -1,4 +1,4 @@
-// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried once with the same marker. A player counts as trying to play while playing or buffering, or unstarted with its video asked to play, as after a consent dialog stopped it. A playlist's video is reloaded through the playlist when the player holds that list, so its place there is kept. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
+// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. A hold counts against a marker only when the held data came from a request the quick fixes edited, which their tag in the response's `path*=text` shows; other data, inlined in the page or fetched by YouTube ahead of a click, is retried with the same marker, at most twice per video. A player counts as trying to play while playing or buffering, or unstarted with its video asked to play, as after a consent dialog stopped it. A playlist's video is reloaded through the playlist when the player holds that list, so its place there is kept. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, text that marks a playability error as a block, and the response's tag of an edited request. See docs/adblock.md.
 function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, requested) {
     const names = String(markers ?? '').split(/\s+/).filter((name) => /^[a-z0-9]+$/.test(name));
     const pairs = (spec, operator) => String(spec ?? '').split('|').map((pair) => {
@@ -30,6 +30,23 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     let config;
     let original;
     let written;
+    const read = (root, path) => {
+        let value = root;
+        for (const key of path) {
+            if (value === null || typeof value !== 'object') {
+                return undefined;
+            }
+            value = value[key];
+        }
+        return value;
+    };
+    const isPremium = () => {
+        try {
+            return read(globalThis, premiumPath) === premiumValue;
+        } catch (e) {
+            return false;
+        }
+    };
     const client = () => {
         try {
             return config?.get?.('INNERTUBE_CONTEXT')?.client;
@@ -44,6 +61,9 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         }
         if (target.userAgent !== written) {
             original = target.userAgent;
+        }
+        if (active && isPremium()) {
+            active = false;
         }
         const marker = active && index < names.length ? names[index] : '';
         written = marker === '' || !platform.test(original) ? original : original.replace(platform, `$1; ${marker}`);
@@ -79,17 +99,6 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         return;
     }
 
-    const read = (root, path) => {
-        let value = root;
-        for (const key of path) {
-            if (value === null || typeof value !== 'object') {
-                return undefined;
-            }
-            value = value[key];
-        }
-        return value;
-    };
-    const isPremium = () => read(globalThis, premiumPath) === premiumValue;
     const edited = (player) => {
         try {
             const value = read(player.getPlayerResponse?.(), tagPath);
@@ -113,13 +122,14 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         }
     };
     // An unstarted player whose video was asked to play waits on a hold too,
-    // as when a dialog stopped it and playback was asked for again.
-    const trying = (player, state) => {
+    // as when a dialog stopped it and playback was asked for again; one this
+    // reloaded is unstarted until the new request is answered, which is no hold.
+    const trying = (player, state, id) => {
         if (state === 1 || state === 3) {
             return true;
         }
         try {
-            return state === -1 && player.querySelector?.('video')?.paused === false;
+            return state === -1 && pending !== id && player.querySelector?.('video')?.paused === false;
         } catch (e) {
             return false;
         }
@@ -143,12 +153,22 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     let video;
     let base;
     let heldSince;
-    let retried;
+    // The video this last reloaded, until its player starts again.
+    let pending;
+    // Reloads with the same marker on data no edited request returned, per
+    // video: past them the hold is left alone, since no marker can change it.
+    const RETRIES = 2;
+    let retries = 0;
+    let counted;
+    let navigating = false;
     const stop = () => {
         clearInterval(timer);
         timer = undefined;
     };
     const sample = () => {
+        if (navigating) {
+            return;
+        }
         if (Date.now() - since > WATCH_MS) {
             stop();
             return;
@@ -181,7 +201,12 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             base = now;
             heldSince = undefined;
         }
-        if (now - base > 0.1) {
+        if (id !== counted) {
+            counted = id;
+            retries = 0;
+        }
+        // A seek moves the time too; only a player no longer held has started.
+        if (now - base > 0.1 && !holds(stats)) {
             try {
                 played ||= player.getPlayerState?.() === 1;
             } catch (e) {}
@@ -203,7 +228,10 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         } catch (e) {
             return;
         }
-        if (!refusing && !(trying(player, state) && holds(stats))) {
+        if (state === 1 || state === 3) {
+            pending = undefined;
+        }
+        if (!refusing && !(trying(player, state, id) && holds(stats))) {
             heldSince = undefined;
             return;
         }
@@ -212,8 +240,11 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             return;
         }
         heldSince = undefined;
-        if (!refusing && !edited(player) && retried !== id) {
-            retried = id;
+        if (!refusing && !edited(player)) {
+            if (retries >= RETRIES) {
+                return;
+            }
+            retries += 1;
         } else if (index + 1 < names.length) {
             index += 1;
         } else if (!restarted) {
@@ -226,6 +257,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             return;
         }
         mark();
+        pending = id;
         try {
             reload(player, id, Math.max(0, Math.floor(base)));
         } catch (e) {
@@ -233,6 +265,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         }
     };
     const watch = () => {
+        navigating = false;
         if (!active) {
             return;
         }
@@ -242,7 +275,18 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
             timer = setInterval(sample, 250);
         }
     };
+    // A navigation's old player is not reloaded while the next video loads.
+    document.addEventListener('yt-navigate-start', () => {
+        navigating = true;
+        heldSince = undefined;
+    });
     document.addEventListener('yt-navigate-finish', watch);
+    // Playback asked for after watching ended, as after a long dialog.
+    document.addEventListener('play', () => {
+        if (timer === undefined) {
+            watch();
+        }
+    }, true);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             watch();
