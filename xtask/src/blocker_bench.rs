@@ -1866,7 +1866,8 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
 
 /// `--youtube-snackbar`: a fresh profile's first watch page, where its consent
 /// prompt is answered, each video opened directly, then two opened in the page,
-/// with a listener on the player's "onSnackbarMessage" event that records each
+/// with listeners on the player's "onSnackbarMessage" event, attached by a
+/// 50 ms look and by an observer on the player's container, that record each
 /// call and the player's stats around it.
 fn run_youtube_snackbar(
     context: &Context,
