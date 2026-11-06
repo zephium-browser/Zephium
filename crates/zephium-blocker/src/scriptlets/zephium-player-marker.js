@@ -1,4 +1,4 @@
-// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, and text that marks a playability error as a block. See docs/adblock.md.
+// Zephium's own scriptlet, run only from Zephium's built-in rules: puts a marker into YouTube's client user agent, which the player-request edits of uBlock Origin's quick fixes are keyed on, and moves to the next marker when the player holds a video with no buffer before it starts. The marker that last played is kept for the page's next videos; when every marker has held, the list starts over once, then the page is left unmarked. Every value YouTube may change is an argument: the markers in order, the hold's stats fields (`key=value`, `|`-separated), the stats that excuse it (`key^=prefix`), how long a hold lasts before the next marker, a Premium page's `path=value`, and text that marks a playability error as a block. See docs/adblock.md.
 function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) {
     const names = String(markers ?? '').split(/\s+/).filter((name) => /^[a-z0-9]+$/.test(name));
     const pairs = (spec, operator) => String(spec ?? '').split('|').map((pair) => {
@@ -19,6 +19,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
     // Watching ends a minute after a video is asked for: a hold that long is not one this can end.
     const WATCH_MS = 60000;
     let index = 0;
+    let restarted = false;
     let active = true;
     let config;
     let original;
@@ -158,14 +159,18 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
         heldSince = undefined;
         if (id === inlined) {
             inlined = undefined;
-        } else {
+        } else if (index + 1 < names.length) {
             index += 1;
-        }
-        mark();
-        if (index >= names.length) {
+        } else if (!restarted) {
+            restarted = true;
+            index = 0;
+        } else {
+            active = false;
+            mark();
             stop();
             return;
         }
+        mark();
         try {
             player.loadVideoById(id, Math.max(0, Math.floor(base)));
         } catch (e) {
@@ -182,10 +187,6 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
             timer = setInterval(sample, 250);
         }
     };
-    document.addEventListener('yt-navigate-start', () => {
-        index = 0;
-        mark();
-    });
     document.addEventListener('yt-navigate-finish', watch);
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', watch, { once: true });

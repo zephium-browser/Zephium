@@ -640,17 +640,21 @@ const playerText = () => JSON.stringify({
   page.at(1000);
   assert.equal(page.agent(), marked('lactmilli'));
   assert.deepEqual(page.player.loads, [['v1', 0]]);
+  // The marker that played is kept for the page's next video.
   page.fire('yt-navigate-start');
-  assert.equal(page.agent(), marked('channel'));
-  for (const [ms, marker] of [[2000, 'lactmilli'], [3000, 'yahi'], [4000, 'inline']]) {
+  assert.equal(page.agent(), marked('lactmilli'));
+  // Every marker held: the list starts over once, then the page is left unmarked.
+  for (const [ms, marker] of [[2000, 'yahi'], [3000, 'inline'], [4000, 'channel'], [5000, 'lactmilli'], [6000, 'yahi'], [7000, 'inline']]) {
     page.at(ms);
     page.at(ms + 1000);
     assert.equal(page.agent(), marked(marker), marker);
   }
-  page.at(6000);
-  page.at(7000);
+  page.at(8000);
+  page.at(9000);
   assert.equal(page.agent(), AGENT);
-  assert.equal(page.player.loads.length, 4);
+  assert.equal(page.player.loads.length, 7);
+  assert.ok(!page.watching());
+  page.fire('yt-navigate-finish');
   assert.ok(!page.watching());
 
   // The page's own video had its data inlined, which no marker reached: its
