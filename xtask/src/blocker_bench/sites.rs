@@ -11,6 +11,17 @@ pub(super) const YOUTUBE_FEED: &str = include_str!("youtube-feed.js");
 pub(super) const YOUTUBE_BACKGROUND: &str = include_str!("youtube-background.js");
 const YOUTUBE_PLAY: &str = include_str!("youtube-play.js");
 const YOUTUBE_HIDDEN_NEXT: &str = include_str!("youtube-hidden-next.js");
+const YOUTUBE_FIRST_WATCH: &str = include_str!("youtube-first-watch.js");
+pub(super) const YOUTUBE_PLAYLIST: &str = include_str!("youtube-playlist.js");
+pub(super) const YOUTUBE_PLAYLIST_FIND: &str = include_str!("youtube-playlist-find.js");
+
+pub(super) fn first_watch_script(seconds: u64) -> String {
+    YOUTUBE_FIRST_WATCH.replacen(
+        "const seconds = __SECONDS__;",
+        &format!("const seconds = {seconds};"),
+        1,
+    )
+}
 
 pub(super) fn play_script(seconds: u64) -> String {
     YOUTUBE_PLAY.replacen(

@@ -244,6 +244,9 @@ struct Options {
     only: Vec<String>,
     settle: Duration,
     youtube: bool,
+    /// Zephium only: whether a playlist keeps its place and order when the
+    /// player reloads a video.
+    youtube_playlist: bool,
     youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
@@ -332,6 +335,10 @@ impl Options {
                         value()?.split_whitespace().map(str::to_string).collect();
                 }
                 "--youtube" => options.youtube = true,
+                "--youtube-playlist" => {
+                    options.youtube = true;
+                    options.youtube_playlist = true;
+                }
                 "--youtube-consent" => {
                     options.youtube_consent = match value()?.as_str() {
                         "reject" => YoutubeConsent::Reject,
@@ -363,6 +370,9 @@ impl Options {
         ];
         if passes.into_iter().filter(|pass| *pass).count() > 1 {
             return Err("--youtube, --startup and --speedometer are separate passes".into());
+        }
+        if options.youtube_playlist && options.browsers.iter().any(|config| !config.zephium()) {
+            return Err("--youtube-playlist measures Zephium only".into());
         }
         if options.speedometer_warm && options.speedometer.is_none() {
             return Err("--speedometer-warm needs --speedometer".into());
@@ -1633,6 +1643,9 @@ fn visit_line(visit: &Visit) -> String {
 /// watch page, five videos, one Shorts page, a video behind another tab, and
 /// a video that played in view moving on to the next one behind another tab.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
+    if context.options.youtube_playlist {
+        return run_youtube_playlist(context, results, saved);
+    }
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
             let name = config.name();
@@ -1751,6 +1764,120 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             if let Some(profile) = &session._profile {
                 results.launches[launch_at].components =
                     Some(profile_components(profile.path(), launched));
+            }
+            session.driver.quit();
+            drop(session);
+            drop(qa);
+            results.save(saved)?;
+        }
+    }
+    Ok(())
+}
+
+/// A YouTube mix, the music case, opened at its first video.
+const MIX: &str = "https://www.youtube.com/watch?v=kJQP7kiw5Fk&list=RDkJQP7kiw5Fk";
+/// The channel whose first public playlist is the other list opened.
+const PLAYLISTS: &str = "https://www.youtube.com/@YouTube/playlists";
+
+/// `--youtube-playlist`: opens a watch page first, so its consent prompt is
+/// answered there, then a mix and a public playlist directly, and records
+/// whether each list keeps its place and order through the marker's own start
+/// and each way of reloading a held video.
+fn run_youtube_playlist(
+    context: &Context,
+    results: &mut Results,
+    saved: &Path,
+) -> Result<(), String> {
+    let step = "playlist";
+    for run in 1..=context.options.runs {
+        for config in &context.options.browsers {
+            let name = config.name();
+            eprintln!("run {run}/{} {name} {step}", context.options.runs);
+            let qa = QaSession::new(*config, &format!("p{run}"));
+            let mut launch = Launch {
+                config: name.to_string(),
+                run,
+                phase: step.into(),
+                ..Launch::default()
+            };
+            let mut session =
+                match context.launch(*config, Some(&qa), &format!("{name}-{step}-r{run}")) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("  {name} did not start: {error}");
+                        launch.error = Some(error);
+                        results.launches.push(launch);
+                        continue;
+                    }
+                };
+            record_session(&mut launch, &session);
+            results.launches.push(launch);
+            let plan = context.plan(*config);
+            let mut consent_pending = true;
+            // A fresh profile's first page is a watch page, so its consent
+            // prompt is answered there, as a new visitor's would be.
+            let first = format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0);
+            let (record, gone) = youtube_step(
+                &mut session,
+                &plan,
+                (*config, run),
+                ("first-watch", Some(VIDEOS[0].0), &first),
+                (&sites::first_watch_script(25), 25_000 + 60_000),
+                &mut consent_pending,
+            );
+            eprintln!(
+                "  first-watch {}",
+                record
+                    .result
+                    .as_ref()
+                    .map_or(record.errors.join("; "), Value::to_string)
+            );
+            results.youtube.push(record);
+            if gone {
+                session.driver.quit();
+                results.save(saved)?;
+                continue;
+            }
+            let (found, gone) = youtube_step(
+                &mut session,
+                &plan,
+                (*config, run),
+                ("playlist-find", None, PLAYLISTS),
+                (sites::YOUTUBE_PLAYLIST_FIND, EVAL_TIMEOUT_MS + 10_000),
+                &mut consent_pending,
+            );
+            let listed = found
+                .result
+                .as_ref()
+                .and_then(|result| result.get("url"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            eprintln!("  playlist-find {}", listed.as_deref().unwrap_or("none"));
+            results.youtube.push(found);
+            let mut urls = vec![MIX.to_string()];
+            urls.extend(listed);
+            if !gone {
+                for url in urls {
+                    let (record, gone) = youtube_step(
+                        &mut session,
+                        &plan,
+                        (*config, run),
+                        (step, None, &url),
+                        (sites::YOUTUBE_PLAYLIST, 300_000),
+                        &mut consent_pending,
+                    );
+                    eprintln!(
+                        "  {step} {url}  {}",
+                        record
+                            .result
+                            .as_ref()
+                            .map_or(record.errors.join("; "), Value::to_string)
+                    );
+                    results.youtube.push(record);
+                    if gone {
+                        break;
+                    }
+                }
             }
             session.driver.quit();
             drop(session);
