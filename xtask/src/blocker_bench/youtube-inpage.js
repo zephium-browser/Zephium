@@ -78,6 +78,8 @@ const watch = async (open) => {
   } catch {}
   return {
     videoId: id,
+    // When the link was clicked, on the page's clock, as the requests' times are.
+    openedAtMs: Math.round(openedMs),
     contentFrameMs,
     stalledMs,
     holdMs,
