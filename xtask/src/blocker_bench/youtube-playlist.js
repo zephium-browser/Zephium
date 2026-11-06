@@ -66,10 +66,11 @@ const ending = async () => {
     const id = call('getVideoData')?.video_id;
     return id && id !== before.videoId ? id : null;
   }, 30000);
-  if (next) await playing(0);
+  // A next item that never plays is a failed transition, whatever its id.
+  const played = next !== null && (await playing(0)) !== null;
   const started = context();
   await sleep(1000);
-  return { expected, next, inOrder: next !== null && next === expected, requests: requests() - sent, started, after: context() };
+  return { expected, next, played, inOrder: played && next === expected, requests: requests() - sent, started, after: context() };
 };
 // Reloads the current item with `how`, as a held start would, then lets it end.
 const reload = async (how) => {
