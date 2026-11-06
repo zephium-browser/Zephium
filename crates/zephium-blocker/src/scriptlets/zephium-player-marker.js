@@ -215,6 +215,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         if (id !== counted) {
             counted = id;
             retries = 0;
+            hastened = undefined;
         }
         // A seek moves the time too; only a player no longer held has started.
         if (now - base > 0.1 && !holds(stats)) {
@@ -306,15 +307,19 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
     };
     let finding;
     let findingSince;
+    const watching = () => location.pathname.startsWith('/watch');
     const find = () => {
         const player = document.getElementById('movie_player');
-        if ((player !== null && listen(player)) || Date.now() - findingSince > WATCH_MS) {
+        const elsewhere = !watching() && navigating === undefined;
+        if ((player !== null && listen(player)) || elsewhere || Date.now() - findingSince > WATCH_MS) {
             clearInterval(finding);
             finding = undefined;
         }
     };
+    // Only a watch page, or a navigation that may lead to one, has a player
+    // to look for.
     const look = () => {
-        if (announced === '' || finding !== undefined) {
+        if (announced === '' || finding !== undefined || (!watching() && navigating === undefined)) {
             return;
         }
         findingSince = Date.now();
@@ -341,6 +346,7 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText, 
         } catch (e) {
             leaving = undefined;
         }
+        look();
     });
     document.addEventListener('yt-navigate-finish', watch);
     // Playback asked for after watching ended, as after a long dialog, or

@@ -608,7 +608,7 @@ const playerText = () => JSON.stringify({
   const PLAYING = { buffer_health_seconds: '4.20 s', resolution: '1280x720', debug_info: 'USDAI, SABR, s:49' };
   const TAGGED = { playabilityStatus: { status: 'OK' }, playbackTracking: { videostatsPlaybackUrl: { baseUrl: 'https://www.youtube.com/api/stats/playback?referrer=https%3A%2F%2Fwww.youtube.com%2F%23reloadxhr' } } };
   const EVENT = 'onSnackbarMessage';
-  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '', prelude = '' } = {}) => {
+  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '', prelude = '', pathname = '/watch' } = {}) => {
     const listeners = {};
     const intervals = new Map();
     let intervalId = 0;
@@ -628,7 +628,7 @@ const playerText = () => JSON.stringify({
     const context = {
       console,
       URLSearchParams,
-      location: { pathname: '/watch', search },
+      location: { pathname, search },
       document: {
         readyState,
         visibilityState: 'visible',
@@ -911,6 +911,43 @@ const playerText = () => JSON.stringify({
   navigated.player.id = 'v2';
   navigated.signal();
   assert.deepEqual(navigated.player.loads, [['v2', 0]]);
+
+  // Leaving a video and coming back gives it the event again, as it gives
+  // it its retries.
+  const revisit = youtube();
+  revisit.player.loadVideoById = function (id, start) { this.loads.push([id, start]); };
+  revisit.find();
+  for (const ms of [0, 1000, 2000, 3000, 4000, 5000]) { revisit.at(ms); }
+  assert.equal(revisit.player.loads.length, 2);
+  revisit.signal();
+  assert.equal(revisit.player.loads.length, 2);
+  revisit.fire('yt-navigate-start');
+  revisit.player.id = 'v2';
+  revisit.fire('yt-navigate-finish');
+  revisit.at(5250);
+  revisit.player.id = 'v1';
+  revisit.at(5500);
+  revisit.signal();
+  assert.equal(revisit.player.loads.length, 3);
+
+  // A page with no video looks for no player, unless a navigation may lead
+  // to one; one that ends elsewhere stops the look.
+  const home = youtube({ pathname: '/' });
+  home.player = null;
+  assert.ok(!home.finding());
+  home.fire('yt-navigate-start');
+  home.find();
+  assert.ok(home.finding());
+  home.fire('yt-navigate-finish');
+  home.find();
+  assert.ok(!home.finding());
+  home.fire('yt-navigate-start');
+  home.context.location.pathname = '/watch';
+  home.fire('yt-navigate-finish');
+  home.player = home.makePlayer();
+  home.find();
+  assert.ok(!home.finding());
+  assert.equal(home.player.events[EVENT].length, 1);
 
   // An event before watching began starts it.
   const beforeWatch = youtube({ readyState: 'loading' });
