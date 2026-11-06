@@ -8,5 +8,7 @@ for (let i = 0; i < 60 && !(player = document.getElementById('movie_player'))?.q
 const video = player?.querySelector('video');
 if (!video) throw new Error('the player has no video element');
 try { player.mute(); player.playVideo(); } catch {}
+const started = video.currentTime;
 await sleep(seconds * 1000);
+if (!(video.currentTime > started)) throw new Error(`the opening video never played (currentTime ${started} -> ${video.currentTime}, paused: ${video.paused}), so the step has nothing to measure`);
 return { videoId: new URLSearchParams(location.search).get('v'), played: Math.round(video.currentTime * 10) / 10 };

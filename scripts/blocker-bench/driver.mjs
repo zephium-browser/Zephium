@@ -210,21 +210,23 @@ class Chromium extends Driver {
 
   // The lifecycle "load" event fires alongside Page.loadEventFired, and its loaderId keeps a late event of the
   // previous document, or of a subframe, from ending the wait early. A navigation the browser restarts commits
-  // under another loaderId, so the main frame's committed documents count too, and the reply says how many did.
+  // under another loaderId, so the main frame's documents committed after Page.navigate replied count too, and
+  // the reply says how many did. A commit seen before that reply may belong to an earlier navigation.
   async load(tab, url, timeoutMs) {
     const sessionId = this.session(tab);
     const loaded = new Set();
     const committed = new Set();
+    let navigated;
     let wake = () => {};
     const stop = this.rpc.listen(message => {
       if (message.sessionId !== sessionId) return;
-      if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) committed.add(message.params.frame.loaderId);
-      else if (message.method === "Page.lifecycleEvent" && message.params.name === "load") loaded.add(message.params.loaderId);
+      if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) {
+        if (navigated) committed.add(message.params.frame.loaderId);
+      } else if (message.method === "Page.lifecycleEvent" && message.params.name === "load") loaded.add(message.params.loaderId);
       else return;
       wake();
     });
     const start = performance.now();
-    let navigated;
     const done = () => navigated.loaderId && (loaded.has(navigated.loaderId) || [...committed].some(id => loaded.has(id)));
     try {
       const timedOut = await raceTimeout((async () => {
@@ -261,9 +263,9 @@ class Chromium extends Driver {
 }
 
 class Firefox extends Driver {
-  async open(url, timeoutMs) {
-    const { context } = await this.rpc.send("browsingContext.create", { type: "tab" });
-    await this.rpc.send("browsingContext.activate", { context });
+  async open(url, timeoutMs, background = false) {
+    const { context } = await this.rpc.send("browsingContext.create", { type: "tab", background });
+    if (!background) await this.rpc.send("browsingContext.activate", { context });
     return this.loadNew(context, url, timeoutMs);
   }
 

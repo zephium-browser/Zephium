@@ -77,6 +77,10 @@ const WATCH_SECONDS: u64 = 30;
 /// Each of the two seeks after the watch gets this long to play again.
 const SEEK_WITHIN_MS: u64 = 15_000;
 const YOUTUBE_DIALOG_WAIT_MS: u64 = 4000;
+/// How often, and for how long in all, the consent check is retried while the
+/// answer's reload is still under way.
+const CONSENT_RETRY: Duration = Duration::from_secs(1);
+const CONSENT_RETRY_WITHIN: Duration = Duration::from_secs(8);
 const QA_IDENTIFIER: &str = "app.zephium.protection-qa";
 /// Speedometer starts itself when it is given `startAutomatically`.
 const SPEEDOMETER_URL: &str = "https://browserbench.org/Speedometer3.1/?startAutomatically=true";
@@ -784,10 +788,23 @@ fn shields_down(profile: &Path) -> Result<(), String> {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
         Err(_) => json!({}),
     };
+    // Preferences holds whatever the browser wrote, so each level is checked
+    // before it is indexed; null stands for absent.
     let object = |value: &mut Value, key: &str| -> Result<(), String> {
-        let map = value.as_object_mut().ok_or("not a JSON object")?;
-        map.entry(key).or_insert_with(|| json!({}));
-        Ok(())
+        let map = value.as_object_mut().ok_or_else(|| {
+            format!("Preferences holds {key} under something that is not a JSON object")
+        })?;
+        let entry = map.entry(key).or_insert(Value::Null);
+        if entry.is_null() {
+            *entry = json!({});
+        }
+        if entry.is_object() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Preferences holds {key} as something that is not a JSON object"
+            ))
+        }
     };
     object(&mut preferences, "profile")?;
     object(
@@ -955,6 +972,21 @@ fn remove_qa_session(root: &Path, label: &str) -> Result<bool, String> {
 }
 
 impl Context {
+    /// The binary for `config`, or for a requested configuration that shares
+    /// its template (a Brave template is prepared for `brave-off` alone).
+    fn executable(&self, config: Config) -> Result<&PathBuf, String> {
+        self.executables
+            .get(config.name())
+            .or_else(|| {
+                self.options
+                    .browsers
+                    .iter()
+                    .filter(|requested| requested.template() == config)
+                    .find_map(|requested| self.executables.get(requested.name()))
+            })
+            .ok_or_else(|| format!("no executable for {}", config.name()))
+    }
+
     /// The command that starts a driver (or, for Zephium, the app itself).
     fn command(
         &self,
@@ -962,7 +994,7 @@ impl Context {
         profile: &Path,
         qa: Option<&QaSession>,
     ) -> Result<Command, String> {
-        let executable = &self.executables[config.name()];
+        let executable = self.executable(config)?;
         let mut command = if let Some((program, rest)) = self.options.driver_command.split_first() {
             let mut command = Command::new(program);
             command.args(rest);
@@ -1314,6 +1346,20 @@ fn youtube_consent_present(driver: &mut Driver, tab: &Value) -> Result<bool, Fai
         .unwrap_or(true))
 }
 
+/// As [`youtube_consent_present`], retried while a navigation the answer
+/// caused makes the check fail; `None` if the page never gave a result.
+fn youtube_consent_settled(driver: &mut Driver, tab: &Value) -> Result<Option<bool>, Failure> {
+    let deadline = Instant::now() + CONSENT_RETRY_WITHIN;
+    loop {
+        match youtube_consent_present(driver, tab) {
+            Ok(present) => return Ok(Some(present)),
+            Err(failure) if failure.is_gone() => return Err(failure),
+            Err(_) if Instant::now() + CONSENT_RETRY > deadline => return Ok(None),
+            Err(_) => std::thread::sleep(CONSENT_RETRY),
+        }
+    }
+}
+
 /// Gives `answer` on YouTube's consent page or dialog, if there is one;
 /// from the consent page the browser is sent back to `url`.
 fn answer_youtube_consent(
@@ -1344,9 +1390,27 @@ fn answer_youtube_consent(
         }
         Some("dialog") => {
             std::thread::sleep(CONSENT_SETTLE);
+            let mut present = youtube_consent_settled(driver, tab)?;
+            // The answer reloads the page, which can ask again.
+            if answered && present == Some(true) {
+                let script = youtube_consent_script(YOUTUBE_DIALOG_WAIT_MS, answer);
+                match eval(
+                    driver,
+                    tab,
+                    &script,
+                    YOUTUBE_DIALOG_WAIT_MS + EVAL_TIMEOUT_MS,
+                ) {
+                    Ok(again) if again.get("answered").and_then(Value::as_bool) == Some(true) => {
+                        std::thread::sleep(CONSENT_SETTLE);
+                        present = youtube_consent_settled(driver, tab)?;
+                    }
+                    Err(failure) if failure.is_gone() => return Err(failure),
+                    _ => {}
+                }
+            }
             Ok(Some(YoutubeConsentOutcome {
                 answered,
-                cleared: !youtube_consent_present(driver, tab)?,
+                cleared: present == Some(false),
                 reloaded: None,
             }))
         }
@@ -2072,6 +2136,7 @@ fn youtube_step(
                     if let Some(reloaded) = again.reloaded {
                         record.nav_ms = reloaded.load_ms;
                         record.timed_out |= reloaded.timed_out;
+                        record.consent_load_wait = reloaded.load_wait;
                     }
                 }
                 Some(None) if wait_ms > 0 => *consent_pending = false,
@@ -2740,6 +2805,73 @@ mod tests {
         for left_out in ["SingletonLock", "DevToolsActivePort", TEMPLATE_MARKER] {
             assert!(!to.path().join(left_out).exists(), "{left_out}");
         }
+    }
+
+    fn shields_down_over(preferences: &str) -> (Result<(), String>, Value) {
+        let profile = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile.path().join("Default")).unwrap();
+        let path = profile.path().join("Default/Preferences");
+        std::fs::write(&path, preferences).unwrap();
+        let result = shields_down(profile.path());
+        let after = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        (result, after)
+    }
+
+    #[test]
+    fn shields_go_down_over_absent_null_and_existing_settings() {
+        for preferences in [
+            "{}",
+            r#"{"profile":null}"#,
+            r#"{"profile":{"default_content_setting_values":null}}"#,
+            r#"{"profile":{"default_content_setting_values":{"cookies":1}}}"#,
+        ] {
+            let (result, after) = shields_down_over(preferences);
+            assert_eq!(result, Ok(()), "{preferences}");
+            assert_eq!(
+                after["profile"]["default_content_setting_values"]["braveShields"], 2,
+                "{preferences}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_settings_are_an_error_and_left_alone() {
+        for preferences in [
+            r#"{"profile":5}"#,
+            r#"{"profile":[]}"#,
+            r#"{"profile":{"default_content_setting_values":"x"}}"#,
+            r#"{"profile":{"default_content_setting_values":[1]}}"#,
+            "[]",
+        ] {
+            let (result, after) = shields_down_over(preferences);
+            assert!(result.is_err(), "{preferences}");
+            assert_eq!(
+                after,
+                serde_json::from_str::<Value>(preferences).unwrap(),
+                "{preferences}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_brave_template_uses_the_requested_brave_binary() {
+        let context = Context {
+            executables: BTreeMap::from([("brave-off", PathBuf::from("/x/brave"))]),
+            options: Options {
+                browsers: vec![Config::BraveOff],
+                driver_command: vec!["driver".into()],
+                ..Options::default()
+            },
+            repository: PathBuf::from("/repo"),
+            cache: PathBuf::new(),
+            out: PathBuf::new(),
+            xpi: None,
+            templates: BTreeMap::new(),
+        };
+        assert!(context
+            .command(Config::Brave, Path::new("/p"), None)
+            .is_ok());
+        assert!(context.executable(Config::Edge).is_err());
     }
 
     #[test]

@@ -94,6 +94,9 @@ pub(super) struct YoutubeStep {
     /// of them under a restarted navigation, and the load events seen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) load_wait: Option<Value>,
+    /// As `load_wait`, for the reload that answering the consent page caused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) consent_load_wait: Option<Value>,
     pub(super) cpu_ms: Option<f64>,
     pub(super) footprint_mb: Option<f64>,
     pub(super) blocked: Option<u64>,

@@ -98,9 +98,10 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
       return Reflect.apply(target, self, args);
     },
   });
-  // For 30 s: the player's state and whether its video was paused at every
-  // sample that showed YouTube's hold, and each marker the client's user agent
-  // carried, which tells a hold from a video nobody asked to play.
+  // For 120 s, which covers a second 30 s watch inside the page: the player's
+  // state and whether its video was paused at every sample that showed
+  // YouTube's hold, and each marker the client's user agent carried, which
+  // tells a hold from a video nobody asked to play.
   const holds = [];
   const markers = [];
   // Each change in what a consent prompt shows and what the player does
@@ -123,7 +124,7 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
     }
   }, true);
   const sampler = setInterval(() => {
-    if (performance.now() > 30000) {
+    if (performance.now() > 120000) {
       clearInterval(sampler);
       return;
     }
@@ -148,7 +149,7 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
         consent.push({ atMs: Math.round(performance.now()), ...now });
       }
       const nerds = player?.getStatsForNerds?.();
-      if (nerds?.buffer_health_seconds === '0.00 s' && nerds?.resolution === '0x0' && holds.length < 120) {
+      if (nerds?.buffer_health_seconds === '0.00 s' && nerds?.resolution === '0x0' && holds.length < 480) {
         holds.push({
           atMs: Math.round(performance.now()),
           state: player.getPlayerState?.() ?? null,
