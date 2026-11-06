@@ -598,6 +598,19 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
     if command.get("private").and_then(Value::as_bool) == Some(true) {
         return open_private(app, &shell, bench, url, timeout);
     }
+    // A tab asked for behind the current one: the current tab is brought back
+    // in front as soon as the new one exists.
+    let front = if command.get("background").and_then(Value::as_bool) == Some(true) {
+        Some(
+            bench
+                .lock()
+                .active
+                .clone()
+                .ok_or("no tab to keep in front")?,
+        )
+    } else {
+        None
+    };
     bench.watch(true);
     let started = Instant::now();
     let command = Command::OpenUrl {
@@ -609,7 +622,7 @@ fn open(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Value,
         .then(|| bench.wait_fresh(started + timeout))
         .flatten();
     if let Some(tab) = &tab {
-        select(&shell, bench, tab);
+        select(&shell, bench, front.as_ref().unwrap_or(tab));
     }
     load(app, bench, dispatched, tab, started, timeout)
 }

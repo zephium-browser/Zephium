@@ -43,6 +43,7 @@ pub use rules::{
     ArtifactDigest, CompiledRules, MatchError, NetworkAction, NetworkDecision, NetworkRequest,
     PolicyDigest, RequestMethod, ResourceType, WebKitRules,
 };
+pub use scriptlets::ScriptletTrust;
 #[doc(hidden)]
 pub use sha256::Sha256;
 #[cfg(feature = "webkit")]
@@ -57,7 +58,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 7;
+pub const POLICY_FORMAT_VERSION: u32 = 8;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;

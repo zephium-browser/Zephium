@@ -211,14 +211,25 @@ mod tests {
         // Zephium's own eight exceptions compile with the lists where requests
         // carry their page; on Windows that is the view's main document. The
         // Windows matcher drops the regex rules its regex engine cannot compile.
+        // Its YouTube marker rule is a source rule the network matcher does not
+        // take.
         let own = 8;
+        let marker = 1;
         let accepted = if cfg!(target_os = "windows") {
             116_893
         } else {
             116_924
         };
-        assert_eq!(rules.coverage().source_rules, 168_465 + own);
+        assert_eq!(rules.coverage().source_rules, 168_465 + own + marker);
         assert_eq!(rules.coverage().accepted_rules, accepted + own);
+        // The quick fixes keep their trust: the marker and the edits it is
+        // keyed on both reach the page.
+        let program = rules
+            .cosmetics()
+            .and_then(|cosmetics| cosmetics.scriptlet_program())
+            .expect("the bundled lists have scriptlets");
+        assert!(program.contains("zephiumPlayerMarker(\"lactmilli channel yahi inline\""));
+        assert!(program.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
             BlockerShutdownOutcome::Clean
