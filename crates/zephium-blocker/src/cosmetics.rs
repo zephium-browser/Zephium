@@ -299,6 +299,12 @@ impl CosmeticPolicy {
         {
             return Err(CosmeticError::InvalidPolicy);
         }
+        // A stored policy holds only the markers its own edits support, as
+        // compiling leaves it.
+        let mut guarded = data.scriptlets.clone();
+        if crate::scriptlets::keep_edited_markers(&mut guarded) != 0 || guarded != data.scriptlets {
+            return Err(CosmeticError::InvalidPolicy);
+        }
         let mut generic = Vec::new();
         let mut predicates = 0usize;
         for (index, rule) in data.rules.iter().enumerate() {
@@ -952,6 +958,31 @@ mod tests {
         let mut data: Data = serde_json::from_slice(&bytes).unwrap();
         data.rules[0].selector = ".ad{}body{color:red}".into();
         assert!(CosmeticPolicy::decode(&serde_json::to_vec(&data).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_stored_marker_without_its_edits_is_rejected() {
+        let edits = concat!(
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+            "\n",
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (lactmilli)\b/"\,"replacement":""}))"#,
+            "\n",
+        );
+        let marker = r"www.youtube.com##+js(zephium-player-marker, lactmilli, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x, a.b*=t)";
+        let policy = CosmeticPolicy::compile_with_trust([
+            (edits, crate::ScriptletTrust::Trusted),
+            (marker, crate::ScriptletTrust::Zephium),
+        ])
+        .unwrap();
+        let bytes = policy.encode().unwrap();
+        let data: Data = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data.scriptlets.len(), 3);
+        assert!(CosmeticPolicy::decode(&bytes).is_ok());
+        let mut stripped = data;
+        stripped
+            .scriptlets
+            .retain(|rule| !rule.line.contains("createCommentParams"));
+        assert!(CosmeticPolicy::decode(&serde_json::to_vec(&stripped).unwrap()).is_err());
     }
 
     #[test]

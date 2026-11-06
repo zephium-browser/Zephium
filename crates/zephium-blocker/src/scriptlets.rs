@@ -397,19 +397,35 @@ pub(crate) fn classify(line: &str) -> Kind {
 }
 
 /// Keeps in Zephium's marker rules only markers uBO's admitted edit rules
-/// both key an edit on and strip from comment requests, and drops a marker
-/// rule left with none, so a marker uBO has renamed is never sent. Returns
-/// how many markers were dropped.
+/// both key an edit on and strip from comment requests, on every host the
+/// marker rule names, and drops a marker rule left with none, so a marker uBO
+/// has renamed or scoped elsewhere is never sent. An exception that turns off
+/// object edits, or every scriptlet, on one of those hosts leaves it none.
+/// Returns how many markers were dropped.
 pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
-    let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
+    let mut edits = Vec::new();
+    let mut exceptions = Vec::new();
     for rule in rules
         .iter()
-        .filter(|rule| rule.trust == ScriptletTrust::Trusted)
+        .filter(|rule| rule.trust != ScriptletTrust::Zephium)
     {
-        if let Some(query) = rule_arguments(&rule.line, EDIT_INBOUND_OBJECT)
-            .and_then(|arguments| arguments.into_iter().nth(3))
-        {
-            user_agent_markers(&query, &mut keyed, &mut stripped);
+        let Some((exception, domains, body)) = split(&rule.line) else {
+            continue;
+        };
+        if exception {
+            let name = arguments(body.strip_suffix(')').unwrap_or(body))
+                .first()
+                .copied()
+                .unwrap_or_default();
+            if name.is_empty() || name.strip_suffix(".js").unwrap_or(name) == EDIT_INBOUND_OBJECT {
+                exceptions.push(domains.to_owned());
+            }
+        } else if rule.trust == ScriptletTrust::Trusted {
+            if let Some(query) = rule_arguments(&rule.line, EDIT_INBOUND_OBJECT)
+                .and_then(|arguments| arguments.into_iter().nth(3))
+            {
+                edits.push((domains.to_owned(), query));
+            }
         }
     }
     let mut dropped = 0;
@@ -420,6 +436,23 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
         let Some(mut arguments) = rule_arguments(&rule.line, PLAYER_MARKER) else {
             return true;
         };
+        let hosts: Vec<&str> = split(&rule.line)
+            .map(|(_, domains, _)| domains)
+            .unwrap_or_default()
+            .split(',')
+            .filter(|host| !host.is_empty() && !host.starts_with('~'))
+            .collect();
+        let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
+        let excepted = exceptions
+            .iter()
+            .any(|domains| hosts.iter().any(|host| applies(domains, host)));
+        if !excepted && !hosts.is_empty() {
+            for (domains, query) in &edits {
+                if hosts.iter().all(|host| applies(domains, host)) {
+                    user_agent_markers(query, &mut keyed, &mut stripped);
+                }
+            }
+        }
         let Some(markers) = arguments.get(1) else {
             return true;
         };
@@ -445,6 +478,33 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
     dropped
 }
 
+/// Whether a rule scoped to `domains` runs on `host`: a generic rule runs
+/// everywhere, a named one on that host and its subdomains, unless a negated
+/// entry names the host or one of its parents.
+fn applies(domains: &str, host: &str) -> bool {
+    let within = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        host == name
+            || host
+                .strip_suffix(name.as_str())
+                .is_some_and(|sub| sub.ends_with('.'))
+    };
+    let entries: Vec<&str> = domains
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let named: Vec<&str> = entries
+        .iter()
+        .filter(|entry| !entry.starts_with('~'))
+        .copied()
+        .collect();
+    let excluded = entries
+        .iter()
+        .filter_map(|entry| entry.strip_prefix('~'))
+        .any(within);
+    !excluded && (named.is_empty() || named.into_iter().any(within))
+}
+
 /// A non-exception rule's arguments as the page receives them, when it calls
 /// `scriptlet`.
 fn rule_arguments(line: &str, scriptlet: &str) -> Option<Vec<String>> {
@@ -457,8 +517,10 @@ fn rule_arguments(line: &str, scriptlet: &str) -> Option<Vec<String>> {
 /// The markers an edit query keys on in the client's user agent, and those it
 /// strips from it.
 fn user_agent_markers(query: &str, keyed: &mut BTreeSet<String>, stripped: &mut BTreeSet<String>) {
+    // Hyphens stay inside a word, so a renamed `lactmilli-v2` is not read as
+    // `lactmilli`.
     let words = |text: &str| -> Vec<String> {
-        text.split(|character: char| !character.is_ascii_alphanumeric())
+        text.split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
             .filter(|word| !word.is_empty())
             .map(str::to_owned)
             .collect()
@@ -493,9 +555,12 @@ fn edits_an_object(body: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
     };
+    // A method has far fewer arguments than this; a longer position would not
+    // be a finite integer in the page and would install no edit.
     let digits = position.strip_prefix('-').unwrap_or(position);
     chain.split('.').all(identifier)
         && !digits.is_empty()
+        && digits.len() <= 4
         && digits.bytes().all(|byte| byte.is_ascii_digit())
         && object_query::accepts(query)
 }
@@ -1202,6 +1267,53 @@ mod tests {
         assert_eq!(keep_edited_markers(&mut alone), 4);
         assert!(alone.is_empty());
 
+        // A renamed marker is not read as the old one it contains.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| trusted(&line.replace("lactmilli", "lactmilli-v2")))
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 1);
+        assert_eq!(markers(&rules).as_deref(), Some("channel yahi inline"));
+
+        // Edits that do not run on the marker's host leave nothing to mark with.
+        for hosts in ["m.youtube.com", "youtube.com,~www.youtube.com"] {
+            let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+                .iter()
+                .map(|line| trusted(&line.replacen("www.youtube.com", hosts, 1)))
+                .collect();
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 4, "{hosts}");
+        }
+        // Edits for a parent domain run on it.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| trusted(&line.replacen("www.youtube.com", "youtube.com", 1)))
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 0);
+        // An exception that turns the edits, or every scriptlet, off there
+        // leaves none, from whichever list.
+        for exception in [
+            "www.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "youtube.com#@#+js()",
+            "#@#+js(trusted-edit-inbound-object.js)",
+        ] {
+            let mut rules: Vec<ScriptletRule> =
+                YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+            rules.push(rule(exception, false));
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 4, "{exception}");
+        }
+        let mut rules: Vec<ScriptletRule> =
+            YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+        rules.push(rule(
+            "m.youtube.com#@#+js(trusted-edit-inbound-object)",
+            false,
+        ));
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 0);
+
         // Only uBO's own lists count: the same edits from elsewhere do not.
         let mut untrusted: Vec<ScriptletRule> = YOUTUBE_EDITS
             .iter()
@@ -1230,6 +1342,10 @@ mod tests {
             edit("www.youtube.com", r#"JSON.stringify, 0, '[?.a]+={"b":1}'"#),
             edit("www.youtube.com", r#"JSON.stringify, x, [?.a]+={"b":1}"#),
             edit("www.youtube.com", r#"JSON.stringify, , [?.a]+={"b":1}"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 10000, [?.a]+={"b":1}"#,
+            ),
             edit("www.youtube.com", r#"JSON..stringify, 0, [?.a]+={"b":1}"#),
             edit(
                 "www.youtube.com",
