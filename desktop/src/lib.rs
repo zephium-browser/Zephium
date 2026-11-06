@@ -6881,6 +6881,15 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }
+                    // A replaced document has no dialog open yet; it reports
+                    // its own when it opens one.
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                        && window.label() == MAIN_LABEL
+                    {
+                        if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                            shell.dispatch(Command::SetChromeModal(false));
+                        }
+                    }
                 })
                 .build()?;
             // Onboarding composes for one size; the browser takes the window
