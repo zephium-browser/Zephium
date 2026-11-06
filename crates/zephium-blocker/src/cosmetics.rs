@@ -110,21 +110,41 @@ pub struct CosmeticPolicy {
 // Retain no policy by ourselves. Native profiles own the live public policy;
 // this single weak slot lets later profiles recover that same instance even
 // after the temporary network JSON envelope has been released.
+#[cfg(not(test))]
 static LIVE_POLICY: Mutex<Weak<CosmeticPolicy>> = Mutex::new(Weak::new());
 
-#[cfg(test)]
-pub(crate) fn live_policy() -> Option<Arc<CosmeticPolicy>> {
+#[cfg(not(test))]
+fn set_live_policy(policy: &Arc<CosmeticPolicy>) {
+    *LIVE_POLICY.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(policy);
+}
+
+#[cfg(not(test))]
+fn live_policy() -> Option<Arc<CosmeticPolicy>> {
     LIVE_POLICY
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .upgrade()
 }
 
+// Tests run in parallel; each sees only the policies its own thread built.
+#[cfg(test)]
+thread_local! {
+    static LIVE_POLICY: std::cell::RefCell<Weak<CosmeticPolicy>> =
+        const { std::cell::RefCell::new(Weak::new()) };
+}
+
+#[cfg(test)]
+fn set_live_policy(policy: &Arc<CosmeticPolicy>) {
+    LIVE_POLICY.with(|live| *live.borrow_mut() = Arc::downgrade(policy));
+}
+
+#[cfg(test)]
+pub(crate) fn live_policy() -> Option<Arc<CosmeticPolicy>> {
+    LIVE_POLICY.with(|live| live.borrow().upgrade())
+}
+
 fn reuse_live_policy(bytes: &[u8]) -> Option<Arc<CosmeticPolicy>> {
-    let policy = LIVE_POLICY
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .upgrade()?;
+    let policy = live_policy()?;
     // The digest of exactly these bytes, computed here: never a
     // caller-supplied digest or a profile identity.
     (policy.fingerprint == Sha256::digest(bytes)).then_some(policy)
@@ -496,7 +516,7 @@ impl CosmeticPolicy {
             fallback_generic,
             scriptlets,
         });
-        *LIVE_POLICY.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&policy);
+        set_live_policy(&policy);
         Ok(policy)
     }
 }
