@@ -1359,17 +1359,34 @@ fn youtube_consent_present(driver: &mut Driver, tab: &Value) -> Result<bool, Fai
         .unwrap_or(true))
 }
 
+/// `attempt`, again every `every` while it fails with the browser still
+/// there, as while a navigation replaces the page, until `within` has passed;
+/// then its last failure.
+fn retried<T>(
+    within: Duration,
+    every: Duration,
+    mut attempt: impl FnMut() -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let deadline = Instant::now() + within;
+    loop {
+        match attempt() {
+            Err(failure) if !failure.is_gone() && Instant::now() + every <= deadline => {
+                std::thread::sleep(every);
+            }
+            done => return done,
+        }
+    }
+}
+
 /// As [`youtube_consent_present`], retried while a navigation the answer
 /// caused makes the check fail; `None` if the page never gave a result.
 fn youtube_consent_settled(driver: &mut Driver, tab: &Value) -> Result<Option<bool>, Failure> {
-    let deadline = Instant::now() + CONSENT_RETRY_WITHIN;
-    loop {
-        match youtube_consent_present(driver, tab) {
-            Ok(present) => return Ok(Some(present)),
-            Err(failure) if failure.is_gone() => return Err(failure),
-            Err(_) if Instant::now() + CONSENT_RETRY > deadline => return Ok(None),
-            Err(_) => std::thread::sleep(CONSENT_RETRY),
-        }
+    match retried(CONSENT_RETRY_WITHIN, CONSENT_RETRY, || {
+        youtube_consent_present(driver, tab)
+    }) {
+        Ok(present) => Ok(Some(present)),
+        Err(failure) if failure.is_gone() => Err(failure),
+        Err(_) => Ok(None),
     }
 }
 
@@ -1382,12 +1399,12 @@ fn answer_youtube_consent(
     wait_ms: u64,
     answer: YoutubeConsent,
 ) -> Result<Option<YoutubeConsentOutcome>, Failure> {
-    let seen = eval(
-        driver,
-        tab,
-        &youtube_consent_script(wait_ms, answer),
-        EVAL_TIMEOUT_MS,
-    )?;
+    // The page may replace itself while the prompt is looked for, as when
+    // YouTube or a blocker reloads it; the new page is asked again.
+    let script = youtube_consent_script(wait_ms, answer);
+    let seen = retried(CONSENT_RETRY_WITHIN, CONSENT_RETRY, || {
+        eval(driver, tab, &script, EVAL_TIMEOUT_MS)
+    })?;
     let answered = seen.get("answered").and_then(Value::as_bool) == Some(true);
     match seen.get("page").and_then(Value::as_str) {
         Some("consent") => {
@@ -2799,6 +2816,35 @@ mod tests {
         assert_eq!(options.mode(), "youtube");
         assert_eq!(options.zephium, Some(PathBuf::from("/x/qa")));
         assert_eq!(options.driver_command, ["node", "/y/stub.mjs"]);
+    }
+
+    #[test]
+    fn a_failure_the_browser_survived_is_retried_until_the_window_ends() {
+        let mut calls = 0;
+        let answered = retried(Duration::from_secs(5), Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err(Failure::Rejected("navigated".into()))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(answered.unwrap(), 3);
+        let mut calls = 0;
+        let gone: Result<(), _> = retried(Duration::from_secs(5), Duration::ZERO, || {
+            calls += 1;
+            Err(Failure::Gone("closed".into()))
+        });
+        assert!(gone.unwrap_err().is_gone());
+        assert_eq!(calls, 1);
+        let mut calls = 0;
+        let late: Result<(), _> =
+            retried(Duration::from_millis(30), Duration::from_millis(10), || {
+                calls += 1;
+                Err(Failure::Rejected("navigated".into()))
+            });
+        assert!(!late.unwrap_err().is_gone());
+        assert!((2..=4).contains(&calls), "{calls}");
     }
 
     #[test]
