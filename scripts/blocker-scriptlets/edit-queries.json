@@ -36,7 +36,9 @@
     "v2:$.store.bicycle{1,};$..book[?@.price<10]",
     "v2:$.store.bicycle;$..book[?@.price<10]",
     "v2:$.store.bicycle{0};$..book[?@.price<10]",
-    "v2:$.store.bicycle{1,2};$.store.book{,3};$..book[?@.price!=10]"
+    "v2:$.store.bicycle{1,2};$.store.book{,3};$..book[?@.price!=10]",
+    "v2:$+={\"a\":1}",
+    "[?.attestationRequest].a=1"
   ],
   "rejected": [
     "",
@@ -84,6 +86,11 @@
     "v2:$.__proto__",
     "v2:$['__proto__']",
     "v2:.a",
-    "$.a b"
+    "$.a b",
+    "v2:$={\"a\":1}",
+    "$=\"x\"",
+    "v2:$=repl({\"regex\":\"a\",\"replacement\":\"b\"})",
+    "$.a;$=\"${now}\"",
+    "[?.attestationRequest]={\"a\":1}"
   ]
 }

@@ -162,6 +162,7 @@ function zephiumObjectEditor(query) {
         }
         const action = assignment();
         if (steps.length === 0 || action === undefined || at !== text.length) { fail(); }
+        if (action.merge === undefined && !steps.some((step) => step.name !== undefined)) { fail(); }
         return { queries: [{ steps, quantity: [1, Infinity] }], action };
     };
 
@@ -216,6 +217,8 @@ function zephiumObjectEditor(query) {
         if (queries[queries.length - 1].bounded) { fail(); }
         const action = assignment() ?? { remove: true };
         if (at !== text.length) { fail(); }
+        // A value is replaced only below the root; a merge may name the root.
+        if (action.remove !== true && action.merge === undefined && queries[queries.length - 1].steps.length === 0) { fail(); }
         return { queries, action };
     };
 
@@ -227,22 +230,39 @@ function zephiumObjectEditor(query) {
         return undefined;
     }
 
-    const children = (node, select, push) => {
+    // Every entry looked at counts against the budget, as it is reached, so a
+    // large object stops the edit before it is walked or copied.
+    const children = (node, select, push, count) => {
         const value = node.value;
         if (!isObject(value)) { return; }
-        const entries = Array.isArray(value) ? value.map((child, index) => [index, child]) : Object.entries(value);
         if (select.index !== undefined) {
             if (!Array.isArray(value)) { return; }
             const index = select.index < 0 ? value.length + select.index : select.index;
             if (index >= 0 && index < value.length) { push({ value: value[index], parent: value, key: index }); }
             return;
         }
-        for (const [key, child] of entries) {
+        if (select.names !== undefined && select.all !== true && select.keys === undefined && select.filter === undefined) {
+            if (Array.isArray(value)) { return; }
+            for (const key of select.names) {
+                count();
+                if (own(value, key)) { push({ value: value[key], parent: value, key }); }
+            }
+            return;
+        }
+        const visit = (key, child) => {
+            count();
             const keep = select.all === true
                 || (select.names !== undefined && !Array.isArray(value) && select.names.includes(key))
                 || (select.keys !== undefined && typeof key === 'string' && select.keys.test(key))
                 || (select.filter !== undefined && select.filter(child));
             if (keep) { push({ value: child, parent: value, key }); }
+        };
+        if (Array.isArray(value)) {
+            for (let index = 0; index < value.length; index += 1) { visit(index, value[index]); }
+        } else {
+            for (const key in value) {
+                if (own(value, key)) { visit(key, value[key]); }
+            }
         }
     };
     const run = (steps, root) => {
@@ -265,11 +285,11 @@ function zephiumObjectEditor(query) {
                 while (stack.length > 0) {
                     const node = stack.pop();
                     count();
-                    children(node, step.select, push);
-                    children(node, { all: true }, (child) => stack.push(child));
+                    children(node, step.select, push, count);
+                    children(node, { all: true }, (child) => stack.push(child), count);
                 }
             } else {
-                for (const node of nodes) { children(node, step.select, push); }
+                for (const node of nodes) { children(node, step.select, push, count); }
             }
             nodes = next;
         }

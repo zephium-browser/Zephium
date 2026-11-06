@@ -221,6 +221,7 @@ impl<'a> Parser<'a> {
 
     fn legacy(&mut self) -> Option<()> {
         let mut steps = 0;
+        let mut child = false;
         loop {
             if self.take("[?") {
                 self.expect(".")?;
@@ -233,12 +234,14 @@ impl<'a> Parser<'a> {
             } else if self.peek(".") && !self.peek("..") {
                 self.at += 1;
                 self.name()?;
+                child = true;
             } else {
                 break;
             }
             steps += 1;
         }
-        (steps > 0 && self.assignment()?).then_some(())
+        let merge = self.peek("+=");
+        (steps > 0 && self.assignment()? && (child || merge)).then_some(())
     }
 
     fn selector(&mut self) -> Option<()> {
@@ -280,9 +283,11 @@ impl<'a> Parser<'a> {
         Some(())
     }
 
-    /// One `$` query, and whether it ends with a quantifier.
-    fn v2_query(&mut self) -> Option<bool> {
+    /// One `$` query, whether it ends with a quantifier, and whether it
+    /// reaches below the root.
+    fn v2_query(&mut self) -> Option<(bool, bool)> {
         self.expect("$")?;
+        let mut child = false;
         loop {
             if !self.take("..") && !self.take(".") && !self.peek("[") {
                 break;
@@ -296,6 +301,7 @@ impl<'a> Parser<'a> {
             } else {
                 self.name()?;
             }
+            child = true;
         }
         let rest = self.rest();
         let Some(inner) = rest
@@ -303,27 +309,31 @@ impl<'a> Parser<'a> {
             .and_then(|rest| rest.split_once('}'))
             .map(|(inner, _)| inner)
         else {
-            return Some(false);
+            return Some((false, child));
         };
         let (low, high) = inner.split_once(',').unwrap_or((inner, ""));
         let numeric = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
         if !numeric(low) || !numeric(high) || (low.is_empty() && high.is_empty()) {
-            return Some(false);
+            return Some((false, child));
         }
         self.at += inner.len() + 2;
-        Some(true)
+        Some((true, child))
     }
 
+    /// An assignment that replaces a value needs a value below the root to
+    /// replace; one that merges into an object may name the root.
     fn v2(&mut self) -> Option<()> {
         self.take("v2:");
-        let mut bounded = self.v2_query()?;
+        let (mut bounded, mut child) = self.v2_query()?;
         while self.take(";") {
-            bounded = self.v2_query()?;
+            (bounded, child) = self.v2_query()?;
         }
         if bounded {
             return None;
         }
-        self.assignment().map(drop)
+        let set = self.at < self.text.len() && !self.peek("+=");
+        self.assignment()?;
+        (child || !set).then_some(())
     }
 }
 

@@ -588,6 +588,15 @@ const playerText = () => JSON.stringify({
   assert.deepEqual(edit('v2:$.store.book[0].author=repl({"pattern":"o","replacement":"0"})', store()).store.book[0].author, 'R0b');
   assert.deepEqual(edit('v2:$.missing=1', store()), store());
   assert.equal(context.zephiumObjectEditor('v2:$.a=call([null,"alert","x"])'), undefined);
+  // Every entry looked at counts against the budget: a selector over a huge
+  // object gives up unedited, while an index or a name is read directly.
+  const wide = Object.fromEntries(Array.from({ length: 20000 }, (_, at) => [`k${at}`, at]));
+  assert.equal(context.zephiumObjectEditor('v2:$./^k1$/=0')(wide), false);
+  assert.equal(wide.k1, 1);
+  assert.equal(context.zephiumObjectEditor('v2:$./^k1$/=0')({ k1: 1, k2: 2 }), true);
+  const long = { list: Array.from({ length: 20000 }, (_, at) => at), k: 1 };
+  assert.equal(context.zephiumObjectEditor('v2:$.list[1]=0')(long), true);
+  assert.equal(long.list[1], 0);
 }
 
 // zephium-player-marker: marks the client after ytcfg.set, moves on from a hold, and leaves ads, started videos and Premium alone.
