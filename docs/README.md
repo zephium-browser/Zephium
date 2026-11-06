@@ -39,7 +39,7 @@ controls product intent.
   [retained inspection evidence](work.md#results-and-evidence),
   [native actions](agentic-browsing.md#actions-and-effect-verification),
   [retained actions](work.md#retained-pages-and-execution-leases),
-  [forms](work.md#authoring-planning-and-execution),
+  [forms](work.md#trusted-form-transitions),
   [results](work.md#results-and-evidence),
   [artifacts](work.md#results-and-evidence),
   [evidence](work.md#results-and-evidence),

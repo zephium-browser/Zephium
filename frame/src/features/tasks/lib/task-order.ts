@@ -1,8 +1,9 @@
 /** Manual position within a column.
  *
- * Keys are fixed-width decimal strings so text comparison preserves numeric
- * order in the store index and `compareRows`. A midpoint normally lets a
- * moved task change position with one write.
+ * `orderKey` pads to at least 12 characters. Only its 12-digit decimal keys
+ * round-trip through `orderValue` and preserve numeric order in text
+ * comparisons; longer results are rejected by `orderValue`. A midpoint
+ * normally lets a moved task change position with one write.
  *
  * Gaps are finite. `orderBetween` returns null when no midpoint is available;
  * board insertion then keeps the current order and reports the unavailable

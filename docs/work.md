@@ -80,6 +80,20 @@ Keep cancellation and waiting bounded; use durable-change notifications in
 [work_changes.rs](../crates/zephium-app/src/work_changes.rs) rather than adding
 an independent polling loop for every visible object.
 
+## Trusted form transitions
+
+[AgentWorkFormTask](../crates/zephium-agent-controller/src/work_form.rs) admits
+bounded fill/select goals supplied by a trusted caller with context, account
+and origin. Page content and model output cannot create those goals or grant
+execution authority. Local preparation requires independently established
+local-only effects; autosave and other remote updates require trusted
+external-write assessment. Neither constructor grants submit or navigation.
+
+Fields must resolve uniquely. Transition goals admit the expected prior value
+or an already-satisfied destination, refusing other values. Every goal in the
+current phase must be independently observed before advancing to the next.
+These field contracts are separate from product-level task proposals and approval.
+
 ## Confirmation and human decisions
 
 A proposed action cannot approve itself. Keep user confirmation bound to the
