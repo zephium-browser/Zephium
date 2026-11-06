@@ -17,12 +17,13 @@ const MAX_STATE: u64 = 64 * 1024;
 const MAX_OBJECTS: usize = 32;
 const DAY: u64 = 24 * 60 * 60;
 const HOUR: u64 = 60 * 60;
-const SCHEMA: u32 = 2;
+const SCHEMA: u32 = 3;
 
 /// What a valid copy of one official list looks like, and how often to check it.
 struct Spec {
     title: &'static str,
-    homepage: &'static str,
+    /// uBlock Origin's assembled `.min` lists carry no homepage line.
+    homepage: Option<&'static str>,
     adblock_header: bool,
     min_bytes: usize,
     min_rules: u64,
@@ -42,7 +43,7 @@ fn spec(filter: OfficialFilter) -> Spec {
             } else {
                 "! Title: EasyPrivacy"
             },
-            homepage: "! Homepage: https://easylist.to/",
+            homepage: Some("! Homepage: https://easylist.to/"),
             adblock_header: true,
             min_bytes: 256 * 1024,
             min_rules: 1000,
@@ -52,7 +53,7 @@ fn spec(filter: OfficialFilter) -> Spec {
         },
         OfficialFilter::UblockFilters => Spec {
             title: "! Title: uBlock filters",
-            homepage: "! Homepage: https://github.com/uBlockOrigin/uAssets",
+            homepage: None,
             adblock_header: false,
             min_bytes: 128 * 1024,
             min_rules: 1000,
@@ -62,7 +63,7 @@ fn spec(filter: OfficialFilter) -> Spec {
         },
         OfficialFilter::UblockQuickFixes => Spec {
             title: "! Title: uBlock\u{2080} filters \u{2013} Quick fixes",
-            homepage: "! Homepage: https://github.com/uBlockOrigin/uAssets",
+            homepage: Some(UASSETS),
             adblock_header: false,
             min_bytes: 8 * 1024,
             min_rules: 50,
@@ -70,6 +71,57 @@ fn spec(filter: OfficialFilter) -> Spec {
             halving_guard: false,
             follows_expires: true,
         },
+        OfficialFilter::UblockLinkShorteners => uassets(
+            "! Title: uBlock filters \u{2013} Link shorteners",
+            Some(UASSETS),
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockPrivacy => uassets(
+            "! Title: uBlock filters \u{2013} Privacy",
+            None,
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockResourceAbuse => uassets(
+            "! Title: uBlock filters \u{2013} Resource abuse",
+            Some(UASSETS),
+            2 * 1024,
+            20,
+        ),
+        OfficialFilter::UblockUnbreak => uassets(
+            "! Title: uBlock filters \u{2013} Unbreak",
+            None,
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockBadware => uassets(
+            "! Title: uBlock filters \u{2013} Badware risks",
+            None,
+            32 * 1024,
+            1000,
+        ),
+    }
+}
+
+const UASSETS: &str = "! Homepage: https://github.com/uBlockOrigin/uAssets";
+
+/// One of uBlock Origin's daily lists, versioned by its modification date.
+const fn uassets(
+    title: &'static str,
+    homepage: Option<&'static str>,
+    min_bytes: usize,
+    min_rules: u64,
+) -> Spec {
+    Spec {
+        title,
+        homepage,
+        adblock_header: false,
+        min_bytes,
+        min_rules,
+        dated: true,
+        halving_guard: true,
+        follows_expires: false,
     }
 }
 
@@ -296,6 +348,47 @@ fn migrate(old: v1::Record, now: u64, intact: impl Fn(&Source) -> bool) -> Optio
     Some(record)
 }
 
+/// The lists a schema-2 record's schedule is in, in its order.
+const SCHEMA_2_LISTS: [OfficialFilter; 4] = [
+    OfficialFilter::EasyList,
+    OfficialFilter::EasyPrivacy,
+    OfficialFilter::UblockFilters,
+    OfficialFilter::UblockQuickFixes,
+];
+
+/// A schema-2 record, from before uBlock Origin's other lists: every list it
+/// downloaded that still verifies is kept for reuse, and every list is due now.
+/// Its packages lack five of the lists, so none is current and the bundled
+/// seed stays in use until a refresh commits. Its uBlock filters came from
+/// `filters.txt` without its includes, a smaller list than `filters.min.txt`,
+/// so that copy is never reused. A list's rejected copy stays rejected until
+/// that list is checked past it.
+fn migrate_lists(old: Record, now: u64, intact: impl Fn(&Source) -> bool) -> Record {
+    let mut record = Record::fresh(old.highest_revision, now);
+    record.jitter = old.jitter;
+    record.attempted = old.attempted;
+    record.verification = old.verification;
+    for (filter, schedule) in SCHEMA_2_LISTS.iter().zip(&old.schedule) {
+        if let Some(index) = OfficialFilter::ALL.iter().position(|known| known == filter) {
+            record.schedule[index].rejected = schedule.rejected;
+        }
+    }
+    for source in [old.candidate, old.current, old.previous]
+        .into_iter()
+        .flatten()
+        .flat_map(|package| package.sources)
+        .chain(old.retained)
+    {
+        if filter_for(&source.id).is_some_and(|filter| filter != OfficialFilter::UblockFilters)
+            && !record.retained.iter().any(|kept| kept.id == source.id)
+            && intact(&source)
+        {
+            record.retained.push(source);
+        }
+    }
+    record
+}
+
 /// Whether a source's object is present with exactly its bytes.
 fn source_intact(root: &Path, source: &Source) -> bool {
     use std::io::Read;
@@ -348,6 +441,10 @@ impl OfficialStore {
         let decode = |path: &Path| -> Result<(Record, bool), StoreError> {
             let bytes = read_bounded_regular(path, MAX_STATE)?;
             let (record, migrated) = match serde_json::from_slice::<Record>(&bytes) {
+                Ok(record) if record.schema == 2 => (
+                    migrate_lists(record, now, |source| source_intact(&root, source)),
+                    true,
+                ),
                 Ok(record) => (record, false),
                 Err(_) => serde_json::from_slice::<v1::Record>(&bytes)
                     .ok()
@@ -709,7 +806,7 @@ fn validate_source(filter: OfficialFilter, text: &str) -> Result<(String, u64, u
         return Err(StoreError::InvalidPackage);
     }
     let head = text.lines().take(32).collect::<Vec<_>>();
-    if !head.contains(&spec.title) || !head.contains(&spec.homepage) {
+    if !head.contains(&spec.title) || spec.homepage.is_some_and(|line| !head.contains(&line)) {
         return Err(StoreError::InvalidPackage);
     }
     let field = |name: &str| head.iter().find_map(|line| line.strip_prefix(name));
@@ -781,8 +878,10 @@ pub(super) fn test_list(filter: OfficialFilter) -> Vec<u8> {
     }
     text.push_str(spec.title);
     text.push('\n');
-    text.push_str(spec.homepage);
-    text.push('\n');
+    if let Some(homepage) = spec.homepage {
+        text.push_str(homepage);
+        text.push('\n');
+    }
     for n in 0..12000 {
         text.push_str(&format!("||ads{n}.{}.example.invalid^\n", filter.id()));
     }
@@ -1157,6 +1256,89 @@ mod tests {
         );
         for source in &store.record.retained {
             assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
+    }
+
+    #[test]
+    fn a_record_from_before_the_other_ublock_lists_keeps_the_lists_it_has() {
+        let directory = root();
+        let path = directory.path().join("official");
+        create_private_directory(&path).unwrap();
+        let mut sources = Vec::new();
+        for filter in &OfficialFilter::ALL[..4] {
+            let bytes = test_list(*filter);
+            // EasyPrivacy's copy is gone from disk.
+            if *filter != OfficialFilter::EasyPrivacy {
+                atomic_write(&path.join(object_name(&Sha256::digest(&bytes))), &bytes).unwrap();
+            }
+            sources.push(serde_json::json!({
+                "id": filter.id(),
+                "sha256": Sha256::digest(&bytes),
+                "bytes": bytes.len(),
+                "rules": 12000,
+                "version": "202609300001",
+                "etag": null,
+                "last_modified": null,
+                "interval": DAY,
+            }));
+        }
+        let state = serde_json::json!({
+            "schema": 2,
+            "highest_revision": 102,
+            "jitter": 60,
+            "due": 5000,
+            "attempted": 950,
+            "checked": 950,
+            "failure_streak": 0,
+            "verification": 3,
+            "current": {
+                "identity": {
+                    "revision": 102,
+                    "manifest_sha256": vec![7u8; 32],
+                    "created_unix": 900,
+                    "expires_unix": 900 + 7 * DAY,
+                    "source_count": 4,
+                    "source_bytes": 1,
+                },
+                "sources": sources,
+            },
+            "previous": null,
+            "candidate": null,
+            "schedule": [
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0, "rejected": vec![9u8; 32] },
+                { "due": 5000, "failure_streak": 0 },
+            ],
+            "retained": [],
+        });
+        atomic_write(
+            &path.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let store = OfficialStore::open(path, 100, 1000).unwrap();
+        assert_eq!(store.record.schema, SCHEMA);
+        assert_eq!(store.record.verification, 3);
+        assert!(store.record.current.is_none());
+        assert_eq!(store.record.schedule.len(), OfficialFilter::ALL.len());
+        assert!(store.record.schedule.iter().all(|s| s.due == 1000));
+        let kept: Vec<&str> = store
+            .record
+            .retained
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        // EasyPrivacy's bytes are gone; uBlock Origin's filters were a different list.
+        assert_eq!(kept, ["easylist", "ublock-quick-fixes"]);
+        for source in &store.record.retained {
+            assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
+        assert!(store.record.prior(OfficialFilter::UblockFilters).is_none());
+        // uBlock Origin's filters keep their rejected copy; no other list has one.
+        for (filter, schedule) in OfficialFilter::ALL.iter().zip(&store.record.schedule) {
+            let expected = (*filter == OfficialFilter::UblockFilters).then_some([9u8; 32]);
+            assert_eq!(schedule.rejected, expected, "{}", filter.id());
         }
     }
 }

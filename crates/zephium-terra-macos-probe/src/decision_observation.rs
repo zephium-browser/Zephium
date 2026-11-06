@@ -186,24 +186,87 @@ pub(super) fn run(site: &std::ffi::OsStr) -> Result<(), ProbeFailure> {
     })
 }
 
-/// Compiles the app's release lists (EasyList, EasyPrivacy and uBlock Origin's
-/// filters and quick fixes) exactly as a
-/// protected profile would, so one recording can be compared with none.
-pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
+/// The release seed with every list the app ships, admitted under limits
+/// that take them all.
+fn release_seed() -> Result<zephium_blocker_service::ReleaseCatalogSeed, ProbeFailure> {
     use zephium_blocker_service::{
-        EmbeddedReleaseAsset, LicensePolicy, ManagedBlocker, ReleaseCatalogSeed, UpdateLimits,
+        EmbeddedReleaseAsset, LicensePolicy, ReleaseCatalogSeed, UpdateLimits,
     };
-    use zephium_core::ports::blocker::{BlockerCompileOutcome, BlockerCompiler as _};
+    let assets = vec![
+        EmbeddedReleaseAsset::new(
+            "easylist.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/easylist.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "easyprivacy.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/easyprivacy.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-filters.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-filters.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-quick-fixes.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-link-shorteners.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-privacy.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-privacy.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-resource-abuse.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-unbreak.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-unbreak.txt.gz"
+            )),
+        ),
+        EmbeddedReleaseAsset::new(
+            "ublock-badware.txt",
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/blocker-seed/v1/ublock-badware.txt.gz"
+            )),
+        ),
+    ];
     let limits = UpdateLimits {
         max_manifest_bytes: 16 * 1024,
-        max_sources: 4,
+        max_sources: assets.len(),
         max_source_bytes: 4 * 1024 * 1024,
         max_total_source_bytes: 8 * 1024 * 1024,
         ..UpdateLimits::default()
     };
     let licenses = LicensePolicy::new(["CC-BY-SA-3.0", "GPL-3.0-only"])
         .map_err(|_| ProbeFailure::Authority)?;
-    let seed = ReleaseCatalogSeed::from_embedded_gzip(
+    ReleaseCatalogSeed::from_embedded_gzip(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/blocker-seed/v1/catalog.json"
@@ -212,40 +275,19 @@ pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/blocker-seed/v1/release-seed.json"
         )),
-        vec![
-            EmbeddedReleaseAsset::new(
-                "easylist.txt",
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/blocker-seed/v1/easylist.txt.gz"
-                )),
-            ),
-            EmbeddedReleaseAsset::new(
-                "easyprivacy.txt",
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/blocker-seed/v1/easyprivacy.txt.gz"
-                )),
-            ),
-            EmbeddedReleaseAsset::new(
-                "ublock-filters.txt",
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/blocker-seed/v1/ublock-filters.txt.gz"
-                )),
-            ),
-            EmbeddedReleaseAsset::new(
-                "ublock-quick-fixes.txt",
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"
-                )),
-            ),
-        ],
+        assets,
         limits,
         licenses,
     )
-    .map_err(|_| ProbeFailure::Authority)?;
+    .map_err(|_| ProbeFailure::Authority)
+}
+
+/// Compiles the app's release lists, every one the app ships, exactly as a
+/// protected profile would, so one recording can be compared with none.
+pub(super) fn use_release_lists() -> Result<(), ProbeFailure> {
+    use zephium_blocker_service::ManagedBlocker;
+    use zephium_core::ports::blocker::{BlockerCompileOutcome, BlockerCompiler as _};
+    let seed = release_seed()?;
     let cache = tempfile::tempdir().map_err(|_| ProbeFailure::Runtime)?;
     let blocker = ManagedBlocker::with_release_seed(
         seed,
@@ -384,5 +426,13 @@ impl std::fmt::Display for PageFacts {
             self.error_marker,
             self.challenge_marker
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_release_lists_get_past_seed_admission_with_every_list() {
+        assert!(super::release_seed().is_ok());
     }
 }

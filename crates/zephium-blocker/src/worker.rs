@@ -2882,10 +2882,9 @@ mod tests {
             |rules: &CompiledRules| rules.evaluate_source_independent(loader).unwrap().action();
         let rules = compile(with_own_rules(vec![blocklist()], CompileTarget::Runtime));
         assert_eq!(action(&rules), NetworkAction::Block);
-        // Without the page, a site-scoped exception would allow the loader on
-        // every site.
+        // Without the page, a site-scoped exception applies on no site.
         let scoped = compile(vec![blocklist(), crate::builtin::source()]);
-        assert_ne!(action(&scoped), NetworkAction::Block);
+        assert_eq!(action(&scoped), NetworkAction::Block);
     }
 
     #[test]
@@ -2984,7 +2983,7 @@ mod tests {
 
     #[cfg(feature = "runtime")]
     #[test]
-    fn runtime_policy_preserves_source_independent_fail_open_semantics() {
+    fn runtime_policy_keeps_a_block_a_page_scoped_exception_could_lift() {
         let rules = Compiler::default()
             .compile(
                 CompileTarget::Runtime,
@@ -3010,7 +3009,7 @@ mod tests {
             source_kind,
         )
         .unwrap();
-        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Allow);
+        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Block);
 
         let generic = CoreRequest::source_independent(
             "https://generic.example/ad.js",
@@ -3181,7 +3180,7 @@ mod tests {
         assert_eq!(decide(cdn, "https://www.cdn.example/"), CoreDecision::Allow);
         assert_eq!(unattributed(cdn), CoreDecision::Allow);
 
-        // Unattributed, a block that one site excepts fails open everywhere.
+        // Unattributed, an exception for one site lifts the block nowhere.
         let loader = "https://ads.example/loader.js";
         assert_eq!(
             decide(loader, "https://publisher.example/"),
@@ -3191,7 +3190,7 @@ mod tests {
             decide(loader, "https://friendly.example/"),
             CoreDecision::Allow
         );
-        assert_eq!(unattributed(loader), CoreDecision::Allow);
+        assert_eq!(unattributed(loader), CoreDecision::Block);
     }
 
     #[cfg(feature = "runtime-exact")]
