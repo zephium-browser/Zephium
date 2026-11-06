@@ -7,9 +7,10 @@
 //! runs only when the frame's host has an entry. The library is reviewed code
 //! shipped in the app and never fetched.
 //!
-//! The owner approved replacing response text with text from uBO's lists on
-//! YouTube's hosts only: those rules are `trusted-*`, so only uBO's lists can
-//! run them, and a rule naming any other host is not admitted.
+//! The owner approved replacing response text, and editing the objects the
+//! player sends, with values from uBO's lists on YouTube's hosts only: those
+//! rules are `trusted-*`, so only uBO's lists can run them, and a rule naming
+//! any other host is not admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -19,8 +20,15 @@ use adblock::resources::{MimeType, PermissionMask, Resource, ResourceType};
 use adblock::Engine;
 use base64::Engine as _;
 
+mod object_query;
+
 /// The permission `trusted-*` scriptlets need and only uBO's lists grant.
 const TRUSTED: PermissionMask = PermissionMask::from_bits(1);
+/// The permission Zephium's own scriptlets need and only its built-in rules
+/// grant; those rules never hold [`TRUSTED`].
+const ZEPHIUM: PermissionMask = PermissionMask::from_bits(2);
+/// The scriptlet that marks YouTube's client for uBO's player-request edits.
+const PLAYER_MARKER: &str = "zephium-player-marker";
 /// Ends every library function, so a host's calls are what follows the last.
 const END: &str = "/* zephium scriptlet end */";
 /// How adblock-rust closes each call it emits.
@@ -28,14 +36,17 @@ const CALL_END: &str = "} catch ( e ) { }";
 const MAX_RULES: usize = 20_000;
 const MAX_RULE_BYTES: usize = 8 * 1024;
 const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
-/// Scriptlets that replace response text, and the only sites, each with its
-/// subdomains, they run on.
-const RESPONSE_TEXT: &[&str] = &[
+/// Scriptlets that replace response text or edit what the page sends, and the
+/// only sites, each with its subdomains, they run on.
+const YOUTUBE_ONLY: &[&str] = &[
     "trusted-replace-fetch-response",
     "trusted-rpfr",
     "trusted-replace-xhr-response",
+    "trusted-edit-inbound-object",
+    PLAYER_MARKER,
 ];
-const RESPONSE_TEXT_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
+const YOUTUBE_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
+const EDIT_INBOUND_OBJECT: &str = "trusted-edit-inbound-object";
 
 struct Scriptlet {
     name: &'static str,
@@ -88,6 +99,13 @@ const HELPERS: &[Scriptlet] = &[
         trusted: false,
         dependencies: &["zephium-pattern.fn"],
         source: include_str!("scriptlets/text-replacer.js"),
+    },
+    Scriptlet {
+        name: "zephium-object-editor.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/object-editor.js"),
     },
 ];
 
@@ -158,6 +176,13 @@ const SCRIPTLETS: &[Scriptlet] = &[
         source: include_str!("scriptlets/trusted-prevent-dom-bypass.js"),
     },
     Scriptlet {
+        name: "trusted-edit-inbound-object.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &["zephium-object-editor.fn"],
+        source: include_str!("scriptlets/trusted-edit-inbound-object.js"),
+    },
+    Scriptlet {
         name: "no-xhr-if.js",
         aliases: &["prevent-xhr.js"],
         trusted: false,
@@ -189,11 +214,38 @@ fn function_text(source: &str) -> String {
     format!("{}\n{END}", body.join("\n").trim_end())
 }
 
-fn resources() -> Vec<Resource> {
+/// Zephium's own scriptlets, which only its built-in rules can call.
+const ZEPHIUM_SCRIPTLETS: &[Scriptlet] = &[Scriptlet {
+    name: "zephium-player-marker.js",
+    aliases: &[],
+    trusted: false,
+    dependencies: &[],
+    source: include_str!("scriptlets/zephium-player-marker.js"),
+}];
+
+/// Every library function, with the permission a rule needs to call it.
+fn library() -> impl Iterator<Item = (&'static Scriptlet, PermissionMask)> {
     HELPERS
         .iter()
         .chain(SCRIPTLETS)
-        .map(|scriptlet| Resource {
+        .map(|scriptlet| {
+            let permission = if scriptlet.trusted {
+                TRUSTED
+            } else {
+                PermissionMask::default()
+            };
+            (scriptlet, permission)
+        })
+        .chain(
+            ZEPHIUM_SCRIPTLETS
+                .iter()
+                .map(|scriptlet| (scriptlet, ZEPHIUM)),
+        )
+}
+
+fn resources() -> Vec<Resource> {
+    library()
+        .map(|(scriptlet, permission)| Resource {
             name: scriptlet.name.to_owned(),
             aliases: scriptlet
                 .aliases
@@ -213,11 +265,7 @@ fn resources() -> Vec<Resource> {
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
                 .collect(),
-            permission: if scriptlet.trusted {
-                TRUSTED
-            } else {
-                PermissionMask::default()
-            },
+            permission,
         })
         .collect()
 }
@@ -225,11 +273,47 @@ fn resources() -> Vec<Resource> {
 /// Whether the library has a scriptlet by this rule name.
 fn known(name: &str) -> bool {
     let name = name.strip_suffix(".js").unwrap_or(name);
-    SCRIPTLETS.iter().any(|scriptlet| {
-        std::iter::once(scriptlet.name)
-            .chain(scriptlet.aliases.iter().copied())
-            .any(|candidate| candidate.strip_suffix(".js") == Some(name))
-    })
+    SCRIPTLETS
+        .iter()
+        .chain(ZEPHIUM_SCRIPTLETS)
+        .any(|scriptlet| {
+            std::iter::once(scriptlet.name)
+                .chain(scriptlet.aliases.iter().copied())
+                .any(|candidate| candidate.strip_suffix(".js") == Some(name))
+        })
+}
+
+/// Which scriptlets a list's rules may call beyond the plain library.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ScriptletTrust {
+    /// The plain library only.
+    #[default]
+    Plain,
+    /// uBlock Origin's own lists: `trusted-*` scriptlets too.
+    Trusted,
+    /// Zephium's built-in rules: Zephium's scriptlets too, never `trusted-*`.
+    Zephium,
+}
+
+impl ScriptletTrust {
+    const fn permissions(self) -> PermissionMask {
+        match self {
+            Self::Plain => PermissionMask::from_bits(0),
+            Self::Trusted => TRUSTED,
+            Self::Zephium => ZEPHIUM,
+        }
+    }
 }
 
 /// One `##+js` rule as admitted, with its list's trust.
@@ -237,7 +321,7 @@ fn known(name: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ScriptletRule {
     pub(crate) line: String,
-    pub(crate) trusted: bool,
+    pub(crate) trust: ScriptletTrust,
 }
 
 /// What a line is, for admission and counting.
@@ -279,7 +363,7 @@ pub(crate) fn classify(line: &str) -> Kind {
     }
     let arguments = arguments(&body[..body.len() - 1]);
     let name = arguments.first().copied().unwrap_or_default();
-    if !exception && RESPONSE_TEXT.contains(&name.strip_suffix(".js").unwrap_or(name)) {
+    if !exception && YOUTUBE_ONLY.contains(&name.strip_suffix(".js").unwrap_or(name)) {
         let mut named = domains
             .split(',')
             .filter(|domain| !domain.is_empty() && !domain.starts_with('~'))
@@ -287,7 +371,7 @@ pub(crate) fn classify(line: &str) -> Kind {
             .peekable();
         let on_sites = named.peek().is_some()
             && named.all(|domain| {
-                RESPONSE_TEXT_SITES.iter().any(|site| {
+                YOUTUBE_SITES.iter().any(|site| {
                     domain == *site
                         || domain
                             .strip_suffix(site)
@@ -299,6 +383,9 @@ pub(crate) fn classify(line: &str) -> Kind {
         }
     }
     let bare = name.strip_suffix(".js").unwrap_or(name);
+    if !exception && bare == EDIT_INBOUND_OBJECT && !edits_an_object(&body[..body.len() - 1]) {
+        return Kind::Unsupported;
+    }
     Kind::Rule {
         unknown: !exception && !known(name),
         substituted: !exception
@@ -307,6 +394,269 @@ pub(crate) fn classify(line: &str) -> Kind {
                 .get(2)
                 .is_some_and(|directive| directive.starts_with("war:")),
     }
+}
+
+/// Keeps in Zephium's marker rules only markers uBO's admitted edit rules
+/// both key an edit on and strip from comment requests, on every host the
+/// marker rule runs on, and drops a marker rule left with none, so a marker
+/// uBO has renamed or scoped elsewhere is never sent. An exception that turns
+/// off object edits, or every scriptlet, on one of those hosts leaves it none.
+/// Returns how many markers were dropped.
+pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
+    let mut edits = Vec::new();
+    let mut exceptions = Vec::new();
+    for rule in rules
+        .iter()
+        .filter(|rule| rule.trust != ScriptletTrust::Zephium)
+    {
+        let Some((exception, domains, body)) = split(&rule.line) else {
+            continue;
+        };
+        if exception {
+            let name = arguments(body.strip_suffix(')').unwrap_or(body))
+                .first()
+                .copied()
+                .unwrap_or_default();
+            if name.is_empty() || name.strip_suffix(".js").unwrap_or(name) == EDIT_INBOUND_OBJECT {
+                exceptions.push(domains.to_owned());
+            }
+        } else if rule.trust == ScriptletTrust::Trusted {
+            if let Some(query) = rule_arguments(&rule.line, EDIT_INBOUND_OBJECT)
+                .and_then(|arguments| arguments.into_iter().nth(3))
+            {
+                edits.push((domains.to_owned(), query));
+            }
+        }
+    }
+    let mut dropped = 0;
+    rules.retain_mut(|rule| {
+        if rule.trust != ScriptletTrust::Zephium {
+            return true;
+        }
+        let Some(mut arguments) = rule_arguments(&rule.line, PLAYER_MARKER) else {
+            return true;
+        };
+        let marker_domains = split(&rule.line)
+            .map(|(_, domains, _)| domains)
+            .unwrap_or_default();
+        let named = |domains: &str| -> Vec<String> {
+            domains
+                .split(',')
+                .map(|entry| {
+                    entry
+                        .strip_prefix('~')
+                        .unwrap_or(entry)
+                        .to_ascii_lowercase()
+                })
+                .filter(|entry| !entry.is_empty() && !entry.ends_with(".*"))
+                .collect()
+        };
+        // The marker rule runs on its hosts and every host below them; another
+        // rule can only treat a host there differently when it names one, so
+        // those hosts stand for all of them.
+        let mut reach: BTreeSet<String> = BTreeSet::new();
+        for host in named(marker_domains) {
+            let below = |name: &String| {
+                name.strip_suffix(host.as_str())
+                    .is_some_and(|sub| sub.ends_with('.'))
+            };
+            reach.insert(host.clone());
+            for domains in exceptions
+                .iter()
+                .chain(edits.iter().map(|(domains, _)| domains))
+                .map(String::as_str)
+                .chain([marker_domains])
+            {
+                reach.extend(named(domains).into_iter().filter(below));
+            }
+        }
+        reach.retain(|host| runs_on(marker_domains, host));
+        let excepted = exceptions
+            .iter()
+            .any(|domains| reach.iter().any(|host| runs_on(domains, host)));
+        let mut supported: Option<BTreeSet<String>> = None;
+        if !excepted {
+            for host in &reach {
+                let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
+                for (domains, query) in &edits {
+                    if runs_on(domains, host) {
+                        user_agent_markers(query, &mut keyed, &mut stripped);
+                    }
+                }
+                let here: BTreeSet<String> = keyed.intersection(&stripped).cloned().collect();
+                supported = Some(match supported {
+                    Some(before) => before.intersection(&here).cloned().collect(),
+                    None => here,
+                });
+            }
+        }
+        let supported = supported.unwrap_or_default();
+        let Some(markers) = arguments.get(1) else {
+            return true;
+        };
+        let (kept, lost): (Vec<&str>, Vec<&str>) = markers
+            .split_whitespace()
+            .partition(|marker| writable(marker) && supported.contains(*marker));
+        dropped += lost.len();
+        if kept.is_empty() {
+            return false;
+        }
+        let kept = kept.join(" ");
+        arguments[1] = kept;
+        let Some((_, domains, _)) = split(&rule.line) else {
+            return false;
+        };
+        let body: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.replace(',', "\\,"))
+            .collect();
+        rule.line = format!("{domains}##+js({})", body.join(", "));
+        true
+    });
+    dropped
+}
+
+/// The keys adblock-rust matches a rule's hostnames and entities against on
+/// `host`: the host, each parent domain, and its entity.
+fn host_keys(host: &str) -> Vec<String> {
+    let labels: Vec<&str> = host.split('.').collect();
+    (0..labels.len())
+        .map(|i| labels[i..].join("."))
+        .chain(entity_keys(&labels))
+        .collect()
+}
+
+/// Whether a rule scoped to `domains` runs on `host`, as adblock-rust decides
+/// it: no negated hostname or entity matches one of the host's keys, and the
+/// rule is generic or a named one does.
+fn runs_on(domains: &str, host: &str) -> bool {
+    let keys = host_keys(host);
+    let matches = |entry: &str| keys.iter().any(|key| key.eq_ignore_ascii_case(entry));
+    let entries: Vec<&str> = domains
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let excluded = entries
+        .iter()
+        .filter_map(|entry| entry.strip_prefix('~'))
+        .any(matches);
+    let mut named = entries
+        .iter()
+        .filter(|entry| !entry.starts_with('~'))
+        .peekable();
+    !excluded && (named.peek().is_none() || named.any(|entry| matches(entry)))
+}
+
+/// Whether the marker scriptlet writes `marker`: the page takes a lowercase
+/// letter or digit, then those or hyphens, and ignores any other name.
+fn writable(marker: &str) -> bool {
+    marker
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && marker
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// A non-exception rule's arguments as the page receives them, when it calls
+/// `scriptlet`.
+fn rule_arguments(line: &str, scriptlet: &str) -> Option<Vec<String>> {
+    let (exception, _, body) = split(line)?;
+    let arguments = page_arguments(body.strip_suffix(')')?)?;
+    let name = arguments.first()?;
+    (!exception && name.strip_suffix(".js").unwrap_or(name) == scriptlet).then_some(arguments)
+}
+
+/// The markers an edit query keys on in the client's user agent, and those it
+/// strips from it.
+fn user_agent_markers(query: &str, keyed: &mut BTreeSet<String>, stripped: &mut BTreeSet<String>) {
+    // Hyphens stay inside a word, so a renamed `lactmilli-v2` is not read as
+    // `lactmilli`.
+    let words = |text: &str| -> Vec<String> {
+        text.split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    for (marker, end) in [("userAgent*=\"", '"'), ("userAgent=/", '/')] {
+        for (at, _) in query.match_indices(marker) {
+            let rest = &query[at + marker.len()..];
+            if let Some(length) = rest.find(end) {
+                keyed.extend(words(&rest[..length]));
+            }
+        }
+    }
+    if let Some((_, rest)) = query.split_once("userAgent=repl(") {
+        stripped.extend(words(rest));
+    }
+}
+
+/// Whether an edit-inbound-object rule names a method chain, an argument
+/// position and a query the page reads, exactly as the page receives them.
+fn edits_an_object(body: &str) -> bool {
+    let Some(arguments) = page_arguments(body) else {
+        return false;
+    };
+    let [_, chain, position, query] = arguments.as_slice() else {
+        return false;
+    };
+    let identifier = |name: &str| {
+        name.bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
+    };
+    // A method has far fewer arguments than this, and a position too long to
+    // be a finite integer in the page would install no edit.
+    let digits = position.strip_prefix('-').unwrap_or(position);
+    chain.split('.').all(identifier)
+        && !digits.is_empty()
+        && digits.len() <= 4
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && object_query::accepts(query)
+}
+
+/// A rule's arguments as adblock-rust hands them to the page: split at
+/// commas no backslash escapes, trimmed, with `\,` read as a comma and every
+/// other backslash kept. A quoted argument is not read here; a quoted
+/// scriptlet name is unquoted, as the library reads it.
+fn page_arguments(body: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for character in body.chars() {
+        if escaped {
+            if character != ',' {
+                current.push('\\');
+            }
+            current.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ',' {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let part = part.trim();
+            if index == 0 {
+                return Some(part.trim_matches(['"', '\'', '`']).to_owned());
+            }
+            (!part.starts_with(['"', '\'', '`'])).then(|| part.to_owned())
+        })
+        .collect()
 }
 
 /// A rule's comma-separated arguments, trimmed and unquoted; `\,` is a comma
@@ -422,7 +772,7 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
         return Err(crate::CosmeticError::ResourceLimit);
     }
     let mut keys = BTreeSet::new();
-    let (mut trusted, mut untrusted) = (Vec::new(), Vec::new());
+    let mut lists: BTreeMap<ScriptletTrust, Vec<&str>> = BTreeMap::new();
     for rule in rules {
         // A stored policy is admitted again, so it cannot run what compiling
         // it would have left out.
@@ -433,23 +783,21 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
             return Err(crate::CosmeticError::InvalidPolicy);
         };
         keys.extend(domain_keys(domains).ok_or(crate::CosmeticError::InvalidPolicy)?);
-        if rule.trusted {
-            &mut trusted
-        } else {
-            &mut untrusted
-        }
-        .push(rule.line.as_str());
+        lists
+            .entry(rule.trust)
+            .or_default()
+            .push(rule.line.as_str());
     }
     if keys.is_empty() {
         return Ok(None);
     }
     let mut filters = FilterSet::new(false);
-    for (lines, permissions) in [(trusted, TRUSTED), (untrusted, PermissionMask::default())] {
+    for (trust, lines) in lists {
         filters.add_filter_list(
             lines.join("\n"),
             ParseOptions {
                 rule_types: RuleTypes::CosmeticOnly,
-                permissions,
+                permissions: trust.permissions(),
                 ..ParseOptions::default()
             },
         );
@@ -514,10 +862,8 @@ pub(crate) fn build(rules: &[ScriptletRule]) -> Result<Option<Program>, crate::C
     }
     let mut ordered: Vec<(&String, &usize)> = calls.iter().collect();
     ordered.sort_unstable_by_key(|(_, index)| **index);
-    let library: Vec<String> = HELPERS
-        .iter()
-        .chain(SCRIPTLETS)
-        .map(|scriptlet| function_text(scriptlet.source))
+    let library: Vec<String> = library()
+        .map(|(scriptlet, _)| function_text(scriptlet.source))
         .collect();
     let entries: Vec<String> = table
         .iter()
@@ -562,7 +908,11 @@ mod tests {
     fn rule(line: &str, trusted: bool) -> ScriptletRule {
         ScriptletRule {
             line: line.to_owned(),
-            trusted,
+            trust: if trusted {
+                ScriptletTrust::Trusted
+            } else {
+                ScriptletTrust::Plain
+            },
         }
     }
 
@@ -674,14 +1024,50 @@ mod tests {
             classify("www.youtube.com##+js(`trusted-rpfr`, a, b)"),
             Kind::Rule { unknown: false, .. }
         ));
-        let stored = |line: &str| ScriptletRule {
-            line: line.to_owned(),
-            trusted: true,
-        };
         assert!(matches!(
-            build(&[stored("example.com##+js(`trusted-rpfr`, a, b)")]),
+            build(&[rule("example.com##+js(`trusted-rpfr`, a, b)", true)]),
             Err(crate::CosmeticError::InvalidPolicy)
         ));
+    }
+
+    #[test]
+    fn a_backtick_quoted_object_edit_is_read_as_the_library_reads_it() {
+        let edit = r#"##+js(`trusted-edit-inbound-object`, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#;
+        assert!(matches!(
+            classify(&format!("example.com{edit}")),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            classify(&format!("www.youtube.com{edit}")),
+            Kind::Rule { unknown: false, .. }
+        ));
+        assert!(matches!(
+            classify(
+                r#"www.youtube.com##+js(`trusted-edit-inbound-object`, JSON.stringify, 0, `[?.a]+={"b":1}`)"#
+            ),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            build(&[rule(&format!("example.com{edit}"), true)]),
+            Err(crate::CosmeticError::InvalidPolicy)
+        ));
+
+        // A quoted edit keys and strips markers as the plain one does.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                rule(
+                    &line.replacen(
+                        "trusted-edit-inbound-object",
+                        "`trusted-edit-inbound-object`",
+                        1,
+                    ),
+                    true,
+                )
+            })
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 0);
     }
 
     #[test]
@@ -744,7 +1130,9 @@ mod tests {
         }
         // Through the cosmetic compile, beside an ordinary rule.
         let source = format!("{}\na.com##+js(set, ok, 1)", odd.join("\n"));
-        let policy = crate::CosmeticPolicy::compile_with_trust([(source.as_str(), true)]).unwrap();
+        let policy =
+            crate::CosmeticPolicy::compile_with_trust([(source.as_str(), ScriptletTrust::Trusted)])
+                .unwrap();
         assert!(policy.scriptlet_program().is_some());
     }
 
@@ -815,6 +1203,278 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// uBlock Origin's quick fixes edit YouTube's player requests with these
+    /// rules, verbatim as of 2026-11-06.
+    const YOUTUBE_EDITS: [&str; 7] = [
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="channel"].context.client[?.clientName=="WEB"]+={"clientScreen":"CHANNEL"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="yahi"]+={"params":"YAHI"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="inline"].playbackContext.contentPlaybackContext+={"isInlinePlaybackNoAd":true})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/channel|lactmilli|inline/].playbackContext.contentPlaybackContext.lactMilliseconds="${now}")"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|lactmilli|inline|yahi|eafg|yaf4/].playbackContext.contentPlaybackContext.referer=repl({"regex":"(?:#reloadxhr)?$"\,"replacement":"#reloadxhr"}))"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"##,
+    ];
+
+    #[test]
+    fn youtube_s_object_edits_reach_the_page_as_its_reader_reads_them() {
+        let queries: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/blocker-scriptlets/edit-queries.json"
+        ))
+        .unwrap();
+        for (line, query) in YOUTUBE_EDITS
+            .iter()
+            .zip(queries["accepted"].as_array().unwrap())
+        {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false, .. }),
+                "{line}"
+            );
+            assert!(build(&[rule(line, false)]).unwrap().is_none(), "{line}");
+            let program = build(&[rule(line, true)]).unwrap().unwrap();
+            let call = format!(
+                "zephiumTrustedEditInboundObject(\"JSON.stringify\", \"0\", {})",
+                serde_json::to_string(query).unwrap()
+            );
+            assert!(program.script.contains(&call), "{line}");
+        }
+    }
+
+    const MARKER: &str = r"www.youtube.com##+js(zephium-player-marker, channel lactmilli yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x, a.b*=t)";
+
+    fn marker_rule(trust: ScriptletTrust) -> ScriptletRule {
+        ScriptletRule {
+            line: MARKER.to_owned(),
+            trust,
+        }
+    }
+
+    #[test]
+    fn only_zephium_s_own_rules_call_its_scriptlets_and_never_trusted_ones() {
+        let marked = |rules: &[ScriptletRule]| {
+            build(rules)
+                .unwrap()
+                .is_some_and(|program| program.script.contains("zephiumPlayerMarker(\"channel"))
+        };
+        assert!(marked(&[marker_rule(ScriptletTrust::Zephium)]));
+        assert!(!marked(&[marker_rule(ScriptletTrust::Trusted)]));
+        assert!(!marked(&[marker_rule(ScriptletTrust::Plain)]));
+        let edit = ScriptletRule {
+            line: YOUTUBE_EDITS[1].to_owned(),
+            trust: ScriptletTrust::Zephium,
+        };
+        assert!(build(&[edit]).unwrap().is_none());
+        assert!(matches!(
+            classify(&MARKER.replacen("www.youtube.com", "example.com", 1)),
+            Kind::Unsupported
+        ));
+    }
+
+    #[test]
+    fn a_marker_no_admitted_edit_both_keys_on_and_strips_is_never_sent() {
+        let trusted = |line: &str| ScriptletRule {
+            line: line.to_owned(),
+            trust: ScriptletTrust::Trusted,
+        };
+        let markers = |rules: &[ScriptletRule]| -> Option<String> {
+            let marker = rules
+                .iter()
+                .find(|rule| rule.trust == ScriptletTrust::Zephium)?;
+            rule_arguments(&marker.line, PLAYER_MARKER)?
+                .into_iter()
+                .nth(1)
+        };
+        let mut rules: Vec<ScriptletRule> =
+            YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 0);
+        assert_eq!(
+            markers(&rules).as_deref(),
+            Some("channel lactmilli yahi inline")
+        );
+        assert_eq!(rules.last().unwrap().line, MARKER);
+
+        // uBO stops keying on yahi: it is dropped, and the rule still runs.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .filter(|line| !line.contains(r#"*="yahi""#))
+            .map(|line| trusted(&line.replace("|yahi", "")))
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 1);
+        assert_eq!(markers(&rules).as_deref(), Some("channel lactmilli inline"));
+        let program = build(&rules).unwrap().unwrap();
+        assert!(program.script.contains(
+            r#"zephiumPlayerMarker("channel lactmilli inline", "buffer_health_seconds=0.00 s|resolution=0x0", "debug_info^=SSAP, AD", "1000""#
+        ));
+
+        // Edits with no strip, or none at all, leave nothing to mark with.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS[..6]
+            .iter()
+            .map(|line| trusted(line))
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 4);
+        assert_eq!(markers(&rules), None);
+        let mut alone = vec![marker_rule(ScriptletTrust::Zephium)];
+        assert_eq!(keep_edited_markers(&mut alone), 4);
+        assert!(alone.is_empty());
+
+        // A renamed marker is not read as the old one it contains.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| trusted(&line.replace("lactmilli", "lactmilli-v2")))
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 1);
+        assert_eq!(markers(&rules).as_deref(), Some("channel yahi inline"));
+
+        // A marker the page would not write is dropped even when edits key on
+        // it, and a hyphenated one it writes is kept.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                trusted(
+                    &line
+                        .replace("lactmilli", "lact-milli")
+                        .replace("yahi", "-yahi")
+                        .replace("channel", "Channel"),
+                )
+            })
+            .collect();
+        rules.push(ScriptletRule {
+            line: MARKER.replace(
+                "channel lactmilli yahi inline",
+                "Channel lact-milli -yahi inline",
+            ),
+            trust: ScriptletTrust::Zephium,
+        });
+        assert_eq!(keep_edited_markers(&mut rules), 2);
+        assert_eq!(markers(&rules).as_deref(), Some("lact-milli inline"));
+
+        // Edits that do not run on the marker's host leave nothing to mark with.
+        for hosts in [
+            "m.youtube.com",
+            "youtube.com,~www.youtube.com",
+            "www.youtube.com,~sub.www.youtube.com",
+            "www.youtube.com,~youtube.*",
+        ] {
+            let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+                .iter()
+                .map(|line| trusted(&line.replacen("www.youtube.com", hosts, 1)))
+                .collect();
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 4, "{hosts}");
+        }
+        // Edits for a parent domain, or the host's entity, run on it.
+        for hosts in ["youtube.com", "youtube.*"] {
+            let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+                .iter()
+                .map(|line| trusted(&line.replacen("www.youtube.com", hosts, 1)))
+                .collect();
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 0, "{hosts}");
+        }
+        // An exception that turns the edits, or every scriptlet, off there
+        // leaves none, from whichever list.
+        for exception in [
+            "www.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "sub.www.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "youtube.*#@#+js(trusted-edit-inbound-object)",
+            "youtube.com#@#+js()",
+            "#@#+js(trusted-edit-inbound-object.js)",
+        ] {
+            let mut rules: Vec<ScriptletRule> =
+                YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+            rules.push(rule(exception, false));
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 4, "{exception}");
+        }
+        // Exceptions elsewhere, or that leave the marker's host out, leave
+        // its edits.
+        for exception in [
+            "m.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "youtube.com,~www.youtube.com#@#+js(trusted-edit-inbound-object)",
+        ] {
+            let mut rules: Vec<ScriptletRule> =
+                YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+            rules.push(rule(exception, false));
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 0, "{exception}");
+        }
+        // A host the marker rule leaves out needs no edits.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                trusted(&line.replacen(
+                    "www.youtube.com",
+                    "www.youtube.com,~sub.www.youtube.com",
+                    1,
+                ))
+            })
+            .collect();
+        rules.push(ScriptletRule {
+            line: MARKER.replacen("www.youtube.com", "www.youtube.com,~sub.www.youtube.com", 1),
+            trust: ScriptletTrust::Zephium,
+        });
+        assert_eq!(keep_edited_markers(&mut rules), 0);
+
+        // Only uBO's own lists count: the same edits from elsewhere do not.
+        let mut untrusted: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| ScriptletRule {
+                line: (*line).to_owned(),
+                trust: ScriptletTrust::Plain,
+            })
+            .collect();
+        untrusted.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut untrusted), 4);
+    }
+
+    #[test]
+    fn an_object_edit_the_page_would_not_read_is_not_admitted() {
+        let edit = |hosts: &str, arguments: &str| {
+            format!("{hosts}##+js(trusted-edit-inbound-object, {arguments})")
+        };
+        for line in [
+            edit("example.com", r#"JSON.stringify, 0, [?.a]+={"b":1}"#),
+            edit("youtube.*", r#"JSON.stringify, 0, [?.a]+={"b":1}"#),
+            edit("www.youtube.com", r#"JSON.stringify, 0, [?.a]"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, [?.a]+={"b":1,"c":2}"#,
+            ),
+            edit("www.youtube.com", r#"JSON.stringify, 0, '[?.a]+={"b":1}'"#),
+            edit("www.youtube.com", r#"JSON.stringify, x, [?.a]+={"b":1}"#),
+            edit("www.youtube.com", r#"JSON.stringify, , [?.a]+={"b":1}"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 10000, [?.a]+={"b":1}"#,
+            ),
+            edit("www.youtube.com", r#"JSON..stringify, 0, [?.a]+={"b":1}"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, [?.a]+={"b":1}, extra"#,
+            ),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, v2:$.a=call([null\,"alert"])"#,
+            ),
+        ] {
+            assert!(matches!(classify(&line), Kind::Unsupported), "{line}");
+        }
+        assert!(matches!(
+            classify(&edit(
+                "m.youtube.com,www.youtube-nocookie.com",
+                r#"JSON.parse, -1, v2:$..adSlots"#
+            )),
+            Kind::Rule { unknown: false, .. }
+        ));
+        assert!(matches!(
+            classify(r#"example.com#@#+js(trusted-edit-inbound-object, JSON.stringify, 0, x)"#),
+            Kind::Rule { unknown: false, .. }
+        ));
     }
 
     #[test]

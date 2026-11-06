@@ -2015,6 +2015,75 @@ mod tests {
         assert_eq!(lists.decide(&request), NetworkDecision::Block);
     }
 
+    /// WebView2 names no frame's parent, so a Windows view judges each frame
+    /// navigation as a subdocument of its main page, as requests are judged.
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_runtime_lists_judge_a_frame_against_its_main_page() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(
+                    CompileTarget::Runtime,
+                    vec![FilterSource::new(
+                        SourceId::new("easylist").unwrap(),
+                        SourceFormat::Standard,
+                        "||adsystem.example^\n\
+                         @@||adsystem.example/kept^$subdocument,domain=shop.example\n\
+                         ||tracker.example^$third-party\n"
+                            .to_owned(),
+                    )],
+                )
+                .unwrap(),
+        );
+        let frame = |url, page| {
+            lists.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    page,
+                    "GET",
+                    NetworkResourceType::Subdocument,
+                    NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let shop = "https://www.shop.example/";
+        assert_eq!(
+            frame("https://s.adsystem.example/iu3?slot=footer", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", shop),
+            NetworkDecision::Allow
+        );
+        // The exception is for frames on shop.example only.
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", "https://news.example/"),
+            NetworkDecision::Block
+        );
+        let script = CoreRequest::top_level_approximation(
+            "https://s.adsystem.example/kept",
+            shop,
+            "GET",
+            NetworkResourceType::Script,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&script), NetworkDecision::Block);
+        assert_eq!(
+            frame("https://tracker.example/frame", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://tracker.example/frame", "https://tracker.example/"),
+            NetworkDecision::Allow
+        );
+    }
+
     #[cfg(all(
         feature = "runtime-exact",
         feature = "webkit",

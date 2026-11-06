@@ -59,6 +59,12 @@ const TEMPLATE_WARMUP: Duration = Duration::from_secs(60);
 const TEMPLATE_MARKER: &str = ".blocker-bench-template";
 const CONSENT_SETTLE: Duration = Duration::from_secs(2);
 const BETWEEN_SITES: Duration = Duration::from_secs(1);
+/// How long a watch page opened behind another tab is left before it is read.
+const BACKGROUND_WAIT: Duration = Duration::from_secs(15);
+/// How long a video plays in view before its tab goes behind another, and how
+/// long the next one is watched there.
+const PLAY_IN_VIEW_SECONDS: u64 = 10;
+const HIDDEN_NEXT_SECONDS: u64 = 25;
 const UBLOCK_URL: &str =
     "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
 /// What Firefox gets to finish after it is ready. uBlock Origin downloads its
@@ -71,6 +77,10 @@ const WATCH_SECONDS: u64 = 30;
 /// Each of the two seeks after the watch gets this long to play again.
 const SEEK_WITHIN_MS: u64 = 15_000;
 const YOUTUBE_DIALOG_WAIT_MS: u64 = 4000;
+/// How often, and for how long in all, the consent check is retried while the
+/// answer's reload is still under way.
+const CONSENT_RETRY: Duration = Duration::from_secs(1);
+const CONSENT_RETRY_WITHIN: Duration = Duration::from_secs(8);
 const QA_IDENTIFIER: &str = "app.zephium.protection-qa";
 /// Speedometer starts itself when it is given `startAutomatically`.
 const SPEEDOMETER_URL: &str = "https://browserbench.org/Speedometer3.1/?startAutomatically=true";
@@ -149,6 +159,8 @@ enum Config {
     ZephiumOff,
     ZephiumOn,
     Brave,
+    /// Brave with Shields down on every site: the same engine and lists, none applied.
+    BraveOff,
     Edge,
     Chrome,
     Firefox,
@@ -168,6 +180,7 @@ impl Config {
             Config::ZephiumOff => summary::ZEPHIUM_OFF,
             Config::ZephiumOn => summary::ZEPHIUM_ON,
             Config::Brave => "brave",
+            Config::BraveOff => "brave-off",
             Config::Edge => "edge",
             Config::Chrome => "chrome",
             Config::Firefox => "firefox",
@@ -180,6 +193,7 @@ impl Config {
             Config::ZephiumOff,
             Config::ZephiumOn,
             Config::Brave,
+            Config::BraveOff,
             Config::Edge,
             Config::Chrome,
             Config::Firefox,
@@ -194,7 +208,18 @@ impl Config {
     }
 
     fn chromium(self) -> bool {
-        matches!(self, Config::Brave | Config::Edge | Config::Chrome)
+        matches!(
+            self,
+            Config::Brave | Config::BraveOff | Config::Edge | Config::Chrome
+        )
+    }
+
+    /// The configuration whose template profile this one starts from.
+    fn template(self) -> Config {
+        match self {
+            Config::BraveOff => Config::Brave,
+            other => other,
+        }
     }
 
     fn firefox(self) -> bool {
@@ -207,6 +232,7 @@ impl Config {
             Config::ZephiumOff => "zoff",
             Config::ZephiumOn => "zon",
             Config::Brave => "brave",
+            Config::BraveOff => "braveoff",
             Config::Edge => "edge",
             Config::Chrome => "chrome",
             Config::Firefox => "ff",
@@ -222,6 +248,9 @@ struct Options {
     only: Vec<String>,
     settle: Duration,
     youtube: bool,
+    /// Zephium only: whether a playlist keeps its place and order when the
+    /// player reloads a video.
+    youtube_playlist: bool,
     youtube_consent: YoutubeConsent,
     startup: Option<usize>,
     speedometer: Option<usize>,
@@ -310,6 +339,10 @@ impl Options {
                         value()?.split_whitespace().map(str::to_string).collect();
                 }
                 "--youtube" => options.youtube = true,
+                "--youtube-playlist" => {
+                    options.youtube = true;
+                    options.youtube_playlist = true;
+                }
                 "--youtube-consent" => {
                     options.youtube_consent = match value()?.as_str() {
                         "reject" => YoutubeConsent::Reject,
@@ -341,6 +374,9 @@ impl Options {
         ];
         if passes.into_iter().filter(|pass| *pass).count() > 1 {
             return Err("--youtube, --startup and --speedometer are separate passes".into());
+        }
+        if options.youtube_playlist && options.browsers.iter().any(|config| !config.zephium()) {
+            return Err("--youtube-playlist measures Zephium only".into());
         }
         if options.speedometer_warm && options.speedometer.is_none() {
             return Err("--speedometer-warm needs --speedometer".into());
@@ -607,7 +643,7 @@ fn executables(options: &Options) -> Result<BTreeMap<&'static str, PathBuf>, Str
             Config::ZephiumOff | Config::ZephiumOn => options.zephium.clone().ok_or(
                 "zephium-off and zephium-on need --zephium <path to the protection QA app binary>",
             )?,
-            Config::Brave => options
+            Config::Brave | Config::BraveOff => options
                 .brave
                 .clone()
                 .or_else(|| default_executable(*config))
@@ -646,7 +682,7 @@ fn default_executable(config: Config) -> Option<PathBuf> {
             std::env::var_os(variable).map(|root| PathBuf::from(root).join(path))
         };
         match config {
-            Config::Brave => under(
+            Config::Brave | Config::BraveOff => under(
                 "ProgramFiles",
                 r"BraveSoftware\Brave-Browser\Application\brave.exe",
             ),
@@ -662,7 +698,9 @@ fn default_executable(config: Config) -> Option<PathBuf> {
         }
     } else {
         let path = match config {
-            Config::Brave => "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            Config::Brave | Config::BraveOff => {
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+            }
             Config::Edge => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             Config::Chrome => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
             Config::Firefox | Config::FirefoxUbo => {
@@ -707,7 +745,8 @@ fn fetch_ublock(cache: &Path) -> Result<PathBuf, String> {
 /// profile that has already had its first-run downloads.
 fn prepare_templates(context: &mut Context) -> Result<(), String> {
     for config in context.options.browsers.clone() {
-        if !config.chromium() {
+        let config = config.template();
+        if !config.chromium() || context.templates.contains_key(config.name()) {
             continue;
         }
         let template = context.cache.join(format!("{}-template", config.name()));
@@ -738,6 +777,89 @@ fn prepare_templates(context: &mut Context) -> Result<(), String> {
         context.templates.insert(config.name(), template);
     }
     Ok(())
+}
+
+/// Turns Brave's Shields down by default in a profile before it starts:
+/// `braveShields` is a content setting, where block means down.
+fn shields_down(profile: &Path) -> Result<(), String> {
+    let path = profile.join("Default").join("Preferences");
+    std::fs::create_dir_all(profile.join("Default")).map_err(|e| e.to_string())?;
+    let mut preferences: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string())?,
+        Err(_) => json!({}),
+    };
+    // Preferences holds whatever the browser wrote, so each level is checked
+    // before it is indexed; null stands for absent.
+    let object = |value: &mut Value, key: &str| -> Result<(), String> {
+        let map = value.as_object_mut().ok_or_else(|| {
+            format!("Preferences holds {key} under something that is not a JSON object")
+        })?;
+        let entry = map.entry(key).or_insert(Value::Null);
+        if entry.is_null() {
+            *entry = json!({});
+        }
+        if entry.is_object() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Preferences holds {key} as something that is not a JSON object"
+            ))
+        }
+    };
+    object(&mut preferences, "profile")?;
+    object(
+        &mut preferences["profile"],
+        "default_content_setting_values",
+    )?;
+    preferences["profile"]["default_content_setting_values"]["braveShields"] = json!(2);
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&preferences).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The browser components a Chromium profile holds, from their manifests:
+/// name, version, and when each manifest was written in seconds from `since`
+/// (a component copied from the template is written just before it).
+fn profile_components(profile: &Path, since: SystemTime) -> Vec<Value> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(profile) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id.len() != 32 || !id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+            continue;
+        }
+        let Ok(versions) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for version in versions.flatten() {
+            let manifest = version.path().join("manifest.json");
+            let Some(value) = std::fs::read(&manifest)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            else {
+                continue;
+            };
+            let written = std::fs::metadata(&manifest)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .map(|time| match time.duration_since(since) {
+                    Ok(after) => after.as_secs_f64(),
+                    Err(before) => -before.duration().as_secs_f64(),
+                });
+            found.push(json!({
+                "id": id,
+                "name": value.get("name"),
+                "version": value.get("version"),
+                "writtenS": written.map(|seconds| (seconds * 10.0).round() / 10.0),
+            }));
+        }
+    }
+    found.sort_by_key(|component| component["name"].as_str().unwrap_or_default().to_owned());
+    found
 }
 
 /// Copies a profile, leaving out the locks and the port file a running
@@ -850,6 +972,21 @@ fn remove_qa_session(root: &Path, label: &str) -> Result<bool, String> {
 }
 
 impl Context {
+    /// The binary for `config`, or for a requested configuration that shares
+    /// its template (a Brave template is prepared for `brave-off` alone).
+    fn executable(&self, config: Config) -> Result<&PathBuf, String> {
+        self.executables
+            .get(config.name())
+            .or_else(|| {
+                self.options
+                    .browsers
+                    .iter()
+                    .filter(|requested| requested.template() == config)
+                    .find_map(|requested| self.executables.get(requested.name()))
+            })
+            .ok_or_else(|| format!("no executable for {}", config.name()))
+    }
+
     /// The command that starts a driver (or, for Zephium, the app itself).
     fn command(
         &self,
@@ -857,7 +994,7 @@ impl Context {
         profile: &Path,
         qa: Option<&QaSession>,
     ) -> Result<Command, String> {
-        let executable = &self.executables[config.name()];
+        let executable = self.executable(config)?;
         let mut command = if let Some((program, rest)) = self.options.driver_command.split_first() {
             let mut command = Command::new(program);
             command.args(rest);
@@ -943,9 +1080,13 @@ impl Context {
             .prefix(&format!("{}-", config.name()))
             .tempdir_in(self.cache.join("profiles"))
             .map_err(|e| e.to_string())?;
-        if let Some(template) = self.templates.get(config.name()) {
+        if let Some(template) = self.templates.get(config.template().name()) {
             copy_profile(template, directory.path())
                 .map_err(|e| format!("copying the template profile: {e}"))?;
+        }
+        if config == Config::BraveOff {
+            shields_down(directory.path())
+                .map_err(|e| format!("turning Brave's Shields down: {e}"))?;
         }
         Ok(directory)
     }
@@ -1018,6 +1159,7 @@ struct Opened {
     tab: Value,
     load_ms: Option<f64>,
     timed_out: bool,
+    load_wait: Option<Value>,
 }
 
 fn open(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
@@ -1033,6 +1175,25 @@ fn open(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
             .get("timedOut")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
+    })
+}
+
+/// As [`open`], in a new tab behind the current one.
+fn open_behind(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
+    let reply = driver.call(
+        "open",
+        json!({ "url": url, "timeoutMs": OPEN_TIMEOUT_MS, "background": true }),
+        Duration::from_millis(OPEN_TIMEOUT_MS) + REPLY_GRACE,
+    )?;
+    Ok(Opened {
+        tab: reply.get("tab").cloned().unwrap_or(Value::Null),
+        load_ms: reply.get("loadMs").and_then(Value::as_f64),
+        timed_out: reply
+            .get("timedOut")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
     })
 }
 
@@ -1050,6 +1211,7 @@ fn navigate(driver: &mut Driver, tab: &Value, url: &str) -> Result<Opened, Failu
             .get("timedOut")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
     })
 }
 
@@ -1184,6 +1346,20 @@ fn youtube_consent_present(driver: &mut Driver, tab: &Value) -> Result<bool, Fai
         .unwrap_or(true))
 }
 
+/// As [`youtube_consent_present`], retried while a navigation the answer
+/// caused makes the check fail; `None` if the page never gave a result.
+fn youtube_consent_settled(driver: &mut Driver, tab: &Value) -> Result<Option<bool>, Failure> {
+    let deadline = Instant::now() + CONSENT_RETRY_WITHIN;
+    loop {
+        match youtube_consent_present(driver, tab) {
+            Ok(present) => return Ok(Some(present)),
+            Err(failure) if failure.is_gone() => return Err(failure),
+            Err(_) if Instant::now() + CONSENT_RETRY > deadline => return Ok(None),
+            Err(_) => std::thread::sleep(CONSENT_RETRY),
+        }
+    }
+}
+
 /// Gives `answer` on YouTube's consent page or dialog, if there is one;
 /// from the consent page the browser is sent back to `url`.
 fn answer_youtube_consent(
@@ -1214,9 +1390,27 @@ fn answer_youtube_consent(
         }
         Some("dialog") => {
             std::thread::sleep(CONSENT_SETTLE);
+            let mut present = youtube_consent_settled(driver, tab)?;
+            // The answer reloads the page, which can ask again.
+            if answered && present == Some(true) {
+                let script = youtube_consent_script(YOUTUBE_DIALOG_WAIT_MS, answer);
+                match eval(
+                    driver,
+                    tab,
+                    &script,
+                    YOUTUBE_DIALOG_WAIT_MS + EVAL_TIMEOUT_MS,
+                ) {
+                    Ok(again) if again.get("answered").and_then(Value::as_bool) == Some(true) => {
+                        std::thread::sleep(CONSENT_SETTLE);
+                        present = youtube_consent_settled(driver, tab)?;
+                    }
+                    Err(failure) if failure.is_gone() => return Err(failure),
+                    _ => {}
+                }
+            }
             Ok(Some(YoutubeConsentOutcome {
                 answered,
-                cleared: !youtube_consent_present(driver, tab)?,
+                cleared: present == Some(false),
                 reloaded: None,
             }))
         }
@@ -1509,8 +1703,13 @@ fn visit_line(visit: &Visit) -> String {
     )
 }
 
-/// The YouTube pass: the home feed, five videos and one Shorts page.
+/// The YouTube pass: the home feed, two videos opened in the page from a
+/// watch page, five videos, one Shorts page, a video behind another tab, and
+/// a video that played in view moving on to the next one behind another tab.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
+    if context.options.youtube_playlist {
+        return run_youtube_playlist(context, results, saved);
+    }
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
             let name = config.name();
@@ -1524,6 +1723,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 phase: "run".into(),
                 ..Launch::default()
             };
+            let launched = SystemTime::now();
             let mut session =
                 match context.launch(config, qa.as_ref(), &format!("{name}-youtube-r{run}")) {
                     Ok(session) => session,
@@ -1535,17 +1735,40 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                     }
                 };
             record_session(&mut launch, &session);
+            let launch_at = results.launches.len();
             results.launches.push(launch);
             let plan = context.plan(config);
             let feed = sites::YOUTUBE_FEED.to_string();
             let watch = sites::watch_script(WATCH_SECONDS, SEEK_WITHIN_MS);
-            let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![(
-                "feed",
-                None,
-                "https://www.youtube.com/".to_string(),
-                &feed,
-                EVAL_TIMEOUT_MS + 10_000,
-            )];
+            let inpage = sites::inpage_script(WATCH_SECONDS);
+            let first = sites::first_watch_script(25);
+            let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![
+                // A fresh profile's first page, so its consent prompt is
+                // answered on a watch page, as a new visitor's would be.
+                (
+                    "first-watch",
+                    Some(VIDEOS[0].0),
+                    format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0),
+                    &first,
+                    25_000 + 60_000,
+                ),
+                (
+                    "feed",
+                    None,
+                    "https://www.youtube.com/".to_string(),
+                    &feed,
+                    EVAL_TIMEOUT_MS + 10_000,
+                ),
+                // Opened from the one video that is not music, whose related
+                // links are less likely to be mixes, which the clicks skip.
+                (
+                    "inpage",
+                    Some(VIDEOS[4].0),
+                    format!("https://www.youtube.com/watch?v={}", VIDEOS[4].0),
+                    &inpage,
+                    2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
+                ),
+            ];
             for (id, _) in VIDEOS {
                 pages.push((
                     "watch",
@@ -1566,6 +1789,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             // a full wait saw none, so a dialog the feed missed is still met
             // and later pages are timed alike in every browser.
             let mut consent_pending = true;
+            let mut browser_gone = false;
             for (step, id, url, script, timeout_ms) in pages {
                 let (record, gone) = youtube_step(
                     &mut session,
@@ -1585,7 +1809,148 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 );
                 results.youtube.push(record);
                 if gone {
+                    browser_gone = true;
                     break;
+                }
+            }
+            if !browser_gone {
+                let (record, gone) = youtube_background_step(&mut session, (config, run));
+                eprintln!(
+                    "  background  {}",
+                    record
+                        .result
+                        .as_ref()
+                        .map_or(record.errors.join("; "), Value::to_string)
+                );
+                results.youtube.push(record);
+                if !gone {
+                    let (record, _) = youtube_hidden_next_step(&mut session, (config, run));
+                    eprintln!(
+                        "  hidden-next  {}",
+                        record
+                            .result
+                            .as_ref()
+                            .map_or(record.errors.join("; "), Value::to_string)
+                    );
+                    results.youtube.push(record);
+                }
+            }
+            if let Some(profile) = &session._profile {
+                results.launches[launch_at].components =
+                    Some(profile_components(profile.path(), launched));
+            }
+            session.driver.quit();
+            drop(session);
+            drop(qa);
+            results.save(saved)?;
+        }
+    }
+    Ok(())
+}
+
+/// A YouTube mix, the music case, opened at its first video.
+const MIX: &str = "https://www.youtube.com/watch?v=kJQP7kiw5Fk&list=RDkJQP7kiw5Fk";
+/// The channel whose first public playlist is the other list opened.
+const PLAYLISTS: &str = "https://www.youtube.com/@YouTube/playlists";
+
+/// `--youtube-playlist`: opens a watch page first, so its consent prompt is
+/// answered there, then a mix and a public playlist directly, and records
+/// whether each list keeps its place and order through the marker's own start
+/// and each way of reloading a held video.
+fn run_youtube_playlist(
+    context: &Context,
+    results: &mut Results,
+    saved: &Path,
+) -> Result<(), String> {
+    let step = "playlist";
+    for run in 1..=context.options.runs {
+        for config in &context.options.browsers {
+            let name = config.name();
+            eprintln!("run {run}/{} {name} {step}", context.options.runs);
+            let qa = QaSession::new(*config, &format!("p{run}"));
+            let mut launch = Launch {
+                config: name.to_string(),
+                run,
+                phase: step.into(),
+                ..Launch::default()
+            };
+            let mut session =
+                match context.launch(*config, Some(&qa), &format!("{name}-{step}-r{run}")) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        eprintln!("  {name} did not start: {error}");
+                        launch.error = Some(error);
+                        results.launches.push(launch);
+                        continue;
+                    }
+                };
+            record_session(&mut launch, &session);
+            results.launches.push(launch);
+            let plan = context.plan(*config);
+            let mut consent_pending = true;
+            // A fresh profile's first page is a watch page, so its consent
+            // prompt is answered there, as a new visitor's would be.
+            let first = format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0);
+            let (record, gone) = youtube_step(
+                &mut session,
+                &plan,
+                (*config, run),
+                ("first-watch", Some(VIDEOS[0].0), &first),
+                (&sites::first_watch_script(25), 25_000 + 60_000),
+                &mut consent_pending,
+            );
+            eprintln!(
+                "  first-watch {}",
+                record
+                    .result
+                    .as_ref()
+                    .map_or(record.errors.join("; "), Value::to_string)
+            );
+            results.youtube.push(record);
+            if gone {
+                session.driver.quit();
+                results.save(saved)?;
+                continue;
+            }
+            let (found, gone) = youtube_step(
+                &mut session,
+                &plan,
+                (*config, run),
+                ("playlist-find", None, PLAYLISTS),
+                (sites::YOUTUBE_PLAYLIST_FIND, EVAL_TIMEOUT_MS + 10_000),
+                &mut consent_pending,
+            );
+            let listed = found
+                .result
+                .as_ref()
+                .and_then(|result| result.get("url"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            eprintln!("  playlist-find {}", listed.as_deref().unwrap_or("none"));
+            results.youtube.push(found);
+            let mut urls = vec![MIX.to_string()];
+            urls.extend(listed);
+            if !gone {
+                for url in urls {
+                    let (record, gone) = youtube_step(
+                        &mut session,
+                        &plan,
+                        (*config, run),
+                        (step, None, &url),
+                        (sites::YOUTUBE_PLAYLIST, 300_000),
+                        &mut consent_pending,
+                    );
+                    eprintln!(
+                        "  {step} {url}  {}",
+                        record
+                            .result
+                            .as_ref()
+                            .map_or(record.errors.join("; "), Value::to_string)
+                    );
+                    results.youtube.push(record);
+                    if gone {
+                        break;
+                    }
                 }
             }
             session.driver.quit();
@@ -1595,6 +1960,129 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
         }
     }
     Ok(())
+}
+
+/// A watch page opened behind the home feed and read after
+/// `BACKGROUND_WAIT`: nobody asked it to play, so nothing may reload or
+/// re-mark it.
+fn youtube_background_step(
+    session: &mut Session,
+    (config, run): (Config, usize),
+) -> (YoutubeStep, bool) {
+    let id = VIDEOS[1].0;
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let mut record = YoutubeStep {
+        config: config.name().to_string(),
+        run,
+        step: "background".into(),
+        id: Some(id.to_string()),
+        url: url.clone(),
+        ..YoutubeStep::default()
+    };
+    let driver = &mut session.driver;
+    let outcome = (|| -> Result<(), Failure> {
+        let Some(front) = soft(
+            &mut record.errors,
+            "open front",
+            open(driver, "https://www.youtube.com/"),
+        )?
+        else {
+            return Ok(());
+        };
+        if let Some(behind) = soft(&mut record.errors, "open behind", open_behind(driver, &url))? {
+            record.nav_ms = behind.load_ms;
+            record.timed_out = behind.timed_out;
+            record.load_wait = behind.load_wait;
+            std::thread::sleep(BACKGROUND_WAIT);
+            let result = eval(
+                driver,
+                &behind.tab,
+                sites::YOUTUBE_BACKGROUND,
+                EVAL_TIMEOUT_MS,
+            );
+            record.result = soft(&mut record.errors, "background", result)?;
+            let closed = close(driver, &behind.tab);
+            soft(&mut record.errors, "close", closed)?;
+        }
+        let closed = close(driver, &front.tab);
+        soft(&mut record.errors, "close", closed)?;
+        std::thread::sleep(BETWEEN_SITES);
+        Ok(())
+    })();
+    let gone = match outcome {
+        Ok(()) => false,
+        Err(failure) => {
+            record.errors.push(failure.message().to_string());
+            failure.is_gone()
+        }
+    };
+    (record, gone)
+}
+
+/// A video played in view for `PLAY_IN_VIEW_SECONDS`, its tab then sent
+/// behind the home feed, where the page moves on to a related video as
+/// autoplay would: a page that has played keeps playing hidden, so a hold
+/// there must still be ended.
+fn youtube_hidden_next_step(
+    session: &mut Session,
+    (config, run): (Config, usize),
+) -> (YoutubeStep, bool) {
+    let id = VIDEOS[2].0;
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let mut record = YoutubeStep {
+        config: config.name().to_string(),
+        run,
+        step: "hidden-next".into(),
+        id: Some(id.to_string()),
+        url: url.clone(),
+        ..YoutubeStep::default()
+    };
+    let driver = &mut session.driver;
+    let outcome = (|| -> Result<(), Failure> {
+        let Some(watch) = soft(&mut record.errors, "open", open(driver, &url))? else {
+            return Ok(());
+        };
+        record.nav_ms = watch.load_ms;
+        record.timed_out = watch.timed_out;
+        record.load_wait = watch.load_wait.clone();
+        let play = sites::play_script(PLAY_IN_VIEW_SECONDS);
+        let played = eval(
+            driver,
+            &watch.tab,
+            &play,
+            PLAY_IN_VIEW_SECONDS * 1000 + 30_000,
+        );
+        if soft(&mut record.errors, "play", played)?.is_some() {
+            if let Some(front) = soft(
+                &mut record.errors,
+                "open front",
+                open(driver, "https://www.youtube.com/"),
+            )? {
+                let next = sites::hidden_next_script(HIDDEN_NEXT_SECONDS);
+                let result = eval(
+                    driver,
+                    &watch.tab,
+                    &next,
+                    HIDDEN_NEXT_SECONDS * 1000 + 30_000,
+                );
+                record.result = soft(&mut record.errors, "hidden-next", result)?;
+                let closed = close(driver, &front.tab);
+                soft(&mut record.errors, "close", closed)?;
+            }
+        }
+        let closed = close(driver, &watch.tab);
+        soft(&mut record.errors, "close", closed)?;
+        std::thread::sleep(BETWEEN_SITES);
+        Ok(())
+    })();
+    let gone = match outcome {
+        Ok(()) => false,
+        Err(failure) => {
+            record.errors.push(failure.message().to_string());
+            failure.is_gone()
+        }
+    };
+    (record, gone)
 }
 
 fn youtube_step(
@@ -1629,6 +2117,7 @@ fn youtube_step(
         let tab = opened.tab.clone();
         record.nav_ms = opened.load_ms;
         record.timed_out = opened.timed_out;
+        record.load_wait = opened.load_wait.clone();
         let page = (|| -> Result<(), Failure> {
             let opened_at = Instant::now();
             let wait_ms = if *consent_pending {
@@ -1647,6 +2136,7 @@ fn youtube_step(
                     if let Some(reloaded) = again.reloaded {
                         record.nav_ms = reloaded.load_ms;
                         record.timed_out |= reloaded.timed_out;
+                        record.consent_load_wait = reloaded.load_wait;
                     }
                 }
                 Some(None) if wait_ms > 0 => *consent_pending = false,
@@ -2315,6 +2805,109 @@ mod tests {
         for left_out in ["SingletonLock", "DevToolsActivePort", TEMPLATE_MARKER] {
             assert!(!to.path().join(left_out).exists(), "{left_out}");
         }
+    }
+
+    fn shields_down_over(preferences: &str) -> (Result<(), String>, Value) {
+        let profile = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(profile.path().join("Default")).unwrap();
+        let path = profile.path().join("Default/Preferences");
+        std::fs::write(&path, preferences).unwrap();
+        let result = shields_down(profile.path());
+        let after = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        (result, after)
+    }
+
+    #[test]
+    fn shields_go_down_over_absent_null_and_existing_settings() {
+        for preferences in [
+            "{}",
+            r#"{"profile":null}"#,
+            r#"{"profile":{"default_content_setting_values":null}}"#,
+            r#"{"profile":{"default_content_setting_values":{"cookies":1}}}"#,
+        ] {
+            let (result, after) = shields_down_over(preferences);
+            assert_eq!(result, Ok(()), "{preferences}");
+            assert_eq!(
+                after["profile"]["default_content_setting_values"]["braveShields"], 2,
+                "{preferences}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_settings_are_an_error_and_left_alone() {
+        for preferences in [
+            r#"{"profile":5}"#,
+            r#"{"profile":[]}"#,
+            r#"{"profile":{"default_content_setting_values":"x"}}"#,
+            r#"{"profile":{"default_content_setting_values":[1]}}"#,
+            "[]",
+        ] {
+            let (result, after) = shields_down_over(preferences);
+            assert!(result.is_err(), "{preferences}");
+            assert_eq!(
+                after,
+                serde_json::from_str::<Value>(preferences).unwrap(),
+                "{preferences}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_components_read_valid_manifests_and_skip_the_rest() {
+        let profile = tempfile::tempdir().unwrap();
+        let component = |id: &str, version: &str, manifest: Option<&str>| {
+            let directory = profile.path().join(id).join(version);
+            std::fs::create_dir_all(&directory).unwrap();
+            if let Some(manifest) = manifest {
+                std::fs::write(directory.join("manifest.json"), manifest).unwrap();
+            }
+        };
+        let id = "a".repeat(32);
+        component(
+            &id,
+            "1.0.2",
+            Some(r#"{"name":"Filters","version":"1.0.2"}"#),
+        );
+        component(&"b".repeat(32), "1", Some("{not json"));
+        component(&"c".repeat(32), "1", None);
+        component(
+            &"z".repeat(32),
+            "1",
+            Some(r#"{"name":"Not a component id"}"#),
+        );
+        component("Default", "1", Some(r#"{"name":"A profile folder"}"#));
+        let since = SystemTime::now() - Duration::from_secs(60);
+        let found = profile_components(profile.path(), since);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["id"], id);
+        assert_eq!(found[0]["name"], "Filters");
+        assert_eq!(found[0]["version"], "1.0.2");
+        assert!(found[0]["writtenS"]
+            .as_f64()
+            .is_some_and(|seconds| seconds > 0.0));
+        assert!(profile_components(&profile.path().join("missing"), since).is_empty());
+    }
+
+    #[test]
+    fn a_shared_brave_template_uses_the_requested_brave_binary() {
+        let context = Context {
+            executables: BTreeMap::from([("brave-off", PathBuf::from("/x/brave"))]),
+            options: Options {
+                browsers: vec![Config::BraveOff],
+                driver_command: vec!["driver".into()],
+                ..Options::default()
+            },
+            repository: PathBuf::from("/repo"),
+            cache: PathBuf::new(),
+            out: PathBuf::new(),
+            xpi: None,
+            templates: BTreeMap::new(),
+        };
+        assert!(context
+            .command(Config::Brave, Path::new("/p"), None)
+            .is_ok());
+        assert!(context.executable(Config::Edge).is_err());
     }
 
     #[test]

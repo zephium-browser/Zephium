@@ -198,6 +198,7 @@ pub struct FilterSource {
     format: SourceFormat,
     contents: String,
     trusted: bool,
+    zephium: bool,
 }
 
 impl FilterSource {
@@ -208,7 +209,14 @@ impl FilterSource {
             format,
             contents,
             trusted: false,
+            zephium: false,
         }
+    }
+
+    /// Zephium's built-in rules: they may call Zephium's own scriptlets.
+    pub(crate) const fn zephium_rules(mut self) -> Self {
+        self.zephium = true;
+        self
     }
 
     /// Lets this source's `trusted-*` scriptlet rules run.
@@ -368,7 +376,7 @@ impl Compiler {
         let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
             prepared
                 .iter()
-                .map(|source| (source.cosmetics.as_str(), source.trusted)),
+                .map(|source| (source.cosmetics.as_str(), source.trust)),
         )
         .map_err(CompileError::Cosmetics)?;
         // A policy with only scriptlets still has a program to run.
@@ -472,7 +480,7 @@ struct AcceptedRule {
 struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
-    trusted: bool,
+    trust: crate::ScriptletTrust,
     rules: String,
     cosmetics: String,
     #[cfg(feature = "webkit")]
@@ -662,7 +670,13 @@ fn prepare_source(
     Ok(PreparedSource {
         id: source.id,
         format: source.format,
-        trusted: source.trusted,
+        trust: if source.zephium {
+            crate::ScriptletTrust::Zephium
+        } else if source.trusted {
+            crate::ScriptletTrust::Trusted
+        } else {
+            crate::ScriptletTrust::Plain
+        },
         rules,
         cosmetics,
         #[cfg(feature = "webkit")]
