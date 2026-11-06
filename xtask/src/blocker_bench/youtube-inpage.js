@@ -1,7 +1,7 @@
-// Body of an async function run on the YouTube home feed: opens the first
-// video the feed links to by clicking it, then the player's next video, as a
-// person would and without a page load, and watches each for `__SECONDS__`
-// s. In these steps the player asks YouTube for each video's data, so the
+// Body of an async function run on a YouTube watch page: opens the first
+// other video the page links to by clicking it, then the player's next video,
+// as a person would and without a page load, and watches each for
+// `__SECONDS__` s. In these steps the player asks YouTube for each video's data, so the
 // requests the preload records show what was sent, after any blocker's
 // edits. The first navigation's numbers are also the result's own.
 const seconds = __SECONDS__;
@@ -88,9 +88,16 @@ const watch = async (open) => {
   };
 };
 
-const link = await until(() => [...document.querySelectorAll('ytd-rich-item-renderer a#thumbnail[href^="/watch?v="]')]
-  .find((element) => visible(element) && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer')), 20000);
-if (!link) throw new Error('the feed links no video');
+const opening = await until(() => document.getElementById('movie_player')?.getVideoData?.()?.video_id, 15000);
+if (!opening) throw new Error('the opening video did not load');
+const target = (element) => {
+  const url = new URL(element.href, location.href);
+  return url.searchParams.get('v') !== opening && !url.searchParams.has('list');
+};
+const link = await until(() => [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')]
+  .find((element) => visible(element) && target(element)
+    && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer')), 20000);
+if (!link) throw new Error('the watch page links no other video');
 const navigations = [await watch(() => link.click())];
 const next = await until(() => [...document.querySelectorAll('#movie_player .ytp-next-button')].find(visible), 5000);
 if (next && !navigations[0].error) navigations.push(await watch(() => next.click()));

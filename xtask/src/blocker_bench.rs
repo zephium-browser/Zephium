@@ -1559,8 +1559,8 @@ fn visit_line(visit: &Visit) -> String {
     )
 }
 
-/// The YouTube pass: the home feed, two videos opened from it in the page,
-/// five videos and one Shorts page.
+/// The YouTube pass: the home feed, two videos opened in the page from a
+/// watch page, five videos and one Shorts page.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
@@ -1601,8 +1601,8 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 ),
                 (
                     "inpage",
-                    None,
-                    "https://www.youtube.com/".to_string(),
+                    Some(VIDEOS[0].0),
+                    format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0),
                     &inpage,
                     2 * (WATCH_SECONDS * 1000 + 35_000) + 25_000,
                 ),
