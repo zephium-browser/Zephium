@@ -459,9 +459,9 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
         let Some(markers) = arguments.get(1) else {
             return true;
         };
-        let (kept, lost): (Vec<&str>, Vec<&str>) = markers
-            .split_whitespace()
-            .partition(|marker| keyed.contains(*marker) && stripped.contains(*marker));
+        let (kept, lost): (Vec<&str>, Vec<&str>) = markers.split_whitespace().partition(|marker| {
+            writable(marker) && keyed.contains(*marker) && stripped.contains(*marker)
+        });
         dropped += lost.len();
         if kept.is_empty() {
             return false;
@@ -506,6 +506,18 @@ fn applies(domains: &str, host: &str) -> bool {
         .filter_map(|entry| entry.strip_prefix('~'))
         .any(within);
     !excluded && (named.is_empty() || named.into_iter().any(within))
+}
+
+/// Whether the marker scriptlet writes `marker`: the page takes a lowercase
+/// letter or digit, then those or hyphens, and ignores any other name.
+fn writable(marker: &str) -> bool {
+    marker
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && marker
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 /// Whether `domains` negates a host below `host`, where a rule for `host`
@@ -1291,6 +1303,29 @@ mod tests {
         rules.push(marker_rule(ScriptletTrust::Zephium));
         assert_eq!(keep_edited_markers(&mut rules), 1);
         assert_eq!(markers(&rules).as_deref(), Some("channel yahi inline"));
+
+        // A marker the page would not write is dropped even when edits key on
+        // it, and a hyphenated one it writes is kept.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                trusted(
+                    &line
+                        .replace("lactmilli", "lact-milli")
+                        .replace("yahi", "-yahi")
+                        .replace("channel", "Channel"),
+                )
+            })
+            .collect();
+        rules.push(ScriptletRule {
+            line: MARKER.replace(
+                "channel lactmilli yahi inline",
+                "Channel lact-milli -yahi inline",
+            ),
+            trust: ScriptletTrust::Zephium,
+        });
+        assert_eq!(keep_edited_markers(&mut rules), 2);
+        assert_eq!(markers(&rules).as_deref(), Some("lact-milli inline"));
 
         // Edits that do not run on the marker's host leave nothing to mark with.
         for hosts in [

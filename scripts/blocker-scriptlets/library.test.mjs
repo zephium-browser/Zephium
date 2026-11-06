@@ -921,6 +921,17 @@ const playerText = () => JSON.stringify({
   fresh.fire('DOMContentLoaded');
   assert.ok(fresh.watching());
 
+  // A hyphenated marker is written as named; a name the page cannot write is skipped.
+  {
+    const context = { console, URLSearchParams, location: { pathname: '/watch', search: '' }, document: { readyState: 'complete', visibilityState: 'visible', addEventListener() {}, getElementById: () => null }, setInterval: () => 1, clearInterval() {} };
+    vm.createContext(context);
+    vm.runInContext(files.map(source).join('\n'), context);
+    context.zephiumPlayerMarker('-x Upper lact-milli2 inline', 'buffer_health_seconds=0.00 s|resolution=0x0', '', '1000', 'a.b=c', '', 'a.b*=t');
+    vm.runInContext(`var ytcfg = { data_: {}, get(key) { return this.data_[key]; }, set(values) { Object.assign(this.data_, values); } };
+      ytcfg.set({ INNERTUBE_CONTEXT: { client: { userAgent: ${JSON.stringify(AGENT)} } } });`, context);
+    assert.equal(vm.runInContext('ytcfg.get("INNERTUBE_CONTEXT").client.userAgent', context), marked('lact-milli2'));
+  }
+
   // Arguments it cannot read leave the page untouched.
   const context = { console, URLSearchParams, document: { addEventListener() {} }, location: { pathname: '/watch', search: '' } };
   vm.createContext(context);
