@@ -7,9 +7,10 @@
 //! runs only when the frame's host has an entry. The library is reviewed code
 //! shipped in the app and never fetched.
 //!
-//! The owner approved replacing response text with text from uBO's lists on
-//! YouTube's hosts only: those rules are `trusted-*`, so only uBO's lists can
-//! run them, and a rule naming any other host is not admitted.
+//! The owner approved replacing response text, and editing the objects the
+//! player sends, with values from uBO's lists on YouTube's hosts only: those
+//! rules are `trusted-*`, so only uBO's lists can run them, and a rule naming
+//! any other host is not admitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -18,6 +19,8 @@ use adblock::lists::{FilterSet, ParseOptions, RuleTypes};
 use adblock::resources::{MimeType, PermissionMask, Resource, ResourceType};
 use adblock::Engine;
 use base64::Engine as _;
+
+mod object_query;
 
 /// The permission `trusted-*` scriptlets need and only uBO's lists grant.
 const TRUSTED: PermissionMask = PermissionMask::from_bits(1);
@@ -28,14 +31,16 @@ const CALL_END: &str = "} catch ( e ) { }";
 const MAX_RULES: usize = 20_000;
 const MAX_RULE_BYTES: usize = 8 * 1024;
 const MAX_PROGRAM_BYTES: usize = 4 * 1024 * 1024;
-/// Scriptlets that replace response text, and the only sites, each with its
-/// subdomains, they run on.
-const RESPONSE_TEXT: &[&str] = &[
+/// Scriptlets that replace response text or edit what the page sends, and the
+/// only sites, each with its subdomains, they run on.
+const YOUTUBE_ONLY: &[&str] = &[
     "trusted-replace-fetch-response",
     "trusted-rpfr",
     "trusted-replace-xhr-response",
+    "trusted-edit-inbound-object",
 ];
-const RESPONSE_TEXT_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
+const YOUTUBE_SITES: &[&str] = &["youtube.com", "youtube-nocookie.com"];
+const EDIT_INBOUND_OBJECT: &str = "trusted-edit-inbound-object";
 
 struct Scriptlet {
     name: &'static str,
@@ -88,6 +93,13 @@ const HELPERS: &[Scriptlet] = &[
         trusted: false,
         dependencies: &["zephium-pattern.fn"],
         source: include_str!("scriptlets/text-replacer.js"),
+    },
+    Scriptlet {
+        name: "zephium-object-editor.fn",
+        aliases: &[],
+        trusted: false,
+        dependencies: &[],
+        source: include_str!("scriptlets/object-editor.js"),
     },
 ];
 
@@ -156,6 +168,13 @@ const SCRIPTLETS: &[Scriptlet] = &[
         trusted: true,
         dependencies: &[],
         source: include_str!("scriptlets/trusted-prevent-dom-bypass.js"),
+    },
+    Scriptlet {
+        name: "trusted-edit-inbound-object.js",
+        aliases: &[],
+        trusted: true,
+        dependencies: &["zephium-object-editor.fn"],
+        source: include_str!("scriptlets/trusted-edit-inbound-object.js"),
     },
     Scriptlet {
         name: "no-xhr-if.js",
@@ -279,7 +298,7 @@ pub(crate) fn classify(line: &str) -> Kind {
     }
     let arguments = arguments(&body[..body.len() - 1]);
     let name = arguments.first().copied().unwrap_or_default();
-    if !exception && RESPONSE_TEXT.contains(&name.strip_suffix(".js").unwrap_or(name)) {
+    if !exception && YOUTUBE_ONLY.contains(&name.strip_suffix(".js").unwrap_or(name)) {
         let mut named = domains
             .split(',')
             .filter(|domain| !domain.is_empty() && !domain.starts_with('~'))
@@ -287,7 +306,7 @@ pub(crate) fn classify(line: &str) -> Kind {
             .peekable();
         let on_sites = named.peek().is_some()
             && named.all(|domain| {
-                RESPONSE_TEXT_SITES.iter().any(|site| {
+                YOUTUBE_SITES.iter().any(|site| {
                     domain == *site
                         || domain
                             .strip_suffix(site)
@@ -299,6 +318,9 @@ pub(crate) fn classify(line: &str) -> Kind {
         }
     }
     let bare = name.strip_suffix(".js").unwrap_or(name);
+    if !exception && bare == EDIT_INBOUND_OBJECT && !edits_an_object(&body[..body.len() - 1]) {
+        return Kind::Unsupported;
+    }
     Kind::Rule {
         unknown: !exception && !known(name),
         substituted: !exception
@@ -307,6 +329,65 @@ pub(crate) fn classify(line: &str) -> Kind {
                 .get(2)
                 .is_some_and(|directive| directive.starts_with("war:")),
     }
+}
+
+/// Whether an edit-inbound-object rule names a method chain, an argument
+/// position and a query the page reads, exactly as the page receives them.
+fn edits_an_object(body: &str) -> bool {
+    let Some(arguments) = page_arguments(body) else {
+        return false;
+    };
+    let [_, chain, position, query] = arguments.as_slice() else {
+        return false;
+    };
+    let identifier = |name: &str| {
+        name.bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
+    };
+    let digits = position.strip_prefix('-').unwrap_or(position);
+    chain.split('.').all(identifier)
+        && !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && object_query::accepts(query)
+}
+
+/// A rule's arguments as adblock-rust hands them to the page: split at
+/// commas no backslash escapes, trimmed, with `\,` read as a comma and every
+/// other backslash kept. A quoted argument is not read here.
+fn page_arguments(body: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for character in body.chars() {
+        if escaped {
+            if character != ',' {
+                current.push('\\');
+            }
+            current.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ',' {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    parts.push(current);
+    parts
+        .into_iter()
+        .map(|part| {
+            let part = part.trim();
+            (!part.starts_with(['"', '\'', '`'])).then(|| part.to_owned())
+        })
+        .collect()
 }
 
 /// A rule's comma-separated arguments, trimmed and unquoted; `\,` is a comma
@@ -795,6 +876,83 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// uBlock Origin's quick fixes edit YouTube's player requests with these
+    /// rules, verbatim as of 2026-11-06.
+    const YOUTUBE_EDITS: [&str; 7] = [
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="channel"].context.client[?.clientName=="WEB"]+={"clientScreen":"CHANNEL"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="yahi"]+={"params":"YAHI"})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="inline"].playbackContext.contentPlaybackContext+={"isInlinePlaybackNoAd":true})"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/channel|lactmilli|inline/].playbackContext.contentPlaybackContext.lactMilliseconds="${now}")"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|lactmilli|inline|yahi|eafg|yaf4/].playbackContext.contentPlaybackContext.referer=repl({"regex":"(?:#reloadxhr)?$"\,"replacement":"#reloadxhr"}))"##,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"##,
+    ];
+
+    #[test]
+    fn youtube_s_object_edits_reach_the_page_as_its_reader_reads_them() {
+        let queries: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/blocker-scriptlets/edit-queries.json"
+        ))
+        .unwrap();
+        for (line, query) in YOUTUBE_EDITS
+            .iter()
+            .zip(queries["accepted"].as_array().unwrap())
+        {
+            assert!(
+                matches!(classify(line), Kind::Rule { unknown: false, .. }),
+                "{line}"
+            );
+            assert!(build(&[rule(line, false)]).unwrap().is_none(), "{line}");
+            let program = build(&[rule(line, true)]).unwrap().unwrap();
+            let call = format!(
+                "zephiumTrustedEditInboundObject(\"JSON.stringify\", \"0\", {})",
+                serde_json::to_string(query).unwrap()
+            );
+            assert!(program.script.contains(&call), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_object_edit_the_page_would_not_read_is_not_admitted() {
+        let edit = |hosts: &str, arguments: &str| {
+            format!("{hosts}##+js(trusted-edit-inbound-object, {arguments})")
+        };
+        for line in [
+            edit("example.com", r#"JSON.stringify, 0, [?.a]+={"b":1}"#),
+            edit("youtube.*", r#"JSON.stringify, 0, [?.a]+={"b":1}"#),
+            edit("www.youtube.com", r#"JSON.stringify, 0, [?.a]"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, [?.a]+={"b":1,"c":2}"#,
+            ),
+            edit("www.youtube.com", r#"JSON.stringify, 0, '[?.a]+={"b":1}'"#),
+            edit("www.youtube.com", r#"JSON.stringify, x, [?.a]+={"b":1}"#),
+            edit("www.youtube.com", r#"JSON.stringify, , [?.a]+={"b":1}"#),
+            edit("www.youtube.com", r#"JSON..stringify, 0, [?.a]+={"b":1}"#),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, [?.a]+={"b":1}, extra"#,
+            ),
+            edit(
+                "www.youtube.com",
+                r#"JSON.stringify, 0, v2:$.a=call([null\,"alert"])"#,
+            ),
+        ] {
+            assert!(matches!(classify(&line), Kind::Unsupported), "{line}");
+        }
+        assert!(matches!(
+            classify(&edit(
+                "m.youtube.com,www.youtube-nocookie.com",
+                r#"JSON.parse, -1, v2:$..adSlots"#
+            )),
+            Kind::Rule { unknown: false, .. }
+        ));
+        assert!(matches!(
+            classify(r#"example.com#@#+js(trusted-edit-inbound-object, JSON.stringify, 0, x)"#),
+            Kind::Rule { unknown: false, .. }
+        ));
     }
 
     #[test]

@@ -10,7 +10,7 @@ const source = (name) => readFileSync(new URL(name, library), 'utf8')
 const files = ['pattern.js', 'json-pruner.js', 'request-matcher.js', 'timer-booster.js', 'text-replacer.js',
   'json-prune.js', 'json-prune-fetch-response.js', 'json-prune-xhr-response.js', 'nano-settimeout-booster.js',
   'nano-setinterval-booster.js', 'trusted-replace-fetch-response.js', 'trusted-replace-xhr-response.js',
-  'trusted-prevent-dom-bypass.js', 'no-xhr-if.js'];
+  'trusted-prevent-dom-bypass.js', 'no-xhr-if.js', 'object-editor.js', 'trusted-edit-inbound-object.js'];
 
 const page = (fetchBody) => {
   class FakeXhr extends EventTarget {
@@ -483,6 +483,110 @@ const playerText = () => JSON.stringify({
   slower.zephiumSetTimeoutBooster('', '*', '200');
   vm.runInContext('setTimeout(() => {}, 10)', slower);
   assert.deepEqual(slower.timers, [['timeout', 500]]);
+}
+
+// Object edits: the queries the compiler admits, as edit-queries.json lists them for both readers.
+{
+  const context = page('{}');
+  const queries = JSON.parse(readFileSync(new URL('edit-queries.json', import.meta.url), 'utf8'));
+  for (const query of queries.accepted) {
+    assert.notEqual(context.zephiumObjectEditor(query), undefined, query);
+  }
+  for (const query of queries.rejected) {
+    assert.equal(context.zephiumObjectEditor(query), undefined, query);
+  }
+}
+
+// trusted-edit-inbound-object: today's YouTube rules on the objects the player stringifies.
+{
+  const queries = JSON.parse(readFileSync(new URL('edit-queries.json', import.meta.url), 'utf8')).accepted.slice(0, 7);
+  const context = page('{}');
+  for (const query of queries) {
+    context.zephiumTrustedEditInboundObject('JSON.stringify', '0', query);
+  }
+  const stringify = vm.runInContext('JSON.stringify', context);
+  const agent = (marker) => `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7${marker === '' ? '' : `; ${marker}`}) AppleWebKit/537.36`;
+  const request = (marker) => ({
+    context: { client: { clientName: 'WEB', clientScreen: 'WATCH', userAgent: agent(marker) } },
+    playbackContext: { contentPlaybackContext: { lactMilliseconds: '-1', referer: 'https://www.youtube.com/' } },
+    attestationRequest: { omitBotguardData: true },
+    videoId: 'abc',
+  });
+  const edited = (marker) => {
+    const body = request(marker);
+    const before = Date.now();
+    const text = stringify(body);
+    assert.deepEqual(JSON.parse(text), body);
+    const lact = body.playbackContext.contentPlaybackContext.lactMilliseconds;
+    if (lact !== '-1') {
+      assert.match(lact, /^[0-9]+$/);
+      assert.ok(Number(lact) >= before && Number(lact) <= Date.now());
+      body.playbackContext.contentPlaybackContext.lactMilliseconds = 'now';
+    }
+    return body;
+  };
+  const expected = (marker, change) => {
+    const body = request(marker);
+    change(body.context.client, body.playbackContext.contentPlaybackContext, body);
+    return body;
+  };
+  const reload = 'https://www.youtube.com/#reloadxhr';
+  assert.deepEqual(edited('channel'), expected('channel', (client, playback) => {
+    client.clientScreen = 'CHANNEL';
+    Object.assign(playback, { lactMilliseconds: 'now', referer: reload });
+  }));
+  assert.deepEqual(edited('lactmilli'), expected('lactmilli', (client, playback, body) => {
+    body.params = '8AUB';
+    Object.assign(playback, { lactMilliseconds: 'now', referer: reload });
+  }));
+  assert.deepEqual(edited('yahi'), expected('yahi', (client, playback, body) => {
+    body.params = 'YAHI';
+    playback.referer = reload;
+  }));
+  assert.deepEqual(edited('inline'), expected('inline', (client, playback) => {
+    Object.assign(playback, { isInlinePlaybackNoAd: true, lactMilliseconds: 'now', referer: reload });
+  }));
+  assert.deepEqual(edited('eafg'), expected('eafg', (client, playback) => {
+    playback.referer = reload;
+  }));
+  assert.deepEqual(edited(''), request(''));
+  const next = request('channel');
+  delete next.attestationRequest;
+  stringify(next);
+  assert.equal(next.context.client.clientScreen, 'WATCH');
+  const twice = request('yahi');
+  stringify(twice);
+  stringify(twice);
+  assert.equal(twice.playbackContext.contentPlaybackContext.referer, reload);
+  const comment = { createCommentParams: 'x', context: { client: { userAgent: agent('channel') } } };
+  stringify(comment);
+  assert.equal(comment.context.client.userAgent, agent(''));
+  assert.equal(stringify([1, 'a']), '[1,"a"]');
+  assert.match(vm.runInContext('String(JSON.stringify)', context), /native code/);
+}
+
+// The v2 grammar: removal, filters, regular-expression keys, quantifiers and assignments.
+{
+  const context = page('{}');
+  const edit = (query, value) => {
+    const editor = context.zephiumObjectEditor(query);
+    assert.notEqual(editor, undefined, query);
+    editor(value);
+    return value;
+  };
+  const store = () => ({ store: { bicycle: { price: 19 }, book: [{ price: 8, author: 'Rob' }, { price: 22, author: 'Evelyn' }, { price: 9, author: 'Herman' }] } });
+  assert.deepEqual(edit('v2:$..book[?@.price<10]', store()).store.book, [{ price: 22, author: 'Evelyn' }]);
+  assert.deepEqual(edit('v2:$..book[?@.price>20].price=0', store()).store.book.map((book) => book.price), [8, 0, 9]);
+  assert.deepEqual(edit('v2:$..book[?@.author^="E"]', store()).store.book.length, 2);
+  assert.deepEqual(edit('v2:$..book[?@.author=/R/]', store()).store.book.map((book) => book.author), ['Evelyn', 'Herman']);
+  assert.deepEqual(edit('v2:$.store.bicycle{0};$..book[?@.price<10]', store()), store());
+  assert.deepEqual(edit('v2:$.store.bicycle;$..book[?@.price<10]', store()).store.book.length, 1);
+  assert.deepEqual(edit('v2:$../^b/..price', store()), { store: { bicycle: {}, book: [{ author: 'Rob' }, { author: 'Evelyn' }, { author: 'Herman' }] } });
+  assert.deepEqual(edit('$..book[-1]', store()).store.book.length, 2);
+  assert.deepEqual(edit('v2:$.store+={"open":true}', store()).store.open, true);
+  assert.deepEqual(edit('v2:$.store.book[0].author=repl({"pattern":"o","replacement":"0"})', store()).store.book[0].author, 'R0b');
+  assert.deepEqual(edit('v2:$.missing=1', store()), store());
+  assert.equal(context.zephiumObjectEditor('v2:$.a=call([null,"alert","x"])'), undefined);
 }
 
 console.log('scriptlet library: all checks passed');
