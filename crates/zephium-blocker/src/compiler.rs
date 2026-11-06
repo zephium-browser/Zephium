@@ -256,6 +256,8 @@ pub struct Compiler {
     webkit_pruning: bool,
     #[cfg(feature = "webkit")]
     navigation_checked: bool,
+    #[cfg(feature = "runtime")]
+    badware_apart: bool,
 }
 
 impl Compiler {
@@ -269,7 +271,18 @@ impl Compiler {
             webkit_pruning: true,
             #[cfg(feature = "webkit")]
             navigation_checked: cfg!(feature = "runtime"),
+            #[cfg(feature = "runtime")]
+            badware_apart: false,
         }
+    }
+
+    /// Whether a runtime matcher leaves the badware list's blocking rules to
+    /// the navigation check's matcher, which the policy also asks about what
+    /// this one allows. The list's exceptions and cosmetics stay here.
+    #[cfg(feature = "runtime")]
+    pub const fn with_badware_apart(mut self, apart: bool) -> Self {
+        self.badware_apart = apart;
+        self
     }
 
     /// Whether the badware list's page and frame wildcard rules are judged
@@ -404,8 +417,18 @@ impl Compiler {
                     #[cfg(feature = "runtime")]
                     {
                         let badware_shadowed_rules = badware_shadowed_rules(&prepared);
+                        let badware_apart = self.badware_apart
+                            && prepared
+                                .iter()
+                                .any(|source| source.id.as_str() == NAVIGATION_CHECKED_SOURCE);
+                        if badware_apart {
+                            let mut apart = Sha256::new();
+                            apart.update(b"zephium-runtime-badware-apart-v1");
+                            apart.update(digest.as_bytes());
+                            digest = PolicyDigest(apart.finalize());
+                        }
                         let (runtime, blocking_entries, mut coverage) =
-                            compile_runtime(&mut prepared, self.limits)?;
+                            compile_runtime(&mut prepared, self.limits, badware_apart)?;
                         coverage.badware_shadowed_rules = badware_shadowed_rules;
                         (Some(runtime), Some(coverage), None, None, blocking_entries)
                     }
@@ -1133,23 +1156,48 @@ fn normalize_domain_predicate(value: &str) -> Option<String> {
 fn compile_runtime(
     prepared: &mut [PreparedSource],
     limits: CompileLimits,
+    badware_apart: bool,
 ) -> Result<(Engine, usize, RuntimeCoverage), CompileError> {
     let mut filters = FilterSet::new(false);
     for source in prepared {
-        filters.add_filter_list(
-            std::mem::take(&mut source.rules),
-            parse_options(source.format),
-        );
+        let mut rules = std::mem::take(&mut source.rules);
+        if badware_apart && source.id.as_str() == NAVIGATION_CHECKED_SOURCE {
+            rules = without_blocking_rules(&rules, source.format)?;
+        }
+        filters.add_filter_list(rules, parse_options(source.format));
     }
     let engine = Engine::new_with_filter_set(filters);
-    let (blocking_entries, coverage) = prepare_and_validate_runtime_engine(&engine, limits)?;
+    // Apart, the badware matcher holds blocks this one may lack.
+    let (blocking_entries, coverage) =
+        prepare_and_validate_runtime_engine(&engine, limits, !badware_apart)?;
     Ok((engine, blocking_entries, coverage))
+}
+
+/// `rules`' exceptions and `$badfilter` rules, which act on every list's
+/// blocks as in one matcher.
+#[cfg(feature = "runtime")]
+fn without_blocking_rules(rules: &str, format: SourceFormat) -> Result<String, CompileError> {
+    use adblock::filters::network::NetworkFilterMaskHelper as _;
+    let mut kept = String::new();
+    for line in rules.lines() {
+        let ParsedLine::Network(filter) = parse_filter(line, true, parse_options(format))
+            .map_err(|_| CompileError::UpstreamInvariant)?
+        else {
+            return Err(CompileError::AdmissionInvariant);
+        };
+        if filter.mask.is_exception() || filter.is_badfilter() {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    Ok(kept)
 }
 
 #[cfg(feature = "runtime")]
 pub(crate) fn prepare_and_validate_runtime_engine(
     engine: &Engine,
     limits: CompileLimits,
+    require_blocks: bool,
 ) -> Result<(usize, RuntimeCoverage), CompileError> {
     let preparation_limits = NetworkMatcherPreparationLimits {
         max_regexes: MAX_RUNTIME_REGEXES.min(limits.max_rules()),
@@ -1165,7 +1213,7 @@ pub(crate) fn prepare_and_validate_runtime_engine(
         .map_err(map_runtime_preparation_error)?;
     let blocking_entries = engine
         .source_independent_blocking_filter_entry_count_for_types(WEBVIEW2_AUDITED_REQUEST_TYPES);
-    if blocking_entries == 0 {
+    if require_blocks && blocking_entries == 0 {
         return Err(CompileError::NoNativeBlockingRules);
     }
     Ok((

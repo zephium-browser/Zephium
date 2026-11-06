@@ -1850,6 +1850,33 @@ pub(crate) fn compile_hidden(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Windows holds the badware list's blocks in the navigation check's own
+    // matcher, which the lists' matcher asks about what it allows.
+    #[cfg(feature = "blocker-seed-runtime")]
+    let badware_blocking_entries = {
+        let path = SOURCES
+            .iter()
+            .zip(paths)
+            .find(|(spec, _)| spec.id == "ublock-badware")
+            .map(|(_, path)| path)
+            .ok_or("the seed has no badware list")?;
+        let text = String::from_utf8(read_regular_file(path, MAX_SOURCE_BYTES)?)
+            .map_err(|_| format!("{} is not UTF-8", path.display()))?;
+        Compiler::default()
+            .compile(
+                zephium_blocker::CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("ublock-badware").map_err(|error| error.to_string())?,
+                    SourceFormat::Standard,
+                    text,
+                )],
+            )
+            .map_err(|error| format!("{error:?}"))?
+            .report()
+            .native_blocking_rule_entries()
+    };
+    #[cfg(not(feature = "blocker-seed-runtime"))]
+    let badware_blocking_entries = 0;
     let native_target = match expected_target {
         CompileTarget::Runtime => zephium_blocker::CompileTarget::Runtime,
         CompileTarget::Webkit => zephium_blocker::CompileTarget::WebKit,
@@ -1859,6 +1886,8 @@ pub(crate) fn compile_hidden(
     // loads with its runtime matcher, though this graph builds only WebKit.
     #[cfg(feature = "blocker-seed-webkit")]
     let compiler = compiler.with_navigation_check(true);
+    #[cfg(feature = "blocker-seed-runtime")]
+    let compiler = compiler.with_badware_apart(true);
     #[cfg(feature = "blocker-seed-webkit")]
     let compiler = if unpruned {
         compiler.without_webkit_pruning()
@@ -1994,7 +2023,10 @@ pub(crate) fn compile_hidden(
         candidate_rules: report.candidate_rules(),
         accepted_rules: report.accepted_rules(),
         rejected_rules: report.rejected_rules(),
-        native_blocking_rule_entries: report.native_blocking_rule_entries(),
+        native_blocking_rule_entries: report
+            .native_blocking_rule_entries()
+            .checked_add(badware_blocking_entries)
+            .ok_or("blocking rule entries overflow")?,
         attribution_sensitive_rules: report.attribution_sensitive_rules(),
         runtime_omitted_rules: report.runtime_omitted_rules(),
         runtime_approximated_rules: report.runtime_approximated_rules(),

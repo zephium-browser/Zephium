@@ -411,7 +411,7 @@ pub(crate) struct RuntimeEngine<'a> {
 /// A policy split across two matchers, the request parsed once under the
 /// first one's limits: the first decides unless it lets the request through,
 /// or cannot judge it, and the second blocks it. Otherwise the first one's
-/// result stands, an error included.
+/// error stands, then the second one's, then the first one's decision.
 pub(crate) fn evaluate_split(
     first: RuntimeEngine<'_>,
     second: RuntimeEngine<'_>,
@@ -449,6 +449,7 @@ fn split_decision(
     }
     match match_native(second.engine, native, source_independent_only) {
         Ok(decision) if decision.action == NetworkAction::Block => Ok(decision),
+        Err(error) if decided.is_ok() => Err(error),
         _ => decided,
     }
 }

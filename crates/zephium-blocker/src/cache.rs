@@ -670,7 +670,7 @@ fn decode_navigation(
     }
     let mut engine = adblock::Engine::default();
     engine.deserialize(bytes).ok()?;
-    let (blocking_entries, _) = prepare_and_validate_runtime_engine(&engine, limits).ok()?;
+    let (blocking_entries, _) = prepare_and_validate_runtime_engine(&engine, limits, true).ok()?;
     Some(Some((
         Box::new(CachedRuntimeRules::new(engine, limits)),
         blocking_entries,
@@ -871,12 +871,13 @@ fn validate_runtime_payload(
     {
         return None;
     }
+    // The lists' matcher leaves the badware list's blocks to the kept
+    // navigation matcher, and the coverage counts both.
+    let navigation = decode_navigation(record.navigation, limits)?;
     let mut engine = adblock::Engine::default();
     engine.deserialize(record.payload).ok()?;
-    let (blocking_entries, _) = prepare_and_validate_runtime_engine(&engine, limits).ok()?;
-    // The lists' matcher leaves the badware list to the kept navigation
-    // matcher, and the coverage counts both.
-    let navigation = decode_navigation(record.navigation, limits)?;
+    let (blocking_entries, _) =
+        prepare_and_validate_runtime_engine(&engine, limits, navigation.is_none()).ok()?;
     let blocking_entries =
         blocking_entries.checked_add(navigation.as_ref().map_or(0, |(_, entries)| *entries))?;
     if u64::try_from(blocking_entries).ok()? != record.coverage.blocking_rule_entries {
@@ -2235,15 +2236,30 @@ mod tests {
             (CompileTarget::Runtime, key(5)),
             (CompileTarget::WebKit, key(6)),
         ] {
-            let (compiled, rules) = compiled_artifact(target, "cache-navigation");
             for kept in [None, Some(&navigation)] {
                 // A runtime policy that keeps the badware matcher leaves that
-                // list to it, and counts its rules.
-                let rules = match (target, kept) {
+                // list's blocks to it, and counts them.
+                let (compiled, rules) = match (target, kept) {
                     (CompileTarget::Runtime, Some(navigation)) => {
-                        crate::worker::adapt_split_rules(compiled.clone(), navigation.clone())
+                        let source = |id: &str| {
+                            crate::FilterSource::new(
+                                crate::SourceId::new(id).unwrap(),
+                                crate::SourceFormat::Standard,
+                                "||ads.zephium.invalid^$script".to_owned(),
+                            )
+                        };
+                        let lists = crate::Compiler::default()
+                            .with_badware_apart(true)
+                            .compile(
+                                CompileTarget::Runtime,
+                                vec![source("cache-navigation"), source("ublock-badware")],
+                            )
+                            .unwrap();
+                        let rules =
+                            crate::worker::adapt_split_rules(lists.clone(), navigation.clone());
+                        (lists, rules)
                     }
-                    _ => rules.clone(),
+                    _ => compiled_artifact(target, "cache-navigation"),
                 };
                 let record = encode_compiled_record(cache_key, &compiled, &rules, kept).unwrap();
                 let loaded_navigation = match target {

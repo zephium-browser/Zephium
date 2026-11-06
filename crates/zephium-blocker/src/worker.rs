@@ -1329,14 +1329,15 @@ fn compile_policy(
     // Badware in the catalog that cannot be compiled fails the generation: the
     // policy applied before stays, never one without the navigation check.
     let navigation = compile_navigation(catalog, compiler)?;
-    // A runtime matcher leaves the badware list to the navigation check's
-    // matcher, and asks it about what the other lists allow.
+    // A runtime matcher leaves the badware list's blocks to the navigation
+    // check's matcher, and asks it about what the lists allow.
     let badware = navigation
         .as_ref()
         .filter(|_| target == CompileTarget::Runtime);
-    let sources = without_badware(catalog.instantiate(), badware.is_some());
+    #[cfg(feature = "runtime")]
+    let compiler = compiler.with_badware_apart(badware.is_some());
     let lists = compiler
-        .compile(target, with_own_rules(sources, target))
+        .compile(target, with_own_rules(catalog.instantiate(), target))
         .map_err(|error| map_compile_error(&error))?;
     let rules = adapt_rules_with(lists.clone(), badware)?;
     Ok(CompiledPolicy {
@@ -1421,19 +1422,6 @@ fn compile_navigation(
     Ok(None)
 }
 
-#[cfg(feature = "runtime")]
-fn without_badware(sources: Vec<FilterSource>, split: bool) -> Vec<FilterSource> {
-    sources
-        .into_iter()
-        .filter(|source| !split || source.id().as_str() != NAVIGATION_SOURCE)
-        .collect()
-}
-
-#[cfg(not(feature = "runtime"))]
-fn without_badware(sources: Vec<FilterSource>, _: bool) -> Vec<FilterSource> {
-    sources
-}
-
 fn with_navigation(
     rules: Arc<ContentRules>,
     navigation: Option<Arc<RuntimePolicyArtifact>>,
@@ -1470,7 +1458,7 @@ pub(crate) fn adapt_rules(
     adapt_rules_with(rules, None)
 }
 
-/// `lists` as a runtime policy that leaves the badware list to `badware`.
+/// `lists` as a runtime policy that leaves the badware list's blocks to `badware`.
 #[cfg(all(test, feature = "runtime", feature = "webkit"))]
 pub(crate) fn adapt_split_rules(lists: CompiledRules, badware: CompiledRules) -> Arc<ContentRules> {
     adapt_rules_with(
@@ -1481,8 +1469,8 @@ pub(crate) fn adapt_split_rules(lists: CompiledRules, badware: CompiledRules) ->
 }
 
 /// `rules` as content rules. A runtime matcher given `badware`, the matcher
-/// the navigation check shares, holds every other list and asks it about
-/// what they allow; the badware list's rules still count in its coverage.
+/// the navigation check shares, holds every rule but the badware list's
+/// blocks and asks it about what the lists allow.
 fn adapt_rules_with(
     rules: CompiledRules,
     badware: Option<&Arc<RuntimePolicyArtifact>>,
@@ -1553,7 +1541,7 @@ fn adapt_rules_with(
         .and_then(|badware| badware.compiled_rules())
         .filter(|_| rules.target() == CompileTarget::Runtime)
     {
-        Some(badware) => with_runtime_coverage(coverage, badware.report())?,
+        Some(badware) => with_badware_blocks(coverage, badware.report())?,
         None => coverage,
     };
     let result = match rules.target() {
@@ -1592,42 +1580,19 @@ fn adapt_rules_with(
     Ok(attach_cosmetics(result, cosmetics))
 }
 
-/// `coverage` with a separately compiled runtime matcher's rules counted in.
-fn with_runtime_coverage(
+/// `coverage` with the badware matcher's blocks counted in. The lists'
+/// matcher counts every rule of the badware list itself.
+fn with_badware_blocks(
     coverage: ContentRuleCoverage,
     report: &crate::CompilationReport,
 ) -> Result<ContentRuleCoverage, BlockerCompileFailure> {
-    let add = |total: u64, more: usize| {
-        u64::try_from(more)
-            .ok()
-            .and_then(|more| total.checked_add(more))
-            .ok_or(BlockerCompileFailure::ResourceLimit)
-    };
+    let blocking_rule_entries = u64::try_from(report.native_blocking_rule_entries())
+        .ok()
+        .and_then(|more| coverage.blocking_rule_entries.checked_add(more))
+        .ok_or(BlockerCompileFailure::ResourceLimit)?;
     Ok(ContentRuleCoverage {
-        source_rules: add(coverage.source_rules, report.candidate_rules())?,
-        accepted_rules: add(coverage.accepted_rules, report.accepted_rules())?,
-        rejected_rules: add(coverage.rejected_rules, report.rejected_rules())?,
-        platform_omitted_rules: add(
-            coverage.platform_omitted_rules,
-            report.runtime_omitted_rules(),
-        )?,
-        platform_approximated_rules: add(
-            coverage.platform_approximated_rules,
-            report.runtime_approximated_rules(),
-        )?,
-        platform_resource_approximated_rules: add(
-            coverage.platform_resource_approximated_rules,
-            report.runtime_resource_approximated_rules(),
-        )?,
-        platform_source_kind_approximated_rules: add(
-            coverage.platform_source_kind_approximated_rules,
-            report.runtime_source_kind_approximated_rules(),
-        )?,
-        platform_attribution_approximated_rules: coverage.platform_attribution_approximated_rules,
-        blocking_rule_entries: add(
-            coverage.blocking_rule_entries,
-            report.native_blocking_rule_entries(),
-        )?,
+        blocking_rule_entries,
+        ..coverage
     })
 }
 
@@ -2307,16 +2272,28 @@ mod tests {
                 Arc::from(rules),
             )
         };
+        // More candidates for one request than a matcher checks: lists on
+        // budget.example, badware on trap.example.
+        let crowd = |host: &str, path: &str| {
+            (1..=300)
+                .map(|n| format!("||{host}/{path}{}$script\n", "-".repeat(n)))
+                .collect::<String>()
+        };
+        let maintained = format!(
+            "||ads.example^\n@@||ads.example/ok.js\n||tracker.example^$document\n{}",
+            crowd("budget.example", "lists")
+        );
+        let badware = format!(
+            "{}{}",
+            "||scam.example^$all\n@@||scam.example/landing$doc\n||cdn.example/x.js$script\n\
+             @@||ads.example/badware-ok.js\nnews.example##.badware-banner\n\
+             ||budget.example^$script\n",
+            crowd("trap.example", "badware")
+        );
         let catalog = StaticPolicyCatalog::new(vec![
-            source(
-                "maintained",
-                "||ads.example^\n@@||ads.example/ok.js\n||tracker.example^$document",
-            ),
+            source("maintained", &maintained),
             source("maintained-unbreak", "@@||scam.example/ok.js"),
-            source(
-                "ublock-badware",
-                "||scam.example^$all\n@@||scam.example/landing$doc\n||cdn.example/x.js$script",
-            ),
+            source("ublock-badware", &badware),
         ])
         .unwrap();
         let policy = compile_policy(&catalog, Compiler::default(), CompileTarget::Runtime).unwrap();
@@ -2430,6 +2407,12 @@ mod tests {
             // The other lists decide as before, their own exceptions included.
             assert_eq!(decide("https://ads.example/a.js", Script), Block, "{name}");
             assert_eq!(decide("https://ads.example/ok.js", Script), Allow, "{name}");
+            // The badware list's exceptions act on the other lists' blocks.
+            assert_eq!(
+                decide("https://ads.example/badware-ok.js", Script),
+                Allow,
+                "{name}"
+            );
             // Unlike uBlock Origin, another list's exception does not lift a
             // badware block.
             assert_eq!(
@@ -2450,6 +2433,131 @@ mod tests {
                 badware,
                 "{name}"
             );
+        }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_matcher_that_cannot_judge_a_request_is_counted_and_badware_still_blocks() {
+        use zephium_core::blocker::NetworkDecision::{Allow, Block};
+        use zephium_core::blocker::NetworkResourceType::Script;
+        let page = "https://news.example/";
+        for (name, rules) in split_policies() {
+            let policy = rules.runtime_policy().unwrap();
+            let split = name != "lists alone";
+            // The lists' matcher cannot judge it; badware blocks it, so
+            // nothing fails open.
+            assert_eq!(
+                policy.decide(&split_request("https://budget.example/lists", page, Script)),
+                if split { Block } else { Allow },
+                "{name}"
+            );
+            assert_eq!(
+                policy.diagnostics().candidate_budget_exhausted,
+                u64::from(!split),
+                "{name}"
+            );
+            // The lists allow it and badware cannot judge it: it loads, and
+            // the error is counted.
+            assert_eq!(
+                policy.decide(&split_request("https://trap.example/badware", page, Script)),
+                Allow,
+                "{name}"
+            );
+            assert_eq!(policy.diagnostics().candidate_budget_exhausted, 1, "{name}");
+        }
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_badware_only_change_changes_the_runtime_policy_s_identity() {
+        let catalog = |badware: &str| {
+            StaticPolicyCatalog::new(vec![
+                PolicySource::new(
+                    SourceId::new("maintained").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example^"),
+                ),
+                PolicySource::new(
+                    SourceId::new("ublock-badware").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(badware),
+                ),
+            ])
+            .unwrap()
+        };
+        let digest = |badware: &str| {
+            compile_policy(
+                &catalog(badware),
+                Compiler::default(),
+                CompileTarget::Runtime,
+            )
+            .unwrap()
+            .rules
+            .digest()
+        };
+        assert_ne!(
+            digest("||scam.example^"),
+            digest("||scam.example^\n||new-scam.example^")
+        );
+        // The same lists in one matcher are another policy.
+        let whole = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                with_own_rules(
+                    catalog("||scam.example^").instantiate(),
+                    CompileTarget::Runtime,
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            ContentRuleDigest::from_bytes(*whole.digest().as_bytes()),
+            digest("||scam.example^")
+        );
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn a_catalog_whose_only_blocks_are_badware_s_compiles_and_loads() {
+        let catalog = StaticPolicyCatalog::new(vec![
+            PolicySource::new(
+                SourceId::new("maintained").unwrap(),
+                SourceFormat::Standard,
+                Arc::from("@@||ads.example/ok.js"),
+            ),
+            PolicySource::new(
+                SourceId::new("ublock-badware").unwrap(),
+                SourceFormat::Standard,
+                Arc::from("||scam.example^$all"),
+            ),
+        ])
+        .unwrap();
+        let policy = compile_policy(&catalog, Compiler::default(), CompileTarget::Runtime)
+            .expect("the badware matcher holds the blocks");
+        assert!(policy.rules.coverage().has_blocking_entries());
+        #[cfg(all(
+            feature = "runtime-exact",
+            any(
+                all(target_os = "windows", feature = "runtime"),
+                all(not(target_os = "windows"), feature = "webkit")
+            )
+        ))]
+        loaded_split_policy(&policy);
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_badware_list_s_cosmetics_stay_in_the_policy() {
+        for (name, rules) in split_policies() {
+            if name == "lists alone" {
+                continue;
+            }
+            let plan = rules
+                .cosmetics()
+                .expect("cosmetics")
+                .document_plan("https://news.example/")
+                .unwrap();
+            assert!(plan.css.contains(".badware-banner"), "{name}");
         }
     }
 
