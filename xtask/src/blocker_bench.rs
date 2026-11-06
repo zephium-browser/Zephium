@@ -1117,6 +1117,7 @@ struct Opened {
     tab: Value,
     load_ms: Option<f64>,
     timed_out: bool,
+    load_wait: Option<Value>,
 }
 
 fn open(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
@@ -1132,6 +1133,7 @@ fn open(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
             .get("timedOut")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
     })
 }
 
@@ -1149,6 +1151,7 @@ fn open_behind(driver: &mut Driver, url: &str) -> Result<Opened, Failure> {
             .get("timedOut")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
     })
 }
 
@@ -1166,6 +1169,7 @@ fn navigate(driver: &mut Driver, tab: &Value, url: &str) -> Result<Opened, Failu
             .get("timedOut")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        load_wait: reply.get("loadWait").cloned(),
     })
 }
 
@@ -1787,6 +1791,7 @@ fn youtube_background_step(
             record.timed_out = behind.timed_out;
             std::thread::sleep(BACKGROUND_WAIT);
             let result = eval(
+            record.load_wait = behind.load_wait;
                 driver,
                 &behind.tab,
                 sites::YOUTUBE_BACKGROUND,
@@ -1838,6 +1843,7 @@ fn youtube_hidden_next_step(
         record.timed_out = watch.timed_out;
         let play = sites::play_script(PLAY_IN_VIEW_SECONDS);
         let played = eval(
+        record.load_wait = watch.load_wait.clone();
             driver,
             &watch.tab,
             &play,
@@ -1910,6 +1916,7 @@ fn youtube_step(
         record.timed_out = opened.timed_out;
         let page = (|| -> Result<(), Failure> {
             let opened_at = Instant::now();
+        record.load_wait = opened.load_wait.clone();
             let wait_ms = if *consent_pending {
                 YOUTUBE_DIALOG_WAIT_MS
             } else {

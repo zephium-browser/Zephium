@@ -209,24 +209,32 @@ class Chromium extends Driver {
   }
 
   // The lifecycle "load" event fires alongside Page.loadEventFired, and its loaderId keeps a late event of the
-  // previous document, or of a subframe, from ending the wait early.
+  // previous document, or of a subframe, from ending the wait early. A navigation the browser restarts commits
+  // under another loaderId, so the main frame's committed documents count too.
   async load(tab, url, timeoutMs) {
     const sessionId = this.session(tab);
     const loaded = new Set();
+    const committed = new Set();
     let wake = () => {};
     const stop = this.rpc.listen(message => {
-      if (message.sessionId !== sessionId || message.method !== "Page.lifecycleEvent" || message.params.name !== "load") return;
-      loaded.add(message.params.loaderId);
+      if (message.sessionId !== sessionId) return;
+      if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) committed.add(message.params.frame.loaderId);
+      else if (message.method === "Page.lifecycleEvent" && message.params.name === "load") loaded.add(message.params.loaderId);
+      else return;
       wake();
     });
     const start = performance.now();
+    let navigated;
+    const done = () => navigated.loaderId && (loaded.has(navigated.loaderId) || [...committed].some(id => loaded.has(id)));
     try {
       const timedOut = await raceTimeout((async () => {
-        const result = await this.rpc.send("Page.navigate", { url }, sessionId);
-        if (result.errorText) throw new Error(result.errorText);
-        while (result.loaderId && !loaded.has(result.loaderId)) await new Promise(done => { wake = done; });
+        navigated = await this.rpc.send("Page.navigate", { url }, sessionId);
+        if (navigated.errorText) throw new Error(navigated.errorText);
+        while (navigated.loaderId && !done()) await new Promise(resolve => { wake = resolve; });
       })(), timeoutMs);
-      return { loadMs: elapsed(start), ...(timedOut && { timedOut: true }) };
+      if (!timedOut) return { loadMs: elapsed(start) };
+      const restarted = [...committed].filter(id => id !== navigated?.loaderId).length;
+      return { loadMs: elapsed(start), timedOut: true, loadWait: { committed: committed.size, restarted, loads: loaded.size } };
     } finally {
       stop();
     }

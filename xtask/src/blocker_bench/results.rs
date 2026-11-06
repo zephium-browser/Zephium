@@ -90,6 +90,10 @@ pub(super) struct YoutubeStep {
     #[serde(alias = "loadMs")]
     pub(super) nav_ms: Option<f64>,
     pub(super) timed_out: bool,
+    /// When the load timed out: the main-frame documents committed, how many
+    /// of them under a restarted navigation, and the load events seen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) load_wait: Option<Value>,
     pub(super) cpu_ms: Option<f64>,
     pub(super) footprint_mb: Option<f64>,
     pub(super) blocked: Option<u64>,
