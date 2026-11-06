@@ -3,6 +3,7 @@
 //! tests share one answer.
 
 use zephium_core::geometry::Rect;
+use zephium_core::layout::SidebarPosition;
 
 /// `(x, y, width, height)` in physical pixels.
 pub(crate) type PixelRect = (i32, i32, i32, i32);
@@ -22,6 +23,22 @@ pub(crate) fn card_pixels(card: Rect, client: (i32, i32), scale: f64) -> Option<
     let width = ((card.width * scale).round() as i32).min(client.0 - x);
     let height = client.1 - 2 * y;
     (x >= 0 && y >= 0 && width > 0 && height > 0).then_some((x, y, width, height))
+}
+
+/// Follow the frame's mirrored `100% + 24px` hidden-card translation.
+pub(crate) fn sliding_card_pixels(
+    placed: PixelRect,
+    width: f64,
+    scale: f64,
+    away: f64,
+    sidebar_position: SidebarPosition,
+) -> PixelRect {
+    let travel = ((width + 24.0) * scale * away).round() as i32;
+    let travel = match sidebar_position {
+        SidebarPosition::Left => -travel,
+        SidebarPosition::Right => travel,
+    };
+    (placed.0 + travel, placed.1, placed.2, placed.3)
 }
 
 /// The card's rectangle in the coordinates of a page window placed at
@@ -76,6 +93,25 @@ mod tests {
         assert_eq!(
             in_container((8, 8, 256, 784), (400, 40, 700, 500)),
             ((-392, -32), (256, 784))
+        );
+    }
+
+    #[test]
+    fn hidden_card_travel_uses_explicit_side_even_in_a_narrow_window() {
+        let placed = (8, 8, 184, 584);
+        for (away, distance) in [(0.0, 0), (0.5, 140), (1.0, 280)] {
+            assert_eq!(
+                sliding_card_pixels(placed, 256.0, 1.0, away, SidebarPosition::Left),
+                (8 - distance, 8, 184, 584),
+            );
+            assert_eq!(
+                sliding_card_pixels(placed, 256.0, 1.0, away, SidebarPosition::Right),
+                (8 + distance, 8, 184, 584),
+            );
+        }
+        assert_eq!(
+            sliding_card_pixels(placed, 256.0, 1.5, 1.0, SidebarPosition::Right),
+            (428, 8, 184, 584),
         );
     }
 }

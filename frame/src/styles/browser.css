@@ -344,6 +344,9 @@
   min-height: 0;
   gap: 8px;
 }
+.browser-sidebar[data-sidebar-position="right"] .sidebar-columns {
+  flex-direction: row-reverse;
+}
 .sidebar-browser-column {
   display: flex;
   flex: 1;
@@ -637,6 +640,9 @@
 .browser-sidebar[data-reshaping="true"] > .sidebar-columns {
   width: var(--sidebar-width);
 }
+.browser-sidebar[data-sidebar-position="right"][data-reshaping="true"] > .sidebar-columns {
+  align-self: flex-end;
+}
 /* The header is one shape or the other, never both; the new one fades in. */
 .browser-sidebar[data-header-fresh="true"] > header {
   animation: interface-fade var(--motion-slow) var(--ease-out) both;
@@ -902,11 +908,14 @@
   background: var(--color-fill);
   animation: tool-host-in var(--motion-page) var(--ease-emphasized) backwards;
 }
+.browser-sidebar[data-sidebar-position="right"] .sidebar-tool-host {
+  --tool-host-from: 8px;
+}
 /* A tool grows out of the rail it was opened from. */
 @keyframes tool-host-in {
   from {
     opacity: 0;
-    translate: -8px 0;
+    translate: var(--tool-host-from, -8px) 0;
   }
 }
 
@@ -961,8 +970,13 @@
   }
 }
 
+.shell[data-sidebar-position="right"] .stage-column > main,
+.shell[data-sidebar-position="right"] .internal-stage {
+  padding-inline: 0 8px;
+}
+
 /* A hidden column is out of the row, so the page's own inset from it goes. */
 .shell:has(> .browser-sidebar:is([data-hidden], [data-leaving])) .stage-column > main,
 .shell:has(> .browser-sidebar:is([data-hidden], [data-leaving])) .internal-stage {
-  padding-inline-start: 0;
+  padding-inline: 0;
 }

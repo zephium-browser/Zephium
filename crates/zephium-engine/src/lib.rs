@@ -606,6 +606,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
+use zephium_core::layout::SidebarPosition;
 use zephium_core::permissions::{PagePermissionRequestId, PagePermissionRequestSettlement};
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, HistoryRequestId, NativeDispatch,
@@ -3268,6 +3269,7 @@ impl Engine for WebviewEngine {
         raised: bool,
         card: Rect,
         slide: bool,
+        sidebar_position: SidebarPosition,
     ) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
@@ -3275,7 +3277,9 @@ impl Engine for WebviewEngine {
             let queued_delivery = self.event_delivery.clone();
             let queued_fatal = self.fatal_security_failure.clone();
             NativeDispatch::from_scheduled(self.run(move || {
-                if !host::try_with(move |host| host.raise_chrome(window, raised, card, slide)) {
+                if !host::try_with(move |host| {
+                    host.raise_chrome(window, raised, card, slide, sidebar_position)
+                }) {
                     fail_native_host_admission(
                         &queued_delivery,
                         &queued_retirement,
@@ -3287,7 +3291,7 @@ impl Engine for WebviewEngine {
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = (window, raised, card, slide);
+            let _ = (window, raised, card, slide, sidebar_position);
             NativeDispatch::Unsupported
         }
     }

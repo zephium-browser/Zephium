@@ -416,6 +416,60 @@ fn topology_collapse_revokes_a_captured_divider_before_its_path_can_alias() {
 }
 
 #[test]
+fn right_sidebar_split_coordinates_follow_the_page_and_side_changes_revoke_capture() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    shell.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    let win = shell.windows.focused().unwrap();
+    let tree = shell.pane_tree().unwrap();
+    let content = layout::compute(win.size, win.mode, win.metrics, true)
+        .content
+        .unwrap();
+    assert_eq!(content.x, 8.0);
+    let local = Rect::new(0.0, 0.0, content.width, content.height);
+    let (target, region) = split::layout(&tree, local, win.metrics.gap)[0];
+    let drop = shell
+        .resolve_drop(
+            content.x + region.x + 1.0,
+            content.y + region.y + region.height / 2.0,
+        )
+        .unwrap();
+    assert_eq!(drop.tab, target);
+    assert_eq!(drop.edge, Edge::Left);
+    let divider = split::divider_at_path(&tree, local, win.metrics.gap, &[]).unwrap();
+    shell.handle(Command::DividerGrab {
+        x: content.x + divider.strip.x + divider.strip.width / 2.0,
+        y: content.y + divider.strip.y + 10.0,
+    });
+    assert!(shell.divider.is_some());
+    shell.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "left".into(),
+    });
+    assert!(shell.divider.is_none());
+    shell.handle(Command::DividerRelease {
+        x: Some(content.x + content.width * 0.8),
+        y: Some(content.y + 10.0),
+    });
+    let Pane::Branch { ratio, .. } = shell.pane_tree().unwrap() else {
+        panic!("the split remains live");
+    };
+    assert_eq!(ratio, 0.5);
+}
+
+#[test]
 fn native_divider_event_changes_ratio_only_and_rejects_non_finite_state() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, screen) = setup_with(store.clone());

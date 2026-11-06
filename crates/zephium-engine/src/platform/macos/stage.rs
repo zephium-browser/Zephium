@@ -30,7 +30,7 @@ use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::DropPreview;
 use zephium_core::split::{self, Divider, Pane};
 
-use crate::pane_geometry::rounded_native_size;
+use crate::pane_geometry::{rounded_native_size, SidebarSlide};
 
 use super::pointer_cover::{Parked, PointerCover};
 
@@ -210,6 +210,7 @@ pub struct StageIvars {
     /// frame it then takes. The generation retires a completion whose slide
     /// a newer layout has already settled.
     held_frame: Cell<Option<NSRect>>,
+    sidebar_slide: Cell<Option<SidebarSlide>>,
     motion_generation: Cell<u64>,
 }
 
@@ -221,6 +222,24 @@ define_class!(
     pub struct ContentStage;
 
     impl ContentStage {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            let mut point = point;
+            if let Some(slide) = self.ivars().sidebar_slide.get() {
+                let clip = slide.clip;
+                if point.x < clip.x || point.x >= clip.x + clip.width
+                    || point.y < clip.y || point.y >= clip.y + clip.height
+                {
+                    return std::ptr::null_mut();
+                }
+                if let Some(layer) = self.layer() {
+                    point.x -= presented_shift(&layer).0;
+                }
+            }
+            // SAFETY: NSView receives its usual superview-space point.
+            unsafe { msg_send![super(self), hitTest: point] }
+        }
+
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, _old: NSSize) {
             self.cancel_split_drag(false);
@@ -401,12 +420,14 @@ impl ContentStage {
     /// Whether a slide to `frame` can be carried out on the layer: the stage
     /// is on screen and only its horizontal extent changes.
     pub fn can_slide_to(&self, frame: NSRect) -> bool {
-        let current = self.motion_target();
         !self.isHidden()
-            && current.size.width > 0.0
-            && current.origin.y == frame.origin.y
-            && current.size.height == frame.size.height
-            && current.origin.x != frame.origin.x
+            && self
+                .ivars()
+                .visible
+                .try_borrow()
+                .is_ok_and(|visible| !visible.is_empty())
+            && SidebarSlide::between(stage_rect(self.motion_target()), stage_rect(frame), false)
+                .is_some()
     }
 
     /// The frame the stage is at, or is travelling to.
@@ -432,53 +453,51 @@ impl ContentStage {
         };
         let generation = self.ivars().motion_generation.get().wrapping_add(1);
         self.ivars().motion_generation.set(generation);
-        let (from, to) = if frame.size.width >= current.size.width {
+        let Some(slide) =
+            SidebarSlide::between(stage_rect(current), stage_rect(frame), self.under_chrome())
+        else {
             self.setFrame(frame);
-            (current.origin.x - frame.origin.x, 0.0)
-        } else {
-            self.ivars().held_frame.set(Some(frame));
-            (0.0, frame.origin.x - current.origin.x)
+            return;
         };
-        let animation = translation(from, to, SLIDE_SECONDS);
-        // Travelling right from under a hidden sidebar's card, the stage gives
-        // way to the column the card becomes: it is cut at its new edge,
-        // which stays where it is while the stage slides out past it, so the
-        // page never shows where the column now stands. The cut is a mask
-        // running the other way in the same transaction, so the compositor
-        // keeps the two in step.
-        let cut = (to > from && self.under_chrome()).then(|| {
-            let radius = self
-                .ivars()
-                .views
-                .try_borrow()
-                .ok()
-                .and_then(|views| {
-                    views
-                        .values()
-                        .find_map(|host| host.view.layer().map(|layer| layer.cornerRadius()))
-                })
-                .unwrap_or(0.0);
-            let mask = CALayer::new();
-            mask.setBackgroundColor(Some(&NSColor::blackColor().CGColor()));
-            mask.setCornerRadius(radius);
-            // SAFETY: an immutable framework constant.
-            mask.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
-            let bounds = self.bounds();
-            mask.setFrame(NSRect::new(
-                NSPoint::new(to - from, 0.0),
-                NSSize::new(frame.size.width, bounds.size.height),
-            ));
-            (
-                mask,
-                offset_animation(
-                    ns_string!("position.x"),
-                    0.0,
-                    from - to,
-                    SLIDE_SECONDS,
-                    true,
-                ),
-            )
-        });
+        let journey = slide.frame;
+        let journey_frame = NSRect::new(
+            NSPoint::new(journey.x, journey.y),
+            NSSize::new(journey.width, journey.height),
+        );
+        if !same_rect(current, journey_frame) {
+            self.setFrame(journey_frame);
+        }
+        self.ivars().held_frame.set(Some(frame));
+        self.ivars().sidebar_slide.set(Some(slide));
+        let animation = translation(slide.from, slide.to, SLIDE_SECONDS);
+        let radius = self
+            .ivars()
+            .views
+            .try_borrow()
+            .ok()
+            .and_then(|views| {
+                views
+                    .values()
+                    .find_map(|host| host.view.layer().map(|layer| layer.cornerRadius()))
+            })
+            .unwrap_or(0.0);
+        // Counter-translate the mask so neither outer edge crosses into chrome.
+        let mask = CALayer::new();
+        mask.setBackgroundColor(Some(&NSColor::blackColor().CGColor()));
+        mask.setCornerRadius(radius);
+        // SAFETY: an immutable framework constant.
+        mask.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+        mask.setFrame(NSRect::new(
+            NSPoint::new(slide.clip.x - journey.x - slide.to, 0.0),
+            NSSize::new(slide.clip.width, slide.clip.height),
+        ));
+        let cut = offset_animation(
+            ns_string!("position.x"),
+            slide.to - slide.from,
+            0.0,
+            SLIDE_SECONDS,
+            true,
+        );
         let stage = Weak::from_retained(&self.retain());
         let arrived = block2::RcBlock::new(move || {
             if let Some(stage) = stage.load() {
@@ -490,12 +509,10 @@ impl ContentStage {
         CATransaction::begin();
         // SAFETY: the block holds the stage weakly and runs on the main thread.
         unsafe { CATransaction::setCompletionBlock(Some(&arrived)) };
-        if let Some((mask, cut)) = cut {
-            CATransaction::setDisableActions(true);
-            // SAFETY: the mask is a fresh layer no other layer holds.
-            unsafe { layer.setMask(Some(&mask)) };
-            mask.addAnimation_forKey(&cut, Some(ns_string!("zephium.slide")));
-        }
+        CATransaction::setDisableActions(true);
+        // SAFETY: the mask is a fresh layer no other layer holds.
+        unsafe { layer.setMask(Some(&mask)) };
+        mask.addAnimation_forKey(&cut, Some(ns_string!("zephium.slide")));
         layer.addAnimation_forKey(&animation, Some(ns_string!("zephium.slide")));
         CATransaction::commit();
     }
@@ -560,6 +577,7 @@ impl ContentStage {
             .motion_generation
             .set(self.ivars().motion_generation.get().wrapping_add(1));
         let held = self.ivars().held_frame.take();
+        self.ivars().sidebar_slide.set(None);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         if let Some(frame) = held {
@@ -2293,6 +2311,15 @@ fn feedback_rect(divider: &Divider, dragging: bool) -> Rect {
             )
         }
     }
+}
+
+fn stage_rect(frame: NSRect) -> Rect {
+    Rect::new(
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    )
 }
 
 fn same_rect(left: NSRect, right: NSRect) -> bool {

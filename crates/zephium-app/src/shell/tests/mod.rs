@@ -844,6 +844,7 @@ impl Engine for FakeEngine {
         raised: bool,
         _card: Rect,
         _slide: bool,
+        _sidebar_position: layout::SidebarPosition,
     ) -> NativeDispatch {
         self.log(format!("raise@{window} {raised}"));
         self.native_admission()

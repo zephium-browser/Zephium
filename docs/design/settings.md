@@ -30,6 +30,10 @@ preview store. They survive page navigation in the current session, but do
 not change system settings, download paths, browser permissions, search
 providers, imports, updates, authentication, or external tool access.
 
+Appearance includes Sidebar position with Left and Right options. Left is the
+default. This preference is saved as `sidebar.position` through the existing
+Rust preference commands, not the session-only preview store.
+
 Dialogs distinguish preview changes from real effects. Cancelling restores
 the captured draft for the same profile; applying retains only preview state.
 No import, export, cleanup, update, default-browser, or folder-selection

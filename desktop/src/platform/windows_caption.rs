@@ -57,7 +57,7 @@ struct State {
     // Hover is ignored until it leaves, or the caption would return at once
     // under a pointer that has not moved.
     reveal_block: Option<POINT>,
-    page_left: Option<f64>,
+    page_interval: Option<(f64, f64)>,
     dark: bool,
     previous_focus: HWND,
     laying_out: bool,
@@ -73,7 +73,7 @@ struct State {
     drag_start: Option<POINT>,
     motion_paused: Option<std::time::Instant>,
     surface: Option<paint::Surface>,
-    geometry: Option<(i32, i32, i32, i32, i32, u32)>,
+    geometry: Option<(i32, i32, i32, i32, i32, i32, u32)>,
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
@@ -164,7 +164,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             menu_open: false,
             named: None,
             reveal_block: None,
-            page_left: None,
+            page_interval: None,
             dark: true,
             previous_focus: HWND::default(),
             laying_out: false,
@@ -250,15 +250,18 @@ pub fn set_suppressed(window: &WebviewWindow, cause: Suppression, suppressed: bo
     }
 }
 
-/// The shell's admitted chrome boundary, in logical coordinates. Internal
-/// pages need only the corner controls; web pages get a band over the page.
-pub fn set_page_left(window: &WebviewWindow, page_left: Option<f64>) {
+/// The page interval in logical window coordinates. Internal pages need only
+/// the corner controls; native pages get a band bounded by both sidebar edges.
+pub fn set_page_interval(window: &WebviewWindow, page_interval: Option<(f64, f64)>) {
     // SAFETY: see `state_of`.
     unsafe {
         if let Some(state) = state_of(window) {
-            if (*state).page_left != page_left {
-                (*state).page_left = page_left;
+            if (*state).page_interval != page_interval {
+                (*state).page_interval = page_interval;
+                (*state).near_top = false;
+                cancel_reveal(state);
                 layout(state);
+                pointer_moved((*state).owner);
             }
         }
     }
@@ -429,11 +432,7 @@ unsafe fn layout(p: *mut State) {
     let button_height = height - padding * 2;
     let mut rect = RECT::default();
     let _ = GetClientRect(owner, &mut rect);
-    let left = (*p)
-        .page_left
-        .map(|left| (left * scale).round() as i32)
-        .unwrap_or(rect.right - controls_width)
-        .clamp(0, (rect.right - controls_width).max(0));
+    let (left, right) = page_band((*p).page_interval, scale, rect.right);
     let mut origin = POINT::default();
     let _ = ClientToScreen(owner, &mut origin);
     // Owned popup z-order follows the owner. Hover may reveal an inactive
@@ -462,14 +461,22 @@ unsafe fn layout(p: *mut State) {
     let displacement = (height as f64 * progress).round() as i32;
     zephium_engine::set_window_caption_offset(
         owner.0 as isize,
-        if (*p).page_left.is_some() {
+        if (*p).page_interval.is_some() {
             displacement as f64 / scale
         } else {
             0.0
         },
-        (*p).page_left.is_some() && (*p).opacity > 0 && (*p).opacity < 255,
+        (*p).page_interval.is_some() && (*p).opacity > 0 && (*p).opacity < 255,
     );
-    let geometry = (origin.x, origin.y, rect.right, left, displacement, dpi);
+    let geometry = (
+        origin.x,
+        origin.y,
+        rect.right,
+        left,
+        right,
+        displacement,
+        dpi,
+    );
     if (*p).geometry != Some(geometry) {
         (*p).geometry = Some(geometry);
         let reveal_height = (8.0 * scale).round() as i32;
@@ -483,7 +490,7 @@ unsafe fn layout(p: *mut State) {
             SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
         );
         let region = CreateRectRgn(0, 0, rect.right.max(1), reveal_height);
-        let band = CreateRectRgn(left, 0, rect.right.max(1), displacement);
+        let band = CreateRectRgn(left, 0, right, displacement);
         let _ = CombineRgn(Some(region), Some(region), Some(band), RGN_OR);
         let _ = DeleteObject(band.into());
         // Where the controls stand is theirs even while they are away.
@@ -698,6 +705,10 @@ unsafe fn hover_reveal(p: *mut State, hot: HWND) {
     if (*p).suppressed || (*p).changing_state || (*p).sizing || !pointer_moved_on(p) {
         return;
     }
+    if hot.0.is_null() && !at_controls(p) && !over_page_band(p) {
+        cancel_reveal(p);
+        return;
+    }
     if (*p).expanded || hot == (*p).buttons[1] || at_controls(p) {
         cancel_reveal(p);
         reveal(p);
@@ -705,6 +716,22 @@ unsafe fn hover_reveal(p: *mut State, hot: HWND) {
         (*p).reveal_armed = true;
         SetTimer(Some((*p).strip), REVEAL, REVEAL_DWELL_MS, None);
     }
+}
+unsafe fn over_page_band(p: *mut State) -> bool {
+    let mut at = POINT::default();
+    let mut client = RECT::default();
+    if GetCursorPos(&mut at).is_err()
+        || !ScreenToClient((*p).owner, &mut at).as_bool()
+        || GetClientRect((*p).owner, &mut client).is_err()
+    {
+        return false;
+    }
+    let dpi = GetDpiForWindow((*p).owner).max(96);
+    let scale = dpi as f64 / 96.0;
+    let (_, height, _, _) = paint::dimensions(dpi);
+    let reach = ((8.0 * scale).round() as i32)
+        .max((f64::from(height) * f64::from((*p).opacity) / 255.0).round() as i32);
+    page_band_hit(at, (*p).page_interval, scale, client.right, reach)
 }
 unsafe fn in_front(owner: HWND) -> bool {
     GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) == owner
@@ -727,12 +754,9 @@ unsafe fn near_top(p: *mut State) -> bool {
     if !ScreenToClient(owner, &mut at).as_bool() || GetClientRect(owner, &mut client).is_err() {
         return false;
     }
-    let Some(page_left) = (*p).page_left else {
-        return false;
-    };
     let scale = GetDpiForWindow(owner).max(96) as f64 / 96.0;
     let reach = (TOP_REACH * scale).round() as i32;
-    at.y >= 0 && at.y < reach && at.x >= (page_left * scale).round() as i32 && at.x < client.right
+    page_band_hit(at, (*p).page_interval, scale, client.right, reach)
 }
 /// The pointer moved, or the window came to the front or left it: a page's
 /// top asks for the caption after a dwell, and leaving it lets the caption go.
@@ -1358,7 +1382,10 @@ unsafe extern "system" fn strip_proc(
             let mut cursor = POINT::default();
             let _ = GetCursorPos(&mut cursor);
             let hovered = WindowFromPoint(cursor);
-            if (hovered == (*p).edge || (*p).buttons.contains(&hovered) || near_top(p))
+            if (over_page_band(p)
+                || at_controls(p)
+                || (*p).buttons.contains(&hovered)
+                || near_top(p))
                 && pointer_moved_on(p)
             {
                 reveal(p);
@@ -1411,19 +1438,11 @@ unsafe extern "system" fn strip_proc(
                 SetTimer(Some(hwnd), HIDE, 450, None);
                 return LRESULT(0);
             }
-            let mut rect = RECT::default();
-            let _ = GetWindowRect((*p).edge, &mut rect);
-            rect.left += (*p).geometry.map_or(0, |(_, _, _, left, _, _)| left);
-            let mut edge = RECT::default();
-            let _ = GetWindowRect((*p).edge, &mut edge);
-            edge.bottom =
-                edge.top + (8.0 * GetDpiForWindow((*p).owner).max(96) as f64 / 96.0).round() as i32;
             // Moving along the reveal strip must not dismiss the controls.
             let hovered = WindowFromPoint(cursor);
-            let on_caption = hovered == (*p).edge || (*p).buttons.contains(&hovered);
-            if !on_caption
-                || (!PtInRect(&rect, cursor).as_bool() && !PtInRect(&edge, cursor).as_bool())
-            {
+            let on_caption = (*p).buttons.contains(&hovered)
+                || (hovered == (*p).edge && (over_page_band(p) || at_controls(p)));
+            if !on_caption {
                 transition(p, false);
             } else {
                 // The input host stays visible, so a leave event can dismiss
@@ -1614,6 +1633,42 @@ unsafe extern "system" fn button_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_width_resize_does_not_reveal_over_sidebar_or_internal_pages() {
+        for x in [100, 400, 700] {
+            assert_eq!(top_frame_hit(x, 1, 1000, 8, 16, None), Some(HTTOP));
+            assert!(!page_band_hit(POINT { x, y: 1 }, None, 1.0, 1000, 8));
+        }
+        assert!(!page_band_hit(
+            POINT { x: 100, y: 1 },
+            Some((248.0, 1000.0)),
+            1.0,
+            1000,
+            8
+        ));
+        assert!(!page_band_hit(
+            POINT { x: 900, y: 1 },
+            Some((0.0, 752.0)),
+            1.0,
+            1000,
+            8
+        ));
+        assert!(page_band_hit(
+            POINT { x: 400, y: 1 },
+            Some((0.0, 752.0)),
+            1.0,
+            1000,
+            8
+        ));
+    }
+    #[test]
+    fn caption_band_stops_at_either_sidebar_at_fractional_dpi() {
+        assert_eq!(page_band(Some((248.0, 1000.0)), 1.25, 1250), (310, 1250));
+        assert_eq!(page_band(Some((0.0, 752.0)), 1.25, 1250), (0, 940));
+        assert_eq!(page_band(Some((0.0, 728.0)), 1.25, 1250), (0, 910));
+        assert_eq!(page_band(Some((800.0, 1000.0)), 1.0, 600), (600, 600));
+        assert_eq!(page_band(None, 1.25, 1250), (0, 0));
+    }
     #[test]
     fn complete_button_rectangles_hit_at_fractional_dpi_and_negative_monitor_coordinates() {
         for dpi in [96, 120, 144, 192] {
@@ -1815,4 +1870,24 @@ mod tests {
         assert_eq!(top_frame_hit(799, 0, 800, 8, 16, controls), None);
         assert_eq!(top_frame_hit(10, 7, 800, 8, 16, controls), Some(HTTOPLEFT));
     }
+}
+
+fn page_band(interval: Option<(f64, f64)>, scale: f64, width: i32) -> (i32, i32) {
+    let Some((left, right)) = interval else {
+        return (0, 0);
+    };
+    let left = ((left * scale).round() as i32).clamp(0, width.max(0));
+    let right = ((right * scale).round() as i32).clamp(left, width.max(0));
+    (left, right)
+}
+
+fn page_band_hit(
+    at: POINT,
+    interval: Option<(f64, f64)>,
+    scale: f64,
+    width: i32,
+    height: i32,
+) -> bool {
+    let (left, right) = page_band(interval, scale, width);
+    at.y >= 0 && at.y < height && at.x >= left && at.x < right
 }

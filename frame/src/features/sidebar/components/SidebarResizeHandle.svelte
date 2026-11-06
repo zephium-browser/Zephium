@@ -13,7 +13,8 @@
     MIN_EXPANDED_WIDTH,
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
-  import { onDestroy } from "svelte";
+  import { preferences } from "$domain/preferences";
+  import { onDestroy, untrack } from "svelte";
 
   let { width, disabled = false }: { width: number; disabled?: boolean } = $props();
   let configuredRevision = claimSidebarResizeOwner();
@@ -29,6 +30,8 @@
   // Native draws the guide over pages; the renderer line is only a fallback.
   let nativeGuide = $state(false);
   let previousCursor = "";
+  let position = $derived(preferences.sidebarPosition());
+  let configuredPosition = untrack(() => position);
 
   type Configuration = { width: number; enabled: boolean; revision: number; generation: number };
   let pendingConfiguration: Configuration | null = null;
@@ -63,6 +66,12 @@
     const current = ++generation;
     const value = width;
     const enabled = !disabled;
+    const side = position;
+    if (side !== configuredPosition) {
+      cancelPointerResize();
+      configuredPosition = side;
+      claimSidebarResizeOwner();
+    }
     configuredRevision = sidebarResizeRevision();
     queueConfiguration({
       width: value,
@@ -118,7 +127,8 @@
     });
   }
   function handlePointerMove(event: PointerEvent) {
-    if (resizing && sidebarResizeActive()) updateGuide(startWidth + event.clientX - startX);
+    if (resizing && sidebarResizeActive())
+      updateGuide(startWidth + (event.clientX - startX) * (position === "right" ? -1 : 1));
   }
   function endPointerResize(event: PointerEvent) {
     if (!resizing) return;
@@ -148,12 +158,13 @@
     }
     if (disabled) return;
     const delta = event.shiftKey ? 24 : 8;
+    const direction = position === "right" ? -1 : 1;
     if (event.key === "ArrowLeft") {
       event.preventDefault();
-      applyDragWidth(width - delta);
+      applyDragWidth(width - delta * direction);
     } else if (event.key === "ArrowRight") {
       event.preventDefault();
-      applyDragWidth(width + delta);
+      applyDragWidth(width + delta * direction);
     } else if (event.key === "Home") {
       event.preventDefault();
       applyDragWidth(MIN_EXPANDED_WIDTH);
@@ -187,7 +198,8 @@
   class={[
     // Mostly in the gap beside the column, as the native target on macOS,
     // so the tab list's edge and scrollbar stay usable.
-    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
+    "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none outline-none",
+    position === "right" ? "-left-1.5" : "-right-1.5",
     // The native control owns the pointer; the tab list's edge stays usable.
     nativeCapture && "pointer-events-none",
   ]}
@@ -201,7 +213,8 @@
   {#if !disabled}<span
       aria-hidden="true"
       class={[
-        "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
+        "absolute top-1/2 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
+        position === "right" ? "left-1.5" : "right-1.5",
         !nativeCapture && "group-hover:bg-text-muted",
       ]}
     ></span>{/if}
@@ -211,6 +224,7 @@
   <span
     aria-hidden="true"
     class="pointer-events-none absolute inset-y-0 z-20 w-0.5 bg-accent"
-    style:left={`${Math.min(startWidth - 2, guide - 2)}px`}
+    style:left={position === "left" ? `${Math.min(startWidth - 2, guide - 2)}px` : undefined}
+    style:right={position === "right" ? `${Math.min(startWidth - 2, guide - 2)}px` : undefined}
   ></span>
 {/if}

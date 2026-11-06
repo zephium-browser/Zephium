@@ -2,6 +2,15 @@
 
 use super::*;
 
+pub(super) fn sidebar_caption(position: layout::SidebarPosition) -> f64 {
+    // macOS traffic lights stay on the left even when the column moves right.
+    if cfg!(target_os = "macos") && position == layout::SidebarPosition::Right {
+        32.0
+    } else {
+        0.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct GrabbedDivider {
     window: WindowId,
@@ -111,6 +120,8 @@ impl Shell {
         if !self.chrome.position(ChromeFrame {
             rect: chrome_layout.chrome,
             fill_width: chrome_layout.content.is_none(),
+            sidebar_position: win.metrics.sidebar_position,
+            sidebar_hidden: win.metrics.sidebar_hidden,
             travel,
         }) {
             return NativeDispatch::Rejected;

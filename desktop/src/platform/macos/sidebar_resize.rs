@@ -20,7 +20,7 @@ use objc2_foundation::{
 };
 use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
-use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use zephium_core::layout::{SidebarPosition, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
 type Commit = Rc<dyn Fn(f64, u64)>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
@@ -102,6 +102,7 @@ pub struct Ivars {
     chrome: Weak<WKWebView>,
     width: Cell<f64>,
     enabled: Cell<bool>,
+    position: Cell<SidebarPosition>,
     revision: Cell<u64>,
     generation: Cell<u64>,
     capture: Cell<Option<Capture>>,
@@ -171,7 +172,7 @@ define_class!(
             let cursor = self.ivars().observers.try_borrow().ok().and_then(|observers| observers.as_ref().and_then(|observers| observers.cursor.as_ref()).map(|cursor| cursor.cursor.clone()));
             if let Some(cursor) = cursor { cursor.set(); }
             if self.ivars().generation.get() != generation || !revision_current(capture.revision) { self.cancel(false); return; }
-            let requested = capture.original + event.locationInWindow().x - capture.start_x;
+            let requested = dragged_width(capture.original, event.locationInWindow().x - capture.start_x, self.ivars().position.get());
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
             self.ivars().capture.set(Some(capture));
@@ -183,7 +184,7 @@ define_class!(
             let _owner = self.retain();
             let Some(capture) = self.ivars().capture.get() else { return };
             if !revision_current(capture.revision) { self.cancel(false); return; }
-            let requested = capture.original + event.locationInWindow().x - capture.start_x;
+            let requested = dragged_width(capture.original, event.locationInWindow().x - capture.start_x, self.ivars().position.get());
             let width = resolved_width(if requested.is_finite() { requested } else { capture.pending });
             let generation = self.ivars().generation.get();
             self.feedback(width, true);
@@ -218,6 +219,7 @@ impl Control {
             chrome: Weak::from_retained(chrome),
             width: Cell::new(width),
             enabled: Cell::new(true),
+            position: Cell::new(POSITION.get()),
             revision: Cell::new(revision),
             generation: Cell::new(0),
             capture: Cell::new(None),
@@ -240,8 +242,18 @@ impl Control {
         let frame = chrome.frame();
         let width = self.ivars().width.get();
         let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < GUTTER + width;
+        let edge = column_edge(
+            frame.origin.x,
+            frame.size.width,
+            width,
+            self.ivars().position.get(),
+        );
+        let x = match self.ivars().position.get() {
+            SidebarPosition::Left => edge - HOT_INSET,
+            SidebarPosition::Right => edge + HOT_INSET - HOT_WIDTH,
+        };
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
+            NSPoint::new(x, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
         );
         let current = self.frame();
@@ -286,9 +298,19 @@ impl Control {
         };
         // Centred in the gap between the column and the page, as a split's
         // guide is centred in the strip between its panes.
+        let edge = column_edge(
+            frame.origin.x,
+            frame.size.width,
+            width,
+            self.ivars().position.get(),
+        );
+        let gap = match self.ivars().position.get() {
+            SidebarPosition::Left => GUTTER / 2.0,
+            SidebarPosition::Right => -GUTTER / 2.0,
+        };
         let target = NSRect::new(
             NSPoint::new(
-                frame.origin.x + GUTTER + width + GUTTER / 2.0 - GUIDE_WIDTH / 2.0,
+                edge + gap - GUIDE_WIDTH / 2.0,
                 frame.origin.y + (frame.size.height - height) / 2.0,
             ),
             NSSize::new(GUIDE_WIDTH, height),
@@ -484,6 +506,7 @@ impl Control {
 thread_local! {
     static CONTROL: RefCell<Option<(u64, Retained<Control>)>> = const { RefCell::new(None) };
     static CONFIG_EPOCH: Cell<u64> = const { Cell::new(0) };
+    static POSITION: Cell<SidebarPosition> = const { Cell::new(SidebarPosition::Left) };
 }
 fn configuration_current(epoch: u64, generation: u64, revision: u64) -> bool {
     CONFIG_EPOCH.with(|current| current.get() == epoch)
@@ -669,13 +692,18 @@ pub(super) fn column_width(width: f64) {
         disable();
     }
 }
-pub(super) fn refresh() {
+pub(super) fn refresh(position: SidebarPosition) {
+    let changed = POSITION.replace(position) != position;
     let control = CONTROL.with(|slot| {
         slot.try_borrow()
             .ok()
             .and_then(|slot| slot.as_ref().map(|(_, control)| control.clone()))
     });
     if let Some(control) = control {
+        if changed {
+            control.cancel(false);
+            control.ivars().position.set(position);
+        }
         control.place();
     }
 }
@@ -701,5 +729,43 @@ fn resolved_width(width: f64) -> f64 {
         MIN_SIDEBAR_WIDTH
     } else {
         width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+    }
+}
+
+fn column_edge(x: f64, chrome_width: f64, width: f64, position: SidebarPosition) -> f64 {
+    match position {
+        SidebarPosition::Left => x + GUTTER + width,
+        SidebarPosition::Right => x + chrome_width - GUTTER - width,
+    }
+}
+
+fn dragged_width(original: f64, delta: f64, position: SidebarPosition) -> f64 {
+    match position {
+        SidebarPosition::Left => original + delta,
+        SidebarPosition::Right => original - delta,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn right_capture_and_guide_follow_the_inner_edge_in_window_coordinates() {
+        assert_eq!(column_edge(0.0, 256.0, 240.0, SidebarPosition::Left), 248.0);
+        assert_eq!(
+            column_edge(744.0, 256.0, 240.0, SidebarPosition::Right),
+            752.0
+        );
+        assert_eq!(
+            column_edge(0.0, 1000.0, 240.0, SidebarPosition::Right),
+            752.0
+        );
+        assert_eq!(dragged_width(240.0, -60.0, SidebarPosition::Right), 300.0);
+        assert_eq!(dragged_width(240.0, 60.0, SidebarPosition::Left), 300.0);
+        assert_eq!(
+            resolved_width(dragged_width(240.0, 120.0, SidebarPosition::Right)),
+            MIN_SIDEBAR_WIDTH
+        );
     }
 }

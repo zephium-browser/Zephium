@@ -13,6 +13,11 @@ content in the main area. Interface Studio and its separate entry points have
 been removed. See [Settings interface](settings.md) for the current section
 map, preview-state contract, and language-selection behavior.
 
+Appearance saves Sidebar position as `sidebar.position`, defaulting to Left.
+Right mirrors the sidebar/content arrangement while tools and Settings stay
+inward. Hidden reveal follows the selected edge. Window controls remain on
+their native OS sides.
+
 ## Tokens and composition
 
 Use semantic colors, never raw palette utilities in product markup. The

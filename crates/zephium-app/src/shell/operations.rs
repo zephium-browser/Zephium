@@ -916,6 +916,38 @@ impl Shell {
         if key == "search.history" {
             self.search.include_history = value == "true";
         }
+        if key == "sidebar.position" {
+            let position = layout::SidebarPosition::from_id(&value).unwrap_or_default();
+            if self
+                .windows
+                .set_sidebar_position(position, window_layout::sidebar_caption(position))
+            {
+                self.drop_divider();
+                for window in self.windows.iter() {
+                    let _ = self.engine.set_resize_guide(window.id, None);
+                }
+                // Only a hidden native-page sidebar can have raised chrome to put back.
+                // Full-window browser pages must keep chrome above the retained stage.
+                if let Some(window) = self.windows.focused().filter(|win| {
+                    win.metrics.sidebar_hidden
+                        && self.window_visible
+                        && self.active_browser_page().is_none()
+                        && !self.page_permission_modal()
+                        && !self.focus_covers()
+                        && self.pane_tree().is_some()
+                }) {
+                    let card = layout::hidden_card(window.size, window.metrics);
+                    let _ = self.engine.raise_chrome(
+                        window.id,
+                        false,
+                        card,
+                        false,
+                        window.metrics.sidebar_position,
+                    );
+                }
+                let _ = self.relayout();
+            }
+        }
         self.tab_preferences.apply(&key, &value);
         if self.proxy.apply(&key, &value) {
             self.engine.set_proxy(self.proxy.server());

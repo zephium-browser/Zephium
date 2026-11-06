@@ -62,6 +62,25 @@ for (const [id, mode, material] of cases) {
   });
 }
 
+test("choosing the right sidebar edge survives reopening Appearance", async () => {
+  native.settings = {};
+  await preferences.init();
+  const screen = await render(AppearanceStage);
+  const position = screen.getByRole("button", { name: "Sidebar position", exact: true });
+  await expect.element(position).toHaveTextContent("Left");
+  await position.click();
+  await page.getByRole("option", { name: "Right", exact: true }).click();
+  await expect.poll(() => native.settings["sidebar.position"]).toBe("right");
+  await expect.poll(() => preferences.saving()).toBe(false);
+  screen.unmount();
+  preferences.dispose();
+  await preferences.init();
+  const restored = await render(AppearanceStage);
+  await expect
+    .element(restored.getByRole("button", { name: "Sidebar position", exact: true }))
+    .toHaveTextContent("Right");
+});
+
 test("editing a preset forks it into Custom and writes once it rests", async () => {
   await page.viewport(1100, 1200);
   native.settings = { appearance: "dark", "ui.theme": "nord" };

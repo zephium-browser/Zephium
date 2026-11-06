@@ -4,10 +4,10 @@ use std::{
 };
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{DeclaredClass, Message};
+use objc2::{msg_send, rc::Retained, DeclaredClass, Message};
 use objc2_foundation::{
   MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString,
-  NSURLErrorFailingURLErrorKey, NSURL,
+  NSURLErrorFailingURLErrorKey, NSURLResponse, NSURL,
 };
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
@@ -1006,9 +1006,13 @@ pub(crate) fn navigation_policy_response(
   handler: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>,
 ) {
   unsafe {
+    // WebKit can return nil despite the SDK's nonnull annotation.
+    let native_response: Option<Retained<NSURLResponse>> = msg_send![response, response];
+    let Some(native_response) = native_response else {
+      (*handler).call((WKNavigationResponsePolicy::Cancel,));
+      return;
+    };
     let can_show_mime_type = response.canShowMIMEType();
-
-    let native_response = response.response();
     let attachment = native_response
       .downcast_ref::<NSHTTPURLResponse>()
       .and_then(|response| {
@@ -1027,8 +1031,7 @@ pub(crate) fn navigation_policy_response(
     }
 
     if response.isForMainFrame() {
-      let response = response.response();
-      let Some(_url) = response
+      let Some(_url) = native_response
         .URL()
         .and_then(|url| url.absoluteString())
         .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))

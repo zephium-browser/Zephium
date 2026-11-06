@@ -62,6 +62,193 @@ fn setting_operation_reports_store_admission_without_claiming_durability() {
 }
 
 #[test]
+fn sidebar_position_is_admitted_for_current_and_future_windows_and_loaded_on_startup() {
+    use layout::SidebarPosition::{Left, Right};
+
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let window = shell.windows.focused().unwrap();
+    assert_eq!(window.metrics.sidebar_position, Left);
+    assert_eq!(window.metrics.caption, 0.0);
+    let (profile, space) = (window.profile, window.space);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(1000.0, 700.0));
+
+    store
+        .reject_settings
+        .store(true, std::sync::atomic::Ordering::Release);
+    let rejected = shell.handle_operation(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    assert_eq!(rejected.reason, OperationReason::StoreAdmissionRejected);
+    assert!(shell
+        .windows
+        .iter()
+        .all(|win| win.metrics.sidebar_position == Left));
+    store
+        .reject_settings
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let admitted = shell.handle_operation(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    assert_eq!(admitted.outcome, OperationOutcome::Deferred);
+    assert_eq!(admitted.reason, OperationReason::StoreWorkPending);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(900.0, 600.0));
+    assert!(shell
+        .windows
+        .iter()
+        .all(|win| win.metrics.sidebar_position == Right));
+    let caption = if cfg!(target_os = "macos") { 32.0 } else { 0.0 };
+    assert!(shell
+        .windows
+        .iter()
+        .all(|win| win.metrics.caption == caption));
+
+    let (mut restarted, _engine, _screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(
+        restarted
+            .windows
+            .focused()
+            .unwrap()
+            .metrics
+            .sidebar_position,
+        Right
+    );
+    assert_eq!(
+        restarted.windows.focused().unwrap().metrics.caption,
+        caption
+    );
+    restarted.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "left".into(),
+    });
+    assert_eq!(
+        restarted
+            .windows
+            .focused()
+            .unwrap()
+            .metrics
+            .sidebar_position,
+        Left
+    );
+    assert_eq!(restarted.windows.focused().unwrap().metrics.caption, 0.0);
+}
+
+#[test]
+fn changing_sidebar_position_relayouts_the_page_and_cancels_hidden_peek_and_guide() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "position.example");
+    let window = shell.windows.focused().unwrap().id;
+    shell.handle(Command::SetSidebarHidden(true));
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    shell.handle(Command::SidebarResizeGuide(Some(310.0)));
+    shell.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    let calls = engine.calls();
+    assert!(calls
+        .iter()
+        .any(|call| call == &format!("resize-guide@{window} None")));
+    assert_eq!(
+        calls.iter().rfind(|call| call.starts_with("raise@")),
+        Some(&format!("raise@{window} false")),
+    );
+    assert!(shell.windows.focused().unwrap().metrics.sidebar_hidden);
+    let caption = if cfg!(target_os = "macos") { 32.0 } else { 0.0 };
+    assert_eq!(
+        engine
+            .layout_regions
+            .lock()
+            .unwrap()
+            .last()
+            .copied()
+            .flatten(),
+        Some(Rect::new(8.0, 8.0 + caption, 1184.0, 784.0 - caption)),
+    );
+    shell.handle(Command::SetSidebarHidden(false));
+    assert_eq!(
+        engine
+            .layout_regions
+            .lock()
+            .unwrap()
+            .last()
+            .copied()
+            .flatten(),
+        Some(Rect::new(8.0, 8.0 + caption, 936.0, 784.0 - caption)),
+    );
+    shell.handle(Command::SidebarResizeGuide(Some(310.0)));
+    assert!(engine.calls().iter().any(|call| {
+        call == &format!(
+            "resize-guide@{window} {:?}",
+            Some(Rect::new(882.0, 8.0, 2.0, 784.0)),
+        )
+    }));
+}
+
+#[test]
+fn full_window_chrome_receives_sidebar_position_and_hidden_state_live() {
+    let (mut shell, engine, chrome, _screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    shell.handle(Command::SetSidebarHidden(true));
+    let frame = chrome.last_frame().unwrap();
+    assert_eq!(frame.sidebar_position, layout::SidebarPosition::Right);
+    assert!(frame.sidebar_hidden);
+    assert!(frame.fill_width);
+    assert_eq!(frame.rect, Rect::new(0.0, 0.0, 1200.0, 800.0));
+    assert!(!engine.calls().iter().any(|call| call.starts_with("raise@")));
+}
+
+#[test]
+fn changing_sidebar_side_never_lowers_full_window_settings_or_unraised_visible_chrome() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "settings-position.example");
+    shell.handle(Command::SetAppSetting {
+        key: "sidebar.position".into(),
+        value: "right".into(),
+    });
+    assert!(!engine.calls().iter().any(|call| call.starts_with("raise@")));
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    for (hidden, position) in [(true, "left"), (false, "right")] {
+        shell.handle(Command::SetSidebarHidden(hidden));
+        shell.handle(Command::SetAppSetting {
+            key: "sidebar.position".into(),
+            value: position.into(),
+        });
+        assert!(!engine.calls().iter().any(|call| call.starts_with("raise@")));
+        assert_eq!(
+            engine
+                .layout_regions
+                .lock()
+                .unwrap()
+                .last()
+                .copied()
+                .flatten(),
+            None,
+        );
+    }
+}
+
+#[test]
 fn operation_outcomes_reject_invalid_scope_and_report_native_admission() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

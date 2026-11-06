@@ -128,7 +128,10 @@ one window fight over the cursor: NSTrackingArea fires regardless of z-occlusion
 
 - **Tiling, never overlap.** Chrome = one region rectangle (sidebar or top bar),
   content = another, gaps = window vibrancy. `core::layout` computes both rects
-  from (window size, mode, metrics).
+  from (window size, mode, metrics). The saved `sidebar.position` preference
+  defaults to Left; Right mirrors sidebar/content geometry and keeps tool
+  panels and Settings navigation inward. Hidden reveal uses the selected edge.
+  OS window controls retain their native sides rather than mirroring.
 - **Native content stage owns content geometry.** A custom NSView subclass
   (objc2 `define_class`) hosts content webviews as subviews and lays out the
   split tree inside AppKit's layout pass (`resizeSubviewsWithOldSize:`), so
@@ -152,6 +155,12 @@ one window fight over the cursor: NSTrackingArea fires regardless of z-occlusion
 - Non-interactive visuals over content (drop indicator, zone highlight) are
   plain layer-backed native views: no tracking area, no cursor fight. Proven by
   the DnD indicator.
+
+**Navigation responses (macOS).** Wry reads `WKNavigationResponse.response` as
+nullable and retains a present response once for MIME, attachment and main-frame
+URL checks. A missing response receives one `Cancel` decision instead of
+panicking through the Objective-C callback. The main-thread native regression is
+`cargo run -p zephium-engine --example macos_navigation_response_guard --locked`.
 
 **Multi-window is first-class.** `Window` is a core entity; each window has its
 own chrome presence, stage, mode and split tree, all projecting the one

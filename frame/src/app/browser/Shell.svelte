@@ -67,7 +67,8 @@
     SidebarNotice,
     UtilityTray,
   } from "$features/sidebar";
-  import { IS_WINDOWS } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { fullscreen } from "$shared/lib/fullscreen.svelte";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
@@ -335,13 +336,15 @@
         {compact}
       />{/await}{/if}{/snippet}
 
-<!-- The chrome view starts at the window's corner in every shape and draws
-     the gutter itself, which stays a place to drag the window by. -->
+<!-- Native anchors the chrome to the selected edge; the shell draws its gutter. -->
 <div
   class="shell flex h-screen w-screen p-2"
   data-tauri-drag-region
   class:pb-0={inWork}
   data-caption={IS_WINDOWS || undefined}
+  data-sidebar-position={preferences.sidebarPosition()}
+  data-page-caption={(IS_MAC && preferences.sidebarPosition() === "right" && !fullscreen()) ||
+    undefined}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
   data-private={incognito || undefined}
@@ -664,17 +667,27 @@
 {#if ClearSiteData}<ClearSiteData />{/if}
 
 <style>
+  .shell[data-sidebar-position="right"] {
+    flex-direction: row-reverse;
+  }
+
   .stage-column {
     display: flex;
     flex: 1;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    transition-property: none;
+  }
+
+  .shell[data-page-caption] .stage-column {
+    padding-block-start: var(--titlebar-height);
   }
 
   .stage-column > :global(main) {
     flex: 1;
     min-height: 0;
+    transition-property: none;
   }
 
   .rail-search {

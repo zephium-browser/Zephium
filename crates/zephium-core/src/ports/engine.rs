@@ -9,6 +9,7 @@ use crate::extensions::{
 use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
+use crate::layout::SidebarPosition;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
 use crate::permissions::{
     PagePermissionRequest, PagePermissionRequestId, PagePermissionRequestSettlement,
@@ -853,6 +854,7 @@ pub trait Engine {
         _raised: bool,
         _card: Rect,
         _slide: bool,
+        _sidebar_position: SidebarPosition,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }

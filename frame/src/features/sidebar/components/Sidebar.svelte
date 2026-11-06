@@ -6,6 +6,7 @@
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   import * as tools from "$session/tools.svelte";
   import { tick, untrack } from "svelte";
   import {
@@ -40,6 +41,7 @@
     dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
+  let position = $derived(preferences.sidebarPosition());
   const SETTINGS_PANEL = 264;
   let taskPage = $derived(
     browserPage.currentPage() === "tasks" || browserPage.currentPage() === "notes",
@@ -76,7 +78,7 @@
   });
 
   // Hidden, the column waits off to the side, beneath the page, and comes
-  // over it as a card as the pointer reaches the window's left edge. The
+  // over it as a card as the pointer reaches the selected window edge. The
   // page's own view takes the pointer there, so native watches the edge.
   let hidden = $derived(isHidden());
   // A page hides the column by sliding over it, so the column keeps its
@@ -103,6 +105,12 @@
       getComputedStyle(document.documentElement).getPropertyValue("--ease-emphasized").trim() ||
       "ease-out",
   });
+  const mainEdge = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect();
+    return position === "right" ? rect.right : rect.left;
+  };
+  const offscreen = (rect: DOMRect) =>
+    position === "right" ? window.innerWidth - rect.left : -rect.right;
   $effect(() => {
     if (!hidden && untrack(() => away && peeking && overPage && !reducedMotion())) {
       // Shown from the card, the card is the column at once, its window
@@ -123,16 +131,16 @@
     }
     if (!hidden) {
       const main = untrack(() => away && !overPage && !reducedMotion()) ? beside() : null;
-      const before = main?.getBoundingClientRect().left;
+      const before = main ? mainEdge(main) : undefined;
       away = false;
       if (main && before !== undefined)
         void tick().then(() => {
           if (!aside || isHidden()) return;
           const timing = pushTiming();
-          const shift = before - main.getBoundingClientRect().left;
+          const shift = before - mainEdge(main);
           main.animate([{ translate: `${shift}px 0` }, { translate: "0 0" }], timing);
-          const reach = aside.getBoundingClientRect().right;
-          aside.animate([{ translate: `${-reach}px 0` }, { translate: "0 0" }], timing);
+          const reach = offscreen(aside.getBoundingClientRect());
+          aside.animate([{ translate: `${reach}px 0` }, { translate: "0 0" }], timing);
         });
       return;
     }
@@ -148,16 +156,16 @@
         away = true;
         return;
       }
-      const before = main.getBoundingClientRect().left;
+      const before = mainEdge(main);
       leaving = rect;
       let pushed: Animation | undefined;
       let slid: Animation | undefined;
       void tick().then(() => {
         if (!aside || !leaving) return;
         const timing = pushTiming();
-        const shift = before - main.getBoundingClientRect().left;
+        const shift = before - mainEdge(main);
         slid = main.animate([{ translate: `${shift}px 0` }, { translate: "0 0" }], timing);
-        pushed = aside.animate([{ translate: "0 0" }, { translate: `${-rect.right}px 0` }], {
+        pushed = aside.animate([{ translate: "0 0" }, { translate: `${offscreen(rect)}px 0` }], {
           ...timing,
           fill: "forwards",
         });
@@ -196,14 +204,17 @@
   });
   // The column becomes the card already out of sight: only from the next
   // frame on does the card slide, so it never crosses the window's gutter.
-  let armed = $state(false);
+  let armed = $state<"left" | "right" | null>(null);
   $effect(() => {
+    const edge = position;
     if (!away) {
-      armed = false;
+      armed = null;
       return;
     }
     let live = true;
-    requestAnimationFrame(() => requestAnimationFrame(() => live && (armed = true)));
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => live && edge === position && (armed = edge)),
+    );
     return () => {
       live = false;
     };
@@ -247,11 +258,14 @@
       );
       return;
     }
+    const edge = position;
     // Native stacks the chrome over the page before the card slides in, so
     // the slide is seen from its first frame.
     void commands.sidebarPeek(true, true, false).then(() =>
       requestAnimationFrame(() => {
-        if (away) peeking = true;
+        if (!away || position !== edge) return;
+        peeking = true;
+        if (!atEdge && !pointerIn) release();
       }),
     );
   }
@@ -318,6 +332,24 @@
       peeking = false;
     });
   });
+  let previousPosition = untrack(() => position);
+  $effect.pre(() => {
+    const next = position;
+    if (next === previousPosition) return;
+    previousPosition = next;
+    clearTimeout(linger);
+    clearTimeout(lowered);
+    atEdge = false;
+    pointerIn = false;
+    peeking = false;
+    armed = null;
+    for (const animation of columns?.getAnimations({ subtree: true }) ?? []) animation.cancel();
+    clearTimeout(reshaped);
+    morph = null;
+    reshaping = false;
+    headerFresh = false;
+    void commands.sidebarPeek(false, false, false);
+  });
   $effect(() => () => {
     clearTimeout(linger);
     clearTimeout(lowered);
@@ -359,10 +391,10 @@
         // A page travels to the column's new edge natively; what the chrome
         // draws beside it travels there the same way.
         const main = !overPage && !reducedMotion() ? beside() : null;
-        const before = main?.getBoundingClientRect().left;
+        const before = main ? mainEdge(main) : undefined;
         if (main && before !== undefined)
           void tick().then(() => {
-            const shift = before - main.getBoundingClientRect().left;
+            const shift = before - mainEdge(main);
             if (Math.abs(shift) >= 0.5)
               main.animate([{ translate: `${shift}px 0` }, { translate: "0 0" }], pushTiming());
           });
@@ -465,9 +497,10 @@
 
 <aside
   bind:this={aside}
+  data-sidebar-position={position}
   data-hidden={away || undefined}
   data-peek={(away && peeking) || undefined}
-  data-armed={(away && armed) || undefined}
+  data-armed={(away && armed === position) || undefined}
   data-cut={CUT_TO_CARD || undefined}
   data-leaving={leaving ? true : undefined}
   style:left={leaving ? `${leaving.left}px` : undefined}
@@ -520,7 +553,10 @@
     data-launch={motion.launchState()}
   >
     {#key compact}<div class="sidebar-browser-column" class:sidebar-tool-rail={paneled}>
-        {#if settings && IS_MAC}<div class="sidebar-lights" aria-hidden="true"></div>{/if}
+        {#if (settings && IS_MAC && position === "left") || (settings && IS_WINDOWS && position === "right")}<div
+            class="sidebar-lights"
+            aria-hidden="true"
+          ></div>{/if}
         {@render browserBody(compact)}
         {@render dock(compact)}
       </div>{/key}
@@ -571,6 +607,12 @@
     background: var(--sidebar-frost) center / cover;
     box-shadow: var(--shadow-overlay);
     translate: calc(-100% - 24px) 0;
+    transition-property: none;
+  }
+
+  .browser-sidebar[data-sidebar-position="right"][data-hidden] {
+    inset-inline: auto 8px;
+    translate: calc(100% + 24px) 0;
   }
 
   .browser-sidebar[data-custom-background][data-hidden] {
