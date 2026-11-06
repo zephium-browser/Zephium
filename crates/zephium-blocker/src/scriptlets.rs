@@ -502,7 +502,8 @@ fn edits_an_object(body: &str) -> bool {
 
 /// A rule's arguments as adblock-rust hands them to the page: split at
 /// commas no backslash escapes, trimmed, with `\,` read as a comma and every
-/// other backslash kept. A quoted argument is not read here.
+/// other backslash kept. A quoted argument is not read here; a quoted
+/// scriptlet name is unquoted, as the library reads it.
 fn page_arguments(body: &str) -> Option<Vec<String>> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -528,8 +529,12 @@ fn page_arguments(body: &str) -> Option<Vec<String>> {
     parts.push(current);
     parts
         .into_iter()
-        .map(|part| {
+        .enumerate()
+        .map(|(index, part)| {
             let part = part.trim();
+            if index == 0 {
+                return Some(part.trim_matches(['"', '\'', '`']).to_owned());
+            }
             (!part.starts_with(['"', '\'', '`'])).then(|| part.to_owned())
         })
         .collect()
@@ -900,14 +905,50 @@ mod tests {
             classify("www.youtube.com##+js(`trusted-rpfr`, a, b)"),
             Kind::Rule { unknown: false, .. }
         ));
-        let stored = |line: &str| ScriptletRule {
-            line: line.to_owned(),
-            trusted: true,
-        };
         assert!(matches!(
-            build(&[stored("example.com##+js(`trusted-rpfr`, a, b)")]),
+            build(&[rule("example.com##+js(`trusted-rpfr`, a, b)", true)]),
             Err(crate::CosmeticError::InvalidPolicy)
         ));
+    }
+
+    #[test]
+    fn a_backtick_quoted_object_edit_is_read_as_the_library_reads_it() {
+        let edit = r#"##+js(`trusted-edit-inbound-object`, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#;
+        assert!(matches!(
+            classify(&format!("example.com{edit}")),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            classify(&format!("www.youtube.com{edit}")),
+            Kind::Rule { unknown: false, .. }
+        ));
+        assert!(matches!(
+            classify(
+                r#"www.youtube.com##+js(`trusted-edit-inbound-object`, JSON.stringify, 0, `[?.a]+={"b":1}`)"#
+            ),
+            Kind::Unsupported
+        ));
+        assert!(matches!(
+            build(&[rule(&format!("example.com{edit}"), true)]),
+            Err(crate::CosmeticError::InvalidPolicy)
+        ));
+
+        // A quoted edit keys and strips markers as the plain one does.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                rule(
+                    &line.replacen(
+                        "trusted-edit-inbound-object",
+                        "`trusted-edit-inbound-object`",
+                        1,
+                    ),
+                    true,
+                )
+            })
+            .collect();
+        rules.push(marker_rule(ScriptletTrust::Zephium));
+        assert_eq!(keep_edited_markers(&mut rules), 0);
     }
 
     #[test]
