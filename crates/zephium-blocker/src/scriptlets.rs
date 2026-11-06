@@ -398,9 +398,9 @@ pub(crate) fn classify(line: &str) -> Kind {
 
 /// Keeps in Zephium's marker rules only markers uBO's admitted edit rules
 /// both key an edit on and strip from comment requests, on every host the
-/// marker rule names, and drops a marker rule left with none, so a marker uBO
-/// has renamed or scoped elsewhere is never sent. An exception that turns off
-/// object edits, or every scriptlet, on one of those hosts leaves it none.
+/// marker rule runs on, and drops a marker rule left with none, so a marker
+/// uBO has renamed or scoped elsewhere is never sent. An exception that turns
+/// off object edits, or every scriptlet, on one of those hosts leaves it none.
 /// Returns how many markers were dropped.
 pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
     let mut edits = Vec::new();
@@ -436,34 +436,67 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
         let Some(mut arguments) = rule_arguments(&rule.line, PLAYER_MARKER) else {
             return true;
         };
-        let hosts: Vec<&str> = split(&rule.line)
+        let marker_domains = split(&rule.line)
             .map(|(_, domains, _)| domains)
-            .unwrap_or_default()
-            .split(',')
-            .filter(|host| !host.is_empty() && !host.starts_with('~'))
-            .collect();
-        let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
-        let excepted = exceptions.iter().any(|domains| {
-            hosts
+            .unwrap_or_default();
+        let named = |domains: &str| -> Vec<String> {
+            domains
+                .split(',')
+                .map(|entry| {
+                    entry
+                        .strip_prefix('~')
+                        .unwrap_or(entry)
+                        .to_ascii_lowercase()
+                })
+                .filter(|entry| !entry.is_empty() && !entry.ends_with(".*"))
+                .collect()
+        };
+        // The marker rule runs on its hosts and every host below them; another
+        // rule can only treat a host there differently when it names one, so
+        // those hosts stand for all of them.
+        let mut reach: BTreeSet<String> = BTreeSet::new();
+        for host in named(marker_domains) {
+            let below = |name: &String| {
+                name.strip_suffix(host.as_str())
+                    .is_some_and(|sub| sub.ends_with('.'))
+            };
+            reach.insert(host.clone());
+            for domains in exceptions
                 .iter()
-                .any(|host| applies(domains, host) || names_below(domains, host))
-        });
-        if !excepted && !hosts.is_empty() {
-            for (domains, query) in &edits {
-                if hosts
-                    .iter()
-                    .all(|host| applies(domains, host) && !excludes_below(domains, host))
-                {
-                    user_agent_markers(query, &mut keyed, &mut stripped);
-                }
+                .chain(edits.iter().map(|(domains, _)| domains))
+                .map(String::as_str)
+                .chain([marker_domains])
+            {
+                reach.extend(named(domains).into_iter().filter(below));
             }
         }
+        reach.retain(|host| runs_on(marker_domains, host));
+        let excepted = exceptions
+            .iter()
+            .any(|domains| reach.iter().any(|host| runs_on(domains, host)));
+        let mut supported: Option<BTreeSet<String>> = None;
+        if !excepted {
+            for host in &reach {
+                let (mut keyed, mut stripped) = (BTreeSet::new(), BTreeSet::new());
+                for (domains, query) in &edits {
+                    if runs_on(domains, host) {
+                        user_agent_markers(query, &mut keyed, &mut stripped);
+                    }
+                }
+                let here: BTreeSet<String> = keyed.intersection(&stripped).cloned().collect();
+                supported = Some(match supported {
+                    Some(before) => before.intersection(&here).cloned().collect(),
+                    None => here,
+                });
+            }
+        }
+        let supported = supported.unwrap_or_default();
         let Some(markers) = arguments.get(1) else {
             return true;
         };
-        let (kept, lost): (Vec<&str>, Vec<&str>) = markers.split_whitespace().partition(|marker| {
-            writable(marker) && keyed.contains(*marker) && stripped.contains(*marker)
-        });
+        let (kept, lost): (Vec<&str>, Vec<&str>) = markers
+            .split_whitespace()
+            .partition(|marker| writable(marker) && supported.contains(*marker));
         dropped += lost.len();
         if kept.is_empty() {
             return false;
@@ -483,31 +516,35 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
     dropped
 }
 
-/// Whether a rule scoped to `domains` runs on `host`: a generic rule runs
-/// everywhere, a named one on that host and its subdomains, unless a negated
-/// entry names the host or one of its parents.
-fn applies(domains: &str, host: &str) -> bool {
-    let within = |name: &str| {
-        let name = name.to_ascii_lowercase();
-        host == name
-            || host
-                .strip_suffix(name.as_str())
-                .is_some_and(|sub| sub.ends_with('.'))
-    };
+/// The keys adblock-rust matches a rule's hostnames and entities against on
+/// `host`: the host, each parent domain, and its entity.
+fn host_keys(host: &str) -> Vec<String> {
+    let labels: Vec<&str> = host.split('.').collect();
+    (0..labels.len())
+        .map(|i| labels[i..].join("."))
+        .chain(entity_keys(&labels))
+        .collect()
+}
+
+/// Whether a rule scoped to `domains` runs on `host`, as adblock-rust decides
+/// it: no negated hostname or entity matches one of the host's keys, and the
+/// rule is generic or a named one does.
+fn runs_on(domains: &str, host: &str) -> bool {
+    let keys = host_keys(host);
+    let matches = |entry: &str| keys.iter().any(|key| key.eq_ignore_ascii_case(entry));
     let entries: Vec<&str> = domains
         .split(',')
         .filter(|entry| !entry.is_empty())
         .collect();
-    let named: Vec<&str> = entries
-        .iter()
-        .filter(|entry| !entry.starts_with('~'))
-        .copied()
-        .collect();
     let excluded = entries
         .iter()
         .filter_map(|entry| entry.strip_prefix('~'))
-        .any(within);
-    !excluded && (named.is_empty() || named.into_iter().any(within))
+        .any(matches);
+    let mut named = entries
+        .iter()
+        .filter(|entry| !entry.starts_with('~'))
+        .peekable();
+    !excluded && (named.peek().is_none() || named.any(|entry| matches(entry)))
 }
 
 /// Whether the marker scriptlet writes `marker`: the page takes a lowercase
@@ -520,32 +557,6 @@ fn writable(marker: &str) -> bool {
         && marker
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-/// Whether `domains` names a host below `host`, where a rule for `host`
-/// also runs.
-fn names_below(domains: &str, host: &str) -> bool {
-    domains
-        .split(',')
-        .filter(|entry| !entry.starts_with('~'))
-        .any(|name| {
-            name.to_ascii_lowercase()
-                .strip_suffix(host)
-                .is_some_and(|sub| sub.ends_with('.'))
-        })
-}
-
-/// Whether `domains` negates a host below `host`, where a rule for `host`
-/// would still run but this one would not.
-fn excludes_below(domains: &str, host: &str) -> bool {
-    domains
-        .split(',')
-        .filter_map(|entry| entry.strip_prefix('~'))
-        .any(|name| {
-            name.to_ascii_lowercase()
-                .strip_suffix(host)
-                .is_some_and(|sub| sub.ends_with('.'))
-        })
 }
 
 /// A non-exception rule's arguments as the page receives them, when it calls
@@ -1347,6 +1358,7 @@ mod tests {
             "m.youtube.com",
             "youtube.com,~www.youtube.com",
             "www.youtube.com,~sub.www.youtube.com",
+            "www.youtube.com,~youtube.*",
         ] {
             let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
                 .iter()
@@ -1355,18 +1367,21 @@ mod tests {
             rules.push(marker_rule(ScriptletTrust::Zephium));
             assert_eq!(keep_edited_markers(&mut rules), 4, "{hosts}");
         }
-        // Edits for a parent domain run on it.
-        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
-            .iter()
-            .map(|line| trusted(&line.replacen("www.youtube.com", "youtube.com", 1)))
-            .collect();
-        rules.push(marker_rule(ScriptletTrust::Zephium));
-        assert_eq!(keep_edited_markers(&mut rules), 0);
+        // Edits for a parent domain, or the host's entity, run on it.
+        for hosts in ["youtube.com", "youtube.*"] {
+            let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+                .iter()
+                .map(|line| trusted(&line.replacen("www.youtube.com", hosts, 1)))
+                .collect();
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 0, "{hosts}");
+        }
         // An exception that turns the edits, or every scriptlet, off there
         // leaves none, from whichever list.
         for exception in [
             "www.youtube.com#@#+js(trusted-edit-inbound-object)",
             "sub.www.youtube.com#@#+js(trusted-edit-inbound-object)",
+            "youtube.*#@#+js(trusted-edit-inbound-object)",
             "youtube.com#@#+js()",
             "#@#+js(trusted-edit-inbound-object.js)",
         ] {
@@ -1376,13 +1391,33 @@ mod tests {
             rules.push(marker_rule(ScriptletTrust::Zephium));
             assert_eq!(keep_edited_markers(&mut rules), 4, "{exception}");
         }
-        let mut rules: Vec<ScriptletRule> =
-            YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
-        rules.push(rule(
+        // Exceptions elsewhere, or that leave the marker's host out, leave
+        // its edits.
+        for exception in [
             "m.youtube.com#@#+js(trusted-edit-inbound-object)",
-            false,
-        ));
-        rules.push(marker_rule(ScriptletTrust::Zephium));
+            "youtube.com,~www.youtube.com#@#+js(trusted-edit-inbound-object)",
+        ] {
+            let mut rules: Vec<ScriptletRule> =
+                YOUTUBE_EDITS.iter().map(|line| trusted(line)).collect();
+            rules.push(rule(exception, false));
+            rules.push(marker_rule(ScriptletTrust::Zephium));
+            assert_eq!(keep_edited_markers(&mut rules), 0, "{exception}");
+        }
+        // A host the marker rule leaves out needs no edits.
+        let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
+            .iter()
+            .map(|line| {
+                trusted(&line.replacen(
+                    "www.youtube.com",
+                    "www.youtube.com,~sub.www.youtube.com",
+                    1,
+                ))
+            })
+            .collect();
+        rules.push(ScriptletRule {
+            line: MARKER.replacen("www.youtube.com", "www.youtube.com,~sub.www.youtube.com", 1),
+            trust: ScriptletTrust::Zephium,
+        });
         assert_eq!(keep_edited_markers(&mut rules), 0);
 
         // Only uBO's own lists count: the same edits from elsewhere do not.
