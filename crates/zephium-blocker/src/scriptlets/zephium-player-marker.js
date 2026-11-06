@@ -101,6 +101,10 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
     let video;
     let base;
     let heldSince;
+    // The page's own video came with its player data inlined in the page, so
+    // no request carried the marker: its first hold is retried with the same
+    // marker before moving on.
+    let inlined = new URLSearchParams(location.search).get('v');
     const stop = () => {
         clearInterval(timer);
         timer = undefined;
@@ -152,7 +156,11 @@ function zephiumPlayerMarker(markers, hold, excuse, holdMs, premium, blockText) 
             return;
         }
         heldSince = undefined;
-        index += 1;
+        if (id === inlined) {
+            inlined = undefined;
+        } else {
+            index += 1;
+        }
         mark();
         if (index >= names.length) {
             stop();

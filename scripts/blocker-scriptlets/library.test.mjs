@@ -594,7 +594,7 @@ const playerText = () => JSON.stringify({
 {
   const AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
   const marked = (marker) => AGENT.replace(') AppleWebKit', `; ${marker}) AppleWebKit`);
-  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete' } = {}) => {
+  const youtube = ({ premium = 'ytInitialData.logo=PREMIUM', readyState = 'complete', search = '' } = {}) => {
     const listeners = {};
     let interval;
     const player = {
@@ -608,7 +608,8 @@ const playerText = () => JSON.stringify({
     };
     const context = {
       console,
-      location: { pathname: '/watch' },
+      URLSearchParams,
+      location: { pathname: '/watch', search },
       document: {
         readyState,
         addEventListener: (type, handler) => { (listeners[type] ??= []).push(handler); },
@@ -652,6 +653,18 @@ const playerText = () => JSON.stringify({
   assert.equal(page.player.loads.length, 4);
   assert.ok(!page.watching());
 
+  // The page's own video had its data inlined, which no marker reached: its
+  // first hold is retried with the same marker, the next one moves on.
+  const inlined = youtube({ search: '?v=v1&t=0' });
+  inlined.at(0);
+  inlined.at(1000);
+  assert.equal(inlined.agent(), marked('channel'));
+  assert.deepEqual(inlined.player.loads, [['v1', 0]]);
+  inlined.at(2000);
+  inlined.at(3000);
+  assert.equal(inlined.agent(), marked('lactmilli'));
+  assert.equal(inlined.player.loads.length, 2);
+
   // A server-inserted ad is not a hold, and a video that has started is left alone.
   const ad = youtube();
   ad.player.stats = { ...ad.player.stats, debug_info: 'SSAP, AD, s:49' };
@@ -689,7 +702,7 @@ const playerText = () => JSON.stringify({
   assert.ok(fresh.watching());
 
   // Arguments it cannot read leave the page untouched.
-  const context = { console, document: { addEventListener() {} }, location: { pathname: '/watch' } };
+  const context = { console, URLSearchParams, document: { addEventListener() {} }, location: { pathname: '/watch', search: '' } };
   vm.createContext(context);
   vm.runInContext(files.map(source).join('\n'), context);
   for (const args of [
