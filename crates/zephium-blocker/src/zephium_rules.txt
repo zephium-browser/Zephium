@@ -45,5 +45,8 @@
 ! of the playability error YouTube shows a blocker. A marker no admitted quick
 ! fix edits on and strips is left out when compiling.
 ! Evidence, 2026-11-06, 5 videos x 5 runs, macOS: Brave marked 18/18 not held,
-! unmarked 7/7 held; Zephium unmarked 25/25 held, stall median 8.5 s.
-www.youtube.com##+js(zephium-player-marker, channel lactmilli yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019)
+! unmarked 7/7 held; Zephium unmarked 25/25 held, stall median 8.5 s. On a
+! direct load the first quick-fix marker, channel, was held in every run and
+! lactmilli never (Brave 28/28 runs ended on lactmilli), so lactmilli comes
+! first.
+www.youtube.com##+js(zephium-player-marker, lactmilli channel yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019)

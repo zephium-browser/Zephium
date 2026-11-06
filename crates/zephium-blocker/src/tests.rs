@@ -1556,7 +1556,7 @@ fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
         };
         let marked = program(true).unwrap();
         assert!(
-            marked.contains(r#"zephiumPlayerMarker("channel lactmilli yahi inline", "#),
+            marked.contains(r#"zephiumPlayerMarker("lactmilli channel yahi inline", "#),
             "{target:?}"
         );
         assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
