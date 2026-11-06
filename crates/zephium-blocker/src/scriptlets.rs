@@ -448,7 +448,10 @@ pub(crate) fn keep_edited_markers(rules: &mut Vec<ScriptletRule>) -> usize {
             .any(|domains| hosts.iter().any(|host| applies(domains, host)));
         if !excepted && !hosts.is_empty() {
             for (domains, query) in &edits {
-                if hosts.iter().all(|host| applies(domains, host)) {
+                if hosts
+                    .iter()
+                    .all(|host| applies(domains, host) && !excludes_below(domains, host))
+                {
                     user_agent_markers(query, &mut keyed, &mut stripped);
                 }
             }
@@ -505,6 +508,19 @@ fn applies(domains: &str, host: &str) -> bool {
     !excluded && (named.is_empty() || named.into_iter().any(within))
 }
 
+/// Whether `domains` negates a host below `host`, where a rule for `host`
+/// would still run but this one would not.
+fn excludes_below(domains: &str, host: &str) -> bool {
+    domains
+        .split(',')
+        .filter_map(|entry| entry.strip_prefix('~'))
+        .any(|name| {
+            name.to_ascii_lowercase()
+                .strip_suffix(host)
+                .is_some_and(|sub| sub.ends_with('.'))
+        })
+}
+
 /// A non-exception rule's arguments as the page receives them, when it calls
 /// `scriptlet`.
 fn rule_arguments(line: &str, scriptlet: &str) -> Option<Vec<String>> {
@@ -555,8 +571,8 @@ fn edits_an_object(body: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
     };
-    // A method has far fewer arguments than this; a longer position would not
-    // be a finite integer in the page and would install no edit.
+    // A method has far fewer arguments than this, and a position too long to
+    // be a finite integer in the page would install no edit.
     let digits = position.strip_prefix('-').unwrap_or(position);
     chain.split('.').all(identifier)
         && !digits.is_empty()
@@ -1277,7 +1293,11 @@ mod tests {
         assert_eq!(markers(&rules).as_deref(), Some("channel yahi inline"));
 
         // Edits that do not run on the marker's host leave nothing to mark with.
-        for hosts in ["m.youtube.com", "youtube.com,~www.youtube.com"] {
+        for hosts in [
+            "m.youtube.com",
+            "youtube.com,~www.youtube.com",
+            "www.youtube.com,~sub.www.youtube.com",
+        ] {
             let mut rules: Vec<ScriptletRule> = YOUTUBE_EDITS
                 .iter()
                 .map(|line| trusted(&line.replacen("www.youtube.com", hosts, 1)))
