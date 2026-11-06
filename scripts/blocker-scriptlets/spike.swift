@@ -8,6 +8,14 @@ import AppKit
 import Network
 import WebKit
 
+/// Tells a view its window is never occluded, so its page runs as in view off screen.
+func unoccluded(_ view: WKWebView) {
+    let setter = Selector(("_setWindowOcclusionDetectionEnabled:"))
+    guard view.responds(to: setter) else { return }
+    typealias Set = @convention(c) (AnyObject, Selector, Bool) -> Void
+    unsafeBitCast(view.method(for: setter), to: Set.self)(view, setter, false)
+}
+
 @MainActor func spin(_ timeout: TimeInterval, until done: () -> Bool) {
     let deadline = Date().addingTimeInterval(timeout)
     while !done() && Date() < deadline {
@@ -31,7 +39,7 @@ final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             return
         }
         _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         NSApp.finishLaunching()
         // Two origins on one local listener (its own queue: the main queue is busy spinning).
         let queue = DispatchQueue(label: "scriptlet-spike-server")
@@ -78,8 +86,10 @@ final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
         var loaded = context(load())
         try! controller.load(loaded)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
-        window.makeKeyAndOrderFront(nil)
+        // Off every screen and never activated, so nothing shows in front of the user; each view is
+        // told its window is not occluded, so pages run as in view.
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.orderBack(nil)
         func view(privateStore: Bool) -> (WKWebView, Probe) {
             let probe = Probe()
             let config = WKWebViewConfiguration()
@@ -87,6 +97,7 @@ final class Probe: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             if privateStore { config.websiteDataStore = .nonPersistent() }
             config.userContentController.add(probe, name: "probe")
             let view = WKWebView(frame: window.contentView!.bounds, configuration: config)
+            unoccluded(view)
             view.navigationDelegate = probe
             window.contentView!.addSubview(view)
             return (view, probe)

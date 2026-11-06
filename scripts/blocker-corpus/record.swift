@@ -21,6 +21,14 @@ final class Recorder: NSObject, WKNavigationDelegate {
     var count = 0
     let allowed: Set<String>
     init(out: FileHandle, allowed: Set<String>) { self.out = out; self.allowed = allowed }
+    // WebKit asks for the key it wraps a page's stored CryptoKeys with; unanswered, it keeps one in
+    // the login keychain, which prompts for a new build. A key for this run only, never stored.
+    let masterKey: Data = { var bytes = [UInt8](repeating: 0, count: 32); _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes); return Data(bytes) }()
+    @objc(_webCryptoMasterKeyForWebView:)
+    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { webCryptoKeyAsked(); return masterKey as NSData }
+    @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { webCryptoKeyAsked(); completionHandler(masterKey as NSData) }
+    func webCryptoKeyAsked() { FileHandle.standardError.write("webcrypto key: in memory\n".data(using: .utf8)!) }
     /// Only http(s) leaves the machine; about:blank, data: and the like stay.
     func admitted(_ url: URL?) -> Bool {
         guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return true }
@@ -61,6 +69,14 @@ final class Recorder: NSObject, WKNavigationDelegate {
     }
 }
 
+/// Tells a view its window is never occluded, so its page runs as in view off screen.
+func unoccluded(_ view: WKWebView) {
+    let setter = Selector(("_setWindowOcclusionDetectionEnabled:"))
+    guard view.responds(to: setter) else { return }
+    typealias Set = @convention(c) (AnyObject, Selector, Bool) -> Void
+    unsafeBitCast(view.method(for: setter), to: Set.self)(view, setter, false)
+}
+
 @MainActor func spin(_ timeout: TimeInterval, until done: () -> Bool) {
     let deadline = Date().addingTimeInterval(timeout)
     while !done() && Date() < deadline {
@@ -85,13 +101,12 @@ final class Recorder: NSObject, WKNavigationDelegate {
         }
         let allowed = Set(hostText.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty && !$0.hasPrefix("#") })
         _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         NSApp.finishLaunching()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // Off every screen and never activated, so nothing shows in front of the user; each view is
+        // told its window is not occluded, so pages run as in view.
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 1280, height: 900), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.orderBack(nil)
         let rules = types.map { ["trigger": ["url-filter": ".*", "resource-type": [$0]], "action": ["type": "notify", "notification": $0]] }
         let json = String(data: try! JSONSerialization.data(withJSONObject: rules), encoding: .utf8)!
         let store = WKContentRuleListStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("record-store"))!
@@ -109,6 +124,7 @@ final class Recorder: NSObject, WKNavigationDelegate {
         for (n, page) in pages.enumerated() {
             config.websiteDataStore = .nonPersistent()
             let view = WKWebView(frame: window.contentView!.bounds, configuration: config)
+            unoccluded(view)
             view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
             window.contentView!.addSubview(view)
             view.navigationDelegate = recorder

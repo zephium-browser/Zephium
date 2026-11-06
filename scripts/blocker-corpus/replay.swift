@@ -10,6 +10,14 @@ import Network
 import WebKit
 
 final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    // WebKit asks for the key it wraps a page's stored CryptoKeys with; unanswered, it keeps one in
+    // the login keychain, which prompts for a new build. A key for this run only, never stored.
+    let masterKey: Data = { var bytes = [UInt8](repeating: 0, count: 32); _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes); return Data(bytes) }()
+    @objc(_webCryptoMasterKeyForWebView:)
+    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { webCryptoKeyAsked(); return masterKey as NSData }
+    @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { webCryptoKeyAsked(); completionHandler(masterKey as NSData) }
+    func webCryptoKeyAsked() { FileHandle.standardError.write("webcrypto key: in memory\n".data(using: .utf8)!) }
     var blocked = Set<String>()
     var seen: [String: Set<String>] = [:]
     var done = false
@@ -24,6 +32,14 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         if (action.value(forKey: "blockedLoad") as? Bool) == true { blocked.insert(url) }
         for note in (action.value(forKey: "notifications") as? [String]) ?? [] { seen[url, default: []].insert(note) }
     }
+}
+
+/// Tells a view its window is never occluded, so its page runs as in view off screen.
+func unoccluded(_ view: WKWebView) {
+    let setter = Selector(("_setWindowOcclusionDetectionEnabled:"))
+    guard view.responds(to: setter) else { return }
+    typealias Set = @convention(c) (AnyObject, Selector, Bool) -> Void
+    unsafeBitCast(view.method(for: setter), to: Set.self)(view, setter, false)
 }
 
 @MainActor func spin(_ timeout: TimeInterval, until done: () -> Bool) {
@@ -61,11 +77,12 @@ func request(_ type: String) -> String {
         listener.newConnectionHandler = { connection in connection.cancel() }
         listener.start(queue: .main)
         _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         NSApp.finishLaunching()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
-        window.level = .floating
-        window.makeKeyAndOrderFront(nil)
+        // Off every screen and never activated, so nothing shows in front of the user; each view is
+        // told its window is not occluded, so pages run as in view.
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.orderBack(nil)
         var lists: [WKContentRuleList] = []
         let ruleStore = WKContentRuleListStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("verdict-store"))!
         for path in args[3...] {
@@ -86,6 +103,7 @@ func request(_ type: String) -> String {
         config.userContentController.add(probe, name: "done")
         func view() -> WKWebView {
             let v = WKWebView(frame: window.contentView!.bounds, configuration: config)
+            unoccluded(v)
             v.navigationDelegate = probe
             window.contentView!.addSubview(v)
             return v
