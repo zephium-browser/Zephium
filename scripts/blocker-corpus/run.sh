@@ -8,7 +8,7 @@ set -euo pipefail
 here=${0:A:h}
 repo=${here:h:h}
 out=${1:?usage: run.sh OUT_DIR}
-if [[ ${out:A} == $here ]]; then
+if [[ ${out:A} == "$here" ]]; then
   print -u2 "run.sh: OUT_DIR must not be scripts/blocker-corpus itself"
   exit 2
 fi
