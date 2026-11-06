@@ -316,7 +316,6 @@ fn configure_with_credential_denied(
         core14: core14.clone(),
         frame_token: None,
         judged_frame_token: None,
-        refused_frames: Rc::default(),
         refused_frame_requests: None,
         external_token: None,
         basic_auth_token: None,
@@ -494,7 +493,6 @@ pub struct SecurityPolicy {
     core14: ICoreWebView2_14,
     frame_token: Option<i64>,
     judged_frame_token: Option<i64>,
-    refused_frames: Rc<RefCell<refused_frames::RefusedFrameDocuments>>,
     refused_frame_requests: Option<refused_frames::RefusedFrameRequests>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
@@ -553,14 +551,27 @@ impl SecurityPolicy {
     /// runs first, so a frame it cancelled stays cancelled.
     ///
     /// WebView2 sends the frame's request without waiting for this answer,
-    /// so each refused address is also handed to the view's request filter,
-    /// which answers that request itself before it leaves. A redirect hop is
-    /// judged and handed over the same way.
+    /// so each refused address is also held by the view, which answers that
+    /// request itself before it leaves. A redirect hop is judged and held the
+    /// same way.
     pub fn judge_frame_navigations(
         &mut self,
         blocks: impl Fn(&str) -> bool + 'static,
     ) -> windows_core::Result<()> {
-        let refused = self.refused_frames.clone();
+        if self.refused_frame_requests.is_none() {
+            // Without it a refused frame is still never shown; only its
+            // request goes out, as it did before.
+            match refused_frames::RefusedFrameRequests::hold(&self.core) {
+                Ok(held) => self.refused_frame_requests = Some(held),
+                Err(error) => {
+                    eprintln!("content blocker: refused frame requests are not held: {error}")
+                }
+            }
+        }
+        let held = self
+            .refused_frame_requests
+            .as_ref()
+            .map(refused_frames::RefusedFrameRequests::handle);
         let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
                 return Ok(());
@@ -572,9 +583,8 @@ impl SecurityPolicy {
                 });
                 if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
-                    if let (Some(uri), Ok(mut refused)) = (uri.as_deref(), refused.try_borrow_mut())
-                    {
-                        refused.record(uri, std::time::Instant::now());
+                    if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {
+                        held.refuse(uri);
                     }
                 }
             }
@@ -587,19 +597,6 @@ impl SecurityPolicy {
         };
         if let Some(previous) = self.judged_frame_token.replace(token) {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
-        }
-        if self.refused_frame_requests.is_none() {
-            // Without it a refused frame is still never shown; only its
-            // request goes out, as it did before.
-            match refused_frames::RefusedFrameRequests::hold(
-                &self.core,
-                self.refused_frames.clone(),
-            ) {
-                Ok(held) => self.refused_frame_requests = Some(held),
-                Err(error) => {
-                    eprintln!("content blocker: refused frame requests are not held: {error}")
-                }
-            }
         }
         Ok(())
     }
