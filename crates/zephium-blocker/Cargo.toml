@@ -28,6 +28,9 @@ base64.workspace = true
 [dev-dependencies]
 flate2 = "=1.1.9"
 proptest.workspace = true
+# The desktop graph enables dfa-build through bstr; tests and labs build the
+# regex engine the app ships.
+regex-automata = { version = "=0.4.18", features = ["dfa-build"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 tempfile.workspace = true
 

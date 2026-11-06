@@ -111,6 +111,20 @@ version = "0.1"
 [dependencies.regex]
 version = "1.12.3"
 
+[dependencies.regex-automata]
+version = "0.4.18"
+default-features = false
+features = [
+    "std",
+    "syntax",
+    "meta",
+    "hybrid",
+    "dfa-onepass",
+    "nfa-backtrack",
+    "perf-inline",
+    "perf-literal",
+]
+
 [dependencies.rustc-hash]
 version = "2.1"
 default-features = false

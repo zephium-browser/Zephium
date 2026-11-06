@@ -61,7 +61,7 @@ const EXCLUDED_COMPONENTS: [&str; 11] = [
     "rust-toolchain.toml",
     "all upstream data fixtures",
 ];
-const PATCH_SET_NAMES: [&str; 9] = [
+const PATCH_SET_NAMES: [&str; 10] = [
     "bounded prepared runtime matcher",
     "source-independent request construction",
     "conservative unknown-attribution matching",
@@ -71,8 +71,9 @@ const PATCH_SET_NAMES: [&str; 9] = [
     "strict request test compatibility",
     "fork regression tests",
     "fixture-free test surface",
+    "lazy-DFA prepared regexes",
 ];
-const PATCH_PATHS: [&str; 20] = [
+const PATCH_PATHS: [&str; 21] = [
     "Cargo.toml",
     "src/blocker.rs",
     "src/content_blocking.rs",
@@ -91,6 +92,7 @@ const PATCH_PATHS: [&str; 20] = [
     "tests/unit/content_blocking.rs",
     "tests/unit/engine.rs",
     "tests/unit/filters/network_matchers.rs",
+    "tests/unit/optimizer.rs",
     "tests/unit/request.rs",
     "tests/unit/resources/resource_assembler.rs",
 ];
@@ -639,6 +641,7 @@ fn validate_manifests(repository: &Path, fork_root: &Path) -> Result<(), String>
             "percent-encoding",
             "precomputed-hash",
             "regex",
+            "regex-automata",
             "rustc-hash",
             "seahash",
             "selectors",
