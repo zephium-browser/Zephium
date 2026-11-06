@@ -1,6 +1,6 @@
 // Body of an async function run on a YouTube watch page: opens the first
-// other video the page links to by clicking it, then the player's next video,
-// as a person would and without a page load, and watches each for
+// other video the page links to by clicking it, then the first one that page
+// links to, as a person would and without a page load, and watches each for
 // `__SECONDS__` s. In these steps the player asks YouTube for each video's data, so the
 // requests the preload records show what was sent, after any blocker's
 // edits. The first navigation's numbers are also the result's own.
@@ -97,19 +97,25 @@ const watch = async (open) => {
 
 const opening = await until(() => document.getElementById('movie_player')?.getVideoData?.()?.video_id, 15000);
 if (!opening) throw new Error('the opening video did not load');
-const target = (element) => {
-  const url = new URL(element.href, location.href);
-  return url.searchParams.get('v') !== opening && !url.searchParams.has('list');
-};
-const link = await until(() => [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')]
-  .find((element) => visible(element) && target(element)
-    && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer')), 20000);
-if (!link) throw new Error('the watch page links no other video');
-const navigations = [await watch(() => link.click())];
-// The player hides its controls while playing; the button is there all the same.
-const next = await until(() => [...document.querySelectorAll('#movie_player .ytp-next-button')]
-  .find((element) => element.getAttribute('aria-disabled') !== 'true' && element.style.display !== 'none'), 5000);
-if (next && !navigations[0].error) navigations.push(await watch(() => next.click()));
+const seen = new Set([opening]);
+const related = () => until(() => [...document.querySelectorAll('#secondary a[href^="/watch?v="], #related a[href^="/watch?v="]')]
+  .find((element) => {
+    const url = new URL(element.href, location.href);
+    return visible(element) && !seen.has(url.searchParams.get('v')) && !url.searchParams.has('list')
+      && !element.closest('ytd-ad-slot-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-sparkles-web-renderer');
+  }), 20000);
+const navigations = [];
+for (let i = 0; i < 2; i += 1) {
+  const link = await related();
+  if (!link) {
+    if (i === 0) throw new Error('the watch page links no other video');
+    break;
+  }
+  const navigation = await watch(() => link.click());
+  navigations.push(navigation);
+  if (navigation.error) break;
+  seen.add(navigation.videoId);
+}
 const first = navigations[0];
 return {
   url: location.href,

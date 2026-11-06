@@ -38,7 +38,12 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   const API = /\/youtubei\/v1\/([a-z_/]+)/;
   const kind = (body) => body === undefined || body === null ? 'none' : typeof body === 'string' ? 'string'
     : body instanceof Blob ? 'blob' : body instanceof ArrayBuffer || ArrayBuffer.isView(body) ? 'bytes'
-    : body instanceof ReadableStream ? 'stream' : body instanceof Request ? 'request' : 'other';
+    : body instanceof ReadableStream ? 'stream'
+    : body instanceof Request ? (body.headers.get('content-encoding') === 'gzip' ? 'request-gzip' : 'request') : 'other';
+  // YouTube may compress a request's JSON body; it is read uncompressed.
+  const textOf = (request) => request.headers.get('content-encoding') === 'gzip' && request.body
+    ? new Response(request.body.pipeThrough(new DecompressionStream('gzip'))).text()
+    : request.text();
   const count = (url, body) => {
     const path = API.exec(String(url))?.[1];
     if (path === undefined) return;
@@ -86,7 +91,7 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
         if (input instanceof Request) {
           if ((PLAYER.test(input.url) || NEXT.test(input.url)) && init?.body === undefined) {
             count(input.url, input);
-            input.clone().text().then((body) => note(input.url, body), () => {});
+            textOf(input.clone()).then((body) => note(input.url, body), () => {});
           } else read(input.url, init?.body);
         } else read(input, init?.body);
       } catch {}
