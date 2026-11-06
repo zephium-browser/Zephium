@@ -7526,7 +7526,6 @@ dependencies = [
  "idna",
  "proptest",
  "regex",
- "regex-automata",
  "ring",
  "rustix",
  "serde",

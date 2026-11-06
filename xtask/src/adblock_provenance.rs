@@ -657,10 +657,30 @@ fn validate_manifests(repository: &Path, fork_root: &Path) -> Result<(), String>
     let dev_dependencies = require_table(&manifest, "dev-dependencies")?;
     require_key_set(
         dev_dependencies,
-        &["addr", "criterion", "mock_instant", "sha2"],
+        &[
+            "addr",
+            "criterion",
+            "mock_instant",
+            "regex-automata",
+            "sha2",
+        ],
         "adblock dev-dependency table",
     )?;
     validate_dependency_sources(dev_dependencies, "dev-dependency")?;
+    // Fork tests see the regex engine features the desktop graph unifies.
+    let test_regex = dev_dependencies
+        .get("regex-automata")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            "adblock manifest must build tests with the shipped regex engine".to_owned()
+        })?;
+    require_key_set(
+        test_regex,
+        &["features", "version"],
+        "adblock test regex-automata dependency",
+    )?;
+    require_string(test_regex, "version", "=0.4.18")?;
+    require_string_array(test_regex, "features", &["dfa-build"])?;
     let test_resolver = dev_dependencies
         .get("addr")
         .and_then(toml::Value::as_table)

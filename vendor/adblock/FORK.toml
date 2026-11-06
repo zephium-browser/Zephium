@@ -149,6 +149,7 @@ invariants = [
   "prepared regexes never build a fully compiled DFA, whatever regex-automata features the application graph unifies",
   "prepared regexes keep no capture slots; matching only asks whether a regex matches",
   "the size limits, match kinds, and byte-oriented non-Unicode syntax are those regex::bytes applies, so the same rules compile, fail, and match",
+  "fork tests build regex-automata with dfa-build, as the desktop graph does, and check the compiled regexes themselves",
 ]
 
 [production_graphs]

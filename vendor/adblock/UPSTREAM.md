@@ -123,6 +123,8 @@ request callback:
   unchanged, and the 99th percentile rose 2% for exact and 4% for
   source-independent attribution. The switch is explicit in the
   configuration, so a feature change elsewhere cannot bring the full DFA back.
+  The fork's tests enable `dfa-build` through a test-only dependency, as the
+  desktop graph does, and check the compiled regexes' configuration.
 
 The changed filter-bucket representation is serialization-incompatible with
 upstream 0.13.2. This fork increments the internal data version from 5 to 6

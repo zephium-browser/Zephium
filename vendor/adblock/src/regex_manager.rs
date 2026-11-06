@@ -384,11 +384,29 @@ mod prepared_engine_tests {
 
     #[test]
     fn prepared_regexes_never_build_a_full_dfa_or_capture_slots() {
-        for kind in [MatchKind::LeftmostFirst, MatchKind::All] {
-            let config = prepared_config(kind, 1024, 1024);
+        let compile = |patterns: &[&str]| {
+            make_regexp_bounded(
+                NetworkFilterMask::IS_REGEX,
+                patterns.iter().copied(),
+                1024 * 1024,
+                1024 * 1024,
+            )
+        };
+        let CompiledRegex::Compiled(single, _) = compile(&["/ads/*.js^"]) else {
+            panic!("one pattern compiles to one regex");
+        };
+        let CompiledRegex::CompiledSet(set, _) = compile(&["/ads/*.js^", "/track/*^"]) else {
+            panic!("several patterns compile to one set");
+        };
+        for (regex, kind) in [(single, MatchKind::LeftmostFirst), (set, MatchKind::All)] {
+            let config = regex.get_config();
             assert!(!config.get_dfa());
-            assert!(matches!(config.get_which_captures(), WhichCaptures::None));
             assert!(config.get_hybrid());
+            assert!(matches!(config.get_which_captures(), WhichCaptures::None));
+            assert_eq!(config.get_match_kind(), kind);
+            assert_eq!(config.get_nfa_size_limit(), Some(1024 * 1024));
+            assert_eq!(config.get_hybrid_cache_capacity(), 1024 * 1024);
+            assert_eq!(regex.group_info().all_group_len(), 0);
         }
     }
 
