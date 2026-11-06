@@ -61,6 +61,10 @@ const CONSENT_SETTLE: Duration = Duration::from_secs(2);
 const BETWEEN_SITES: Duration = Duration::from_secs(1);
 /// How long a watch page opened behind another tab is left before it is read.
 const BACKGROUND_WAIT: Duration = Duration::from_secs(15);
+/// How long a video plays in view before its tab goes behind another, and how
+/// long the next one is watched there.
+const PLAY_IN_VIEW_SECONDS: u64 = 10;
+const HIDDEN_NEXT_SECONDS: u64 = 25;
 const UBLOCK_URL: &str =
     "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
 /// What Firefox gets to finish after it is ready. uBlock Origin downloads its
@@ -1622,7 +1626,8 @@ fn visit_line(visit: &Visit) -> String {
 }
 
 /// The YouTube pass: the home feed, two videos opened in the page from a
-/// watch page, five videos, one Shorts page and a video behind another tab.
+/// watch page, five videos, one Shorts page, a video behind another tab, and
+/// a video that played in view moving on to the next one behind another tab.
 fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result<(), String> {
     for run in 1..=context.options.runs {
         for config in rotated(&context.options.browsers, run - 1) {
@@ -1716,7 +1721,7 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                 }
             }
             if !browser_gone {
-                let (record, _) = youtube_background_step(&mut session, (config, run));
+                let (record, gone) = youtube_background_step(&mut session, (config, run));
                 eprintln!(
                     "  background  {}",
                     record
@@ -1725,6 +1730,17 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
                         .map_or(record.errors.join("; "), Value::to_string)
                 );
                 results.youtube.push(record);
+                if !gone {
+                    let (record, _) = youtube_hidden_next_step(&mut session, (config, run));
+                    eprintln!(
+                        "  hidden-next  {}",
+                        record
+                            .result
+                            .as_ref()
+                            .map_or(record.errors.join("; "), Value::to_string)
+                    );
+                    results.youtube.push(record);
+                }
             }
             if let Some(profile) = &session._profile {
                 results.launches[launch_at].components =
@@ -1781,6 +1797,71 @@ fn youtube_background_step(
             soft(&mut record.errors, "close", closed)?;
         }
         let closed = close(driver, &front.tab);
+        soft(&mut record.errors, "close", closed)?;
+        std::thread::sleep(BETWEEN_SITES);
+        Ok(())
+    })();
+    let gone = match outcome {
+        Ok(()) => false,
+        Err(failure) => {
+            record.errors.push(failure.message().to_string());
+            failure.is_gone()
+        }
+    };
+    (record, gone)
+}
+
+/// A video played in view for `PLAY_IN_VIEW_SECONDS`, its tab then sent
+/// behind the home feed, where the page moves on to a related video as
+/// autoplay would: a page that has played keeps playing hidden, so a hold
+/// there must still be ended.
+fn youtube_hidden_next_step(
+    session: &mut Session,
+    (config, run): (Config, usize),
+) -> (YoutubeStep, bool) {
+    let id = VIDEOS[2].0;
+    let url = format!("https://www.youtube.com/watch?v={id}");
+    let mut record = YoutubeStep {
+        config: config.name().to_string(),
+        run,
+        step: "hidden-next".into(),
+        id: Some(id.to_string()),
+        url: url.clone(),
+        ..YoutubeStep::default()
+    };
+    let driver = &mut session.driver;
+    let outcome = (|| -> Result<(), Failure> {
+        let Some(watch) = soft(&mut record.errors, "open", open(driver, &url))? else {
+            return Ok(());
+        };
+        record.nav_ms = watch.load_ms;
+        record.timed_out = watch.timed_out;
+        let play = sites::play_script(PLAY_IN_VIEW_SECONDS);
+        let played = eval(
+            driver,
+            &watch.tab,
+            &play,
+            PLAY_IN_VIEW_SECONDS * 1000 + 30_000,
+        );
+        if soft(&mut record.errors, "play", played)?.is_some() {
+            if let Some(front) = soft(
+                &mut record.errors,
+                "open front",
+                open(driver, "https://www.youtube.com/"),
+            )? {
+                let next = sites::hidden_next_script(HIDDEN_NEXT_SECONDS);
+                let result = eval(
+                    driver,
+                    &watch.tab,
+                    &next,
+                    HIDDEN_NEXT_SECONDS * 1000 + 30_000,
+                );
+                record.result = soft(&mut record.errors, "hidden-next", result)?;
+                let closed = close(driver, &front.tab);
+                soft(&mut record.errors, "close", closed)?;
+            }
+        }
+        let closed = close(driver, &watch.tab);
         soft(&mut record.errors, "close", closed)?;
         std::thread::sleep(BETWEEN_SITES);
         Ok(())
