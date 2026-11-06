@@ -396,7 +396,13 @@ impl Shell {
                 OperationReason::ItemLimitReached,
             );
         };
-        effects.extend(self.items.navigate(id, &input));
+        let local =
+            url::Url::parse(&input).is_ok_and(|url| zephium_core::navigation::local_document(&url));
+        effects.extend(if local {
+            self.items.navigate_external(id, &input)
+        } else {
+            self.items.navigate(id, &input)
+        });
         mutation_result(self.commit(effects))
     }
 
@@ -455,7 +461,7 @@ impl Shell {
             .external_position
             .unwrap_or(self.tab_preferences.new_position);
         for url in urls.into_iter().take(limit) {
-            if let Some(url) = zephium_core::navigation::external_target(&url) {
+            if let Some(url) = zephium_core::navigation::external_document(&url) {
                 let _ = self.open_url_in_new_tab_at(url.to_string(), position);
             }
         }

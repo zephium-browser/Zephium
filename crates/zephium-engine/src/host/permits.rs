@@ -33,6 +33,9 @@ impl Sink {
 #[derive(Clone)]
 pub(super) struct EventPermit {
     state: Arc<Mutex<EventPermitState>>,
+    /// The one local document the shell asked this view to open. A page
+    /// cannot reach any other `file:` address.
+    local_document: Arc<Mutex<Option<String>>>,
     #[cfg(target_os = "windows")]
     extensions: Option<ExtensionNavigationGrants>,
 }
@@ -54,6 +57,7 @@ impl EventPermit {
     pub(super) fn inactive() -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Inactive)),
+            local_document: Arc::default(),
             #[cfg(target_os = "windows")]
             extensions: None,
         }
@@ -62,6 +66,7 @@ impl EventPermit {
     pub(super) fn bound(token: &Arc<AtomicBool>) -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Bound(Arc::downgrade(token)))),
+            local_document: Arc::default(),
             #[cfg(target_os = "windows")]
             extensions: None,
         }
@@ -82,8 +87,29 @@ impl EventPermit {
             })
     }
 
+    /// Records the shell's request to open `target` when it is a local
+    /// document, and forgets the previous one otherwise. The shell admits a
+    /// local document only from another application's hand-off.
+    pub(super) fn grant_local_document(&self, target: &str) {
+        let granted = url::Url::parse(target)
+            .is_ok_and(|url| navigation::local_document(&url))
+            .then(|| target.to_owned());
+        *self
+            .local_document
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = granted;
+    }
+
+    fn local_document_granted(&self, target: &str) -> bool {
+        self.local_document
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(target)
+    }
+
     pub(super) fn allows_target(&self, target: &str) -> bool {
-        if navigation::is_allowed_str(target) {
+        if navigation::is_allowed_str(target) || self.local_document_granted(target) {
             return true;
         }
         #[cfg(target_os = "windows")]

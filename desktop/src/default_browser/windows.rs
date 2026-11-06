@@ -15,6 +15,10 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 pub(crate) const CLIENT: &str = "Zephium";
 pub(crate) const PROG_ID: &str = "ZephiumURL";
+/// Handler for local web pages, with no `URL Protocol` value: Windows treats
+/// a ProgId that has one as a link scheme, not a file type.
+const HTML_PROG_ID: &str = "ZephiumHTML";
+const FILE_TYPES: [&str; 4] = [".htm", ".html", ".xhtml", ".shtml"];
 const CLIENT_KEY: &str = r"Software\Clients\StartMenuInternet\Zephium";
 const CAPABILITIES: &str = r"Software\Clients\StartMenuInternet\Zephium\Capabilities";
 const SCHEMES: [&str; 2] = ["http", "https"];
@@ -39,7 +43,7 @@ pub(crate) fn register() -> bool {
     let exe = exe.display().to_string();
     let open = format!("\"{exe}\" \"%1\"");
     let icon = format!("\"{exe}\",0");
-    let entries: [(String, &str, String); 14] = [
+    let mut entries: Vec<(String, &str, String)> = vec![
         (
             format!(r"Software\Classes\{PROG_ID}"),
             "",
@@ -94,7 +98,29 @@ pub(crate) fn register() -> bool {
             CLIENT,
             CAPABILITIES.into(),
         ),
+        (
+            format!(r"Software\Classes\{HTML_PROG_ID}"),
+            "",
+            "Zephium HTML Document".into(),
+        ),
+        (
+            format!(r"Software\Classes\{HTML_PROG_ID}\DefaultIcon"),
+            "",
+            format!("\"{exe}\",0"),
+        ),
+        (
+            format!(r"Software\Classes\{HTML_PROG_ID}\shell\open\command"),
+            "",
+            format!("\"{exe}\" \"%1\""),
+        ),
     ];
+    entries.extend(FILE_TYPES.iter().map(|extension| {
+        (
+            format!(r"{CAPABILITIES}\FileAssociations"),
+            *extension,
+            HTML_PROG_ID.into(),
+        )
+    }));
     let written = entries
         .iter()
         .all(|(key, name, value)| write_string(key, name, value));

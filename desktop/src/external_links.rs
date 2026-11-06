@@ -4,7 +4,7 @@
 
 use super::*;
 use std::sync::Mutex;
-use zephium_core::navigation::{external_target, MAX_EXTERNAL_TARGETS};
+use zephium_core::navigation::{external_document, MAX_EXTERNAL_TARGETS};
 
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.
@@ -20,7 +20,7 @@ pub(crate) fn hand_off(
 ) {
     let urls: Vec<String> = arguments
         .into_iter()
-        .filter_map(|argument| external_target(&argument))
+        .filter_map(|argument| external_document(&argument))
         .map(|url| url.to_string())
         .take(MAX_EXTERNAL_TARGETS)
         .collect();
