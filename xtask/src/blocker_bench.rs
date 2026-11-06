@@ -1677,7 +1677,17 @@ fn run_youtube(context: &Context, results: &mut Results, saved: &Path) -> Result
             let feed = sites::YOUTUBE_FEED.to_string();
             let watch = sites::watch_script(WATCH_SECONDS, SEEK_WITHIN_MS);
             let inpage = sites::inpage_script(WATCH_SECONDS);
+            let first = sites::first_watch_script(25);
             let mut pages: Vec<(&str, Option<&str>, String, &str, u64)> = vec![
+                // A fresh profile's first page, so its consent prompt is
+                // answered on a watch page, as a new visitor's would be.
+                (
+                    "first-watch",
+                    Some(VIDEOS[0].0),
+                    format!("https://www.youtube.com/watch?v={}", VIDEOS[0].0),
+                    &first,
+                    25_000 + 60_000,
+                ),
                 (
                     "feed",
                     None,

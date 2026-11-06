@@ -34,12 +34,11 @@ for (let elapsed = 0; elapsed < seconds * 1000; elapsed += 250) {
     time: video ? Math.round(video.currentTime * 10) / 10 : null,
     paused: video?.paused ?? null,
     id: player?.getVideoData?.()?.video_id ?? null,
-    dialog: Boolean(document.querySelector('ytd-consent-bump-v2-lightbox, tp-yt-paper-dialog[opened]')),
   });
   await sleep(250);
 }
 // Only the samples where something the poll reads changed.
-const changes = timeline.filter((sample, at) => at === 0 || ['visible', 'state', 'hold', 'paused', 'id', 'dialog']
+const changes = timeline.filter((sample, at) => at === 0 || ['visible', 'state', 'hold', 'paused', 'id']
   .some((key) => sample[key] !== timeline[at - 1][key]) || (sample.time > 0 && !(timeline[at - 1].time > 0)));
 return {
   url: location.href,
@@ -51,4 +50,6 @@ return {
   markers: window.__benchMarkers ?? null,
   holdStates: (window.__benchHoldStates ?? []).slice(0, 8),
   holdSamples: (window.__benchHoldStates ?? []).length,
+  consent: window.__benchConsent ?? null,
+  playability: (() => { try { return document.getElementById('movie_player')?.getPlayerResponse?.()?.playabilityStatus?.status ?? null; } catch { return null; } })(),
 };

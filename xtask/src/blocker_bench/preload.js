@@ -103,8 +103,25 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
   // carried, which tells a hold from a video nobody asked to play.
   const holds = [];
   const markers = [];
+  // Each change in what a consent prompt shows and what the player does
+  // under it, by several candidate selectors so the record shows which one
+  // matched, and every click, so the answer's time is known.
+  const consent = [];
   Object.defineProperty(window, '__benchHoldStates', { value: holds });
   Object.defineProperty(window, '__benchMarkers', { value: markers });
+  Object.defineProperty(window, '__benchConsent', { value: consent });
+  const shown = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return 'absent';
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && (!element.checkVisibility || element.checkVisibility()) ? 'shown' : 'hidden';
+  };
+  document.addEventListener('click', (event) => {
+    if (consent.length < 120) {
+      const target = event.target?.closest?.('button, a, [role="button"]') ?? event.target;
+      consent.push({ atMs: Math.round(performance.now()), click: String(target?.getAttribute?.('aria-label') ?? target?.textContent ?? '').trim().slice(0, 40) });
+    }
+  }, true);
   const sampler = setInterval(() => {
     if (performance.now() > 30000) {
       clearInterval(sampler);
@@ -116,6 +133,20 @@ if (/(^|\.)youtube\.com$/.test(location.hostname)) {
         markers.push({ atMs: Math.round(performance.now()), tail: tail({ userAgent: agent }) });
       }
       const player = document.getElementById('movie_player');
+      const media = player?.querySelector('video');
+      const now = {
+        form: shown('form[action*="consent"]'),
+        lightbox: shown('ytd-consent-bump-v2-lightbox'),
+        reject: shown('button[aria-label^="Reject"]'),
+        error: shown('.ytp-error'),
+        state: player?.getPlayerState?.() ?? null,
+        paused: media?.paused ?? null,
+        playing: (media?.currentTime ?? 0) > 0,
+      };
+      const last = [...consent].reverse().find((entry) => !('click' in entry));
+      if (consent.length < 120 && (!last || Object.keys(now).some((key) => now[key] !== last[key]))) {
+        consent.push({ atMs: Math.round(performance.now()), ...now });
+      }
       const nerds = player?.getStatsForNerds?.();
       if (nerds?.buffer_health_seconds === '0.00 s' && nerds?.resolution === '0x0' && holds.length < 120) {
         holds.push({

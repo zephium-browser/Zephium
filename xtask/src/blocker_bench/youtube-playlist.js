@@ -53,8 +53,10 @@ const context = () => {
 };
 const playing = (from) => until(() => !video.paused && video.currentTime > from + 0.5, 20000);
 // Seeks to just before the end and waits for the player to move on.
+const requests = () => (window.__benchPlayerRequests ?? []).length;
 const ending = async () => {
   const before = context();
+  const sent = requests();
   const expected = items()[before.panelAt + 1] ?? null;
   const duration = call('getDuration') ?? video.duration;
   call('seekTo', Math.max(0, duration - 3), true);
@@ -64,8 +66,9 @@ const ending = async () => {
     return id && id !== before.videoId ? id : null;
   }, 30000);
   if (next) await playing(0);
+  const started = context();
   await sleep(1000);
-  return { expected, next, inOrder: next !== null && next === expected, after: context() };
+  return { expected, next, inOrder: next !== null && next === expected, requests: requests() - sent, started, after: context() };
 };
 // Reloads the current item with `how`, as a held start would, then lets it end.
 const reload = async (how) => {
@@ -81,7 +84,6 @@ const reload = async (how) => {
 };
 
 try { player.mute(); player.playVideo(); } catch {}
-const requests = () => (window.__benchPlayerRequests ?? []).length;
 await playing(0);
 await sleep(1000);
 const start = { requests: requests(), markers: window.__benchMarkers ?? null, context: context() };
