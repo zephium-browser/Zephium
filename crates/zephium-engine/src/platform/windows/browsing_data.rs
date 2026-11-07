@@ -155,7 +155,7 @@ pub(crate) fn sites(target: &DataTarget, done: EngineDataCompletion) {
             .filter_map(|index| unsafe { cookies.GetValueAtIndex(index) }.ok())
             .map(|cookie| (domain_of(&cookie), true, false));
         done.finish(EngineDataReply::Sites {
-            sites: merge_sites(hosts),
+            sites: merge_sites(hosts).0,
             partial: true,
         });
         Ok(())
