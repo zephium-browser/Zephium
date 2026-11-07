@@ -2584,6 +2584,10 @@ impl Engine for WebviewEngine {
         });
     }
 
+    fn release_spare(&self) {
+        self.run(|| host::best_effort_with(|host| host.release_spare()));
+    }
+
     fn suspends_hidden_views(&self) -> bool {
         cfg!(target_os = "windows")
     }

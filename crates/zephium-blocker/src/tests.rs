@@ -102,12 +102,17 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
     assert!(official("||unrelated.example^")
         .verify_official_canary()
         .is_err());
-    // A wildcard exception scoped to one site fails open when no page is known.
-    assert!(
+    // A wildcard exception scoped to one site lifts nothing elsewhere, nor
+    // where no page is known.
+    assert_eq!(
         official("||doubleclick.com^\n@@*$script,3p,from=elsewhere.example")
-            .verify_official_canary()
-            .is_err()
+            .verify_official_canary(),
+        Ok(())
     );
+    // An exception that applies on every page is still refused.
+    assert!(official("||doubleclick.com^\n@@||doubleclick.com^$script")
+        .verify_official_canary()
+        .is_err());
     // A list that blocks the harmless request is refused too.
     assert!(official("||doubleclick.com^\n||example.com^")
         .verify_official_canary()
@@ -119,6 +124,31 @@ fn the_official_canary_refuses_lists_that_stop_blocking() {
             .unwrap()
             .verify_official_canary(),
         Ok(())
+    );
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn with_no_page_known_a_site_scoped_wildcard_exception_lifts_no_block() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![FilterSource::new(
+                id("easylist"),
+                SourceFormat::Standard,
+                "||doubleclick.com^\n@@*$script,3p,from=elsewhere.example".to_owned(),
+            )],
+        )
+        .unwrap();
+    assert_eq!(rules.verify_official_canary(), Ok(()));
+    assert_eq!(
+        rules
+            .evaluate_source_independent(source_independent_request(
+                "https://ad.doubleclick.com/activity;src=1"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
     );
 }
 
@@ -279,7 +309,7 @@ fn approximate_attribution_never_evaluates_source_sensitive_rules() {
 
 #[cfg(feature = "runtime-exact")]
 #[test]
-fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
+fn unknown_attribution_never_lets_a_scoped_exception_lift_a_block() {
     let rules = Compiler::default()
         .compile(
             CompileTarget::Runtime,
@@ -310,13 +340,13 @@ fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
             ))
             .unwrap()
             .action(),
-        NetworkAction::Allow
+        NetworkAction::Block
     );
 }
 
 #[cfg(feature = "runtime")]
 #[test]
-fn source_independent_matching_preserves_target_semantics_and_fails_open_on_source_semantics() {
+fn source_independent_matching_preserves_target_semantics_and_fails_closed_on_source_semantics() {
     fn action(rules: &str, url: &str, method: RequestMethod) -> NetworkAction {
         Compiler::default()
             .compile(CompileTarget::Runtime, vec![source(rules)])
@@ -342,8 +372,8 @@ fn source_independent_matching_preserves_target_semantics_and_fails_open_on_sour
         let rules = format!("||tracker.example^\n{scoped_exception}");
         assert_eq!(
             action(&rules, target, RequestMethod::Get),
-            NetworkAction::Allow,
-            "unknown source attribution could activate {scoped_exception}"
+            NetworkAction::Block,
+            "{scoped_exception} needs the page, so it cannot lift a block without one"
         );
     }
 
@@ -1489,14 +1519,63 @@ fn the_built_in_rules_compile_for_webkit_after_the_lists() {
     assert_eq!(probe_sites, ["*mirror.co.uk", "*tomsguide.com"]);
 }
 
+/// The built-in list marks YouTube's client for the quick fixes' edits, and
+/// only when those edits are admitted from uBO's own list.
 #[test]
-fn the_built_in_rules_are_exceptions_only() {
+fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
+    let edits = [
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|lactmilli|inline|yahi|eafg|yaf4/].playbackContext.contentPlaybackContext.lactMilliseconds="${now}")"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"#,
+    ]
+    .join("\n");
+    let targets = [
+        #[cfg(feature = "runtime-exact")]
+        CompileTarget::Runtime,
+        #[cfg(feature = "webkit")]
+        CompileTarget::WebKit,
+    ];
+    for target in targets {
+        let program = |trusted: bool| {
+            let quick_fixes = FilterSource::new(
+                id("ublock-quick-fixes"),
+                SourceFormat::Standard,
+                format!("||ads.example^\n{edits}"),
+            );
+            let quick_fixes = if trusted {
+                quick_fixes.trusting_scriptlets()
+            } else {
+                quick_fixes
+            };
+            let rules = Compiler::default()
+                .compile(target, vec![quick_fixes, crate::builtin::source()])
+                .unwrap();
+            rules
+                .cosmetic_policy()
+                .and_then(|policy| policy.scriptlet_program().map(str::to_owned))
+        };
+        let marked = program(true).unwrap();
+        assert!(
+            marked.contains(r#"zephiumPlayerMarker("lactmilli channel yahi inline", "#),
+            "{target:?}"
+        );
+        assert!(marked.contains(r#"baseUrl*=reloadxhr", "onSnackbarMessage")"#));
+        assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
+        assert!(program(false).is_none_or(|script| !script.contains("zephiumPlayerMarker(\"")));
+    }
+}
+
+#[test]
+fn the_built_in_rules_add_no_block() {
     let rules = include_str!("zephium_rules.txt")
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('!'));
     for rule in rules {
-        assert!(rule.starts_with("@@"), "{rule}");
+        assert!(
+            rule.starts_with("@@") || rule.contains("##+js(zephium-"),
+            "{rule}"
+        );
     }
 }
 
@@ -1590,6 +1669,94 @@ fn the_runtime_target_ignores_pruned_rules() {
     let (with, without) = (compile(&[entry_for(PRUNABLE)]), compile(&[]));
     assert_eq!(with.digest(), without.digest());
     assert_eq!(with.report(), without.report());
+}
+
+#[cfg(all(feature = "webkit", feature = "runtime"))]
+#[test]
+fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
+    let rules = concat!(
+        "||scam.example^$doc\n",
+        "||cdn.example/*/alarm.mp3\n",
+        "||lure.example/*/winpage$doc\n",
+        "||lure.example/*/framepage$subdocument\n",
+        "||scam.example/*/both$doc,script\n",
+        "/track/*/pixel$image,xhr\n",
+    );
+    let compile_for = |target: CompileTarget, id_text: &str| {
+        Compiler::default()
+            .compile(
+                target,
+                vec![FilterSource::new(
+                    id(id_text),
+                    SourceFormat::Standard,
+                    rules.to_owned(),
+                )],
+            )
+            .unwrap()
+    };
+    let compile = |id_text: &str| compile_for(CompileTarget::WebKit, id_text);
+    let badware = compile("ublock-badware");
+    let coverage = badware.report().webkit().unwrap();
+    // The navigation check judges only these two; every other type stays blocked here.
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 2);
+    assert_eq!(coverage.converted_input_rules(), 4);
+    let json = badware.webkit().unwrap().json();
+    assert!(json.contains("alarm") && json.contains("both") && json.contains("pixel"));
+    assert!(!json.contains("winpage") && !json.contains("framepage"));
+    #[cfg(feature = "runtime-exact")]
+    {
+        // The navigation check compiles the badware list for the runtime
+        // matcher and refuses both loads WebKit no longer sees.
+        let navigation = compile_for(CompileTarget::Runtime, "ublock-badware");
+        let decide = |url: &str, page: &str, resource| {
+            navigation
+                .evaluate(NetworkRequest::new(url, page, resource, RequestMethod::Get))
+                .unwrap()
+                .action()
+        };
+        let page = "https://lure.example/a/b/winpage";
+        assert_eq!(
+            decide(page, page, ResourceType::Document),
+            NetworkAction::Block
+        );
+        assert_eq!(
+            decide(
+                "https://lure.example/a/framepage",
+                "https://news.example/",
+                ResourceType::Subdocument
+            ),
+            NetworkAction::Block
+        );
+        let elsewhere = "https://news.example/a/winpage";
+        assert_eq!(
+            decide(elsewhere, elsewhere, ResourceType::Document),
+            NetworkAction::Allow
+        );
+    }
+    let other = compile("ublock-filters");
+    let coverage = other.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 6);
+}
+
+#[cfg(all(feature = "webkit", not(feature = "runtime")))]
+#[test]
+fn without_the_navigation_check_badware_page_rules_stay_in_webkit() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![FilterSource::new(
+                id("ublock-badware"),
+                SourceFormat::Standard,
+                "||scam.example/*/winpage$doc\n||scam.example/*/framepage$subdocument\n".to_owned(),
+            )],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 2);
+    let json = rules.webkit().unwrap().json();
+    assert!(json.contains("winpage") && json.contains("framepage"));
 }
 
 #[cfg(feature = "webkit")]

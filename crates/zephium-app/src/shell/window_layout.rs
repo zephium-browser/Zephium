@@ -59,6 +59,7 @@ impl Shell {
         // privileged chrome for exactly the lifetime of the retained sheet.
         // A prompt in the sidebar needs neither: no page view overlaps it.
         let privileged_overlay_active = self.page_permission_modal()
+            || self.chrome_modal
             || self.active_browser_page().is_some()
             || self.focus_covers();
         // `Items` marks a prospective view resident before its CreateView

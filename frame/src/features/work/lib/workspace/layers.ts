@@ -3,20 +3,16 @@ const QUIET_MS = 250;
 const HELD_MS = 1000;
 
 /**
- * WebKit composites the canvas's transformed viewport while anything inside
- * it moves (an arrival, a board settling, a helper walking), and keeps it
- * composited after the motion ends: a backing store the size of everything on
- * the canvas, tens to hundreds of megabytes, held at rest. One invisible
- * layout change once the canvas is still lets WebKit take the layer back.
- * Where WebKit already does, the change costs one small layout and nothing more.
+ * Temporarily requests transform layers while the canvas moves. Wheel and
+ * dragging input engage a hold, renewed during motion; visibility loss or
+ * the hold timeout clears `will-change` and `data-held` on the viewport.
+ * The canvas styles use `data-held` for its cards too.
  *
- * A moving canvas is the exception: while it pans, pinches or a card is
- * dragged, the viewport and each card are held as layers (`data-held`,
- * styled by the canvas), so motion is the compositor sliding and rescaling
- * pictures rather than repainting tiles, rounded photos and all. Those layers
- * cost hundreds of megabytes on a full canvas, so they are made only for real
- * motion, never for a pointer resting on the canvas, and let go a moment
- * after it stops, or at once when the window hides.
+ * After a quiet interval, release waits for running or pending subtree
+ * animations to settle. It then inserts a zero-sized probe, forces layout
+ * and removes the probe to encourage release of an idle backing layer.
+ * Layer allocation, reclamation and rendering cost depend on the native
+ * engine and require measurement; the layout change does not guarantee them.
  */
 export function layerRelease(root: HTMLElement) {
   let timer: ReturnType<typeof setTimeout> | undefined;

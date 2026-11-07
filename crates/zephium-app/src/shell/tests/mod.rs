@@ -325,6 +325,7 @@ pub(crate) struct FakeEngine {
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
     pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    release_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -375,6 +376,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn release_spare_calls(&self) -> usize {
+        self.release_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn warm_spare_calls(&self) -> usize {
         self.warm_spare_calls
@@ -1016,6 +1021,10 @@ impl Engine for FakeEngine {
     fn set_shortcuts(&self, _shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {}
     fn warm_spare(&self, _partition: Partition) {
         self.warm_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn release_spare(&self) {
+        self.release_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
     fn prepare_profile(&self, partition: Partition) {

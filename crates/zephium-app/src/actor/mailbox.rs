@@ -1302,6 +1302,7 @@ fn command_is_critical(command: &Command) -> bool {
         command,
         Command::SetWindowFocused(false)
             | Command::SetPagePermissionCardHost(false)
+            | Command::SetChromeModal(false)
             | Command::BlockerReady(_)
             | Command::SetMemoryPressure(_)
             | Command::SidebarResizeGuide(None)

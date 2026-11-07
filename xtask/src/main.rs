@@ -140,17 +140,11 @@ fn main() {
     }
 }
 
-const UPDATE_BLOCKER_SEED_USAGE: &str = "update-blocker-seed --easylist PATH --easyprivacy PATH --ublock-filters PATH --ublock-quick-fixes PATH --license PATH --gpl-license PATH";
+const UPDATE_BLOCKER_SEED_USAGE: &str =
+    "update-blocker-seed --sources DIR --license PATH --gpl-license PATH";
 
 fn update_blocker_seed(arguments: &[String]) {
-    const FLAGS: [&str; 6] = [
-        "--easylist",
-        "--easyprivacy",
-        "--ublock-filters",
-        "--ublock-quick-fixes",
-        "--license",
-        "--gpl-license",
-    ];
+    const FLAGS: [&str; 3] = ["--sources", "--license", "--gpl-license"];
     let mut paths = [None; FLAGS.len()];
     let complete = arguments.len() == 2 * FLAGS.len()
         && arguments.chunks_exact(2).all(|pair| {
@@ -163,20 +157,12 @@ fn update_blocker_seed(arguments: &[String]) {
                         .is_none()
                 })
         });
-    let (
-        true,
-        [Some(easylist), Some(easyprivacy), Some(filters), Some(quick_fixes), Some(license), Some(gpl_license)],
-    ) = (complete, paths)
-    else {
+    let (true, [Some(sources), Some(license), Some(gpl_license)]) = (complete, paths) else {
         eprintln!("usage: cargo xtask {UPDATE_BLOCKER_SEED_USAGE}");
         exit(2);
     };
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    if let Err(error) = blocker_seed::update(
-        &repository,
-        [easylist, easyprivacy, filters, quick_fixes],
-        [license, gpl_license],
-    ) {
+    if let Err(error) = blocker_seed::update(&repository, sources, [license, gpl_license]) {
         eprintln!("bundled blocker seed update failed: {error}");
         exit(1);
     }
