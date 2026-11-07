@@ -38,13 +38,16 @@ fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
 
 fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration) -> Result<T> {
     let deadline = Instant::now() + budget;
+    let settled = |rx: &mpsc::Receiver<windows::core::Result<T>>| match rx.try_recv() {
+        Ok(result) => Some(result.map_err(|e| e.to_string())),
+        Err(mpsc::TryRecvError::Disconnected) => {
+            Some(Err("Native extension callback was lost.".into()))
+        }
+        Err(mpsc::TryRecvError::Empty) => None,
+    };
     loop {
-        match rx.try_recv() {
-            Ok(result) => return result.map_err(|e| e.to_string()),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err("Native extension callback was lost.".into());
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
+        if let Some(result) = settled(&rx) {
+            return result;
         }
         if Instant::now() >= deadline {
             return Err(TIMED_OUT.into());
@@ -63,9 +66,17 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
                     break;
                 }
             }
-            // The completion arrives as a message to this thread: sleep until
-            // one does instead of checking a thousand times a second.
-            let remaining = deadline.saturating_duration_since(Instant::now());
+        }
+        // The pump may just have run the completion, and an empty queue would
+        // not wake the wait below until the deadline.
+        if let Some(result) = settled(&rx) {
+            return result;
+        }
+        // The completion arrives as a message to this thread: sleep until
+        // one does instead of checking a thousand times a second.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // SAFETY: waits on this thread's own queue with no handles.
+        unsafe {
             MsgWaitForMultipleObjectsEx(
                 None,
                 remaining.as_millis().min(u128::from(u32::MAX)) as u32,
@@ -211,4 +222,80 @@ pub(crate) fn is_runtime_component(id: &str) -> bool {
         id,
         "dgiklkfkllikcanfonkcabmbdfmgleag" | "mhjfbmdgcfjbbpaeojofohoefgiehjai"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::w;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW, HWND_MESSAGE,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+    };
+
+    thread_local! {
+        static COMPLETION: Cell<Option<mpsc::Sender<windows::core::Result<u32>>>> =
+            const { Cell::new(None) };
+    }
+
+    unsafe extern "system" fn deliver(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_APP {
+            if let Some(sender) = COMPLETION.take() {
+                let _ = sender.send(Ok(7));
+            }
+            return LRESULT(0);
+        }
+        // SAFETY: forwards this window's own message unchanged.
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+
+    #[test]
+    fn a_completion_the_pump_delivers_answers_at_once() {
+        let (sender, receiver) = mpsc::channel();
+        COMPLETION.set(Some(sender));
+        // SAFETY: a message-only window owned and destroyed by this thread.
+        let window = unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(deliver),
+                hInstance: instance.into(),
+                lpszClassName: w!("ZephiumExtensionWaitTest"),
+                ..Default::default()
+            };
+            RegisterClassW(&class);
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("ZephiumExtensionWaitTest"),
+                None,
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap()
+        };
+        // SAFETY: the window is live on this thread.
+        unsafe { PostMessageW(Some(window), WM_APP, WPARAM(0), LPARAM(0)).unwrap() };
+
+        let started = Instant::now();
+        let answer = wait_within(receiver, Duration::from_secs(5));
+        let waited = started.elapsed();
+        // SAFETY: destroys the window this test created.
+        unsafe { DestroyWindow(window).unwrap() };
+
+        assert_eq!(answer, Ok(7));
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+    }
 }
