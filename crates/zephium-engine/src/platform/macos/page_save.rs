@@ -145,6 +145,11 @@ fn write_page(
     mut bytes: impl std::io::Read,
     origin: &str,
 ) -> std::io::Result<()> {
+    let permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("missing page directory"))?;
@@ -168,6 +173,9 @@ fn write_page(
             .map_err(|_| std::io::Error::other("page quarantine failed"))?;
         crate::host::download_files::verify_quarantine(&file)
             .map_err(|_| std::io::Error::other("page quarantine verification failed"))?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
         file.sync_all()?;
         std::fs::rename(&partial, path)
     })();
@@ -201,6 +209,21 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn replacing_a_page_preserves_destination_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 
     #[test]
