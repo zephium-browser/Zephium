@@ -303,6 +303,35 @@ test("a confirm is answered on its own block, with the exact control", async () 
   await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1, "approve"]);
 });
 
+test("a typing confirm shows the full value and sites read before approval", async () => {
+  const value = `private  "quoted" <script>text</script> ${"x".repeat(180)} tail`;
+  const label = `${JSON.stringify(value)} → Type into "Message"\nexample.com → ycombinator.com`;
+  const { screen } = await open(
+    status([
+      person(1, "Summarize the page"),
+      reply(
+        2,
+        [
+          {
+            kind: "steps",
+            steps: [{ index: 0, label, category: "type", state: "confirm", reason: null }],
+          },
+        ],
+        { state: "waiting", cost: null },
+      ),
+    ]),
+  );
+  const details = screen.getByText(label, { exact: true });
+  await expect.element(details).toBeVisible();
+  expect(details.element().textContent).toBe(label);
+  expect(getComputedStyle(details.element()).whiteSpace).toBe("pre-wrap");
+  expect(getComputedStyle(details.element()).overflowWrap).toBe("anywhere");
+  expect(details.element().querySelector("script")).toBeNull();
+  expect(native.decide).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Message", exact: true }).click();
+  await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 0, "approve"]);
+});
+
 test("Continue in Work starts it; once started, Open in Work goes to Work", async () => {
   const { screen } = await open(
     status([person(1, "Set up the status page"), reply(2, [text("Work fits."), HANDOFF()])]),

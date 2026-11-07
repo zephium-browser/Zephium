@@ -257,6 +257,20 @@ impl Reply {
 
     // ----------------------------------------------------------------- reads
 
+    fn other_sites(&self, target: &str) -> Vec<String> {
+        self.with_data(|data| {
+            data.read_sites
+                .iter()
+                .map(|(_, site)| site)
+                .filter(|site| site.as_str() != target)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     async fn read_tab(&self, tab: &str) -> Result<usize, PageAssistFaultV1> {
         let ports = self.service.ports();
         let facts = ports
@@ -321,6 +335,7 @@ impl Reply {
             }
         }
         self.with_data(|data| {
+            data.read_sites.insert((tab.to_owned(), site));
             data.reads.push(ReadRecord {
                 tab: tab.to_owned(),
                 epoch: facts.epoch,
@@ -396,7 +411,8 @@ impl Reply {
                         parts.push(format!("(The page {host} could not be read just now.)"));
                     }
                 },
-                Admitted::Selection { tab, text } => {
+                Admitted::Selection { tab, site, text } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     let letters = self
                         .with_data(|data| data.reads.iter().position(|read| &read.tab == tab))
                         .flatten()
@@ -405,8 +421,13 @@ impl Reply {
                     parts.push(prompt::selection_block(&letters, text));
                 }
                 Admitted::Element {
-                    host, label, pick, ..
+                    tab,
+                    site,
+                    host,
+                    label,
+                    pick,
                 } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     parts.push(prompt::element_block(
                         host,
                         label,
@@ -428,12 +449,45 @@ impl Reply {
 
     fn history(&self) -> Vec<WorkModelMessage> {
         let messages = {
-            let state = self.service.state();
-            state
-                .live
-                .get(&self.conversation)
-                .map(|live| live.conversation.messages().to_vec())
-                .unwrap_or_default()
+            let mut state = self.service.state();
+            let Some(live) = state.live.get_mut(&self.conversation) else {
+                return Vec::new();
+            };
+            let messages = live.conversation.messages().to_vec();
+            let mut sites = std::collections::BTreeSet::new();
+            let mut unknown = false;
+            for message in &messages {
+                if let PageAssistMessageV1::Person { attachments, .. } = message {
+                    for attachment in attachments {
+                        let (tab, host) = match attachment {
+                            PageAssistAttachmentV1::Page { tab, host, .. }
+                            | PageAssistAttachmentV1::Selection { tab, host, .. }
+                            | PageAssistAttachmentV1::Element { tab, host, .. } => (tab, host),
+                        };
+                        if let Some(site) = site_of(Some(&format!("https://{host}"))) {
+                            sites.insert((tab.clone(), site));
+                        } else {
+                            unknown = true;
+                        }
+                    }
+                }
+                if let PageAssistMessageV1::Reply { id, .. } = message {
+                    if *id == self.reply {
+                        continue;
+                    }
+                    if let Some(data) = live.replies.get(id) {
+                        sites.extend(data.read_sites.iter().cloned());
+                        unknown |= data.unknown_read_sites;
+                    } else {
+                        unknown = true;
+                    }
+                }
+            }
+            if let Some(data) = live.replies.get_mut(&self.reply) {
+                data.read_sites.extend(sites);
+                data.unknown_read_sites |= unknown;
+            }
+            messages
         };
         let mut model = Vec::new();
         for exchange in prompt::history(&messages) {
@@ -732,6 +786,14 @@ fn list_tabs(reply: &Reply) -> String {
         .take(60)
         .map(|tab| {
             let host = tab.url.as_deref().map(host_of).unwrap_or_default();
+            let site = site_of(tab.url.as_deref()).unwrap_or_else(|| {
+                if host.is_empty() {
+                    "?".to_owned()
+                } else {
+                    host.clone()
+                }
+            });
+            reply.with_data(|data| data.read_sites.insert((tab.id.clone(), site)));
             let title = text::bounded(&text::clean(&tab.title), 90).replace('"', "'");
             format!(
                 "{} · {} · \"{}\"",
@@ -1332,9 +1394,17 @@ fn category(effect: StepEffect) -> Option<WorkConfirmCategoryV1> {
 }
 
 /// Refuses, from the step's own read, steps the engine must never run:
-/// protected fields and links away from the site are refused, anything a
+/// secrets, protected fields and links away from the site are refused, anything a
 /// verb cannot use is unsuitable.
 fn admissible(record: &ReadRecord, step: &StepRequest) -> Result<(), StepFailure> {
+    if step.verb == Verb::Fill
+        && step
+            .value
+            .as_deref()
+            .is_some_and(zephium_agentic::contains_recognized_secret)
+    {
+        return Err(StepFailure::Refused);
+    }
     let Some(target) = step.target else {
         return if step.verb == Verb::Scroll {
             Ok(())
@@ -1430,6 +1500,25 @@ impl Plan {
         if let Some(row) = self.rows.get_mut(index) {
             if !label.is_empty() {
                 row.label = text::bounded(&text::clean(label), 120);
+                let sites = reply.other_sites(&self.record.page.site);
+                let unknown = reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true);
+                if let Some(value) = self.requests.get(index).and_then(|step| {
+                    (step.verb == Verb::Fill && (!sites.is_empty() || unknown))
+                        .then_some(step.value.as_deref())
+                        .flatten()
+                }) {
+                    let sources = if sites.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} → ", sites.join(", "))
+                    };
+                    row.label = format!(
+                        "{value:?} → {}\n{sources}{}",
+                        row.label, self.record.page.site
+                    );
+                }
             }
             if category(effect).is_some() {
                 row.category = category(effect);
@@ -1453,7 +1542,7 @@ impl Plan {
             .map(|row| {
                 let state = match (row.state, row.reason) {
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Refused)) => {
-                        "refused: a protected field or a link to another site"
+                        "refused: a secret, a protected field or a link to another site"
                     }
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Unsuitable)) => {
                         "failed: that passage is not a control this verb can use"
@@ -1638,20 +1727,30 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
 /// `Err(None)` ends the steps and tells the model; `Err(Some)` ends the reply.
 async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<(), Option<End>> {
     let page = reply.service.ports().page.clone();
-    for index in 0..plan.requests.len() {
+    let mut index = 0;
+    while index < plan.requests.len() {
         if reply.took_over.swap(false, Ordering::AcqRel) {
             take_over(reply, text, plan, index).await?;
+            continue;
         }
         let step = plan.requests[index].clone();
         let resolved = admissible(&plan.record, &step)
             .and_then(|()| page.resolve(&plan.tab, plan.epoch, &step));
-        let resolved = match resolved {
+        let mut resolved = match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
                 plan.fail(reply, index, failure);
                 return Err(None);
             }
         };
+        if step.verb == Verb::Fill
+            && (!reply.other_sites(&plan.record.page.site).is_empty()
+                || reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true))
+        {
+            resolved.effect = StepEffect::Commit(WorkConfirmCategoryV1::Type);
+        }
         if let StepEffect::Commit(_) = resolved.effect {
             plan.mark(
                 reply,
@@ -1676,6 +1775,9 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 Err(reason) => return Err(Some(End::Cancelled(reason))),
             }
         }
+        if reply.took_over.load(Ordering::Acquire) {
+            continue;
+        }
         plan.mark(
             reply,
             index,
@@ -1696,6 +1798,7 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 return Err(None);
             }
         }
+        index += 1;
     }
     Ok(())
 }
