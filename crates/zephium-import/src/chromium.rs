@@ -350,22 +350,35 @@ mod tests {
         use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("Bookmarks");
-        assert!(std::process::Command::new("/usr/bin/mkfifo")
+        assert!(std::process::Command::new("mkfifo")
             .arg(&path)
             .status()
             .unwrap()
             .success());
         // A pipe reports zero bytes of metadata but supplies more than the limit.
+        let writer_path = path.clone();
+        let (opened, ready) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
-            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(writer_path)?;
+            opened.send(()).unwrap();
             let mut bytes = br#"{"roots":{}}"#.to_vec();
             bytes.resize(32 * 1024 * 1024 + 1, b' ');
-            file.write_all(&bytes).unwrap();
+            file.write_all(&bytes)?;
             // A bounded reader closes without consuming the rest of the stream.
             bytes.fill(b' ');
             file.write_all(&bytes)
         });
         let result = bookmarks(directory.path());
+        // Opening both ends cannot block if the reader returned early or the
+        // writer already exited. Wait for the writer to open before closing
+        // this reader, so even an early return releases it with BrokenPipe.
+        let unblock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        ready.recv().unwrap();
+        drop(unblock);
         let tail = writer.join().unwrap();
         assert!(matches!(result, Err(ImportError::Unreadable)));
         assert_eq!(tail.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);

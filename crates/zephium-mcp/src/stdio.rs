@@ -275,8 +275,12 @@ mod tests {
             let leader = process.child.as_mut().unwrap().id().unwrap();
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
+                    // SAFETY: siginfo_t contains only integer and pointer fields;
+                    // all-zero bits are valid before waitid fills the structure.
                     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
                     assert_eq!(
+                        // SAFETY: info is writable and lives through the call;
+                        // leader identifies our child and WNOWAIT leaves it unreaped.
                         unsafe {
                             libc::waitid(
                                 libc::P_PID,
@@ -304,6 +308,7 @@ mod tests {
     async fn dropping_server_ends_a_descendant_even_after_parent_exits() {
         let (process, descendant, mut stdout) = orphaned_descendant().await;
         assert_eq!(
+            // SAFETY: signal zero only probes this fixture pid and takes no pointers.
             unsafe { libc::kill(i32::try_from(descendant).unwrap(), 0) },
             0
         );
@@ -331,7 +336,10 @@ mod tests {
         }));
         drop(process);
         worker.recv().unwrap();
+        // SAFETY: zero is a valid initial value for siginfo_t's integer and pointer fields.
         let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        // SAFETY: info remains writable for the call; leader is our child pid,
+        // and WNOWAIT observes its exit without reaping it.
         let result = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -352,6 +360,7 @@ mod tests {
         .unwrap()
         .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
+            // SAFETY: signal zero only probes the pid and takes no pointers.
             while unsafe { libc::kill(i32::try_from(leader).unwrap(), 0) } == 0 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -382,6 +391,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let descendant: i32 = line.trim().parse().unwrap();
+        // SAFETY: signal zero only probes the fixture pid and takes no pointers.
         assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
         let (started, worker) = std::sync::mpsc::channel();
         let (release, gate) = std::sync::mpsc::channel::<()>();
@@ -400,6 +410,8 @@ mod tests {
         )
         .await;
         // Also clean up the fixture when exercising the unfixed implementation.
+        // SAFETY: group is the positive process group id created for this fixture;
+        // negating it targets that group, and kill takes no pointers.
         unsafe {
             libc::kill(-group, libc::SIGKILL);
         }
@@ -407,6 +419,8 @@ mod tests {
             .expect("SIGTERM-ignoring descendant survived drop")
             .unwrap();
         for _ in 0..100 {
+            // SAFETY: both calls use signal zero to probe fixture pids without
+            // sending a signal or accessing memory through pointers.
             if unsafe { libc::kill(descendant, 0) } != 0 && unsafe { libc::kill(group, 0) } != 0 {
                 return;
             }
