@@ -51,6 +51,14 @@ impl Drop for TemporaryPage {
     }
 }
 
+/// Whether the warm spare of `spare`'s profile is the temporary page a call
+/// still uses, so idle and memory-pressure retirement leave it to that
+/// call's last use.
+#[cfg(any(test, target_os = "windows"))]
+fn temporary_page_held(page: Option<(ProfileId, usize)>, spare: Option<ProfileId>) -> bool {
+    matches!((page, spare), (Some((owner, users)), Some(profile)) if owner == profile && users > 0)
+}
+
 /// Whether a page of `owner` holds `profile`'s durable store.
 #[cfg(any(test, target_os = "windows"))]
 fn durable_partition_of(owner: zephium_core::ports::engine::Partition, profile: ProfileId) -> bool {
@@ -65,8 +73,23 @@ impl EngineHost {
             .any(|(id, partition)| partition.profile() == profile && self.views.contains_key(id))
     }
 
+    /// Whether the warm spare is a temporary page some call still uses.
+    #[cfg(target_os = "windows")]
+    pub(super) fn spare_serves_a_call(&self) -> bool {
+        temporary_page_held(
+            self.temporary_page
+                .as_ref()
+                .map(|(owner, users)| (*owner, users.load(std::sync::atomic::Ordering::Acquire))),
+            self.spare.as_ref().map(|spare| spare.partition.profile()),
+        )
+    }
+
     pub(super) fn close_idle_spare(&mut self, profile: ProfileId) {
         if self.has_live_profile_view(profile) {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if self.spare_serves_a_call() {
             return;
         }
         let Some(spare) = self

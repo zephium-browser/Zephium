@@ -882,6 +882,10 @@ impl EngineHost {
     /// Closes the warm spare view, if one is waiting; the next completed load
     /// may build another.
     pub(crate) fn release_spare(&mut self) {
+        #[cfg(target_os = "windows")]
+        if self.spare_serves_a_call() {
+            return;
+        }
         if let Some(spare) = self.spare.take() {
             #[cfg(target_os = "windows")]
             {
