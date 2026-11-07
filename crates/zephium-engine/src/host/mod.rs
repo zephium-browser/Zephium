@@ -21,7 +21,7 @@ mod content_styles;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
-mod download_files;
+pub(crate) mod download_files;
 #[cfg(target_os = "windows")]
 #[path = "download_files_windows.rs"]
 mod download_files;
