@@ -335,7 +335,15 @@ impl WebExtensions {
                 continue;
             }
             let revision = compat_revision(&entry.access);
-            if entry.compat != revision
+            let too_deep = match self.too_deep(entry) {
+                Ok(too_deep) => too_deep,
+                Err(error) => {
+                    push_failure(&mut failures, entry, error);
+                    continue;
+                }
+            };
+            if too_deep
+                || entry.compat != revision
                 || entry.source.is_empty()
                 || entry.prepared_digest.is_empty()
             {
@@ -343,13 +351,7 @@ impl WebExtensions {
                     Ok(()) => changed = true,
                     Err(error) => {
                         eprintln!("extensions: could not rebuild {}: {error}", entry.id);
-                        if failures.len()
-                            < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE
-                        {
-                            if let Some(install) = ExtensionInstallId::parse(&entry.install) {
-                                failures.push((install, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into()));
-                            }
-                        }
+                        push_failure(&mut failures, entry, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into());
                         continue;
                     }
                 }
@@ -368,6 +370,24 @@ impl WebExtensions {
             loads.push(self.load(entry, install, start_background));
         }
         (loads, failures, changed)
+    }
+
+    /// Whether a package sits too deep for WebView2 to load and must be
+    /// republished under a short name; only one published under a long name,
+    /// before names were shortened, can be. An error says why it can't load
+    /// even so, as when the profile's data has moved somewhere deeper.
+    fn too_deep(&self, entry: &Entry) -> Result<bool, String> {
+        if !cfg!(target_os = "windows") {
+            return Ok(false);
+        }
+        let packages = self.packages(&entry.id);
+        // A missing tree fails its load the usual way.
+        let Ok(longest) =
+            zephium_webext::windows::longest_relative_path(&packages.join(&entry.package))
+        else {
+            return Ok(false);
+        };
+        republish_for_depth(&packages, &entry.package, longest)
     }
 
     fn rebuild(
@@ -457,6 +477,54 @@ impl WebExtensions {
         }
         result
     }
+}
+
+fn push_failure(failures: &mut Vec<(ExtensionInstallId, String)>, entry: &Entry, message: String) {
+    if failures.len() < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+        if let Some(install) = ExtensionInstallId::parse(&entry.install) {
+            failures.push((install, message));
+        }
+    }
+}
+
+/// Whether a package published as `package` under `packages`, its longest file
+/// path inside being `longest`, loads where it is; if not, whether a short name
+/// would make it (`true`, to republish) or why nothing will (the error).
+fn republish_for_depth(packages: &Path, package: &str, longest: usize) -> Result<bool, String> {
+    use zephium_webext::package::{is_long_publication, publication_identity};
+    use zephium_webext::windows::path_budget;
+    let Err(refusal) = path_budget(&packages.join(package), longest) else {
+        return Ok(false);
+    };
+    // A short name is as short as one gets.
+    if !is_long_publication(package) {
+        return Err(refusal);
+    }
+    path_budget(&packages.join(publication_identity("", "", "")), longest)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+#[test]
+fn a_package_past_the_path_limit_is_republished_only_where_a_short_name_fits() {
+    use zephium_webext::package::publication_identity;
+    use zephium_webext::windows::MAX_LOADABLE_PATH;
+    let packages = Path::new(r"C:\Users\user\AppData\Roaming\app.zephium\webext\packages\ext");
+    let short = publication_identity("crx-a", "windows-1", "digest");
+    let long = format!("pkg-{}", "0".repeat(64));
+    let root_len = |name: &str| packages.join(name).to_string_lossy().encode_utf16().count();
+    // The longest path that still loads under a short name.
+    let fits_short = MAX_LOADABLE_PATH - root_len(&short) - 1;
+    assert_eq!(republish_for_depth(packages, &short, fits_short), Ok(false));
+    assert_eq!(republish_for_depth(packages, &long, fits_short), Ok(true));
+    assert_eq!(
+        republish_for_depth(packages, &long, fits_short - 48),
+        Ok(false)
+    );
+    // Too deep even for a short name: it says so rather than loading nothing.
+    let refused = republish_for_depth(packages, &short, fits_short + 1).unwrap_err();
+    assert!(refused.contains("can't load on Windows"), "{refused}");
+    assert!(republish_for_depth(packages, &long, fits_short + 1).is_err());
 }
 
 /// The sites an extension is granted under the user's access choice.
@@ -928,7 +996,7 @@ pub(in crate::webext) async fn open_options(shell: &Handle, id: &str) -> Result<
 }
 
 pub(in crate::webext) fn answer_access(
-    shell: &Handle,
+    dispatch: impl FnOnce(zephium_app::Command),
     extensions: &WebExtensions,
     request: zephium_ipc::WebExtensionAccessRequestView,
     allowed: bool,
@@ -958,10 +1026,17 @@ pub(in crate::webext) fn answer_access(
                     entry.hosts.push(pattern);
                 }
             }
-            extensions.save_existing(profile, &registry)?;
+            if let Err(error) = extensions.save_existing(profile, &registry) {
+                dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+                    profile,
+                    request: number,
+                    allowed: false,
+                });
+                return Err(error);
+            }
         }
     }
-    shell.dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+    dispatch(zephium_app::Command::AnswerWebExtensionAccess {
         profile,
         request: number,
         allowed,

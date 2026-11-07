@@ -7,12 +7,14 @@ use super::*;
 impl Shell {
     pub(super) fn on_audio_changed(&mut self, id: ItemId, audible: bool) {
         let now = std::time::Instant::now();
+        let was_running = self.keeps_running(id);
         if self.items.observe_audio(id, audible, now) {
             if audible {
                 self.watch_tab_media(id);
             }
             self.project_tab(id);
             self.sync_extension_browser_surface_metadata(id);
+            self.follow_running(id, was_running);
         }
         if let Some(deadline) = self.items.tab(id).and_then(|tab| tab.audio.deadline()) {
             self.audio_quiet.insert(id);
@@ -31,9 +33,11 @@ impl Shell {
     pub(super) fn settle_audio(&mut self, now: std::time::Instant) {
         let mut next: Option<std::time::Instant> = None;
         for id in std::mem::take(&mut self.audio_quiet) {
+            let was_running = self.keeps_running(id);
             if self.items.settle_audio(id, now) {
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);
+                self.follow_running(id, was_running);
             }
             if let Some(deadline) = self.items.tab(id).and_then(|tab| tab.audio.deadline()) {
                 self.audio_quiet.insert(id);

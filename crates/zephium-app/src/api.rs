@@ -257,7 +257,7 @@ pub enum SpaceCommand {
 pub enum PageRequestDecision {
     Allow,
     /// Allow, and let this site open the same kind of link without asking
-    /// again until Zephium quits.
+    /// again; kept with the profile's other site settings.
     AlwaysAllow,
     Dismiss,
 }
@@ -348,6 +348,8 @@ pub enum Command {
     FocusWake,
     /// A quiet tab's speaker is due to go.
     AudioWake,
+    /// Pending visit titles reached the end of their coalescing window.
+    VisitTitlesWake,
     /// Captures one persistent destination before any source reads begin,
     /// restoring the session first for onboarding.
     ImportDestination {
@@ -430,6 +432,8 @@ pub enum Command {
     /// The person's answer to what the tab's page asked for.
     AnswerPageRequest {
         id: ItemId,
+        /// The serial of the request the person was shown.
+        request: u32,
         decision: PageRequestDecision,
     },
     /// The person's answer to the tab's sign-in prompt: credentials, or
@@ -442,6 +446,14 @@ pub enum Command {
     /// The person chose to continue past the certificate the tab refused,
     /// on a host on their own network, and to load it again.
     ContinuePastCertificate(ItemId),
+    /// The person chose to open the page the filter lists refused anyway:
+    /// the address they were shown, so a refusal they never saw is not lifted.
+    ContinuePastBlock {
+        id: ItemId,
+        url: String,
+    },
+    /// The person left the page the filter lists refused.
+    LeaveBlockedPage(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {
@@ -497,6 +509,10 @@ pub enum Command {
     /// Whether the expanded sidebar is on screen to show a page-permission
     /// prompt under its address field.
     SetPagePermissionCardHost(bool),
+    /// Whether one of the browser's own dialogs is open over the window.
+    /// Pages are native views above chrome, so they leave the stage while
+    /// it shows.
+    SetChromeModal(bool),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
@@ -711,6 +727,8 @@ pub enum Command {
         origin: zephium_core::permissions::PageOrigin,
         kind: zephium_core::permissions::SitePermissionKind,
         decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        /// The application link scheme, for app link grants.
+        scheme: Option<String>,
     },
     SitePermissionCatalogLoaded {
         operation_id: String,
@@ -845,6 +863,12 @@ pub enum Command {
         profile: ProfileId,
         token: u64,
     },
+    /// The startup protection deadline for one profile: views held for its
+    /// enabled policy open without it from here on.
+    BlockerStartupDeadline {
+        profile: ProfileId,
+        token: u64,
+    },
     /// Bounded follow-up for an exact user-requested refresh or the reserved
     /// internal activation token. Ordinary refresh scheduling remains on the
     /// low-frequency maintenance heartbeat.
@@ -852,6 +876,9 @@ pub enum Command {
         operation: u64,
         attempt: u8,
     },
+    /// The catalog's update worker published a new status, such as a finished
+    /// download, so the catalog is maintained now rather than at the next tick.
+    BlockerCatalogChanged,
     /// One bounded-backoff retry for journal reconciliation, native erasure,
     /// or local SQLite finalization.
     ProfileDeletionRetry {
@@ -1196,12 +1223,12 @@ impl fmt::Debug for ImportDestinationCompletion {
     }
 }
 #[derive(Clone)]
-pub struct ImportCompletion(Completion<Option<u32>>);
+pub struct ImportCompletion(Completion<Option<(u32, bool)>>);
 impl ImportCompletion {
-    pub fn new(done: impl FnOnce(Option<u32>) + Send + 'static) -> Self {
+    pub fn new(done: impl FnOnce(Option<(u32, bool)>) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))
     }
-    pub fn finish(self, added: Option<u32>) {
+    pub fn finish(self, added: Option<(u32, bool)>) {
         let done = self
             .0
             .lock()

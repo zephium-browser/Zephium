@@ -6,6 +6,8 @@
   import Icon from "$shared/ui/Icon";
   import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
+  import TabSelectionBar from "./TabSelectionBar.svelte";
+  import { TabSelection } from "../lib/tab-selection.svelte";
   import SpaceBar from "./SpaceBar.svelte";
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
@@ -26,6 +28,16 @@
     /** Set beside the way to open a tab: pinned extensions. */
     extras?: Snippet;
   } = $props();
+
+  const selection = new TabSelection();
+  export function clearSelection() {
+    selection.clear();
+  }
+
+  let pinnedOrder = $state.raw<string[]>([]);
+  let todayOrder = $state.raw<string[]>([]);
+  const rangeOrder = $derived([...pinnedOrder, ...todayOrder]);
+  let spacePanelOpen = $state(false);
 
   // Private browsing keeps one space, so it has no switcher.
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
@@ -74,7 +86,11 @@
   the difference by having no close control.
 -->
 <!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar {extras} />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
+{#if spaced}<SpaceBar {extras} onOpenChange={(open) => (spacePanelOpen = open)} />{:else}<div
+    class="new-tab-slot"
+    data-cascade
+    style:--cascade={0}
+  >
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
@@ -98,6 +114,10 @@
       data-glide-scroller
     >
       <TabList
+        {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (pinnedOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={pinned}
         section="pinned"
         label={m.pinned_tabs()}
@@ -111,6 +131,10 @@
       {/if}
 
       <TabList
+        {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (todayOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={today}
         section="today"
         label={m.open_tabs()}
@@ -119,6 +143,7 @@
         {onSelect}
       />
     </div>
+    <TabSelectionBar {selection} />
     {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
   </div>
 </div>

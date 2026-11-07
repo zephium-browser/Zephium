@@ -616,6 +616,20 @@ impl InnerWebView {
         ns_string!("allowsPictureInPictureMediaPlayback"),
       );
 
+      #[cfg(target_os = "macos")]
+      if let Some(policy) = pl_attrs.https_upgrade {
+        use objc2_web_kit::WKWebpagePreferencesUpgradeToHTTPSPolicy as Policy;
+        let preferences = config.defaultWebpagePreferences();
+        // WebKit names this policy from macOS 15.2; earlier systems keep
+        // upgrading only the hosts it knows support https.
+        if preferences.respondsToSelector(objc2::sel!(setPreferredHTTPSNavigationPolicy:)) {
+          preferences.setPreferredHTTPSNavigationPolicy(match policy {
+            crate::AppleHttpsUpgrade::AutomaticFallback => Policy::AutomaticFallbackToHTTP,
+            crate::AppleHttpsUpgrade::UserMediatedFallback => Policy::UserMediatedFallbackToHTTP,
+          });
+        }
+      }
+
       if attributes.javascript_disabled {
         // <https://developer.apple.com/documentation/webkit/wkwebviewconfiguration/defaultwebpagepreferences>
         // Available: macOS 10.15+, iOS 13+
@@ -915,6 +929,8 @@ impl InnerWebView {
         pl_attrs.file_upload_handler,
         #[cfg(target_os = "macos")]
         pl_attrs.autofill_button_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.media_return_handler,
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));
@@ -1783,6 +1799,37 @@ impl InnerWebView {
       WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&identifier, &block, mtm);
     }
   }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+  static CONTEXT_MENU_DOWNLOAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the native download handler's call for a download the person
+/// started from WebKit's own context menu.
+#[cfg(target_os = "macos")]
+pub(crate) struct ContextMenuDownload(bool);
+
+#[cfg(target_os = "macos")]
+impl ContextMenuDownload {
+  pub(crate) fn begin() -> Self {
+    Self(CONTEXT_MENU_DOWNLOAD.with(|flag| flag.replace(true)))
+  }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ContextMenuDownload {
+  fn drop(&mut self) {
+    CONTEXT_MENU_DOWNLOAD.with(|flag| flag.set(self.0));
+  }
+}
+
+/// Whether the native download handler is running for a download the person
+/// started from WebKit's context menu rather than one a page started.
+#[cfg(target_os = "macos")]
+pub fn context_menu_download_in_progress() -> bool {
+  CONTEXT_MENU_DOWNLOAD.with(|flag| flag.get())
 }
 
 pub fn url_from_webview(webview: &WKWebView) -> Result<String> {

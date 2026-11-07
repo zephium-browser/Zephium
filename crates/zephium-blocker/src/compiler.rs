@@ -5,6 +5,7 @@ use std::fmt;
 #[cfg(feature = "webkit")]
 use std::sync::Arc;
 
+use crate::Sha256;
 #[cfg(feature = "webkit")]
 use adblock::content_blocking::{
     CbLoadType, CbRule, CbRuleCreationFailure, CbRuleEquivalent, CbType,
@@ -20,7 +21,6 @@ use adblock::{
 };
 #[cfg(feature = "webkit")]
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::limits::CompileLimits;
@@ -46,8 +46,10 @@ const DIGEST_DOMAIN: &[u8] = b"zephium-blocker-policy";
 const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
+/// Its wildcard rules never reach WebKit or its pruning.
+const NAVIGATION_CHECKED_SOURCE: &str = "ublock-badware";
 #[cfg(feature = "runtime")]
-const MAX_RUNTIME_REGEXES: usize = 1_152;
+const MAX_RUNTIME_REGEXES: usize = 4_096;
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_PATTERN_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "runtime")]
@@ -172,12 +174,30 @@ impl SourceFormat {
     }
 }
 
+/// Whether an official list may run `trusted-*` scriptlets: only uBlock
+/// Origin's own lists, which are written for them. User filters and every
+/// other list never may.
+pub fn official_source_trusts_scriptlets(id: &SourceId) -> bool {
+    matches!(
+        id.as_str(),
+        "ublock-filters"
+            | "ublock-quick-fixes"
+            | "ublock-link-shorteners"
+            | "ublock-privacy"
+            | "ublock-resource-abuse"
+            | "ublock-unbreak"
+            | "ublock-badware"
+    )
+}
+
 /// Owned input list consumed by [`Compiler::compile`].
 #[derive(Debug)]
 pub struct FilterSource {
     id: SourceId,
     format: SourceFormat,
     contents: String,
+    trusted: bool,
+    zephium: bool,
 }
 
 impl FilterSource {
@@ -187,7 +207,27 @@ impl FilterSource {
             id,
             format,
             contents,
+            trusted: false,
+            zephium: false,
         }
+    }
+
+    /// Zephium's built-in rules: they may call Zephium's own scriptlets.
+    pub(crate) const fn zephium_rules(mut self) -> Self {
+        self.zephium = true;
+        self
+    }
+
+    /// Lets this source's `trusted-*` scriptlet rules run.
+    #[must_use]
+    pub const fn trusting_scriptlets(mut self) -> Self {
+        self.trusted = true;
+        self
+    }
+
+    /// Whether this source's `trusted-*` scriptlet rules may run.
+    pub const fn trusts_scriptlets(&self) -> bool {
+        self.trusted
     }
 
     /// Returns the source identifier.
@@ -210,12 +250,67 @@ impl FilterSource {
 #[derive(Clone, Copy, Debug)]
 pub struct Compiler {
     limits: CompileLimits,
+    #[cfg(feature = "webkit")]
+    webkit_pruned: Option<&'static crate::webkit_prune::PrunedRules>,
+    #[cfg(feature = "webkit")]
+    webkit_pruning: bool,
+    #[cfg(feature = "webkit")]
+    navigation_checked: bool,
+    #[cfg(feature = "runtime")]
+    badware_apart: bool,
 }
 
 impl Compiler {
     /// Creates a compiler using validated limits.
     pub const fn new(limits: CompileLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            #[cfg(feature = "webkit")]
+            webkit_pruned: None,
+            #[cfg(feature = "webkit")]
+            webkit_pruning: true,
+            #[cfg(feature = "webkit")]
+            navigation_checked: cfg!(feature = "runtime"),
+            #[cfg(feature = "runtime")]
+            badware_apart: false,
+        }
+    }
+
+    /// Whether a runtime matcher leaves the badware list's blocking rules to
+    /// the navigation check's matcher, which the policy also asks about what
+    /// this one allows. The list's exceptions and cosmetics stay here.
+    #[cfg(feature = "runtime")]
+    pub const fn with_badware_apart(mut self, apart: bool) -> Self {
+        self.badware_apart = apart;
+        self
+    }
+
+    /// Whether the badware list's page and frame wildcard rules are judged
+    /// by the navigation check, which only a build with the runtime matcher
+    /// has, and so left out of WebKit. A build without it keeps them, or
+    /// nothing would refuse those loads. Release tooling that compiles for a
+    /// platform other than its own build says which.
+    #[cfg(feature = "webkit")]
+    pub const fn with_navigation_check(mut self, built: bool) -> Self {
+        self.navigation_checked = built;
+        self
+    }
+
+    /// Keeps every WebKit rule, for release tooling that measures which
+    /// rules the page corpus matches.
+    #[cfg(feature = "webkit")]
+    pub const fn without_webkit_pruning(mut self) -> Self {
+        self.webkit_pruning = false;
+        self
+    }
+
+    #[cfg(all(test, feature = "webkit"))]
+    pub(crate) fn with_webkit_pruned(
+        mut self,
+        pruned: &'static crate::webkit_prune::PrunedRules,
+    ) -> Self {
+        self.webkit_pruned = Some(pruned);
+        self
     }
 
     /// Returns the active resource limits.
@@ -290,10 +385,16 @@ impl Compiler {
             return Err(CompileError::NoUsableRules);
         }
 
-        let cosmetic_policy =
-            crate::CosmeticPolicy::compile(prepared.iter().map(|source| source.cosmetics.as_str()))
-                .map_err(CompileError::Cosmetics)?;
-        let cosmetics = if cosmetic_policy.report().accepted == 0 {
+        let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
+            prepared
+                .iter()
+                .map(|source| (source.cosmetics.as_str(), source.trust)),
+        )
+        .map_err(CompileError::Cosmetics)?;
+        // A policy with only scriptlets still has a program to run.
+        let cosmetics = if cosmetic_policy.report().accepted == 0
+            && cosmetic_policy.scriptlet_program().is_none()
+        {
             None
         } else {
             Some(
@@ -308,15 +409,29 @@ impl Compiler {
             combined.update(b"zephium-network-and-cosmetic-policy-v1");
             combined.update(digest.as_bytes());
             combined.update(cosmetics.policy.fingerprint().as_bytes());
-            digest = PolicyDigest(combined.finalize().into());
+            digest = PolicyDigest(combined.finalize());
         }
         let (runtime, runtime_coverage, webkit, webkit_coverage, native_blocking_rule_entries) =
             match target {
                 CompileTarget::Runtime => {
                     #[cfg(feature = "runtime")]
                     {
-                        let (runtime, blocking_entries, coverage) =
-                            compile_runtime(&mut prepared, self.limits)?;
+                        let shadowed = badware_shadowed_rules(&prepared);
+                        let badware_apart = self.badware_apart
+                            && prepared
+                                .iter()
+                                .any(|source| source.id.as_str() == NAVIGATION_CHECKED_SOURCE);
+                        if badware_apart {
+                            let mut apart = Sha256::new();
+                            apart.update(b"zephium-runtime-badware-apart-v1");
+                            apart.update(digest.as_bytes());
+                            digest = PolicyDigest(apart.finalize());
+                        }
+                        let (runtime, blocking_entries, mut coverage) =
+                            compile_runtime(&mut prepared, self.limits, badware_apart)?;
+                        coverage.badware_shadowed_rules = shadowed.rules;
+                        coverage.badware_shadow_work = shadowed.work;
+                        coverage.badware_shadow_count_truncated = shadowed.truncated;
                         (Some(runtime), Some(coverage), None, None, blocking_entries)
                     }
                     #[cfg(not(feature = "runtime"))]
@@ -327,8 +442,19 @@ impl Compiler {
                 CompileTarget::WebKit => {
                     #[cfg(feature = "webkit")]
                     {
-                        let (rules, coverage) =
-                            compile_webkit(&mut prepared, accepted_rules, self.limits)?;
+                        let pruned = if self.webkit_pruning {
+                            self.webkit_pruned
+                                .unwrap_or_else(crate::webkit_prune::PrunedRules::shipped)
+                        } else {
+                            crate::webkit_prune::PrunedRules::none()
+                        };
+                        let (rules, coverage) = compile_webkit(
+                            &mut prepared,
+                            accepted_rules,
+                            self.limits,
+                            pruned,
+                            self.navigation_checked,
+                        )?;
                         let blocking_entries = coverage.blocking_rule_entries;
                         (None, None, Some(rules), Some(coverage), blocking_entries)
                     }
@@ -380,6 +506,7 @@ struct AcceptedRule {
 struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
+    trust: crate::ScriptletTrust,
     rules: String,
     cosmetics: String,
     #[cfg(feature = "webkit")]
@@ -409,6 +536,7 @@ fn prepare_source(
     let mut runtime_approximated_rules = 0usize;
     let mut runtime_resource_approximated_rules = 0usize;
     let mut runtime_source_kind_approximated_rules = 0usize;
+    let mut conditions = crate::conditions::ListConditions::default();
 
     for (line_index, raw_line) in source.contents.split('\n').enumerate() {
         *physical_line_total = physical_line_total
@@ -433,6 +561,10 @@ fn prepare_source(
             });
         }
         let line = line.trim();
+        if matches!(source.format, SourceFormat::Standard) && !conditions.keep(line) {
+            ignored_lines += 1;
+            continue;
+        }
         if is_ignored_line(source.format, line) {
             ignored_lines += 1;
             continue;
@@ -564,6 +696,13 @@ fn prepare_source(
     Ok(PreparedSource {
         id: source.id,
         format: source.format,
+        trust: if source.zephium {
+            crate::ScriptletTrust::Zephium
+        } else if source.trusted {
+            crate::ScriptletTrust::Trusted
+        } else {
+            crate::ScriptletTrust::Plain
+        },
         rules,
         cosmetics,
         #[cfg(feature = "webkit")]
@@ -612,6 +751,12 @@ fn inspect_rule(
                 && has_unsupported_method_predicate(raw_line)
             {
                 return Ok(Admission::Drop(InputDropReason::UnsupportedMethodPredicate));
+            }
+            #[cfg(feature = "runtime")]
+            if matches!(target, CompileTarget::Runtime) && !runtime_regex_compiles(&filter) {
+                return Ok(Admission::Drop(
+                    InputDropReason::UnsupportedRegularExpression,
+                ));
             }
             let attribution_sensitive = filter.opt_domains.is_some()
                 || filter.opt_not_domains.is_some()
@@ -774,6 +919,22 @@ fn parse_drop_reason(error: &FilterParseError) -> InputDropReason {
     }
 }
 
+/// A source's physical lines, and an upper bound on its candidate rules (lines
+/// the compiler does not skip as comments or blanks), as the compiler counts
+/// them against the line and rule ceilings.
+pub(crate) fn line_counts(format: SourceFormat, text: &str) -> (usize, usize) {
+    let mut lines = 0;
+    let mut rules = 0;
+    for line in text.split('\n') {
+        lines += 1;
+        let line = line.strip_suffix('\r').unwrap_or(line).trim();
+        if !is_ignored_line(format, line) {
+            rules += 1;
+        }
+    }
+    (lines, rules)
+}
+
 fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
     if line.is_empty() {
         return true;
@@ -789,6 +950,160 @@ fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
                     .is_some_and(char::is_whitespace)
         }
     }
+}
+
+/// The work [`badware_shadowed_rules`] may spend: string comparisons, each
+/// charged one unit per 64 bytes it may read. The shipped lists take a few
+/// hundred.
+#[cfg(feature = "runtime")]
+pub(crate) const BADWARE_SHADOW_WORK_BUDGET: usize = 200_000;
+
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BadwareShadowCount {
+    pub(crate) rules: usize,
+    pub(crate) work: usize,
+    /// The budget ran out: `rules` counts only what was reached.
+    pub(crate) truncated: bool,
+}
+
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+fn badware_shadowed_rules(prepared: &[PreparedSource]) -> BadwareShadowCount {
+    use adblock::filters::network::{FilterPart, NetworkFilter, NetworkFilterMaskHelper};
+    // A rule for subresources: its host, if it names one, and the literal
+    // start of its path, up to the first wildcard.
+    struct Parsed {
+        exception: bool,
+        badfilter: bool,
+        id: u64,
+        host: Option<String>,
+        path: String,
+    }
+    let parse = |source: &PreparedSource, line: &str| {
+        let filter = NetworkFilter::parse(line, false, parse_options(source.format)).ok()?;
+        if !filter.mask.intersects(WEBVIEW2_AUDITED_REQUEST_TYPES) {
+            return None;
+        }
+        let path = match &filter.filter {
+            FilterPart::Simple(part) => part.split(['*', '^']).next().unwrap_or("").to_owned(),
+            FilterPart::Empty | FilterPart::AnyOf(_) => String::new(),
+        };
+        Some(Parsed {
+            exception: filter.mask.is_exception(),
+            badfilter: filter.is_badfilter(),
+            // Leaves out `$badfilter`, so a badfilter has its target's ID.
+            id: filter.get_id(),
+            host: filter.hostname.as_deref().map(str::to_ascii_lowercase),
+            path,
+        })
+    };
+    let badware = |source: &&PreparedSource| source.id.as_str() == NAVIGATION_CHECKED_SOURCE;
+    let blocks: Vec<Parsed> = prepared
+        .iter()
+        .filter(badware)
+        .flat_map(|source| source.rules.lines().filter_map(|line| parse(source, line)))
+        .filter(|rule| !rule.exception && !rule.badfilter)
+        .collect();
+    if blocks.is_empty() {
+        return BadwareShadowCount::default();
+    }
+    let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
+    // Each block's path under its host and under every domain above it,
+    // sorted, so an exception looks up blocks on related hosts only, and
+    // within each host only the paths that may overlap its own.
+    let mut by_host: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    let mut below: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for block in &blocks {
+        let Some(host) = block.host.as_deref() else {
+            continue;
+        };
+        by_host.entry(host).or_default().push(&block.path);
+        for (dot, _) in host.match_indices('.') {
+            below.entry(&host[dot + 1..]).or_default().push(&block.path);
+        }
+    }
+    // Each bucket's paths, sorted, with the length of its longest.
+    fn sorted<'a>(
+        buckets: std::collections::HashMap<&'a str, Vec<&'a str>>,
+    ) -> std::collections::HashMap<&'a str, (Vec<&'a str>, usize)> {
+        buckets
+            .into_iter()
+            .map(|(host, mut paths)| {
+                paths.sort_unstable();
+                paths.dedup();
+                let longest = paths.iter().map(|path| path.len()).max().unwrap_or(0);
+                (host, (paths, longest))
+            })
+            .collect()
+    }
+    let (by_host, below) = (sorted(by_host), sorted(below));
+    // A diagnostic count: past its budget it stops, as a lower bound, and the
+    // compile goes on.
+    let work = std::cell::Cell::new(0usize);
+    let charge = |one: &str, other: &str| {
+        let units = 1 + one.len().min(other.len()) / 64;
+        work.set(work.get().saturating_add(units));
+    };
+    let compare = |one: &str, other: &str| {
+        charge(one, other);
+        one.cmp(other)
+    };
+    // A path in `paths` that starts with `path`, or that `path` starts with;
+    // no prefix of `path` longer than the longest path can be one.
+    let may_overlap = |(paths, longest): &(Vec<&str>, usize), path: &str| {
+        let longer = paths.partition_point(|block| compare(block, path).is_lt());
+        paths.get(longer).is_some_and(|block| {
+            charge(block, path);
+            block.starts_with(path)
+        }) || (0..=path.len().min(*longest))
+            .filter(|&end| path.is_char_boundary(end))
+            .take_while(|_| work.get() <= BADWARE_SHADOW_WORK_BUDGET)
+            .any(|end| {
+                paths
+                    .binary_search_by(|block| compare(block, &path[..end]))
+                    .is_ok()
+            })
+    };
+    // An exception that names a related host (the same, one above or one
+    // below) on a path that may overlap.
+    let overlaps = |exception: &Parsed| {
+        let Some(host) = exception.host.as_deref() else {
+            return false;
+        };
+        let same_or_above =
+            std::iter::once(host).chain(host.match_indices('.').map(|(dot, _)| &host[dot + 1..]));
+        same_or_above
+            .filter_map(|domain| by_host.get(domain))
+            .chain(below.get(host))
+            .any(|paths| may_overlap(paths, &exception.path))
+    };
+    let mut count = BadwareShadowCount::default();
+    let others = prepared
+        .iter()
+        .filter(|source| !badware(source))
+        .flat_map(|source| {
+            source
+                .rules
+                .lines()
+                .filter(|line| line.starts_with("@@") || line.contains("badfilter"))
+                .filter_map(|line| parse(source, line))
+        });
+    for rule in others {
+        let shadowed = if rule.badfilter {
+            ids.contains(&rule.id)
+        } else {
+            rule.exception && overlaps(&rule)
+        };
+        if work.get() > BADWARE_SHADOW_WORK_BUDGET {
+            count.truncated = true;
+            break;
+        }
+        count.rules += usize::from(shadowed);
+    }
+    count.work = work.get();
+    count
 }
 
 fn parse_options(format: SourceFormat) -> ParseOptions {
@@ -811,6 +1126,24 @@ pub(crate) fn looks_like_cosmetic_rule(line: &str) -> bool {
     };
     let tail = &bytes[sharp.saturating_add(1)..(sharp.saturating_add(5)).min(bytes.len())];
     tail.contains(&b'#')
+}
+
+#[cfg(feature = "runtime")]
+/// Whether a regex-backed rule compiles the way the runtime matcher compiles
+/// it, so one rule the regex engine refuses cannot fail the whole policy.
+fn runtime_regex_compiles(filter: &adblock::filters::network::NetworkFilter) -> bool {
+    use adblock::filters::network::FilterPart;
+    let patterns: Vec<&str> = match &filter.filter {
+        FilterPart::Empty => Vec::new(),
+        FilterPart::Simple(pattern) => vec![pattern.as_ref()],
+        FilterPart::AnyOf(patterns) => patterns.iter().map(AsRef::as_ref).collect(),
+    };
+    adblock::regex_manager::regex_compiles_within(
+        filter.mask,
+        &patterns,
+        MAX_RUNTIME_REGEX_SIZE_BYTES,
+        MAX_RUNTIME_REGEX_DFA_SIZE_BYTES,
+    )
 }
 
 fn has_named_option(line: &str, expected: &str) -> bool {
@@ -888,23 +1221,48 @@ fn normalize_domain_predicate(value: &str) -> Option<String> {
 fn compile_runtime(
     prepared: &mut [PreparedSource],
     limits: CompileLimits,
+    badware_apart: bool,
 ) -> Result<(Engine, usize, RuntimeCoverage), CompileError> {
     let mut filters = FilterSet::new(false);
     for source in prepared {
-        filters.add_filter_list(
-            std::mem::take(&mut source.rules),
-            parse_options(source.format),
-        );
+        let mut rules = std::mem::take(&mut source.rules);
+        if badware_apart && source.id.as_str() == NAVIGATION_CHECKED_SOURCE {
+            rules = without_blocking_rules(&rules, source.format)?;
+        }
+        filters.add_filter_list(rules, parse_options(source.format));
     }
     let engine = Engine::new_with_filter_set(filters);
-    let (blocking_entries, coverage) = prepare_and_validate_runtime_engine(&engine, limits)?;
+    // Apart, the badware matcher holds blocks this one may lack.
+    let (blocking_entries, coverage) =
+        prepare_and_validate_runtime_engine(&engine, limits, !badware_apart)?;
     Ok((engine, blocking_entries, coverage))
+}
+
+/// `rules`' exceptions and `$badfilter` rules, which act on every list's
+/// blocks as in one matcher.
+#[cfg(feature = "runtime")]
+fn without_blocking_rules(rules: &str, format: SourceFormat) -> Result<String, CompileError> {
+    use adblock::filters::network::NetworkFilterMaskHelper as _;
+    let mut kept = String::new();
+    for line in rules.lines() {
+        let ParsedLine::Network(filter) = parse_filter(line, true, parse_options(format))
+            .map_err(|_| CompileError::UpstreamInvariant)?
+        else {
+            return Err(CompileError::AdmissionInvariant);
+        };
+        if filter.mask.is_exception() || filter.is_badfilter() {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    Ok(kept)
 }
 
 #[cfg(feature = "runtime")]
 pub(crate) fn prepare_and_validate_runtime_engine(
     engine: &Engine,
     limits: CompileLimits,
+    require_blocks: bool,
 ) -> Result<(usize, RuntimeCoverage), CompileError> {
     let preparation_limits = NetworkMatcherPreparationLimits {
         max_regexes: MAX_RUNTIME_REGEXES.min(limits.max_rules()),
@@ -920,13 +1278,14 @@ pub(crate) fn prepare_and_validate_runtime_engine(
         .map_err(map_runtime_preparation_error)?;
     let blocking_entries = engine
         .source_independent_blocking_filter_entry_count_for_types(WEBVIEW2_AUDITED_REQUEST_TYPES);
-    if blocking_entries == 0 {
+    if require_blocks && blocking_entries == 0 {
         return Err(CompileError::NoNativeBlockingRules);
     }
     Ok((
         blocking_entries,
         RuntimeCoverage {
             regexes: preparation.regexes,
+            omitted_regexes: preparation.omitted_regexes,
             regex_limit: preparation_limits.max_regexes,
             pattern_bytes: preparation.pattern_bytes,
             pattern_bytes_limit: preparation_limits.max_pattern_bytes,
@@ -937,6 +1296,9 @@ pub(crate) fn prepare_and_validate_runtime_engine(
             regex_size_limit_bytes: preparation.regex_size_limit_bytes,
             regex_dfa_size_limit_bytes: preparation.regex_dfa_size_limit_bytes,
             max_filter_checks_per_request: preparation.max_filter_checks_per_request,
+            badware_shadowed_rules: 0,
+            badware_shadow_work: 0,
+            badware_shadow_count_truncated: false,
         },
     ))
 }
@@ -977,6 +1339,37 @@ fn compile_webkit(
     prepared: &mut [PreparedSource],
     accepted_rules: usize,
     limits: CompileLimits,
+    pruned: &crate::webkit_prune::PrunedRules,
+    navigation_checked: bool,
+) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
+    // Splitting separator ends is an optimization: a list that fits WebKit's
+    // limits only unsplit is compiled unsplit, every rule of it.
+    let mut compile = |split| {
+        compile_webkit_with(
+            prepared,
+            accepted_rules,
+            limits,
+            pruned,
+            split,
+            navigation_checked,
+        )
+    };
+    match compile(true) {
+        Err(CompileError::TooManyWebKitRules { .. } | CompileError::WebKitJsonTooLarge { .. }) => {
+            compile(false)
+        }
+        result => result,
+    }
+}
+
+#[cfg(feature = "webkit")]
+fn compile_webkit_with(
+    prepared: &mut [PreparedSource],
+    accepted_rules: usize,
+    limits: CompileLimits,
+    pruned: &crate::webkit_prune::PrunedRules,
+    split_separator_ends: bool,
+    navigation_checked: bool,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     let mut bad_filter_ids = HashSet::new();
     for source in &*prepared {
@@ -994,6 +1387,7 @@ fn compile_webkit(
     }
 
     let mut drops = BTreeMap::new();
+    let mut pruned_rules = 0usize;
     let mut converted = 0usize;
     let mut converted_approximated = 0usize;
     let mut converted_attribution_approximated = 0usize;
@@ -1027,28 +1421,82 @@ fn compile_webkit(
             }
             let equivalent = webkit_equivalent_without_resource_semantics(filter)
                 .map_err(|_| CompileError::UpstreamInvariant)?;
-            let mut native_rules: Vec<_> = equivalent.into_iter().collect();
-            for native in &mut native_rules {
+            let mut unsplit = Vec::new();
+            for mut native in equivalent {
+                // Domain alternatives are sets; canonical cache records require
+                // uniqueness. Preserve first-seen order before pruning/hashing.
+                for domains in [
+                    &mut native.trigger.if_domain,
+                    &mut native.trigger.unless_domain,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let mut seen = HashSet::with_capacity(domains.len());
+                    domains.retain(|domain| seen.insert(domain.clone()));
+                }
                 if let Some(pattern) =
                     crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
                 {
                     native.trigger.url_filter = pattern;
                 }
+                unsplit.push(native);
             }
-            if native_rules.is_empty() {
+            if unsplit.is_empty() {
                 return Err(CompileError::UpstreamInvariant);
             }
-            if native_rules
-                .iter()
-                .any(|native| native.trigger.url_filter.len() > MAX_WEBKIT_URL_FILTER_BYTES)
+            let natives = if split_separator_ends {
+                let mut split = Vec::with_capacity(unsplit.len());
+                for native in unsplit {
+                    match crate::webkit::split_separator_end(&native.trigger.url_filter) {
+                        Some([at_end, before_separator]) => {
+                            let mut second = native.clone();
+                            let mut first = native;
+                            first.trigger.url_filter = at_end;
+                            second.trigger.url_filter = before_separator;
+                            split.push(first);
+                            split.push(second);
+                        }
+                        None => split.push(native),
+                    }
+                }
+                split
+            } else {
+                unsplit
+            };
+            // The navigation check judges only page and frame loads, so only a
+            // rule for those alone may leave WebKit for it; any other type keeps
+            // its blocking here.
+            if navigation_checked
+                && source.id.as_str() == NAVIGATION_CHECKED_SOURCE
+                && resource_types.iter().all(|resource| {
+                    matches!(
+                        resource,
+                        WebKitResourceType::TopDocument | WebKitResourceType::ChildDocument
+                    )
+                })
+                && natives.iter().any(|native| {
+                    matches!(native.action.typ, CbType::Block)
+                        && native.trigger.url_filter.contains(".*")
+                })
             {
+                increment(&mut drops, WebKitDropReason::NavigationChecked);
+                continue;
+            }
+            let Some(kept) = retain_for_webkit(natives, &resource_types, pruned)? else {
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
+                continue;
+            };
+            if kept.is_empty() {
+                pruned_rules = pruned_rules
+                    .checked_add(1)
+                    .ok_or(CompileError::RuleCountOverflow)?;
                 continue;
             }
             let emitted = blocking_rules
                 .len()
                 .checked_add(exception_rules.len())
-                .and_then(|emitted| emitted.checked_add(native_rules.len()))
+                .and_then(|emitted| emitted.checked_add(kept.len()))
                 .ok_or(CompileError::RuleCountOverflow)?;
             if emitted > limits.max_webkit_rules() {
                 return Err(CompileError::TooManyWebKitRules {
@@ -1056,11 +1504,7 @@ fn compile_webkit(
                     limit: limits.max_webkit_rules(),
                 });
             }
-            for native in native_rules {
-                let converted_rule = ConvertedRule {
-                    native,
-                    resource_types: resource_types.clone(),
-                };
+            for converted_rule in kept {
                 let destination = match converted_rule.native.action.typ {
                     CbType::Block => &mut blocking_rules,
                     CbType::IgnorePreviousRules => &mut exception_rules,
@@ -1109,6 +1553,7 @@ fn compile_webkit(
     let coverage = WebKitCoverage {
         accepted_input_rules: accepted_rules,
         converted_input_rules: converted,
+        pruned_input_rules: pruned_rules,
         approximated_input_rules: converted_approximated,
         attribution_approximated_input_rules: converted_attribution_approximated,
         resource_approximated_input_rules: converted_resource_approximated,
@@ -1125,7 +1570,7 @@ fn compile_webkit(
         WebKitRules {
             json: Arc::from(json),
             rule_count: rules.len(),
-            digest: ArtifactDigest(artifact_digest.finalize().into()),
+            digest: ArtifactDigest(artifact_digest.finalize()),
         },
         coverage,
     ))
@@ -1144,7 +1589,7 @@ fn digest_policy(prepared: &[PreparedSource]) -> PolicyDigest {
         digest.update((source.rules.len() as u64).to_be_bytes());
         digest.update(source.rules.as_bytes());
     }
-    PolicyDigest(digest.finalize().into())
+    PolicyDigest(digest.finalize())
 }
 
 #[cfg(feature = "webkit")]
@@ -1152,6 +1597,40 @@ fn digest_policy(prepared: &[PreparedSource]) -> PolicyDigest {
 struct CanonicalRule<'a> {
     action: CanonicalAction<'a>,
     trigger: CanonicalTrigger<'a>,
+}
+
+#[cfg(feature = "webkit")]
+/// The rules WebKit receives for one filter: `None` when a URL filter is past
+/// WebKit's size limit, otherwise what is left after pruning.
+fn retain_for_webkit(
+    natives: Vec<CbRule>,
+    resource_types: &[WebKitResourceType],
+    pruned: &crate::webkit_prune::PrunedRules,
+) -> Result<Option<Vec<ConvertedRule>>, CompileError> {
+    if natives
+        .iter()
+        .any(|native| native.trigger.url_filter.len() > MAX_WEBKIT_URL_FILTER_BYTES)
+    {
+        return Ok(None);
+    }
+    let mut kept = Vec::with_capacity(natives.len());
+    for native in natives {
+        let converted_rule = ConvertedRule {
+            native,
+            resource_types: resource_types.to_vec(),
+        };
+        if matches!(converted_rule.native.action.typ, CbType::Block)
+            && converted_rule.native.trigger.url_filter.contains(".*")
+            && pruned.contains(
+                &serde_json::to_vec(&canonical(&converted_rule))
+                    .map_err(CompileError::SerializeWebKit)?,
+            )
+        {
+            continue;
+        }
+        kept.push(converted_rule);
+    }
+    Ok(Some(kept))
 }
 
 #[cfg(feature = "webkit")]
@@ -1190,6 +1669,34 @@ struct CanonicalTrigger<'a> {
     unless_top_url: Option<&'a [String]>,
 }
 
+/// One rule as the WebKit artifact holds it; pruned-rule digests are taken
+/// over exactly these bytes.
+#[cfg(feature = "webkit")]
+fn canonical(rule: &ConvertedRule) -> CanonicalRule<'_> {
+    CanonicalRule {
+        action: CanonicalAction {
+            kind: webkit_action_name(&rule.native.action.typ),
+            selector: rule.native.action.selector.as_deref(),
+        },
+        trigger: CanonicalTrigger {
+            url_filter: &rule.native.trigger.url_filter,
+            url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
+            if_domain: rule.native.trigger.if_domain.as_deref(),
+            unless_domain: rule.native.trigger.unless_domain.as_deref(),
+            resource_type: Some(&rule.resource_types),
+            load_type: rule
+                .native
+                .trigger
+                .load_type
+                .iter()
+                .map(webkit_load_name)
+                .collect(),
+            if_top_url: rule.native.trigger.if_top_url.as_deref(),
+            unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
+        },
+    }
+}
+
 #[cfg(feature = "webkit")]
 fn canonical_webkit_json(
     rules: &[ConvertedRule],
@@ -1201,29 +1708,7 @@ fn canonical_webkit_json(
         let mut serializer = serde_json::Serializer::new(&mut output);
         let mut sequence = serializer.serialize_seq(Some(rules.len()))?;
         for rule in rules {
-            let canonical = CanonicalRule {
-                action: CanonicalAction {
-                    kind: webkit_action_name(&rule.native.action.typ),
-                    selector: rule.native.action.selector.as_deref(),
-                },
-                trigger: CanonicalTrigger {
-                    url_filter: &rule.native.trigger.url_filter,
-                    url_filter_is_case_sensitive: rule.native.trigger.url_filter_is_case_sensitive,
-                    if_domain: rule.native.trigger.if_domain.as_deref(),
-                    unless_domain: rule.native.trigger.unless_domain.as_deref(),
-                    resource_type: Some(&rule.resource_types),
-                    load_type: rule
-                        .native
-                        .trigger
-                        .load_type
-                        .iter()
-                        .map(webkit_load_name)
-                        .collect(),
-                    if_top_url: rule.native.trigger.if_top_url.as_deref(),
-                    unless_top_url: rule.native.trigger.unless_top_url.as_deref(),
-                },
-            };
-            sequence.serialize_element(&canonical)?;
+            sequence.serialize_element(&canonical(rule))?;
         }
         sequence.end()
     })();

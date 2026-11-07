@@ -339,6 +339,33 @@ pub fn set_chrome_hidden(window: &WebviewWindow, hidden: bool) -> bool {
         .is_ok()
 }
 
+/// Moves the chrome WebView to a new content process with an empty history.
+/// What a document left in its process (decoded images, graphics buffers,
+/// collected-but-unreturned heap) goes with the old one.
+pub fn restart_content_process(window: &WebviewWindow) {
+    let app = window.app_handle().clone();
+    let _ = window.with_webview(move |webview| {
+        // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+        // of this main-thread callback.
+        let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+        // SAFETY: NSObject's `respondsToSelector:` takes a selector and
+        // returns BOOL.
+        let restarts: bool = unsafe {
+            msg_send![
+                webkit,
+                respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)
+            ]
+        };
+        if restarts {
+            // Only a restart that happens may stand in for a crash.
+            crate::renderer_recovery::expect_restart(&app);
+            // SAFETY: checked above; WebKit declares it with no arguments
+            // and no result.
+            let _: () = unsafe { msg_send![webkit, _killWebContentProcessAndResetState] };
+        }
+    });
+}
+
 pub fn harden_privileged(window: &WebviewWindow) -> bool {
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();
@@ -944,9 +971,10 @@ thread_local! {
 }
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
-/// key equivalent, so a local monitor matches them before the focused web
-/// view sees the keystroke, and extensions' commands after them. Only the main
-/// window's keys are considered; the launcher panel keeps its own.
+/// key equivalent, and Next/Previous Tab must not reach the page (a page
+/// keystroke hides the pointer), so a local monitor matches them before the
+/// focused web view sees the keystroke, and extensions' commands after them.
+/// Only the main window's keys are considered; the launcher panel keeps its own.
 pub fn install_key_monitor(
     window: &WebviewWindow,
     table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,

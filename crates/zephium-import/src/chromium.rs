@@ -4,6 +4,7 @@
 //! account may keep that account's bookmarks apart, in `AccountBookmarks`, in
 //! the same shape.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -217,8 +218,24 @@ pub(crate) fn profile_dir(
 pub(crate) fn bookmarks(profile: &Path) -> Result<Vec<ImportNode>, ImportError> {
     let mut files = Vec::new();
     for name in BOOKMARK_FILES {
-        match std::fs::read(profile.join(name)) {
-            Ok(bytes) => files.push(bytes),
+        let path = profile.join(name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.len() > 32 * 1024 * 1024 => {
+                return Err(ImportError::Unreadable)
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > 32 * 1024 * 1024 {
+                    return Err(ImportError::Unreadable);
+                }
+                files.push(bytes);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -327,6 +344,70 @@ pub(crate) fn history(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn bookmark_stream_cannot_exceed_the_read_limit() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Bookmarks");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        // A pipe reports zero bytes of metadata but supplies more than the limit.
+        let writer_path = path.clone();
+        let (opened, ready) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(writer_path)?;
+            opened.send(()).unwrap();
+            let mut bytes = br#"{"roots":{}}"#.to_vec();
+            bytes.resize(32 * 1024 * 1024 + 1, b' ');
+            file.write_all(&bytes)?;
+            // A bounded reader closes without consuming the rest of the stream.
+            bytes.fill(b' ');
+            file.write_all(&bytes)
+        });
+        let result = bookmarks(directory.path());
+        // Opening both ends cannot block if the reader returned early or the
+        // writer already exited. Wait for the writer to open before closing
+        // this reader, so even an early return releases it with BrokenPipe.
+        let unblock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        ready.recv().unwrap();
+        drop(unblock);
+        let tail = writer.join().unwrap();
+        assert!(matches!(result, Err(ImportError::Unreadable)));
+        assert_eq!(tail.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn oversized_bookmarks_are_refused_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Bookmarks");
+        let mut bytes = br#"{"roots":{}}"#.to_vec();
+        bytes.resize(32 * 1024 * 1024 + 1, b' ');
+        std::fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Metadata remains readable, but opening the contents would fail
+            // with Permission rather than the size refusal below.
+            // A privileged runner can still open it; the size check holds either way.
+            if let Err(error) = std::fs::File::open(&path) {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+        }
+        assert!(matches!(
+            bookmarks(directory.path()),
+            Err(ImportError::Unreadable)
+        ));
+    }
+
     use super::*;
 
     #[test]

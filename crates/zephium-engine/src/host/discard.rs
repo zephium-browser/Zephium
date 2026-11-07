@@ -4,11 +4,13 @@ use zephium_core::ports::engine::{DiscardProbeId, EngineEvent};
 
 use super::dispatch::with_discard_observation;
 #[cfg(target_os = "windows")]
-use super::dispatch::{with_suspend_deadline, with_suspend_result};
+use super::dispatch::{with_suspend_deadline, with_suspend_result, with_suspend_retry};
 use super::permits::EventPermit;
 #[cfg(any(not(target_os = "windows"), test))]
 use super::scripts::DISCARD_SAFETY_QUERY_JS;
 use super::EngineHost;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Native navigation provenance only. A non-GET/unknown main document in
 /// this native history permanently prevents serialization/replay of it.
@@ -168,6 +170,7 @@ pub(super) struct SuspendAttempt {
     deadline: std::time::Instant,
     started: std::sync::atomic::AtomicBool,
     expired: std::sync::atomic::AtomicBool,
+    cycle: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -215,6 +218,19 @@ impl FinalDiscard {
 
 #[cfg(target_os = "windows")]
 const MAX_CONCURRENT_SUSPENDS: usize = 8;
+/// How long a page whose suspension was refused runs before it is asked once
+/// more. A busy page settles, or the pause shows it is genuinely in use.
+#[cfg(target_os = "windows")]
+const SUSPEND_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(target_os = "windows")]
+static SUSPEND_RETRY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A refused view's one retry: its timer while waiting, none once used.
+#[cfg(target_os = "windows")]
+pub(super) struct SuspendRetry {
+    generation: u64,
+    timer: Option<crate::platform::imp::ContentPolicyTimeout>,
+}
 
 #[cfg(target_os = "macos")]
 fn queue_final_discard(
@@ -860,6 +876,16 @@ impl EngineHost {
         if pressure == zephium_core::ports::engine::MemoryPressure::Normal {
             return;
         }
+        self.release_spare();
+    }
+
+    /// Closes the warm spare view, if one is waiting; the next completed load
+    /// may build another.
+    pub(crate) fn release_spare(&mut self) {
+        #[cfg(target_os = "windows")]
+        if self.spare_serves_a_call() {
+            return;
+        }
         if let Some(spare) = self.spare.take() {
             #[cfg(target_os = "windows")]
             {
@@ -1265,9 +1291,10 @@ impl EngineHost {
     /// Suspends hidden views: WebView2 `TrySuspend` on Windows, WebKit's
     /// suspend scheduling policy on macOS. Neither is reported as proof that
     /// a renderer stopped; macOS still runs audible or capturing pages.
-    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>) {
+    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>, request: u64) {
         #[cfg(target_os = "windows")]
         {
+            self.dormant_request = request;
             let next: std::collections::HashSet<ItemId> = ids
                 .into_iter()
                 .filter(|id| self.hidden.contains(id))
@@ -1281,6 +1308,11 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
             self.suspend_failed.retain(|id| next.contains(id));
+            self.suspend_retries.retain(|id, _| next.contains(id));
+            self.dormant_cycles.retain(|id, _| next.contains(id));
+            for id in &next {
+                self.dormant_cycles.entry(*id).or_insert(request);
+            }
             let cancelled: Vec<_> = self
                 .views
                 .iter()
@@ -1305,6 +1337,8 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = request;
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = ids;
     }
@@ -1354,7 +1388,9 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
-        self.suspend_failed.insert(id);
+        if self.attempt_is_current(id, &attempt) {
+            self.suspend_refused(id);
+        }
         let timer = self
             .views
             .get_mut(&id)
@@ -1468,11 +1504,84 @@ impl EngineHost {
                     crate::platform::imp::resume(view);
                 }
             }
-            if self.desired_dormant.contains(&id) {
-                self.suspend_failed.insert(id);
+            if self.desired_dormant.contains(&id) && self.attempt_is_current(id, &attempt) {
+                self.suspend_refused(id);
             }
         }
         self.refresh_missed_styles(id);
+        self.pump_suspends();
+    }
+
+    /// Whether `attempt` was started in the page's current dormancy cycle: a
+    /// late answer from an earlier one settles without being counted.
+    #[cfg(target_os = "windows")]
+    fn attempt_is_current(&self, id: ItemId, attempt: &SuspendAttempt) -> bool {
+        self.dormant_cycles.get(&id) == Some(&attempt.cycle)
+    }
+
+    /// A refused suspension is asked once more after a pause; refused again,
+    /// the page runs until it is shown or no longer meant to sleep.
+    #[cfg(target_os = "windows")]
+    fn suspend_refused(&mut self, id: ItemId) {
+        self.suspend_failed.insert(id);
+        match self
+            .suspend_retries
+            .get(&id)
+            .map(|retry| retry.timer.is_some())
+        {
+            None => {
+                let generation = SUSPEND_RETRY_GENERATION.fetch_add(1, Ordering::Relaxed);
+                let timer =
+                    crate::platform::imp::schedule_browser_timeout(SUSPEND_RETRY, move || {
+                        let _ =
+                            with_suspend_retry(id, move |host| host.retry_suspend(id, generation));
+                    });
+                self.suspend_retries
+                    .insert(id, SuspendRetry { generation, timer });
+            }
+            Some(true) => {}
+            Some(false) => {
+                eprintln!("suspend: refused after its retry; the page stays awake");
+                // The shell then stops asking, so its desired set says what
+                // is really suspended.
+                if let (Some(view), Some(partition)) =
+                    (self.views.get(&id), self.partitions.get(&id))
+                {
+                    view.event_permit.emit(
+                        &self.sink,
+                        EngineEvent::DormancyRefused {
+                            id,
+                            profile: partition.profile(),
+                            request: self.dormant_request,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retry_suspend(&mut self, id: ItemId, generation: u64) {
+        // A retry queued before the page was shown and refused anew is not
+        // the one now waiting, and must not spend it.
+        if self
+            .suspend_retries
+            .get(&id)
+            .is_none_or(|retry| retry.generation != generation)
+        {
+            return;
+        }
+        // A timed-out attempt may still answer, and nothing starts over it:
+        // the retry is not spent without asking; that answer schedules it anew.
+        if self.suspend_uncertain.contains(&id) {
+            self.suspend_retries.remove(&id);
+            return;
+        }
+        let Some(retry) = self.suspend_retries.get_mut(&id) else {
+            return;
+        };
+        retry.timer = None;
+        self.suspend_failed.remove(&id);
         self.pump_suspends();
     }
 
@@ -1492,11 +1601,11 @@ impl EngineHost {
                 .min();
             let Some(id) = candidate else { break };
             let Some(view) = self.views.get(&id) else {
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 continue;
             };
             let Some(epoch) = view.navigation.current_committed() else {
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 continue;
             };
             let attempt = std::sync::Arc::new(SuspendAttempt {
@@ -1506,6 +1615,7 @@ impl EngineHost {
                 started: std::sync::atomic::AtomicBool::new(false),
                 expired: std::sync::atomic::AtomicBool::new(false),
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+                cycle: self.dormant_cycles.get(&id).copied().unwrap_or_default(),
             });
             let Some(view) = self.views.get_mut(&id) else {
                 continue;
@@ -1528,7 +1638,7 @@ impl EngineHost {
             );
             let Some(timer) = timer else {
                 self.suspending.remove(&id);
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 if let Some(view) = self.views.get_mut(&id) {
                     view.suspend_attempt = None;
                 }
@@ -1570,7 +1680,7 @@ impl EngineHost {
             });
             if !started {
                 self.suspending.remove(&id);
-                self.suspend_failed.insert(id);
+                self.suspend_refused(id);
                 let timer = self.views.get_mut(&id).and_then(|view| {
                     view.suspend_attempt = None;
                     view.suspend_deadline.take()
@@ -1647,6 +1757,7 @@ mod tests {
             navigation_type: wry::AppleNavigationType::Other,
             is_get: get,
             target_is_main_frame: main,
+            source: None,
         }
     }
 

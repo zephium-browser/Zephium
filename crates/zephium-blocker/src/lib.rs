@@ -7,22 +7,29 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use sha2::{Digest, Sha256};
-
+mod builtin;
 mod cache;
 mod compiler;
+mod conditions;
 mod cosmetics;
 mod limits;
+mod priority;
 mod report;
 mod rules;
+mod scriptlets;
+mod sha256;
 #[cfg(feature = "webkit")]
 mod webkit;
+#[cfg(feature = "webkit")]
+mod webkit_prune;
 mod worker;
 
 pub use cache::{CompiledArtifactCacheConfig, CompiledArtifactCacheConfigError};
 pub use compiler::{
-    CompileError, CompileTarget, Compiler, FilterSource, SourceFormat, SourceId, SourceIdError,
+    official_source_trusts_scriptlets, CompileError, CompileTarget, Compiler, FilterSource,
+    SourceFormat, SourceId, SourceIdError,
 };
+pub use conditions::ListConditions;
 pub use cosmetics::{
     prepare_site_preferences, validate_personal_selector, CosmeticError, CosmeticPolicy,
     CosmeticReport,
@@ -36,6 +43,11 @@ pub use rules::{
     ArtifactDigest, CompiledRules, MatchError, NetworkAction, NetworkDecision, NetworkRequest,
     PolicyDigest, RequestMethod, ResourceType, WebKitRules,
 };
+pub use scriptlets::ScriptletTrust;
+#[doc(hidden)]
+pub use sha256::Sha256;
+#[cfg(feature = "webkit")]
+pub use webkit_prune::webkit_rule_digest;
 pub use worker::{
     CatalogError, CatalogPreparationOutcome, CatalogReplacementDispatch, PolicyCatalog,
     PolicySource, StaticPolicyCatalog, WorkerBlocker,
@@ -46,7 +58,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 5;
+pub const POLICY_FORMAT_VERSION: u32 = 9;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;
@@ -61,10 +73,14 @@ pub const ADBLOCK_ENGINE_VERSION: &str = "0.13.2";
 /// parser, native target, limits, or embedded engine changed can safely retry
 /// the same signed repository revision without weakening rollback protection.
 pub fn compiler_policy_fingerprint() -> [u8; 32] {
+    policy_fingerprint(POLICY_FORMAT_VERSION)
+}
+
+pub(crate) fn policy_fingerprint(policy_format_version: u32) -> [u8; 32] {
     let values = CompileLimitValues::default();
     let mut digest = Sha256::new();
     digest.update(b"zephium-blocker-compiler-policy-v1");
-    digest.update(POLICY_FORMAT_VERSION.to_be_bytes());
+    digest.update(policy_format_version.to_be_bytes());
     digest.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
     digest.update(ADBLOCK_ENGINE_VERSION.as_bytes());
     digest.update(std::env::consts::OS.as_bytes());
@@ -72,6 +88,11 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     digest.update([u8::from(cfg!(feature = "runtime"))]);
     digest.update([u8::from(cfg!(feature = "runtime-exact"))]);
     digest.update([u8::from(cfg!(feature = "webkit"))]);
+    if cfg!(feature = "webkit") || cfg!(feature = "runtime-exact") {
+        digest.update(builtin::fingerprint());
+    }
+    #[cfg(feature = "webkit")]
+    digest.update(webkit_prune::PrunedRules::shipped().fingerprint());
     for value in [
         values.max_sources,
         values.max_source_bytes,
@@ -86,7 +107,7 @@ pub fn compiler_policy_fingerprint() -> [u8; 32] {
     ] {
         digest.update((value as u64).to_be_bytes());
     }
-    digest.finalize().into()
+    digest.finalize()
 }
 
 #[cfg(test)]

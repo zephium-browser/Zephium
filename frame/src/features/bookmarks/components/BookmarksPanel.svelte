@@ -32,6 +32,7 @@
 
   let session = $state.raw(untrack(() => new BookmarksSession(profile)));
   let renaming = $state<string | null>(null);
+  let pendingFolder = $state.raw<{ owner: BookmarksSession; id: string } | null>(null);
   let draft = $state("");
   /** A folder whose removal waits for a second press, because it takes its
    *  contents with it. */
@@ -66,6 +67,16 @@
       const index = session.items.findIndex((candidate) => candidate.id === landing.id);
       if (index >= 0) void session.reorder(item.id, landing.kind === "after" ? index + 1 : index);
     },
+  });
+
+  // The ghost stays over the panel: past it, pages are native views above
+  // the chrome and would hide it.
+  let panel = $state<HTMLElement>();
+  let ghostWidth = $state(0);
+  const ghostX = $derived.by(() => {
+    const x = drag.at.x + 12;
+    const edge = panel?.getBoundingClientRect().right;
+    return edge === undefined ? x : Math.max(0, Math.min(x, edge - ghostWidth - 4));
   });
 
   function landingAt(item: BookmarkView, target: Element | null, y: number): Landing | null {
@@ -276,10 +287,24 @@
   });
 
   async function addFolder() {
-    const id = await session.addFolder(m.bookmarks_new_folder_name());
-    const created = session.items.find((item) => item.id === id);
-    if (created) startRename(created);
+    const owner = session;
+    const id = await owner.addFolder(m.bookmarks_new_folder_name());
+    if (owner === session && typeof id === "string") pendingFolder = { owner, id };
   }
+
+  $effect(() => {
+    const pending = pendingFolder;
+    if (!pending) return;
+    if (pending.owner !== session) {
+      pendingFolder = null;
+      return;
+    }
+    if (session.loading) return;
+    pendingFolder = null;
+    if (session.error !== null) return;
+    const created = session.items.find((item) => item.id === pending.id);
+    if (created) startRename(created);
+  });
 
   const focusAndSelect = (node: HTMLInputElement) => {
     node.focus();
@@ -296,7 +321,7 @@
   };
 </script>
 
-<div class="bookmarks">
+<div class="bookmarks" bind:this={panel}>
   {#if !session.searching && session.folder !== null}
     <div class="place">
       <IconButton
@@ -532,7 +557,12 @@
 {/if}
 {#if drag.item}
   {@const carried = drag.item}
-  <div class="ghost" style:translate={`${drag.at.x + 12}px ${drag.at.y + 8}px`} aria-hidden="true">
+  <div
+    class="ghost"
+    bind:clientWidth={ghostWidth}
+    style:translate={`${ghostX}px ${drag.at.y + 8}px`}
+    aria-hidden="true"
+  >
     <span class="glyph"
       >{#if carried.url === null}<Icon icon={Folder01Icon} size={14} />{:else}<FavIcon
           image={favicons.mark(carried.icon, carried.url)?.image ?? null}

@@ -37,6 +37,42 @@ test("returning to a tab does not admit its earlier source request", async () =>
   await expect.element(page.getByText("stale source", { exact: true })).not.toBeInTheDocument();
 });
 
+test.each([false, true])(
+  "a late copy does not confirm another source lifetime (return to first tab: %s)",
+  async (returning) => {
+    let finish!: () => void;
+    const write = vi
+      .fn()
+      .mockReturnValueOnce(new Promise<void>((resolve) => (finish = resolve)))
+      .mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: write },
+    });
+    const first = document("first source");
+    native.source
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(document("second source"))
+      .mockResolvedValueOnce(first);
+    const screen = await render(SourcePage, { props: { tab: "first" } });
+    await page.getByRole("button", { name: "Copy source" }).click();
+    expect(write).toHaveBeenCalledExactlyOnceWith("first source");
+    await screen.rerender({ tab: "second" });
+    await expect.element(page.getByText("second source", { exact: true })).toBeVisible();
+    if (returning) {
+      await screen.rerender({ tab: "first" });
+      await expect.element(page.getByText("first source", { exact: true })).toBeVisible();
+    }
+    finish();
+    await new Promise(requestAnimationFrame);
+    expect(screen.container.querySelector("header")?.textContent).toContain("Copy source");
+    expect(screen.container.querySelector("header")?.textContent).not.toContain("Copied");
+    await page.getByRole("button", { name: "Copy source" }).click();
+    expect(write).toHaveBeenLastCalledWith(returning ? "first source" : "second source");
+    await expect.element(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  },
+);
+
 test("the source is drawn as text, one numbered line each, never as markup", async () => {
   native.source.mockResolvedValue(
     document("<!doctype html>\n<script>alert(1)</script>\n\n<p>hi</p>"),

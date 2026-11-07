@@ -8,7 +8,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../src/compat/compat.js", import.meta.url), "utf8");
 const event = () => ({ addListener() {}, removeListener() {}, hasListener: () => false });
 
-function context(kind, declared = []) {
+function context(kind, declared = [], globals = {}) {
   const invalid = (name) => new Error(`Invalid call. The 'permissions' value is invalid, because '${name}' is not a valid permission.`);
   const chrome = {
     runtime: {
@@ -97,14 +97,23 @@ function context(kind, declared = []) {
     i18n: { getMessage: (key) => (key === "name" ? "Probe" : "") },
     webRequest: {
       onBeforeRequest: {
-        addListener(_listener, filter) {
+        addListener(listener, filter) {
           if (filter.urls.some((url) => url.startsWith("ws"))) throw new Error("invalid match pattern");
           if ((filter.types || []).includes("webbundle")) throw new Error("invalid resource type");
           this.filters.push(filter.urls);
           this.types.push(filter.types);
+          this.listeners.push(listener);
+        },
+        removeListener(listener) {
+          const index = this.listeners.indexOf(listener);
+          if (index >= 0) this.listeners.splice(index, 1);
+        },
+        hasListener(listener) {
+          return this.listeners.includes(listener);
         },
         filters: [],
         types: [],
+        listeners: [],
       },
     },
     contextMenus: {
@@ -213,6 +222,7 @@ function context(kind, declared = []) {
     g.location = { protocol: "https:", pathname: "/", href: "https://example.com/" };
   }
   g.globalThis = g;
+  Object.assign(g, globals);
   vm.createContext(g);
   vm.runInContext(source, g);
   return g;
@@ -374,6 +384,32 @@ test("filters and patterns WebKit can't read are narrowed, not refused", async (
   assert.equal(chrome.identity.AccountStatus.ANY, "ANY");
 });
 
+test("a frame's document reaches webRequest listeners as sub_frame, once per listener", () => {
+  const { chrome } = context("worker");
+  const event = chrome.webRequest.onBeforeRequest;
+  const seen = [];
+  const listener = (details) => seen.push(details.type);
+  event.addListener(listener, { urls: ["<all_urls>"], types: ["sub_frame"] });
+  event.addListener(listener, { urls: ["<all_urls>"] });
+  assert.equal(event.listeners.length, 1);
+  assert.equal(JSON.stringify(event.types.at(-1)), JSON.stringify(["sub_frame", "main_frame"]));
+  for (const relay of event.listeners) {
+    relay({ type: "main_frame", frameId: 4 });
+    relay({ type: "main_frame", frameId: 0 });
+  }
+  assert.equal(JSON.stringify(seen), JSON.stringify(["sub_frame"]));
+  assert.equal(event.hasListener(listener), true);
+  event.removeListener(listener);
+  assert.equal(event.hasListener(listener), false);
+  assert.equal(event.listeners.length, 0);
+
+  const retried = () => {};
+  assert.throws(() => event.addListener(retried, undefined));
+  event.addListener(retried, { urls: ["<all_urls>"] });
+  assert.equal(event.hasListener(retried), true);
+  assert.equal(event.listeners.length, 1);
+});
+
 test("API methods work apart from their namespace", async () => {
   const { chrome } = context("page");
   const { query } = chrome.tabs;
@@ -501,4 +537,43 @@ test("bookmarks pass ids and details through as Chrome takes them", async () => 
   for (const name of ["onCreated", "onChanged", "onMoved", "onRemoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]) {
     assert.equal(typeof chrome.bookmarks[name].addListener, "function", name);
   }
+});
+
+for (const kind of ["page", "worker"]) {
+  test(`${kind}: release diagnostics recognize WebKit missing-variable errors and stay bounded`, () => {
+    const listeners = new Map();
+    const g = context(kind, [], { addEventListener: (name, callback) => listeners.set(name, callback) });
+    const logs = () => g.chrome.runtime.messages.filter((message) => message.api === "log");
+    listeners.get("error")({ error: new Error("ordinary extension failure") });
+    assert.equal(logs().length, 0);
+    for (const message of [
+      "Can't find variable 'alice@example.com'",
+      "Can't find variable: 'alice@example.com'",
+      "Can't find variable: alice@example.com",
+      "alice@example.com Can't find variable: requestIdleCallback",
+      "Can't find variable: requestIdleCallback trailing data",
+    ]) listeners.get("error")({ error: new ReferenceError(message) });
+    assert.equal(logs().length, 0, "only the native identifier-only error shape is accepted");
+    listeners.get("error")({ error: new ReferenceError("Can't find variable: requestIdleCallback") });
+    listeners.get("unhandledrejection")({ reason: new ReferenceError("Can't find variable: missingAPI") });
+    assert.equal(logs().length, 2);
+    assert.match(logs()[0].text, /Can't find variable: requestIdleCallback/);
+    assert.match(logs()[1].text, /Can't find variable: missingAPI/);
+    listeners.get("error")({ message: "ReferenceError: Can't find variable: _missingAPI$" });
+    assert.equal(logs().length, 3);
+    for (let i = 0; i < 12; i++) listeners.get("error")({ message: "missingAPI is not defined" });
+    assert.equal(logs().length, 8);
+    for (const message of logs()) {
+      assert.equal(message.level, "error");
+      assert.equal(message.text.includes("\n"), false, "no error stack included");
+    }
+  });
+}
+
+test("release missing-variable reporting stays out of content scripts", () => {
+  const listeners = new Map();
+  const g = context("content", [], { addEventListener: (name, callback) => listeners.set(name, callback) });
+  assert.equal(listeners.has("error"), false);
+  assert.equal(listeners.has("unhandledrejection"), false);
+  assert.equal(g.chrome.runtime.messages.some((message) => message.api === "log"), false);
 });

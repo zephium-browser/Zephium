@@ -1,6 +1,6 @@
 //! A Work page waiting on the person says so outside the window: a count on
-//! the Dock while it waits and, while Zephium is not in front, one system
-//! notification per wait. Nothing leaves the Mac.
+//! the Dock or taskbar while it waits and, while Zephium is not in front, one
+//! system notification per wait. Nothing leaves the computer.
 use super::WorkProductState;
 use std::{collections::BTreeSet, sync::Mutex};
 use tauri::Manager;
@@ -22,8 +22,13 @@ impl WorkAlerts {
         };
         let waiting = owner.providers.browser.pages_waiting_for_person();
         if let Some(window) = app.get_webview_window(crate::MAIN_LABEL) {
-            let count = i64::try_from(waiting.len()).unwrap_or(i64::MAX);
-            let _ = window.set_badge_count((count > 0).then_some(count));
+            #[cfg(target_os = "windows")]
+            crate::taskbar_badge::show(&window, waiting.len());
+            #[cfg(not(target_os = "windows"))]
+            {
+                let count = i64::try_from(waiting.len()).unwrap_or(i64::MAX);
+                let _ = window.set_badge_count((count > 0).then_some(count));
+            }
         }
         let Ok(mut told) = self.told.lock() else {
             return;

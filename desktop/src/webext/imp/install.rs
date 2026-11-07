@@ -301,6 +301,11 @@ pub(super) fn stage(
             sideloaded: from_file,
             pinned: existing.is_some_and(|entry| entry.pinned),
         };
+        #[cfg(target_os = "windows")]
+        zephium_webext::windows::path_budget(
+            &root.join("packages").join(id.as_str()).join(&entry.package),
+            zephium_webext::windows::longest_relative_path(&dir).map_err(|e| e.to_string())?,
+        )?;
         Ok(Staged {
             review: WebExtensionReview {
                 review_id: review_id.clone(),
@@ -965,6 +970,59 @@ mod tests {
             )
             .is_none());
         assert!(registry.extensions[0].compat.is_empty());
+    }
+
+    #[test]
+    fn access_save_failure_dispatches_denial_and_preserves_the_registry() {
+        let (_root, extensions, profile, entry) = installed_fixture();
+        let original = std::fs::read(extensions.registry_path(profile)).unwrap();
+        // Block the atomic save without changing the existing readable registry.
+        std::fs::create_dir(extensions.registry_path(profile).with_extension("json.tmp")).unwrap();
+        let request = zephium_ipc::WebExtensionAccessRequestView {
+            profile_id: profile.to_string(),
+            request: "42".into(),
+            extension_id: entry.id,
+            permissions: vec!["bookmarks".into()],
+            patterns: vec!["https://example.com/*".into()],
+            warnings: vec![],
+        };
+        let mut answers = Vec::new();
+        let result = super::super::answer_access(
+            |command| {
+                if let zephium_app::Command::AnswerWebExtensionAccess {
+                    profile,
+                    request,
+                    allowed,
+                } = command
+                {
+                    answers.push((profile, request, allowed));
+                } else {
+                    panic!("unexpected command");
+                }
+            },
+            &extensions,
+            request.clone(),
+            true,
+        );
+        assert!(result.is_err());
+        assert_eq!(answers, [(profile, 42, false)]);
+        assert_eq!(
+            std::fs::read(extensions.registry_path(profile)).unwrap(),
+            original
+        );
+        // Denial can settle even while storage remains unavailable.
+        super::super::answer_access(
+            |command| {
+                assert!(matches!(
+                    command,
+                    zephium_app::Command::AnswerWebExtensionAccess { allowed: false, .. }
+                ));
+            },
+            &extensions,
+            request,
+            false,
+        )
+        .unwrap();
     }
 
     #[test]

@@ -116,6 +116,10 @@ impl Shell {
                     self.forget_content_fullscreen(*id);
                 }
             }
+            // A quarantined profile's views are gone, and its prompt with them.
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.cancel_page_permission_for_profile(*profile);
+            }
             EngineEvent::ProfileProcessExited { profile, ids } => {
                 self.cancel_page_permission_for_profile(*profile);
                 for id in ids {
@@ -129,6 +133,14 @@ impl Shell {
                 if !self.runtime_restart_required {
                     self.runtime_restart_required = true;
                     self.project_runtime_status();
+                }
+            }
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.runtime_restart_required = true;
+                if self.restart_profiles.insert(profile) {
+                    // The status now names the profile as the reason.
+                    self.project_runtime_status();
+                    self.project_items();
                 }
             }
             EngineEvent::ContentRulesSettled {
@@ -399,14 +411,12 @@ impl Shell {
                 adoption,
             } => self.adopt_linked_native_tab(id, child, foreground, adoption),
             EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
+            EngineEvent::MediaReturnRequested { id } => self.return_to_media(id),
             EngineEvent::PageOpenBlocked { id, url } => {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
                     .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
-                if self
-                    .items
-                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
-                {
+                if self.replace_page_request(id, zephium_core::item::PageRequest::Popup { url }) {
                     self.project_tab(id);
                 }
             }
@@ -415,12 +425,29 @@ impl Shell {
                 url,
                 app,
                 user_gesture,
-            } => self.on_external_app_requested(id, url, app, user_gesture),
+                initiator,
+            } => self.on_external_app_requested(id, url, app, user_gesture, initiator),
             EngineEvent::HttpAuthRequested { id, prompt } => {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::DownloadPermissionRequested { id, prompt } => {
+                self.on_download_permission_requested(id, prompt)
+            }
+            EngineEvent::DownloadPermissionEnded { id, request } => {
+                self.on_download_permission_ended(id, request)
+            }
+            EngineEvent::InsecureAutofillRequested { id } => {
+                self.on_insecure_autofill_requested(id)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
+            EngineEvent::NavigationBlocked {
+                id,
+                url,
+                reason,
+                request,
+                can_continue,
+            } => self.on_navigation_blocked(id, url, reason, request, can_continue),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -456,12 +483,22 @@ impl Shell {
                 probe,
                 can_discard,
             } => self.on_discard_safety(id, probe, can_discard),
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded,
+                stranded_filters,
+            } => self.on_content_protection_changed(id, degraded, stranded_filters),
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
             EngineEvent::ViewDiscardRefused { id, profile, probe } => {
                 self.on_view_discard_refused(id, profile, probe)
             }
+            EngineEvent::DormancyRefused {
+                id,
+                profile,
+                request,
+            } => self.on_dormancy_refused(id, profile, request),
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }
@@ -481,12 +518,14 @@ impl Shell {
                             .get(&id)
                             .map(|(current, _)| *current)
                     });
+                let was_running = self.keeps_running(id);
                 if current_document == Some(navigation)
                     && self
                         .items
                         .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
                 {
                     self.project_tab(id);
+                    self.follow_running(id, was_running);
                 }
             }
             EngineEvent::AudioChanged { id, audible } => self.on_audio_changed(id, audible),
@@ -546,6 +585,19 @@ impl Shell {
                             replaced_page && navigation::is_browser_target(url)
                         }
                     });
+                // An https try that failed loads over http next; its error
+                // never shows.
+                match self.https_first_failed(id) {
+                    super::https_first::HttpsFallback::NotATry => {}
+                    super::https_first::HttpsFallback::LoadingOverHttp => return,
+                    super::https_first::HttpsFallback::Refused(asked) => {
+                        if self.items.record_failure_at(id, reason, asked) {
+                            let _ = self.relayout();
+                            self.project_tab(id);
+                        }
+                        return;
+                    }
+                }
                 let covered = self
                     .items
                     .tab(id)
@@ -632,7 +684,16 @@ impl Shell {
                 if !self.items.set_title(id, title.clone()) {
                     return;
                 }
-                self.amend_recorded_visit_title(id, &title);
+                if self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                }) {
+                    self.pending_visit_titles.insert(id);
+                    if let Some(queue) = &self.self_queue {
+                        queue.schedule_visit_titles(
+                            std::time::Instant::now() + std::time::Duration::from_secs(1),
+                        );
+                    }
+                }
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -656,7 +717,7 @@ impl Shell {
                     // asynchronous image decode. Poll immediately at load
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
-                    self.engine.warm_spare(self.partition_of(id));
+                    self.warm_spare_after_load(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -666,8 +727,13 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
+                self.https_first_settled(id, &committed_url);
                 if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
+                    return;
+                }
+                // Expected, not rejected: the view under a refused first page.
+                if self.items.is_refused_stand_in(id, &committed_url) {
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
@@ -748,8 +814,10 @@ impl Shell {
             EngineEvent::ContentRulesSettled { profile, .. }
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
+            | EngineEvent::DormancyRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
-            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            | EngineEvent::ProfileProcessExited { profile, .. }
+            | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),
                 ..
@@ -790,6 +858,7 @@ impl Shell {
             | EngineEvent::ZoomGesture { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }
+            | EngineEvent::ContentProtectionChanged { id, .. }
             | EngineEvent::FaviconPixels { id, .. }
             | EngineEvent::FaviconRasterFailed { id, .. }
             | EngineEvent::FaviconCandidates { id, .. }
@@ -797,11 +866,16 @@ impl Shell {
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
+            | EngineEvent::MediaReturnRequested { id }
             | EngineEvent::PageOpenBlocked { id, .. }
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::DownloadPermissionRequested { id, .. }
+            | EngineEvent::DownloadPermissionEnded { id, .. }
+            | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
+            | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }
@@ -827,11 +901,37 @@ impl Shell {
 
     /// A visit is recorded when its URL commits, which is before the document
     /// publishes a title, so the row holds a URL-derived placeholder until the
-    /// real one arrives. Replace it while that visit is still the newest.
-    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) {
-        let Some((recorded_url, _)) = self.last_visits.get(&id) else {
-            return;
+    /// real one arrives. Coalesce titles until the next title wake and
+    /// replace it while that visit is still within its 60-second amend window.
+    pub(super) fn flush_visit_titles(&mut self) {
+        for id in std::mem::take(&mut self.pending_visit_titles) {
+            let Some(title) = self.items.tab(id).map(|tab| tab.title.clone()) else {
+                continue;
+            };
+            if !self.amend_recorded_visit_title(id, &title)
+                && self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                })
+            {
+                self.pending_visit_titles.insert(id);
+            }
+        }
+        if !self.pending_visit_titles.is_empty() {
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_visit_titles(
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                );
+            }
+        }
+    }
+
+    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) -> bool {
+        let Some((recorded_url, recorded)) = self.last_visits.get(&id) else {
+            return true;
         };
+        if recorded.elapsed() >= std::time::Duration::from_secs(60) {
+            return true;
+        }
         let recorded_url = recorded_url.clone();
         if self
             .items
@@ -839,17 +939,17 @@ impl Shell {
             .and_then(|tab| tab.url.as_ref())
             .is_none_or(|url| url.as_str() != recorded_url)
         {
-            return;
+            return true;
         }
         let Some(profile) = self.profile_of_item(id).filter(|profile| {
             self.profiles
                 .get(*profile)
                 .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
         }) else {
-            return;
+            return true;
         };
         self.store
-            .amend_visit_title(profile, recorded_url, title.to_owned());
+            .amend_visit_title(profile, recorded_url, title.to_owned())
     }
 
     fn should_record_visit(&mut self, id: ItemId, url: &str) -> bool {
@@ -867,6 +967,7 @@ impl Shell {
             }
         }
         self.last_visits.insert(id, (url.to_owned(), now));
+        self.pending_visit_titles.remove(&id);
         true
     }
 }

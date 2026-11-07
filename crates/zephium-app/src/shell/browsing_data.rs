@@ -12,8 +12,8 @@ use super::*;
 
 use crate::api::BrowsingDataCompletion;
 use zephium_core::browsing_data::{
-    EngineDataCall, EngineDataCompletion, EngineDataFailure, EngineDataKinds, EngineDataReply,
-    EngineSite,
+    site_origin, EngineDataCall, EngineDataCompletion, EngineDataFailure, EngineDataKinds,
+    EngineDataReply, EngineSite, MAX_SITE_ORIGINS,
 };
 use zephium_core::downloads::{DownloadCall, DownloadCompletion, DownloadResponse};
 use zephium_ipc::{
@@ -25,7 +25,15 @@ use zephium_ipc::{
 struct Join {
     remaining: usize,
     failure: Option<BrowsingDataError>,
+    partial: bool,
     done: Option<BrowsingDataCompletion>,
+}
+
+/// How one part of a clear settled.
+enum Part {
+    Cleared,
+    PartlyCleared,
+    Failed(BrowsingDataError),
 }
 
 impl Join {
@@ -33,6 +41,7 @@ impl Join {
         Arc::new(Mutex::new(Self {
             remaining: parts,
             failure: None,
+            partial: false,
             done: Some(done),
         }))
     }
@@ -42,21 +51,29 @@ impl Join {
     }
 
     fn settle_result(join: &Arc<Mutex<Self>>, result: Result<(), BrowsingDataError>) {
+        Self::settle_part(join, result.map_or_else(Part::Failed, |()| Part::Cleared));
+    }
+
+    fn settle_part(join: &Arc<Mutex<Self>>, part: Part) {
         let mut state = join.lock().unwrap_or_else(|error| error.into_inner());
-        if let Err(error) = result {
-            state.failure.get_or_insert(error);
+        match part {
+            Part::Cleared => {}
+            Part::PartlyCleared => state.partial = true,
+            Part::Failed(error) => {
+                state.failure.get_or_insert(error);
+            }
         }
         state.remaining = state.remaining.saturating_sub(1);
         if state.remaining > 0 {
             return;
         }
         if let Some(done) = state.done.take() {
-            done.finish(
-                state
-                    .failure
-                    .take()
-                    .map_or(BrowsingDataResponse::Cleared, error),
-            );
+            let settled = if state.partial {
+                BrowsingDataResponse::PartlyCleared
+            } else {
+                BrowsingDataResponse::Cleared
+            };
+            done.finish(state.failure.take().map_or(settled, error));
         }
     }
 }
@@ -171,7 +188,9 @@ impl Shell {
                                 }
                             }
                             EngineDataReply::Failed(why) => error(failure(why)),
-                            EngineDataReply::Cleared => error(BrowsingDataError::Failed),
+                            EngineDataReply::Cleared | EngineDataReply::PartlyCleared => {
+                                error(BrowsingDataError::Failed)
+                            }
                         })
                     }),
                 );
@@ -194,23 +213,87 @@ impl Shell {
         origin: Option<String>,
         done: BrowsingDataCompletion,
     ) {
+        let profile = partition.profile();
         let join = Join::new(2, done);
-        self.discard_browsing_backup(partition.profile(), &join);
+        self.discard_browsing_backup(profile, &join);
+        // The page asking, then the profile's open pages on the site; the
+        // store adds the ones its history names.
+        let mut origins: Vec<String> = origin.into_iter().collect();
+        for id in self.items.view_ids() {
+            let open = (self.profile_of_item(id) == Some(profile))
+                .then(|| self.items.tab(id).and_then(|tab| tab.url.as_ref()))
+                .flatten()
+                .and_then(|url| site_origin(url.as_str(), &site));
+            if let Some(open) = open.filter(|open| !origins.contains(open)) {
+                origins.push(open);
+            }
+        }
+        let engine = self.engine.clone();
         let settled = join.clone();
-        self.engine.browsing_data_call(
-            partition,
-            EngineDataCall::ForgetSite { site, origin },
-            EngineDataCompletion::new(move |reply| {
-                Join::settle_result(
-                    &settled,
-                    match reply {
-                        EngineDataReply::Cleared => Ok(()),
-                        EngineDataReply::Failed(why) => Err(failure(why)),
-                        EngineDataReply::Sites { .. } => Err(BrowsingDataError::Failed),
-                    },
-                );
+        let wanted = site.clone();
+        // Origins the scan may have left out may still hold data, so the
+        // removal can only be partial then.
+        let forget = move |origins: Vec<String>, complete: bool| {
+            engine.browsing_data_call(
+                partition,
+                EngineDataCall::ForgetSite {
+                    site: wanted,
+                    origins,
+                },
+                EngineDataCompletion::new(move |reply| {
+                    Join::settle_part(
+                        &settled,
+                        match reply {
+                            EngineDataReply::Cleared if complete => Part::Cleared,
+                            EngineDataReply::Cleared | EngineDataReply::PartlyCleared => {
+                                Part::PartlyCleared
+                            }
+                            EngineDataReply::Failed(why) => Part::Failed(failure(why)),
+                            EngineDataReply::Sites { .. } => {
+                                Part::Failed(BrowsingDataError::Failed)
+                            }
+                        },
+                    );
+                }),
+            );
+        };
+        // The history scan runs on the store's thread; a refused one still
+        // removes what the open pages name, and says it may not be all.
+        let pending = Arc::new(Mutex::new(Some((forget, origins))));
+        let answer = pending.clone();
+        let asked = self.store.site_origins(
+            profile,
+            site,
+            Box::new(move |history, scanned| {
+                let taken = answer
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                if let Some((forget, mut origins)) = taken {
+                    let mut complete = scanned;
+                    for found in history {
+                        if origins.contains(&found) {
+                            continue;
+                        }
+                        if origins.len() >= MAX_SITE_ORIGINS {
+                            complete = false;
+                            break;
+                        }
+                        origins.push(found);
+                    }
+                    forget(origins, complete);
+                }
             }),
         );
+        if !asked {
+            let taken = pending
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some((forget, origins)) = taken {
+                forget(origins, false);
+            }
+        }
     }
 
     fn discard_browsing_backup(&self, profile: ProfileId, join: &Arc<Mutex<Join>>) {

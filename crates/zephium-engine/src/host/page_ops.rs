@@ -14,6 +14,23 @@ fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
     }
 }
 
+fn report_find_refusal(
+    accepted: bool,
+    request: Option<FindRequest>,
+    report: impl FnOnce(String, u32, Option<u32>),
+) {
+    if !accepted {
+        if let Some(request) = request {
+            report(request.query, 0, None);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
+    read.and_then(|(html, truncated)| (!truncated).then_some(html))
+}
+
 impl EngineHost {
     pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
         let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
@@ -159,7 +176,7 @@ impl EngineHost {
             let slot = source.clone();
             self.read_html(id, move |read| {
                 if let Ok(mut slot) = slot.lock() {
-                    *slot = read.map(|(html, _)| html);
+                    *slot = saveable_source(read);
                 }
             });
             let page = crate::platform::imp::native_webview(view);
@@ -185,7 +202,43 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        // A password filled into a page that is not encrypted crosses the
+        // network readable: the person is asked first. The page judged is the
+        // one on screen, which a provisional load has not replaced yet; one
+        // that can't be read counts as unencrypted.
+        let Some((epoch, resident)) = view.navigation.resident_document_snapshot() else {
+            return;
+        };
+        view.insecure_autofill.set(None);
+        if resident_unencrypted(&resident) {
+            view.insecure_autofill.set(Some(epoch));
+            view.event_permit
+                .emit(&self.sink, EngineEvent::InsecureAutofillRequested { id });
+            return;
+        }
         let page = crate::platform::imp::native_webview(view);
+        if !crate::platform::macos::autofill::show_passwords(&page) {
+            eprintln!("engine: AutoFill has no focused field here");
+        }
+    }
+
+    /// The person chose to fill a page that is not encrypted. Answering the
+    /// card took the keyboard; the page gets it back, with the field it had.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn autofill_insecure_password(&self, id: ItemId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        // Only the document the warning was shown for: by now the tab may
+        // have moved on to another page that was never asked about.
+        let asked = view.insecure_autofill.take();
+        if !fills_the_page_asked_about(asked, &view.navigation) {
+            return;
+        }
+        let page = crate::platform::imp::native_webview(view);
+        if let Some(window) = page.window() {
+            window.makeFirstResponder(Some(&page));
+        }
         if !crate::platform::macos::autofill::show_passwords(&page) {
             eprintln!("engine: AutoFill has no focused field here");
         }
@@ -227,9 +280,12 @@ impl EngineHost {
             use wry::WebViewExtUnix;
             view.view.webview()
         };
-        if !crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report) {
+        let accepted =
+            crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report.clone());
+        if !accepted {
             eprintln!("engine: find is unavailable in this web engine");
         }
+        report_find_refusal(accepted, request, report());
     }
 
     pub(crate) fn print(&self, id: ItemId) {
@@ -247,6 +303,40 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_find_reports_no_results_but_accepted_find_waits_for_native() {
+        for accepted in [false, true] {
+            let mut results = Vec::new();
+            super::report_find_refusal(
+                accepted,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward: true,
+                }),
+                |query, matches, active| results.push((query, matches, active)),
+            );
+            assert_eq!(
+                results,
+                if accepted {
+                    vec![]
+                } else {
+                    vec![("needle".into(), 0, None)]
+                }
+            );
+            super::report_find_refusal(false, None, |_, _, _| panic!("closing find has no result"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn truncated_html_is_not_offered_for_saving() {
+        assert_eq!(super::saveable_source(Some(("prefix".into(), true))), None);
+        assert_eq!(super::saveable_source(None), None);
+        assert_eq!(
+            super::saveable_source(Some(("complete".into(), false))),
+            Some("complete".into())
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -269,5 +359,74 @@ mod tests {
     fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
         assert_eq!(settled_zoom_scale(1.0, 1.25, true), 1.25);
         assert_eq!(settled_zoom_scale(1.25, 1.5, false), 1.25);
+    }
+}
+
+/// An approved AutoFill warning fills only while the document it was shown
+/// for is still the one on screen.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fills_the_page_asked_about(
+    asked: Option<crate::navigation_epoch::NavigationEpoch>,
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> bool {
+    asked.is_some()
+        && navigation
+            .resident_document_snapshot()
+            .map(|(epoch, _)| epoch)
+            == asked
+}
+
+/// Whether the page at `url` crosses the network unencrypted; an address
+/// that can't be read is treated as if it did.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn resident_unencrypted(url: &str) -> bool {
+    url::Url::parse(url).map_or(true, |url| {
+        zephium_core::certificates::crosses_network_unencrypted(&url)
+    })
+}
+
+#[cfg(test)]
+mod autofill_tests {
+    use super::resident_unencrypted;
+
+    #[test]
+    fn an_approval_fills_only_the_document_it_was_asked_about() {
+        use crate::navigation_epoch::NavigationEpochTracker;
+        use wry::{NavigationEvent, NavigationEventPhase, NavigationId};
+        let event = |id: u64, phase, url: &str| NavigationEvent {
+            id: NavigationId::from_raw(id),
+            phase,
+            url: url.to_owned(),
+        };
+        let navigation = NavigationEpochTracker::new();
+        navigation.begin("http://shop.example/login").unwrap();
+        for phase in [
+            NavigationEventPhase::Started,
+            NavigationEventPhase::Committed,
+        ] {
+            navigation.observe_navigation(&event(1, phase, "http://shop.example/login"));
+        }
+        let asked = navigation
+            .resident_document_snapshot()
+            .map(|(epoch, _)| epoch);
+        assert!(super::fills_the_page_asked_about(asked, &navigation));
+        assert!(!super::fills_the_page_asked_about(None, &navigation));
+        // Another page commits before the approval lands.
+        navigation.begin("http://other.example/").unwrap();
+        for phase in [
+            NavigationEventPhase::Started,
+            NavigationEventPhase::Committed,
+        ] {
+            navigation.observe_navigation(&event(2, phase, "http://other.example/"));
+        }
+        assert!(!super::fills_the_page_asked_about(asked, &navigation));
+    }
+
+    #[test]
+    fn autofill_asks_first_on_plain_http_and_on_an_address_it_cannot_read() {
+        assert!(resident_unencrypted("http://shop.example/login"));
+        assert!(resident_unencrypted("not a url"));
+        assert!(!resident_unencrypted("https://shop.example/login"));
+        assert!(!resident_unencrypted("http://router.lan/"));
     }
 }

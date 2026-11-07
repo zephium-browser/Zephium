@@ -133,7 +133,7 @@ dengan halamannya.
   tetap hemat meski banyak tab terbuka.
 - Pemblokir iklan dan pelacak native, aktif secara default, dibangun di atas
   [adblock-rust](https://github.com/brave/adblock-rust) milik Brave dengan
-  EasyList dan EasyPrivacy. Permintaan dihentikan sebelum halaman sempat
+  EasyList, EasyPrivacy, dan filter uBlock Origin. Permintaan dihentikan sebelum halaman sempat
   mengirimnya, dan Anda bisa menyembunyikan elemen lain di halaman dengan satu
   klik.
 

@@ -65,6 +65,9 @@
         return m.update_status_failed();
     }
   });
+  let restart = $derived(
+    runtime.status().restart_required ? (runtime.status().restart_reason ?? null) : null,
+  );
   let security = $derived(
     updatable ? systemUpdateTarget(runtime.status().security_advisories) : null,
   );
@@ -189,6 +192,22 @@
       >
     {/if}
   </SettingsRow>
+  {#if restart}
+    <SettingsRow
+      title={m.update_restart_title()}
+      description={restart === "profile"
+        ? m.update_restart_profile_detail()
+        : m.update_restart_runtime_detail()}
+    >
+      <Button
+        size="compact"
+        variant="primary"
+        pending={runtime.pendingRelaunch()}
+        onclick={() => void runtime.relaunch()}
+        >{restart === "profile" ? m.navigation_error_restart() : m.update_restart_finish()}</Button
+      >
+    </SettingsRow>
+  {/if}
   {#if updatable}<PreferenceSwitch id="updates.auto-check" preference="updates.auto-check" />{/if}
   {#if security}
     <SettingsRow

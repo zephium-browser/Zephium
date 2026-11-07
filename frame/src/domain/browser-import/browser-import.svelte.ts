@@ -24,7 +24,7 @@ export type ImportSource = {
   running: boolean;
 };
 
-type KindState = "queued" | "running" | "done" | "failed" | "skipped";
+type KindState = "queued" | "running" | "done" | "partial" | "failed" | "skipped";
 
 /** Why a kind failed, when there is something the person can do about it. */
 export type ImportProblem = "busy" | "permission" | "unreadable" | "missing" | "storage";

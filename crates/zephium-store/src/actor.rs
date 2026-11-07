@@ -416,6 +416,7 @@ enum Cmd {
     ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     DiscardSessionBackup(ProfileId, Box<dyn FnOnce(bool) + Send>),
+    SiteOrigins(ProfileId, String, Box<dyn FnOnce(Vec<String>, bool) + Send>),
     Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
     Chat(ProfileId, String, Sender<Option<String>>),
     SaveChat {
@@ -430,10 +431,31 @@ enum Cmd {
     DeleteChat(ProfileId, String, Sender<bool>),
     ClearChats(ProfileId, Option<i64>, Sender<u32>),
     ZoomLevels(ProfileId, Sender<Vec<zephium_core::zoom::SavedLevel>>),
-    SaveZoomLevel(ProfileId, String, Option<u16>, i64),
+    SaveZoomLevel(ProfileId, String, Option<u16>, i64, Sender<bool>),
     PopupSites(
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
+    ),
+    AppLinkSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, String)>>>,
+    ),
+    SetAppLinkSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        String,
+        bool,
+        Sender<bool>,
+    ),
+    DownloadSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, bool)>>>,
+    ),
+    SetDownloadSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        Option<bool>,
+        Sender<bool>,
     ),
     SetPopupSite(
         ProfileId,
@@ -1543,6 +1565,19 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn site_origins(
+        &self,
+        profile: ProfileId,
+        site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        zephium_core::browsing_data::is_site_name(&site)
+            && self
+                .tx
+                .try_send(Cmd::SiteOrigins(profile, site, done))
+                .is_ok()
+    }
+
     fn chats(&self, profile: ProfileId, limit: u32) -> Vec<ChatSummary> {
         let limit = limit.min(MAX_CHATS as u32);
         if limit == 0 {
@@ -1611,9 +1646,8 @@ impl Store for SqliteStore {
         hub::valid_zoom_site(&site)
             && percent.is_none_or(zephium_core::zoom::valid_percent)
             && self
-                .tx
-                .try_send(Cmd::SaveZoomLevel(profile, site, percent, set_at))
-                .is_ok()
+                .ask(|reply| Cmd::SaveZoomLevel(profile, site, percent, set_at, reply))
+                .unwrap_or(false)
     }
 
     fn popup_sites(
@@ -1630,6 +1664,43 @@ impl Store for SqliteStore {
         allowed: bool,
     ) -> bool {
         self.ask(|reply| Cmd::SetPopupSite(profile, origin, allowed, reply))
+            .unwrap_or(false)
+    }
+
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.ask(|reply| Cmd::AppLinkSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply))
+            .unwrap_or(false)
+    }
+
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.ask(|reply| Cmd::DownloadSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetDownloadSite(profile, origin, allowed, reply))
             .unwrap_or(false)
     }
 
@@ -2167,6 +2238,12 @@ fn actor(
                     done(result.is_ok());
                 }));
             }
+            Some(Cmd::SiteOrigins(profile, site, done)) => {
+                let (origins, complete) = hub.site_origins(profile, &site);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    done(origins, complete)
+                }));
+            }
             Some(Cmd::Chats(profile, limit, reply)) => {
                 let _ = reply.send(hub.chats(profile, limit));
             }
@@ -2195,13 +2272,29 @@ fn actor(
             Some(Cmd::ZoomLevels(profile, reply)) => {
                 let _ = reply.send(hub.zoom_levels(profile));
             }
-            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at)) => {
-                if hub.knows(profile) || flush(&mut hub, &mut pending) {
-                    hub.save_zoom_level(profile, &site, percent, set_at);
-                }
+            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.save_zoom_level(profile, &site, percent, set_at);
+                let _ = reply.send(stored);
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
+            }
+            Some(Cmd::AppLinkSites(profile, reply)) => {
+                let _ = reply.send(hub.app_link_sites(profile));
+            }
+            Some(Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_app_link_site(profile, &origin, &scheme, allowed);
+                let _ = reply.send(stored);
+            }
+            Some(Cmd::DownloadSites(profile, reply)) => {
+                let _ = reply.send(hub.download_sites(profile));
+            }
+            Some(Cmd::SetDownloadSite(profile, origin, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_download_site(profile, &origin, allowed);
+                let _ = reply.send(stored);
             }
             Some(Cmd::SetPopupSite(profile, origin, allowed, reply)) => {
                 let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))

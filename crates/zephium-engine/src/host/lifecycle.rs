@@ -30,6 +30,42 @@ fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> Rende
     }
 }
 
+/// One call's use of a page `reach_durable_profile` opened to reach a
+/// profile. Dropped once the call has answered; the last use closes the page,
+/// unless a page of the profile is open by then.
+#[cfg(target_os = "windows")]
+pub(super) struct TemporaryPage {
+    profile: ProfileId,
+    users: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TemporaryPage {
+    fn drop(&mut self) {
+        if self.users.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            let profile = self.profile;
+            let _ = super::dispatch::with_temporary_spare_release(profile, move |host| {
+                host.release_temporary_page(profile)
+            });
+        }
+    }
+}
+
+/// Whether the warm spare of `spare`'s profile is the temporary page a call
+/// still uses, so idle and memory-pressure retirement leave it to that
+/// call's last use.
+#[cfg(any(test, target_os = "windows"))]
+fn temporary_page_held(page: Option<(ProfileId, usize)>, spare: Option<ProfileId>) -> bool {
+    matches!((page, spare), (Some((owner, users)), Some(profile)) if owner == profile && users > 0)
+}
+
+/// Whether a page of `owner` holds `profile`'s durable store.
+#[cfg(any(test, target_os = "windows"))]
+fn durable_partition_of(owner: zephium_core::ports::engine::Partition, profile: ProfileId) -> bool {
+    !matches!(owner, zephium_core::ports::engine::Partition::Ephemeral(_))
+        && owner.profile() == profile
+}
+
 impl EngineHost {
     pub(super) fn has_live_profile_view(&self, profile: ProfileId) -> bool {
         self.partitions
@@ -37,8 +73,23 @@ impl EngineHost {
             .any(|(id, partition)| partition.profile() == profile && self.views.contains_key(id))
     }
 
+    /// Whether the warm spare is a temporary page some call still uses.
+    #[cfg(target_os = "windows")]
+    pub(super) fn spare_serves_a_call(&self) -> bool {
+        temporary_page_held(
+            self.temporary_page
+                .as_ref()
+                .map(|(owner, users)| (*owner, users.load(std::sync::atomic::Ordering::Acquire))),
+            self.spare.as_ref().map(|spare| spare.partition.profile()),
+        )
+    }
+
     pub(super) fn close_idle_spare(&mut self, profile: ProfileId) {
         if self.has_live_profile_view(profile) {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        if self.spare_serves_a_call() {
             return;
         }
         let Some(spare) = self
@@ -66,6 +117,103 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         drop(spare);
+    }
+
+    /// Reaches the durable store of `partition`'s profile through one of its
+    /// live pages, the only way WebView2 exposes it. With none open, a hidden
+    /// page is made for the call and the flag says so: the caller closes it
+    /// with `close_idle_spare` once answered. A private page never serves.
+    #[cfg(target_os = "windows")]
+    pub(super) fn reach_durable_profile<R>(
+        &mut self,
+        partition: zephium_core::ports::engine::Partition,
+        reach: impl Fn(&wry::WebView) -> Option<R>,
+    ) -> Option<(R, Option<TemporaryPage>)> {
+        use zephium_core::ports::engine::Partition;
+        let profile = partition.profile();
+        if matches!(partition, Partition::Ephemeral(_)) {
+            return None;
+        }
+        let durable = |owner: &Partition| durable_partition_of(*owner, profile);
+        let open = self
+            .views
+            .iter()
+            .find(|(id, _)| self.partitions.get(id).is_some_and(durable))
+            .map(|(_, view)| view)
+            .or_else(|| {
+                self.spare
+                    .as_ref()
+                    .filter(|spare| durable(&spare.partition))
+                    .map(|spare| &spare.view)
+            });
+        if let Some(view) = open {
+            let reached = reach(view)?;
+            // A call joining a temporary page keeps it open until it answers.
+            let page = self
+                .temporary_page
+                .as_ref()
+                .filter(|(owner, _)| *owner == profile)
+                .filter(|_| {
+                    self.spare
+                        .as_ref()
+                        .is_some_and(|spare| std::ptr::eq(&spare.view, view))
+                })
+                .map(|(_, users)| {
+                    users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    TemporaryPage {
+                        profile,
+                        users: users.clone(),
+                    }
+                });
+            return Some((reached, page));
+        }
+        // Another profile's page still serving a call is not taken from it.
+        if self.temporary_page.as_ref().is_some_and(|(owner, users)| {
+            *owner != profile && users.load(std::sync::atomic::Ordering::Acquire) > 0
+        }) {
+            return None;
+        }
+        self.applied_content_policy(profile)?;
+        // One warm page exists at a time; another profile's is only a
+        // latency optimisation.
+        self.spare = None;
+        let id = std::rc::Rc::new(std::cell::Cell::new(ItemId::generate()));
+        let view = self.build_view(
+            id.clone(),
+            partition,
+            "about:blank",
+            zephium_core::geometry::Rect::default(),
+            EventPermit::inactive(),
+            super::construction::NativeViewPurpose::WarmSpare,
+        )?;
+        let reached = reach(&view);
+        self.spare = Some(super::Spare {
+            partition,
+            view,
+            id,
+        });
+        let Some(reached) = reached else {
+            self.close_idle_spare(profile);
+            return None;
+        };
+        let users = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        self.temporary_page = Some((profile, users.clone()));
+        Some((reached, Some(TemporaryPage { profile, users })))
+    }
+
+    /// Closes the temporary page once no call uses it any longer.
+    #[cfg(target_os = "windows")]
+    fn release_temporary_page(&mut self, profile: ProfileId) {
+        match &self.temporary_page {
+            Some((owner, users)) if *owner == profile => {
+                if users.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                    return;
+                }
+                self.temporary_page = None;
+            }
+            _ => {}
+        }
+        self.close_idle_spare(profile);
     }
 
     pub(crate) fn close(&mut self, id: ItemId) {
@@ -109,6 +257,7 @@ impl EngineHost {
             self.desired_dormant.remove(&id);
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
+            self.suspend_retries.remove(&id);
             self.suspend_uncertain.remove(&id);
             self.styles_missed.remove(&id);
         }
@@ -277,6 +426,7 @@ impl EngineHost {
         self.desired_dormant.clear();
         self.suspending.clear();
         self.suspend_failed.clear();
+        self.suspend_retries.clear();
         self.suspend_uncertain.clear();
         (obligations, provenance_valid)
     }
@@ -341,6 +491,8 @@ impl EngineHost {
         self.stages.clear();
         #[cfg(target_os = "macos")]
         self.macos_ephemeral_data_stores.clear();
+        #[cfg(target_os = "macos")]
+        self.scriptlets.end_private();
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.anonymous_work_stores.clear();
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]

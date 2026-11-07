@@ -16,6 +16,8 @@ let seen = $state<string | null>(null);
 let securityDismissed = $state<string | null>(null);
 /** Only this launch: the notice is about what happened as it started. */
 let sessionDismissed = $state(false);
+/** Only this launch: a later launch says it again while the data is still there. */
+let cleanupDismissed = $state(false);
 let releaseHighlights = $state.raw<{ version: string; items: string[] } | null>(null);
 
 /** The running release's highlights, when it arrived as an update. */
@@ -33,10 +35,17 @@ export const current = (): Notices =>
     securityDismissed,
     advisories: runtime.status().security_advisories,
     sessionSetAside: runtime.status().session_set_aside && !sessionDismissed,
+    cleanupDismissed,
+    restart: runtime.status().restart_required ? (runtime.status().restart_reason ?? null) : null,
+    restarting: runtime.pendingRelaunch(),
   });
 
 export function dismissSession() {
   sessionDismissed = true;
+}
+
+export function dismissCleanup() {
+  cleanupDismissed = true;
 }
 
 function remember(key: string, value: string) {

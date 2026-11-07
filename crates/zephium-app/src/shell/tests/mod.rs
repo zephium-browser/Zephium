@@ -294,8 +294,23 @@ pub(super) fn agent_lifecycle_with_clean(
 
 type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
+thread_local! {
+    static SUSPENDS_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with engines that suspend hidden views as WebView2 does, so a
+/// shared shell test pins the Windows path as well as the macOS one.
+pub(super) fn suspending(test: fn()) {
+    SUSPENDS_HIDDEN.set(true);
+    test();
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    /// Hidden views are really suspended: the desired set is kept, and a
+    /// suspended page cannot answer a discard probe.
+    suspends_hidden: std::sync::atomic::AtomicBool,
+    suspended: Mutex<std::collections::HashSet<ItemId>>,
     automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
@@ -323,7 +338,9 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    release_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -374,6 +391,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn release_spare_calls(&self) -> usize {
+        self.release_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn warm_spare_calls(&self) -> usize {
         self.warm_spare_calls
@@ -516,6 +537,19 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, origins.iter().map(ToString::to_string).collect()));
+    }
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        self.download_sites.lock().unwrap().push((
+            profile,
+            sites
+                .iter()
+                .map(|(origin, allowed)| (origin.to_string(), *allowed))
+                .collect(),
+        ));
     }
     fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
         self.automatic_pip
@@ -906,6 +940,10 @@ impl Engine for FakeEngine {
         self.log(format!("autofill {id}"));
         self.native_admission()
     }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
+        self.native_admission()
+    }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("discover {id}"));
         self.native_admission()
@@ -919,6 +957,11 @@ impl Engine for FakeEngine {
             .load(std::sync::atomic::Ordering::Acquire)
     }
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        // A suspended WebView2 does not run the probe's script.
+        assert!(
+            !self.suspended.lock().unwrap().contains(&id),
+            "{id} was probed while still suspended"
+        );
         self.log(format!("probe-discard {id} {}", probe.0));
         true
     }
@@ -937,7 +980,13 @@ impl Engine for FakeEngine {
             item.map_or_else(|| "all".into(), |id| id.to_string())
         ));
     }
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, _request: u64) {
+        if self
+            .suspends_hidden
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.suspended.lock().unwrap() = ids.iter().copied().collect();
+        }
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
@@ -951,6 +1000,10 @@ impl Engine for FakeEngine {
     }
     fn open_external_app(&self, url: &str) -> NativeDispatch {
         self.log(format!("open-app {url}"));
+        self.native_admission()
+    }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
         self.native_admission()
     }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
@@ -973,6 +1026,16 @@ impl Engine for FakeEngine {
         self.log(format!("http-auth {item} {request} {answer}"));
         self.native_admission()
     }
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        let answer = if allow { "allow" } else { "refuse" };
+        self.log(format!("download-permission {item} {request} {answer}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -985,6 +1048,18 @@ impl Engine for FakeEngine {
     fn warm_spare(&self, _partition: Partition) {
         self.warm_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn release_spare(&self) {
+        self.release_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn prepare_profile(&self, partition: Partition) {
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("prepare-profile {kind} {}", partition.profile()));
     }
     fn install_content_rules(
         &self,
@@ -1048,6 +1123,11 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    /// What a site's history names; none refuses the scan.
+    /// The origin scan's answer and whether it finished; none answers an
+    /// empty, finished scan. `site_origins_refused` refuses the scan.
+    pub(crate) site_origins: Mutex<Option<(Vec<String>, bool)>>,
+    pub(crate) site_origins_refused: std::sync::atomic::AtomicBool,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1100,6 +1180,8 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    amended_titles: Mutex<Vec<(String, String)>>,
+    amend_title_fails: std::sync::atomic::AtomicBool,
     pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -1115,6 +1197,16 @@ pub(crate) struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
     pub(crate) popup_sites:
         Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::permissions::PageOrigin>>>,
+    pub(crate) download_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
+    >,
+    pub(crate) app_link_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
+    >,
+    /// Every durable read of a pop-up, download or app-link list, by list.
+    pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
+    /// Application link writes report failure, as a store that timed out.
+    pub(crate) app_link_writes_fail: std::sync::atomic::AtomicBool,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1130,6 +1222,8 @@ pub(crate) struct FakeStore {
     /// Saved page zoom per profile, and how many times each profile was loaded.
     pub(crate) zoom_saved: Mutex<std::collections::HashMap<ProfileId, Vec<SavedLevel>>>,
     pub(crate) zoom_loads: std::sync::atomic::AtomicUsize,
+    zoom_save_fails: std::sync::atomic::AtomicBool,
+    zoom_save_fail_site: Mutex<Option<String>>,
     /// Tasks `resource_call` lists, and the searches it was asked for.
     pub(super) task_rows: Mutex<
         Vec<(
@@ -1139,6 +1233,14 @@ pub(crate) struct FakeStore {
     >,
     pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+/// The serial of the request the tab shows, as its card would answer.
+pub(crate) fn shown_serial(shell: &Shell, id: ItemId) -> u32 {
+    shell.items.tab(id).map_or(0, |tab| tab.page_request_serial)
+}
+
+/// One list of download decisions the shell handed the engine.
+type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 
 type AvatarWrite = (
     ProfileId,
@@ -1173,6 +1275,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<zephium_core::permissions::PageOrigin>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("popup_sites", profile));
         Some(
             self.popup_sites
                 .lock()
@@ -1193,6 +1299,75 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("app_link_sites", profile));
+        Some(
+            self.app_link_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        if self
+            .app_link_writes_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let mut sites = self.app_link_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|site| *site != (origin.clone(), scheme.clone()));
+        if allowed {
+            list.push((origin, scheme));
+        }
+        true
+    }
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("download_sites", profile));
+        Some(
+            self.download_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        let mut sites = self.download_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|(site, _)| *site != origin);
+        if let Some(allowed) = allowed {
+            list.push((origin, allowed));
         }
         true
     }
@@ -1735,6 +1910,27 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        if self
+            .site_origins_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let (origins, complete) = self
+            .site_origins
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((Vec::new(), true));
+        done(origins, complete);
+        true
+    }
     fn discard_session_backup(
         &self,
         profile: ProfileId,
@@ -1778,6 +1974,13 @@ impl Store for FakeStore {
         percent: Option<u16>,
         set_at: i64,
     ) -> bool {
+        if self
+            .zoom_save_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.zoom_save_fail_site.lock().unwrap().as_ref() == Some(&site)
+        {
+            return false;
+        }
         let mut saved = self.zoom_saved.lock().unwrap();
         let levels = saved.entry(profile).or_default();
         levels.retain(|level| level.site != site);
@@ -1792,6 +1995,16 @@ impl Store for FakeStore {
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        if self
+            .amend_title_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.amended_titles
+            .lock()
+            .unwrap()
+            .push((url.clone(), title.clone()));
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
             visit.title = title;
@@ -2063,6 +2276,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::HostFullscreen(_) => {}
+        Projection::RaiseWindow => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
@@ -2076,6 +2290,9 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
 
 pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
+    engine
+        .suspends_hidden
+        .store(SUSPENDS_HIDDEN.get(), std::sync::atomic::Ordering::Release);
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,

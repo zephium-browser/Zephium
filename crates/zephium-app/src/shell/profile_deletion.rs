@@ -243,6 +243,9 @@ impl Shell {
         self.recently_closed
             .retain(|entry| entry.profile != profile);
         self.zoom.forget_profile(profile);
+        self.app_link_sites.remove(&profile);
+        self.popup_sites.remove(&profile);
+        self.download_sites.remove(&profile);
         self.extension_browser_surfaces.retire_profile(profile);
         self.extension_actions.retire_profile(profile);
         // Retire compiler admission and erase any callback result before the
@@ -289,6 +292,7 @@ impl Shell {
 
         let removed_spaces = self.spaces.remove_for_profile(profile);
         let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
+        self.sources.retain(|id| self.items.tab(id).is_some());
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 
@@ -306,6 +310,7 @@ impl Shell {
         self.residency
             .discard_protected_until
             .retain(|id, _| self.items.tab(*id).is_some());
+        self.forget_removed_views_protection();
         self.crash
             .crashes
             .retain(|id, _| self.items.tab(*id).is_some());

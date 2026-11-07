@@ -2,10 +2,29 @@ use std::fmt;
 use std::sync::Arc;
 
 use adblock::request::Request;
+#[cfg(feature = "runtime-exact")]
+use adblock::url_parser;
 use adblock::Engine;
 use thiserror::Error;
 
 use crate::{CompilationReport, CompileLimits, CompileTarget};
+
+/// A page no official list names, standing in for any site.
+#[cfg(feature = "runtime-exact")]
+const NEUTRAL_PAGE: &str = "https://example.com/";
+/// Requests and the official list whose rule blocks each; the last must stay
+/// allowed.
+const OFFICIAL_CANARY: [(&str, Option<&str>); 3] = [
+    (
+        "https://ad.doubleclick.com/activity;src=1",
+        Some("easylist"),
+    ),
+    (
+        "https://www.googletagmanager.com/zephium-blocker-smoke.js",
+        Some("easyprivacy"),
+    ),
+    ("https://example.com/app.js", None),
+];
 
 /// Stable SHA-256 identity of a canonical effective policy.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -184,6 +203,101 @@ impl CompiledRules {
         self.evaluate_inner(request, true)
     }
 
+    /// Whether a runtime policy still decides the known requests as its
+    /// official lists must, so a list update that silently stops blocking is
+    /// refused instead of used. Each blocked request is checked only when the
+    /// list that blocks it is part of the policy.
+    ///
+    /// Every request is judged with no page known, as a native callback without
+    /// the initiating document judges it, and where the matcher knows the page,
+    /// on a neutral page too. Site-scoped exceptions such as uBlock Origin's
+    /// `@@*$script,1p,domain=…` must lift neither.
+    pub fn verify_official_canary(&self) -> Result<(), String> {
+        self.verify_official_canary_against(None)
+    }
+
+    /// As [`Self::verify_official_canary`], for a policy that asks `badware`,
+    /// the badware list's own matcher, about what these rules allow.
+    #[cfg(feature = "runtime")]
+    pub fn verify_official_canary_with(&self, badware: &Self) -> Result<(), String> {
+        let badware = badware
+            .runtime_engine()
+            .map_err(|error| format!("official canary has no badware matcher: {error:?}"))?;
+        self.verify_official_canary_against(Some(badware))
+    }
+
+    pub(crate) fn verify_official_canary_against(
+        &self,
+        badware: Option<RuntimeEngine<'_>>,
+    ) -> Result<(), String> {
+        let evaluate = |request, source_independent_only| match badware {
+            Some(badware) => evaluate_split(
+                self.runtime_engine()?,
+                badware,
+                request,
+                source_independent_only,
+            ),
+            None => self.evaluate_inner(request, source_independent_only),
+        };
+        if self.target() != CompileTarget::Runtime {
+            return Ok(());
+        }
+        let present = |list: &str| {
+            self.report()
+                .sources()
+                .iter()
+                .any(|source| source.id().as_str() == list)
+        };
+        for (url, list) in OFFICIAL_CANARY {
+            if list.is_some_and(|list| !present(list)) {
+                continue;
+            }
+            let expected = if list.is_some() {
+                NetworkAction::Block
+            } else {
+                NetworkAction::Allow
+            };
+            let decisions = [
+                // Exact attribution exists only where the matcher has it.
+                #[cfg(feature = "runtime-exact")]
+                (
+                    "on a neutral page",
+                    evaluate(
+                        NetworkRequest::new(
+                            url,
+                            NEUTRAL_PAGE,
+                            ResourceType::Script,
+                            RequestMethod::Get,
+                        ),
+                        false,
+                    ),
+                ),
+                (
+                    "with no page known",
+                    evaluate(
+                        NetworkRequest::source_independent(
+                            url,
+                            ResourceType::Script,
+                            RequestMethod::Get,
+                        ),
+                        true,
+                    ),
+                ),
+            ];
+            for (mode, decision) in decisions {
+                let action = decision
+                    .map_err(|error| format!("official canary {url} {mode} failed: {error:?}"))?
+                    .action();
+                if action != expected {
+                    return Err(format!(
+                        "official canary {url} {mode} returned {action:?}, expected {expected:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn evaluate_inner(
         &self,
         request: NetworkRequest<'_>,
@@ -195,6 +309,67 @@ impl CompiledRules {
             .as_ref()
             .ok_or(MatchError::WrongArtifactTarget)?;
         evaluate_runtime_engine(engine, self.0.limits, request, source_independent_only)
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.0.limits)
+    }
+
+    pub(crate) fn runtime_engine(&self) -> Result<RuntimeEngine<'_>, MatchError> {
+        let engine = self
+            .0
+            .engine
+            .as_ref()
+            .ok_or(MatchError::WrongArtifactTarget)?;
+        Ok(RuntimeEngine {
+            engine,
+            limits: self.0.limits,
+        })
+    }
+
+    /// Evaluates a request from a document parsed by [`Self::source_document`],
+    /// with the same result as [`Self::evaluate`] given that document's URL.
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
+        &self,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
+    ) -> Result<NetworkDecision, MatchError> {
+        let engine = self
+            .0
+            .engine
+            .as_ref()
+            .ok_or(MatchError::WrongArtifactTarget)?;
+        evaluate_runtime_engine_from(engine, self.0.limits, url, source, resource_type, method)
+    }
+}
+
+/// What matching reads from an initiating document: its hostname and
+/// registrable domain. Parsed once per document rather than once per request,
+/// which keeps a URL parse and a public-suffix lookup off every callback.
+#[cfg(feature = "runtime-exact")]
+pub(crate) struct SourceDocument {
+    hostname: Box<str>,
+    domain: Box<str>,
+}
+
+#[cfg(feature = "runtime-exact")]
+impl SourceDocument {
+    fn parse(url: &str, limits: CompileLimits) -> Result<Self, MatchError> {
+        if url.len() > limits.max_source_url_bytes() {
+            return Err(MatchError::SourceUrlTooLong {
+                actual: url.len(),
+                limit: limits.max_source_url_bytes(),
+            });
+        }
+        let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+        Ok(Self {
+            hostname: parsed.hostname().into(),
+            domain: parsed.domain().into(),
+        })
     }
 }
 
@@ -210,12 +385,34 @@ impl CachedRuntimeRules {
         Self { engine, limits }
     }
 
+    pub(crate) const fn runtime_engine(&self) -> RuntimeEngine<'_> {
+        RuntimeEngine {
+            engine: &self.engine,
+            limits: self.limits,
+        }
+    }
+
     #[cfg(feature = "runtime-exact")]
-    pub(crate) fn evaluate(
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.limits)
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<NetworkDecision, MatchError> {
-        evaluate_runtime_engine(&self.engine, self.limits, request, false)
+        evaluate_runtime_engine_from(
+            &self.engine,
+            self.limits,
+            url,
+            source,
+            resource_type,
+            method,
+        )
     }
 
     pub(crate) fn evaluate_source_independent(
@@ -232,13 +429,75 @@ fn evaluate_runtime_engine(
     request: NetworkRequest<'_>,
     source_independent_only: bool,
 ) -> Result<NetworkDecision, MatchError> {
+    let native = native_request(limits, request, source_independent_only)?;
+    match_native(engine, &native, source_independent_only)
+}
+
+/// A compiled or cached runtime matcher, as a policy split across two reads it.
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeEngine<'a> {
+    engine: &'a Engine,
+    limits: CompileLimits,
+}
+
+/// A policy split across two matchers, the request parsed once under the
+/// first one's limits: the first decides unless it lets the request through,
+/// or cannot judge it, and the second blocks it. Otherwise the first one's
+/// error stands, then the second one's, then the first one's decision.
+pub(crate) fn evaluate_split(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    request: NetworkRequest<'_>,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
+    let native = native_request(first.limits, request, source_independent_only)?;
+    split_decision(first, second, &native, source_independent_only)
+}
+
+/// As [`evaluate_split`], for a request from a parsed document.
+#[cfg(feature = "runtime-exact")]
+pub(crate) fn evaluate_split_from(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+) -> Result<NetworkDecision, MatchError> {
+    with_native_request_from(first.limits, url, source, resource_type, method, |native| {
+        split_decision(first, second, native, false)
+    })
+}
+
+fn split_decision(
+    first: RuntimeEngine<'_>,
+    second: RuntimeEngine<'_>,
+    native: &Request,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
+    let decided = match_native(first.engine, native, source_independent_only);
+    if matches!(decided, Ok(decision) if decision.action == NetworkAction::Block) {
+        return decided;
+    }
+    match match_native(second.engine, native, source_independent_only) {
+        Ok(decision) if decision.action == NetworkAction::Block => Ok(decision),
+        Err(error) if decided.is_ok() => Err(error),
+        _ => decided,
+    }
+}
+
+fn native_request(
+    limits: CompileLimits,
+    request: NetworkRequest<'_>,
+    source_independent_only: bool,
+) -> Result<Request, MatchError> {
     if request.url.len() > limits.max_request_url_bytes() {
         return Err(MatchError::RequestUrlTooLong {
             actual: request.url.len(),
             limit: limits.max_request_url_bytes(),
         });
     }
-    let native = if source_independent_only {
+    if source_independent_only {
         if request.source_url.is_some() {
             return Err(MatchError::InvalidRequest);
         }
@@ -269,11 +528,61 @@ fn evaluate_runtime_engine(
             )
         }
     }
-    .map_err(|_| MatchError::InvalidRequest)?;
+    .map_err(|_| MatchError::InvalidRequest)
+}
+
+#[cfg(feature = "runtime-exact")]
+fn evaluate_runtime_engine_from(
+    engine: &Engine,
+    limits: CompileLimits,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+) -> Result<NetworkDecision, MatchError> {
+    with_native_request_from(limits, url, source, resource_type, method, |native| {
+        match_native(engine, native, false)
+    })
+}
+
+#[cfg(feature = "runtime-exact")]
+fn with_native_request_from<T>(
+    limits: CompileLimits,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+    decide: impl FnOnce(&Request) -> Result<T, MatchError>,
+) -> Result<T, MatchError> {
+    if url.len() > limits.max_request_url_bytes() {
+        return Err(MatchError::RequestUrlTooLong {
+            actual: url.len(),
+            limit: limits.max_request_url_bytes(),
+        });
+    }
+    let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+    // Request::new with the source URL would derive the same hostname and
+    // party from a fresh parse of that URL.
+    let native = Request::preparsed(
+        &parsed.url,
+        parsed.hostname(),
+        &source.hostname,
+        resource_type.as_adblock_str(),
+        parsed.domain() != &*source.domain,
+        method.as_adblock_str(),
+    );
+    decide(&native)
+}
+
+fn match_native(
+    engine: &Engine,
+    native: &Request,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
     let result = if source_independent_only {
-        engine.try_check_prepared_source_independent_network_request(&native)
+        engine.try_check_prepared_source_independent_network_request(native)
     } else {
-        engine.try_check_prepared_network_request(&native)
+        engine.try_check_prepared_network_request(native)
     }
     .map_err(map_prepared_match_error)?;
 

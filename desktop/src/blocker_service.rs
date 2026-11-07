@@ -9,10 +9,10 @@ use zephium_blocker_service::{
 };
 
 const COMPILED_CACHE_DIRECTORY: &str = "blocker-compiled-v1";
-const RELEASE_SEED_LICENSE: &str = "CC-BY-SA-3.0";
+const RELEASE_SEED_LICENSES: [&str; 2] = ["CC-BY-SA-3.0", "GPL-3.0-only"];
 const RELEASE_SEED_MAX_MANIFEST_BYTES: usize = 16 * 1024;
 const RELEASE_SEED_MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
-const RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 
 const RELEASE_SEED_CATALOG: &[u8] = include_bytes!("../../assets/blocker-seed/v1/catalog.json");
 const RELEASE_SEED_ENVELOPE: &[u8] =
@@ -20,6 +20,20 @@ const RELEASE_SEED_ENVELOPE: &[u8] =
 const RELEASE_SEED_EASYLIST: &[u8] = include_bytes!("../../assets/blocker-seed/v1/easylist.txt.gz");
 const RELEASE_SEED_EASYPRIVACY: &[u8] =
     include_bytes!("../../assets/blocker-seed/v1/easyprivacy.txt.gz");
+const RELEASE_SEED_UBLOCK_FILTERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-filters.txt.gz");
+const RELEASE_SEED_UBLOCK_QUICK_FIXES: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz");
+const RELEASE_SEED_UBLOCK_LINK_SHORTENERS: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz");
+const RELEASE_SEED_UBLOCK_PRIVACY: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-privacy.txt.gz");
+const RELEASE_SEED_UBLOCK_RESOURCE_ABUSE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz");
+const RELEASE_SEED_UBLOCK_UNBREAK: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-unbreak.txt.gz");
+const RELEASE_SEED_UBLOCK_BADWARE: &[u8] =
+    include_bytes!("../../assets/blocker-seed/v1/ublock-badware.txt.gz");
 
 pub(crate) fn start_with_updates(
     data_dir: &Path,
@@ -33,6 +47,15 @@ pub(crate) fn start_with_updates(
         data_dir.join("blocker-official-v1"),
         validate,
     )
+}
+
+/// The compiled WebKit lists the blocker's cache names, such as a list update
+/// checked before the last exit, so the engine keeps them instead of
+/// collecting and compiling them again.
+pub(crate) fn cached_webkit_digests(data_dir: &Path) -> Vec<[u8; 32]> {
+    CompiledArtifactCacheConfig::new(data_dir.join(COMPILED_CACHE_DIRECTORY))
+        .map(|cache| cache.cached_webkit_artifact_digests())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -57,12 +80,12 @@ fn release_seed_from_embedded(
 ) -> std::io::Result<ReleaseCatalogSeed> {
     let limits = UpdateLimits {
         max_manifest_bytes: RELEASE_SEED_MAX_MANIFEST_BYTES,
-        max_sources: 2,
+        max_sources: 9,
         max_source_bytes: RELEASE_SEED_MAX_SOURCE_BYTES,
         max_total_source_bytes: RELEASE_SEED_MAX_TOTAL_SOURCE_BYTES,
         ..UpdateLimits::default()
     };
-    let licenses = LicensePolicy::new([RELEASE_SEED_LICENSE])
+    let licenses = LicensePolicy::new(RELEASE_SEED_LICENSES)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     ReleaseCatalogSeed::from_embedded_gzip(catalog, envelope, assets, limits, licenses)
         .map_err(|error| std::io::Error::other(format!("invalid embedded blocker seed: {error}")))
@@ -72,6 +95,19 @@ fn embedded_release_assets() -> Vec<EmbeddedReleaseAsset> {
     vec![
         EmbeddedReleaseAsset::new("easylist.txt", RELEASE_SEED_EASYLIST),
         EmbeddedReleaseAsset::new("easyprivacy.txt", RELEASE_SEED_EASYPRIVACY),
+        EmbeddedReleaseAsset::new("ublock-filters.txt", RELEASE_SEED_UBLOCK_FILTERS),
+        EmbeddedReleaseAsset::new("ublock-quick-fixes.txt", RELEASE_SEED_UBLOCK_QUICK_FIXES),
+        EmbeddedReleaseAsset::new(
+            "ublock-link-shorteners.txt",
+            RELEASE_SEED_UBLOCK_LINK_SHORTENERS,
+        ),
+        EmbeddedReleaseAsset::new("ublock-privacy.txt", RELEASE_SEED_UBLOCK_PRIVACY),
+        EmbeddedReleaseAsset::new(
+            "ublock-resource-abuse.txt",
+            RELEASE_SEED_UBLOCK_RESOURCE_ABUSE,
+        ),
+        EmbeddedReleaseAsset::new("ublock-unbreak.txt", RELEASE_SEED_UBLOCK_UNBREAK),
+        EmbeddedReleaseAsset::new("ublock-badware.txt", RELEASE_SEED_UBLOCK_BADWARE),
     ]
 }
 
@@ -92,15 +128,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_610_281_352);
-        assert_eq!(identity.source_count, 2);
-        assert_eq!(identity.source_bytes, 3_515_852);
+        assert_eq!(identity.revision, 202_611_041_052);
+        assert_eq!(identity.source_count, 9);
+        assert_eq!(identity.source_bytes, 6_211_955);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0x8b, 0xea, 0xb1, 0x10, 0x5e, 0x15, 0xd0, 0xb1, 0xd0, 0x74, 0xc6, 0xb1, 0xcd, 0x78,
-                0x69, 0x40, 0xcf, 0x76, 0xa4, 0xb9, 0xc4, 0xaf, 0x32, 0xe0, 0x07, 0xd8, 0x42, 0xb2,
-                0x82, 0x2e, 0xc0, 0xa9
+                0x10, 0x59, 0xb9, 0x7e, 0xa1, 0xf7, 0xe6, 0x4c, 0xb2, 0xf4, 0xfa, 0xfa, 0xd5, 0xfe,
+                0xbc, 0x12, 0x54, 0x5d, 0x39, 0x49, 0xd0, 0x36, 0xe6, 0xfc, 0xe8, 0x49, 0xad, 0xcd,
+                0x67, 0x2f, 0x59, 0xef
             ]
         );
     }
@@ -128,7 +164,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_610_281_352));
+        assert_eq!(snapshot.package_revision, Some(202_611_041_052));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -172,8 +208,28 @@ mod tests {
         };
         assert!(rules.enabled());
         assert!(rules.coverage().has_blocking_entries());
-        assert_eq!(rules.coverage().source_rules, 131_724);
-        assert_eq!(rules.coverage().accepted_rules, 103_789);
+        // Zephium's own eight exceptions compile with the lists where requests
+        // carry their page; on Windows that is the view's main document. The
+        // Windows matcher drops the regex rules its regex engine cannot compile.
+        // Its YouTube marker rule is a source rule the network matcher does not
+        // take.
+        let own = 8;
+        let marker = 1;
+        let accepted = if cfg!(target_os = "windows") {
+            116_893
+        } else {
+            116_924
+        };
+        assert_eq!(rules.coverage().source_rules, 168_465 + own + marker);
+        assert_eq!(rules.coverage().accepted_rules, accepted + own);
+        // The quick fixes keep their trust: the marker and the edits it is
+        // keyed on both reach the page.
+        let program = rules
+            .cosmetics()
+            .and_then(|cosmetics| cosmetics.scriptlet_program())
+            .expect("the bundled lists have scriptlets");
+        assert!(program.contains("zephiumPlayerMarker(\"lactmilli channel yahi inline\""));
+        assert!(program.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
             BlockerShutdownOutcome::Clean

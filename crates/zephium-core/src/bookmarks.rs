@@ -7,7 +7,7 @@ pub const MAX_BOOKMARKS: u32 = 50_000;
 /// Folders nest at most this deep, counting the top level as one.
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_TITLE_BYTES: usize = 512;
-/// Rows one folder listing or search returns.
+/// Rows one folder listing returns, extended when needed to include all folders.
 pub const MAX_LISTING: u32 = 5_000;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
 pub const MAX_QUERY_BYTES: usize = 512;
@@ -39,7 +39,8 @@ impl BookmarkNode {
 /// alone sees the tree they apply to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BookmarkRequest {
-    /// A folder's children in order; `None` is the top level.
+    /// A folder's children, folders first and then links, each in sibling
+    /// order; `None` is the top level. Every folder is included.
     Children {
         parent: Option<i64>,
     },
@@ -194,8 +195,11 @@ pub enum BookmarkReply {
     Nodes(Vec<BookmarkNode>),
     /// The bookmark added, or the existing one an `if_absent` add found.
     Added(i64),
-    /// Links an import added; folders are not counted.
-    Imported(u32),
+    /// Links an import added, and whether capacity stopped it; folders are not counted.
+    Imported {
+        added: u32,
+        partial: bool,
+    },
     Entries(Vec<BookmarkEntry>),
     Done,
     Failed(BookmarkFailure),

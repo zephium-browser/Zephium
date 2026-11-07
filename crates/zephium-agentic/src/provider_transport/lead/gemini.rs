@@ -188,12 +188,13 @@ impl Decoder {
             self.blocked = true;
         }
         if let Some(usage) = data.get("usageMetadata") {
-            let prompt =
-                u64_at(usage, &["promptTokenCount"]) + u64_at(usage, &["toolUsePromptTokenCount"]);
+            let prompt = u64_at(usage, &["promptTokenCount"])
+                .saturating_add(u64_at(usage, &["toolUsePromptTokenCount"]));
             let thoughts = u64_at(usage, &["thoughtsTokenCount"]);
             self.usage.input_tokens = prompt;
             self.usage.cached_input_tokens = u64_at(usage, &["cachedContentTokenCount"]);
-            self.usage.output_tokens = u64_at(usage, &["candidatesTokenCount"]) + thoughts;
+            self.usage.output_tokens =
+                u64_at(usage, &["candidatesTokenCount"]).saturating_add(thoughts);
             self.usage.reasoning_tokens = thoughts;
         }
         let Some(candidate) = data.pointer("/candidates/0") else {

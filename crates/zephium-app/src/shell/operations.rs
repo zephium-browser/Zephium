@@ -41,15 +41,19 @@ impl Shell {
             } => self.operation_set_profile_avatar(profile, avatar, photo),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
-            Command::AnswerPageRequest { id, decision } => {
-                self.operation_answer_page_request(id, decision)
-            }
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => self.operation_answer_page_request(id, request, decision),
             Command::AnswerHttpAuth {
                 id,
                 request,
                 credentials,
             } => self.operation_answer_http_auth(id, request, credentials),
             Command::ContinuePastCertificate(id) => self.operation_continue_past_certificate(id),
+            Command::ContinuePastBlock { id, url } => self.operation_continue_past_block(id, &url),
+            Command::LeaveBlockedPage(id) => self.operation_leave_blocked_page(id),
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
             Command::GoToHistoryEntry { id, offset, url } => {
@@ -416,13 +420,28 @@ impl Shell {
             let _ = self.engine.find(previous, None);
             self.find_target = None;
         }
-        let (Some(page), Some(request)) = (page, request) else {
+        let Some(request) = request else {
             return;
         };
-        if self.engine.find(page, Some(request))
+        let Some(page) = page else {
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
+            return;
+        };
+        if self.engine.find(page, Some(request.clone()))
             != zephium_core::ports::engine::NativeDispatch::Rejected
         {
             self.find_target = Some(page);
+        } else {
+            self.find_target = None;
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
         }
     }
 
@@ -1044,6 +1063,8 @@ impl Shell {
             ),
             "space.next" => self.operation_space(crate::SpaceCommand::Step(1)),
             "space.previous" => self.operation_space(crate::SpaceCommand::Step(-1)),
+            "profile.next" => self.operation_step_profile(true),
+            "profile.previous" => self.operation_step_profile(false),
             id if id.starts_with("space.select.") => id["space.select.".len()..]
                 .parse::<usize>()
                 .ok()

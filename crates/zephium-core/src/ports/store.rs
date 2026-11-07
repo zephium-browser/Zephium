@@ -684,6 +684,20 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// The page origins on `site` that the profile's history and favicons
+    /// name, with their ports, newest visits first and at most
+    /// `browsing_data::MAX_SITE_ORIGINS`. The scan is bounded in rows and
+    /// time, so a long history may yield only its recent origins; the flag
+    /// says whether the scan finished. False means queue refusal, with no
+    /// completion.
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        _done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        false
+    }
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Age in seconds of the cached icon for a favicon key, None when absent.
@@ -734,7 +748,7 @@ pub trait Store {
     }
     /// Saves a site's page zoom, or forgets it when `percent` is none. The
     /// oldest sites beyond `zoom::MAX_SITE_LEVELS` are dropped. False when
-    /// not admitted. Clearing history clears the levels it covers.
+    /// not stored. Clearing history clears the levels it covers.
     fn save_zoom_level(
         &self,
         _profile: ProfileId,
@@ -791,6 +805,43 @@ pub trait Store {
         _profile: ProfileId,
         _origin: crate::permissions::PageOrigin,
         _allowed: bool,
+    ) -> bool {
+        false
+    }
+    /// The sites `profile` lets open a kind of application link without
+    /// asking, as (site, scheme), or None when they cannot be read.
+    fn app_link_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, String)>> {
+        None
+    }
+    /// Keeps or forgets one (site, scheme). False when nothing was written,
+    /// including when the list is full.
+    fn set_app_link_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _scheme: String,
+        _allowed: bool,
+    ) -> bool {
+        false
+    }
+    /// The download decision `profile` keeps per site, true for Allow and
+    /// false for Block, or None when they cannot be read.
+    fn download_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, bool)>> {
+        None
+    }
+    /// Keeps one site's download decision, or forgets it with None. False
+    /// when nothing was written, including when the list is full.
+    fn set_download_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _allowed: Option<bool>,
     ) -> bool {
         false
     }

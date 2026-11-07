@@ -24,9 +24,11 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect, GetWindowLongPtrW,
-    KillTimer, LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect,
+    GetForegroundWindow, GetWindowLongPtrW, IsChild, IsIconic, IsWindowVisible, KillTimer,
+    LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     UpdateLayeredWindow, GA_ROOT, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
     USER_TIMER_MINIMUM, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
@@ -1264,19 +1266,18 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
 
     let hides = {
         let state = state.borrow();
+        // A page already hidden, as one still navigating before its reveal,
+        // may hold native focus too, so it still gets the handoff below.
         ids.iter()
             .filter_map(|id| {
                 let view = state.views.get(id)?;
-                let applied = view.applied.get();
-                ((applied.window_visible != Some(false))
-                    || (applied.controller_visible != Some(false)))
-                .then(|| Hide {
+                Some(Hide {
                     id: *id,
                     serial: view.serial,
                     revision: state.revision,
                     container: view.container,
                     controller: view.controller.clone(),
-                    applied,
+                    applied: view.applied.get(),
                 })
             })
             .collect::<Vec<_>>()
@@ -1326,6 +1327,62 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
         if controller_failed {
             current.dirty.insert(hide.id);
         }
+        let selected = current.visible.contains(&hide.id);
+        drop(current);
+        // Hiding WebView2 does not release its native keyboard focus. Give it
+        // back to chrome only if focus still belongs to a deselected page.
+        // A selected page hidden while navigating must keep its focus.
+        return_hidden_focus(hide.container, selected);
+    }
+}
+
+fn hidden_focus_parent(
+    container: HWND,
+    focus: HWND,
+    foreground: HWND,
+    selected: bool,
+) -> Option<HWND> {
+    if selected {
+        return None;
+    }
+    // SAFETY: Win32 validates these borrowed handles. The queries neither
+    // activate windows nor keep a native object alive across a callback.
+    unsafe {
+        let parent = GetAncestor(container, GA_ROOT);
+        (!parent.0.is_null()
+            && parent == foreground
+            && !IsIconic(parent).as_bool()
+            && !IsWindowVisible(container).as_bool()
+            && (focus == container || IsChild(container, focus).as_bool()))
+        .then_some(parent)
+    }
+}
+
+fn return_hidden_focus(container: HWND, selected: bool) {
+    let (focus, foreground) = hidden_focus_snapshot();
+    if let Some(parent) = hidden_focus_parent(container, focus, foreground, selected) {
+        set_hidden_focus(parent);
+    }
+}
+
+fn hidden_focus_snapshot() -> (HWND, HWND) {
+    #[cfg(test)]
+    if let Some(snapshot) = focus_tests::focus_snapshot() {
+        return snapshot;
+    }
+    // SAFETY: queries on the stage's UI thread; neither activates a window.
+    unsafe { (GetFocus(), GetForegroundWindow()) }
+}
+
+fn set_hidden_focus(parent: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(parent) {
+        return;
+    }
+    // SAFETY: called on the stage's UI thread with no State borrow held.
+    // The parent's Wry subclass routes WM_SETFOCUS to its chrome controller.
+    unsafe {
+        let _ = SetFocus(Some(parent));
     }
 }
 
@@ -1859,6 +1916,12 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             }
         }
         finish_native_placement(state, placement, applied, failed);
+        // Finishing can schedule another pass or retire the view. Recheck its
+        // identity and revision, then release State before transferring focus.
+        if placement_is_current(state, placement) {
+            let selected = state.borrow().visible.contains(&placement.id);
+            return_hidden_focus(placement.container, selected);
+        }
         return;
     }
 
@@ -2199,8 +2262,69 @@ fn draw_indicator(
 }
 
 #[cfg(test)]
+#[path = "stage_focus_tests.rs"]
+mod focus_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{placement_delta, AppliedPlacement, PlacementDelta};
+
+    #[test]
+    fn only_a_hidden_focused_page_in_the_foreground_returns_focus_to_chrome() {
+        use super::hidden_focus_parent;
+        use windows::core::w;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, ShowWindow, SW_HIDE, SW_SHOWNA, WS_CHILD,
+            WS_EX_NOACTIVATE, WS_POPUP, WS_VISIBLE,
+        };
+        // SAFETY: the non-activating, off-screen windows are test-owned and
+        // destroyed here. The test never sets keyboard or foreground focus.
+        unsafe {
+            let create = |parent: Option<HWND>| {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE,
+                    w!("STATIC"),
+                    w!(""),
+                    WS_VISIBLE | if parent.is_some() { WS_CHILD } else { WS_POPUP },
+                    -10000,
+                    -10000,
+                    100,
+                    100,
+                    parent,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            };
+            let owner = create(None);
+            let page = create(Some(owner));
+            let renderer = create(Some(page));
+            let chrome = create(Some(owner));
+            let other = create(None);
+            assert_eq!(hidden_focus_parent(page, renderer, owner, false), None);
+            let _ = ShowWindow(page, SW_HIDE);
+            assert_eq!(
+                hidden_focus_parent(page, renderer, owner, false),
+                Some(owner)
+            );
+            assert_eq!(hidden_focus_parent(page, page, owner, false), Some(owner));
+            assert_eq!(hidden_focus_parent(page, renderer, owner, true), None);
+            assert_eq!(hidden_focus_parent(page, chrome, owner, false), None);
+            assert_eq!(hidden_focus_parent(page, renderer, other, false), None);
+            assert_eq!(
+                hidden_focus_parent(page, HWND::default(), owner, false),
+                None
+            );
+            let _ = ShowWindow(page, SW_SHOWNA);
+            assert_eq!(hidden_focus_parent(page, renderer, owner, false), None);
+            DestroyWindow(page).unwrap();
+            assert_eq!(hidden_focus_parent(page, renderer, owner, false), None);
+            DestroyWindow(other).unwrap();
+            DestroyWindow(owner).unwrap();
+        }
+    }
 
     #[test]
     fn resource_visibility_keeps_pending_paint_and_uncertain_layouts_awake() {

@@ -2,7 +2,12 @@ use url::Url;
 
 const SEARCH_BASE: &str = "https://duckduckgo.com/";
 const MAX_URL_BYTES: usize = 8 * 1024;
-const RESERVED_HOSTS: &[&str] = &["asset.localhost", "ipc.localhost", "tauri.localhost"];
+const RESERVED_HOSTS: &[&str] = &[
+    "asset.localhost",
+    "ipc.localhost",
+    "tauri.localhost",
+    "zephium-onboarding.localhost",
+];
 
 /// Turn raw omnibox text into an allowed URL. Explicit but forbidden or
 /// malformed URL-like input is rejected instead of being sent to the search
@@ -34,11 +39,13 @@ pub fn search_query(input: &str) -> Option<Url> {
     if value.is_empty() || looks_like_local_path(value) {
         return None;
     }
-    if value.contains("://") || Url::parse(value).is_ok() {
+    if has_leading_scheme_separator(value) || Url::parse(value).is_ok() {
         let parsed = Url::parse(value).ok()?;
         if !is_allowed(&parsed) {
             return None;
         }
+    } else if !embedded_web_targets_allowed(value) {
+        return None;
     }
     search_url(value)
 }
@@ -67,13 +74,17 @@ fn classify_input(s: &str) -> InputKind {
     // A syntactically absolute input expresses an intent to navigate, not to
     // search. This includes schemes without `//` such as file:, data: and
     // javascript:. Reject every disallowed absolute URL without exfiltrating
-    // its original text to SEARCH_BASE. A malformed `scheme://` is treated the
-    // same way because it may still contain credentials or a local path.
-    if s.contains("://") || Url::parse(s).is_ok() {
+    // its original text to SEARCH_BASE. A malformed leading `scheme://` is
+    // treated the same way because it may still contain credentials or a local
+    // path; a safe web URL embedded later in prose remains ordinary search text.
+    if has_leading_scheme_separator(s) || Url::parse(s).is_ok() {
         return Url::parse(s)
             .ok()
             .filter(is_browser_target)
             .map_or(InputKind::Rejected, InputKind::Direct);
+    }
+    if !embedded_web_targets_allowed(s) {
+        return InputKind::Rejected;
     }
 
     search_url(s).map_or(InputKind::Rejected, InputKind::Search)
@@ -85,6 +96,65 @@ fn search_url(value: &str) -> Option<Url> {
     // Percent-encoding can expand an otherwise bounded input. Apply the
     // native URL ceiling to the final request.
     is_allowed(&url).then_some(url)
+}
+
+/// A malformed absolute URL can fail `Url::parse` but still be target-shaped.
+/// Only a valid scheme at the start counts; `compare https://example.com` is
+/// prose and can remain a search query after its embedded target is checked.
+fn has_leading_scheme_separator(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once("://") else {
+        return false;
+    };
+    valid_scheme(scheme)
+}
+
+fn valid_scheme(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(first) if first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+/// Search prose may contain ordinary HTTP(S) links, but must not turn a
+/// password-bearing URL, local-file URL, app link, or malformed absolute target
+/// into a remote search query. This keeps the original exfiltration boundary
+/// while allowing normal text such as `compare https://a.example with ...`.
+fn embedded_web_targets_allowed(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while let Some(relative) = value[offset..].find("://") {
+        let separator = offset + relative;
+        let mut start = separator;
+        while start > 0 {
+            let byte = bytes[start - 1];
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.') {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start == separator || !bytes[start].is_ascii_alphabetic() {
+            offset = separator + 3;
+            continue;
+        }
+        let scheme = &value[start..separator];
+        let end = value[separator + 3..]
+            .find(char::is_whitespace)
+            .map_or(value.len(), |relative| separator + 3 + relative);
+        let candidate = value[start..end].trim_end_matches(|ch: char| {
+            matches!(ch, ',' | ';' | '.' | '!' | ')' | ']' | '}' | '"' | '\'')
+        });
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return false;
+        }
+        let Ok(url) = Url::parse(candidate) else {
+            return false;
+        };
+        if !is_allowed(&url) {
+            return false;
+        }
+        offset = separator + 3;
+    }
+    true
 }
 
 fn looks_like_local_path(s: &str) -> bool {
@@ -219,6 +289,44 @@ const NOT_FOR_APPS: &[&str] = &[
     "zephium",
 ];
 
+/// Application link grants one profile keeps.
+pub const MAX_APP_LINK_SITES: usize = 512;
+
+/// A scheme an application link grant may name: one `external_app_link`
+/// itself would hand on.
+pub fn app_link_scheme(scheme: &str) -> bool {
+    scheme.len() <= 64
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+        && scheme.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
+        })
+        && !NOT_FOR_APPS.contains(&scheme)
+        && !scheme.starts_with("zephium")
+}
+
+/// The https address an `http` page is first tried at, as Chrome's HTTPS
+/// upgrades do: a public DNS name on the default port. Addresses on the
+/// person's own network, IP literals and other ports stay as asked.
+pub fn https_upgrade(url: &Url) -> Option<Url> {
+    if url.scheme() != "http" || url.port().is_some() || !url.username().is_empty() {
+        return None;
+    }
+    let url::Host::Domain(host) = url.host()? else {
+        return None;
+    };
+    if !host.contains('.') || crate::certificates::is_local_host(host) {
+        return None;
+    }
+    let mut upgraded = url.clone();
+    upgraded.set_scheme("https").ok()?;
+    // One byte longer can pass what a page may be opened at; it then loads as
+    // asked.
+    (upgraded.as_str().len() <= MAX_URL_BYTES).then_some(upgraded)
+}
+
 /// A link meant for an application on this computer, such as `zoommtg:`,
 /// `mailto:` or `slack:`. It never loads in a tab; the person decides
 /// whether the application it names may open it.
@@ -254,6 +362,20 @@ pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
         (false, true) => AppLinkOutcome::Show,
         (false, false) => AppLinkOutcome::Silent,
     }
+}
+
+/// Which document asked to open an application link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppLinkSource {
+    /// The tab's own document.
+    Page,
+    /// A frame from another site; it is named on the card and its own
+    /// answers are kept apart from the tab's.
+    Frame(crate::permissions::PageOrigin),
+    /// The engine cannot say which document asked, as for a link opened
+    /// into a new tab. A kept answer never opens it, and the card names no
+    /// site.
+    Unknown,
 }
 
 /// Syntactic browser-tab target. Windows extension documents additionally
@@ -352,6 +474,39 @@ mod tests {
     }
 
     #[test]
+    fn only_public_names_on_the_default_port_are_tried_over_https_first() {
+        for (from, to) in [
+            (
+                "http://example.com/a?b#c",
+                Some("https://example.com/a?b#c"),
+            ),
+            (
+                "http://www.example.co.uk/",
+                Some("https://www.example.co.uk/"),
+            ),
+            ("https://example.com/", None),
+            ("http://example.com:8080/", None),
+            ("http://93.184.216.34/", None),
+            ("http://[2001:db8::1]/", None),
+            ("http://router.lan/", None),
+            ("http://printer.local/", None),
+            ("http://intranet/", None),
+            ("http://localhost/", None),
+        ] {
+            let url = Url::parse(from).unwrap();
+            assert_eq!(
+                super::https_upgrade(&url).map(|url| url.to_string()),
+                to.map(str::to_owned),
+                "{from}"
+            );
+        }
+        // An address at the limit is not pushed past it by the extra "s".
+        let longest = format!("http://example.com/{}", "a".repeat(MAX_URL_BYTES - 19));
+        assert_eq!(longest.len(), MAX_URL_BYTES);
+        assert_eq!(super::https_upgrade(&Url::parse(&longest).unwrap()), None);
+    }
+
+    #[test]
     fn only_application_links_are_handed_to_applications() {
         for link in [
             "zoommtg://zoom.us/join?confno=123",
@@ -427,6 +582,35 @@ mod tests {
     }
 
     #[test]
+    fn search_text_may_contain_web_urls() {
+        let query = "compare (https://example.com/a?x=1), with https://example.org/b#two";
+        assert!(is_query(query));
+        let u = classify(query).expect("embedded URLs are search text");
+        assert_eq!(u.host_str(), Some("duckduckgo.com"));
+        assert!(u
+            .query_pairs()
+            .any(|(key, value)| key == "q" && value == query));
+        assert!(search_query(query).is_some());
+    }
+
+    #[test]
+    fn embedded_targets_keep_the_search_exfiltration_guard() {
+        for query in [
+            "compare https://user:secret@example.com with docs",
+            "find file:///private.txt online",
+            "open steam://run/123 in docs",
+            "compare https:// with docs",
+            "compare http://tauri.localhost/index.html with docs",
+            "compare https://example.com/path,steam://run/123 with docs",
+            "compare https://example.com/path?next=file:///private with docs",
+        ] {
+            assert!(!is_query(query), "searched {query}");
+            assert!(classify(query).is_none(), "classified {query}");
+            assert!(search_query(query).is_none(), "sent {query}");
+        }
+    }
+
+    #[test]
     fn explicit_search_never_turns_host_shaped_text_into_navigation() {
         assert_eq!(
             search_query("example.com").unwrap().as_str(),
@@ -434,6 +618,7 @@ mod tests {
         );
         assert!(search_query("https://user:secret@example.com/").is_none());
         assert!(search_query("file:///private.txt").is_none());
+        assert!(search_query("https://").is_none());
         assert!(search_query("/Users/alice/private.txt").is_none());
     }
 
@@ -474,6 +659,7 @@ mod tests {
             "data:text/html,secret",
             "about:config",
             "tauri.localhost/index.html",
+            "zephium-onboarding.localhost/onboarding.html",
             "https://user:secret@example.com/",
             "https://",
             "/home/alice/private.txt",

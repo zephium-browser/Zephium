@@ -320,7 +320,7 @@ fn map_io(error: std::io::Error) -> DownloadError {
     }
 }
 
-fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
+pub(crate) fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
     // Read metadata on the held file, not on a path that may have changed.
     let size = unsafe {
         libc::fgetxattr(
@@ -339,7 +339,7 @@ fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
     }
 }
 
-fn quarantine(path: &Path, source: &str) -> Result<(), DownloadError> {
+pub(crate) fn quarantine(path: &Path, source: &str) -> Result<(), DownloadError> {
     objc2::rc::autoreleasepool(|_| quarantine_in_pool(path, source))
 }
 
@@ -441,6 +441,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         recover_staging(&record).unwrap();
         assert!(!path.exists());

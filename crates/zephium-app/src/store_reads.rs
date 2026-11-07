@@ -158,10 +158,10 @@ pub enum StoreReadResult {
         profile: ProfileId,
         reply: BookmarkSurfaceReply,
     },
-    /// How many an import added, or None when the profile could not take it.
+    /// How many an import added and whether a limit stopped it, or None on failure.
     Imported {
         token: u64,
-        added: Option<u32>,
+        added: Option<(u32, bool)>,
     },
     /// The file an export produced, or None when the store could not read it.
     Exported {
@@ -874,14 +874,14 @@ fn bookmark_work(
         BookmarkReply::Failed(failure) => Err(failure),
         BookmarkReply::Added(_)
         | BookmarkReply::Done
-        | BookmarkReply::Imported(_)
+        | BookmarkReply::Imported { .. }
         | BookmarkReply::Entries(_) => Err(BookmarkFailure::Unavailable),
     };
     let saved = |reply: BookmarkReply| match reply {
         BookmarkReply::Added(id) => BookmarkSurfaceReply::Saved(Some(id)),
         BookmarkReply::Done => BookmarkSurfaceReply::Saved(None),
         BookmarkReply::Failed(failure) => BookmarkSurfaceReply::Failed(failure),
-        BookmarkReply::Nodes(_) | BookmarkReply::Imported(_) | BookmarkReply::Entries(_) => {
+        BookmarkReply::Nodes(_) | BookmarkReply::Imported { .. } | BookmarkReply::Entries(_) => {
             BookmarkSurfaceReply::Failed(BookmarkFailure::Unavailable)
         }
     };
@@ -1183,12 +1183,16 @@ fn run_with(
                         };
                         change = made.map(|made| (profile, ExtensionDataChange::Bookmark(made)));
                         match reply {
-                            BookmarkReply::Imported(added) => Some(added),
+                            BookmarkReply::Imported { added, partial } => Some((added, partial)),
                             _ => None,
                         }
                     }
-                    ImportWork::History(visits) => store.import_history(profile, visits),
-                    ImportWork::Icons(icons) => store.import_favicons(profile, icons),
+                    ImportWork::History(visits) => store
+                        .import_history(profile, visits)
+                        .map(|added| (added, false)),
+                    ImportWork::Icons(icons) => store
+                        .import_favicons(profile, icons)
+                        .map(|added| (added, false)),
                     // The shell keeps these itself and never queues them.
                     ImportWork::Essentials(_) => None,
                 },

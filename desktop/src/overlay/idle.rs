@@ -13,10 +13,12 @@ pub fn suspend(window: &WebviewWindow, done: impl FnOnce() + Send + 'static) {
     let result = window.with_webview(move |view| {
         let callback = completion.clone();
         let handler = TrySuspendCompletedHandler::create(Box::new(move |status, suspended| {
-            #[cfg(debug_assertions)]
-            crate::write_diagnostic(format_args!(
-                "launcher: suspend status={status:?} suspended={suspended:?}"
-            ));
+            // A refusal leaves the launcher awake until its next hide asks again.
+            if status.is_err() || !suspended {
+                crate::write_diagnostic(format_args!(
+                    "launcher: suspend refused status={status:?}"
+                ));
+            }
             if let Some(done) = callback.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 done();
             }

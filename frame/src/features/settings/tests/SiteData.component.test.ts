@@ -90,6 +90,19 @@ test("a site that could not be removed stays listed and says so", async () => {
   await expect.element(dialog.getByRole("listitem")).toHaveLength(3);
 });
 
+test("a site only partly removed stays listed and says some of its data is left", async () => {
+  listing();
+  native.call.mockResolvedValueOnce({ kind: "partly_cleared" });
+  const dialog = await open();
+
+  await dialog.getByRole("button", { name: "Remove data for example.com" }).click();
+
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("Some of the data of example.com couldn't be removed");
+  await expect.element(dialog.getByRole("listitem")).toHaveLength(3);
+});
+
 test("removing everything asks first, then clears cookies and site data of all time", async () => {
   listing();
   native.call.mockResolvedValueOnce({ kind: "cleared" });

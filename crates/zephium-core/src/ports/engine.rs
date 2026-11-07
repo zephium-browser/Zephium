@@ -584,6 +584,101 @@ pub struct Shortcut {
     pub key: u32,
 }
 
+impl Shortcut {
+    /// Exact bindings take precedence over conventional Windows zoom keys.
+    pub fn match_windows(
+        shortcuts: &[Self],
+        key: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<&Self> {
+        shortcuts
+            .iter()
+            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt)
+            .or_else(|| {
+                if !ctrl || alt {
+                    return None;
+                }
+                // VK_OEM_PLUS with Shift, VK_ADD and VK_SUBTRACT.
+                let (id, bound_key) = match (key, shift) {
+                    (0xBB, true) | (0x6B, false) => ("zoom.in", 0xBB),
+                    (0x6D, false) => ("zoom.out", 0xBD),
+                    _ => return None,
+                };
+                shortcuts
+                    .iter()
+                    .find(|s| s.id == id && s.ctrl && !s.shift && !s.alt && s.key == bound_key)
+            })
+    }
+}
+
+#[cfg(test)]
+mod shortcut_matching_tests {
+    use super::Shortcut;
+
+    fn binding(id: &str, key: u32, shift: bool) -> Shortcut {
+        Shortcut {
+            id: id.into(),
+            key,
+            ctrl: true,
+            shift,
+            alt: false,
+        }
+    }
+
+    #[test]
+    fn windows_zoom_accepts_shifted_plus_and_keypad_keys() {
+        let shortcuts = [
+            binding("zoom.in", 0xBB, false),
+            binding("zoom.out", 0xBD, false),
+        ];
+        for (key, shift, id) in [
+            (0xBB, false, "zoom.in"),
+            (0xBB, true, "zoom.in"),
+            (0x6B, false, "zoom.in"),
+            (0x6D, false, "zoom.out"),
+        ] {
+            assert_eq!(
+                Shortcut::match_windows(&shortcuts, key, true, shift, false).map(|s| s.id.as_str()),
+                Some(id)
+            );
+            assert!(Shortcut::match_windows(&shortcuts, key, false, shift, false).is_none());
+            assert!(Shortcut::match_windows(&shortcuts, key, true, shift, true).is_none());
+        }
+    }
+
+    #[test]
+    fn exact_bindings_win_and_rebound_or_disabled_zoom_has_no_alias() {
+        let shortcuts = [
+            binding("zoom.in", 0xBB, false),
+            binding("tab.new", 0xBB, true),
+            binding("tab.close", 0x6B, false),
+        ];
+        assert_eq!(
+            Shortcut::match_windows(&shortcuts, 0xBB, true, true, false)
+                .unwrap()
+                .id,
+            "tab.new"
+        );
+        assert_eq!(
+            Shortcut::match_windows(&shortcuts, 0x6B, true, false, false)
+                .unwrap()
+                .id,
+            "tab.close"
+        );
+        assert!(Shortcut::match_windows(
+            &[binding("zoom.in", 0x4A, false)],
+            0x6B,
+            true,
+            false,
+            false
+        )
+        .is_none());
+        assert!(Shortcut::match_windows(&[], 0xBB, true, true, false).is_none());
+    }
+}
+
 /// How a content layout that follows a deliberate change of the window's
 /// shape is carried out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -720,9 +815,22 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Names the storage of a profile's views before the first one exists,
+    /// so native state made ahead of them, such as the profile's scriptlet
+    /// context, is made where those views will look for it. Call it before
+    /// the profile's first content policy.
+    fn prepare_profile(&self, _partition: Partition) {}
     /// Replaces the sites in `profile` whose pages may open a new tab
     /// without a click.
     fn set_popup_sites(&self, _profile: ProfileId, _origins: Vec<crate::permissions::PageOrigin>) {}
+    /// Replaces the download decision `profile` keeps per site: true lets a
+    /// site save files without asking, false refuses them.
+    fn set_download_sites(
+        &self,
+        _profile: ProfileId,
+        _sites: Vec<(crate::permissions::PageOrigin, bool)>,
+    ) {
+    }
     /// The decisions the engine itself saved in `profile`. None when it keeps
     /// none of its own, as on macOS, or cannot read them now.
     fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
@@ -896,6 +1004,17 @@ pub trait Engine {
     fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Whether the engine itself tries every top-level `http` page over
+    /// https first and falls back on failure, so the browser does not.
+    fn upgrades_https_natively(&self) -> bool {
+        false
+    }
+    /// Opens the passwords panel on a page that is not encrypted, once the
+    /// person has said to fill there anyway; the page gets the keyboard back
+    /// first.
+    fn autofill_insecure_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Starts watching the committed document's icon links: what they name
     /// arrives as `EngineEvent::FaviconCandidates` when the head first has
     /// icons and whenever they change until the page has loaded. One call per
@@ -959,14 +1078,15 @@ pub trait Engine {
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
+    /// Close the warm spare, if one is waiting: browsing has gone quiet, and
+    /// the next completed load warms another.
+    fn release_spare(&self) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
     /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
-    /// and resumes implicitly when a view becomes visible again.
-    fn set_dormant(&self, _ids: Vec<ItemId>) {}
-    /// Whether `set_dormant` actually suspends hidden renderers here.
-    fn suspends_hidden_views(&self) -> bool {
-        false
-    }
+    /// and resumes implicitly when a view becomes visible again. A page that
+    /// cannot be suspended is reported with `EngineEvent::DormancyRefused`,
+    /// naming the `request` it answered; requests are numbered upward.
+    fn set_dormant(&self, _ids: Vec<ItemId>, _request: u64) {}
     /// Drops speculative resources during OS pressure; never evicts user work.
     fn set_memory_pressure(&self, _pressure: MemoryPressure) {}
     /// Requests `EngineEvent::PageMemory` for these live pages where the
@@ -1089,6 +1209,11 @@ pub trait Engine {
     fn allow_certificate_exception(&self, _item: ItemId, _url: String) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// The person chose to open the page the lists refused at `url` anyway.
+    /// Its host stays allowed in the tab's profile until the app quits.
+    fn allow_blocked_navigation(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Answers the tab's sign-in prompt with credentials, or cancels it with
     /// None. A stale or unknown request is ignored and its credentials are
     /// dropped.
@@ -1097,6 +1222,17 @@ pub trait Engine {
         _item: ItemId,
         _request: u32,
         _credentials: Option<crate::http_auth::HttpCredentials>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Answers the download prompt `request` on `item`: true lets every
+    /// download it holds continue, false cancels them. A stale or unknown
+    /// request is ignored.
+    fn answer_download_permission(
+        &self,
+        _item: ItemId,
+        _request: u32,
+        _allow: bool,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -1292,7 +1428,18 @@ pub enum NavigationFailureReason {
     /// The server's certificate was refused, and what the engine could tell
     /// about why.
     Certificate(crate::certificates::CertificateProblem),
+    /// The person's filter lists refused the page.
+    Blocked(NavigationBlockReason),
     Other,
+}
+
+/// Why the filter lists refused a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1412,6 +1559,12 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// The engine can no longer prove which browser process owns this
+    /// profile's data, so it retired the profile's views and refuses new ones
+    /// until Zephium restarts. Sticky for the life of the process.
+    ProfileRestartRequired {
+        profile: ProfileId,
+    },
     /// One exact native content-policy installation attempt settled.
     ///
     /// Replacement failure reports `Retained` with the prior known-good
@@ -1592,6 +1745,14 @@ pub enum EngineEvent {
         id: ItemId,
         loading: bool,
     },
+    /// The view's native filters left it unprotected while resumed
+    /// (`degraded`), or a replaced policy left filters behind on it that a
+    /// retry on its next navigation tries to take back.
+    ContentProtectionChanged {
+        id: ItemId,
+        degraded: bool,
+        stranded_filters: u32,
+    },
     MediaCaptureChanged {
         id: ItemId,
         navigation: NavigationPresentationId,
@@ -1676,6 +1837,14 @@ pub enum EngineEvent {
         profile: ProfileId,
         probe: DiscardProbeId,
     },
+    /// A hidden page the shell asked to suspend refused, also on its retry,
+    /// and keeps running until it is shown or no longer meant to sleep.
+    DormancyRefused {
+        id: ItemId,
+        profile: ProfileId,
+        /// The latest `set_dormant` request the engine had when it gave up.
+        request: u64,
+    },
     /// Physical footprint of the renderer process serving one live page.
     PageMemory {
         id: ItemId,
@@ -1704,6 +1873,12 @@ pub enum EngineEvent {
     NativeTabCloseRequested {
         id: ItemId,
     },
+    /// A video the page presents outside itself, in picture in picture, asked
+    /// to go back to it. The engine puts it back once the page is on screen,
+    /// so the person's tab should come forward, as from its own return button.
+    MediaReturnRequested {
+        id: ItemId,
+    },
     PageOpenBlocked {
         id: ItemId,
         /// The refused page, only when it is an ordinary web address.
@@ -1717,11 +1892,26 @@ pub enum EngineEvent {
         app: Option<String>,
         /// The person clicked, rather than the page navigating by itself.
         user_gesture: bool,
+        /// Which document asked.
+        initiator: crate::navigation::AppLinkSource,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {
         id: ItemId,
         url: String,
+    },
+    /// The filter lists refused the page the view's main frame was about to
+    /// load; the page that was showing stays, and nothing was requested.
+    NavigationBlocked {
+        id: ItemId,
+        url: String,
+        reason: NavigationBlockReason,
+        /// The navigation the shell asked for that this refuses, when the
+        /// engine can tell; a refused link or redirect names none.
+        request: Option<NavigationRequestId>,
+        /// False where the engine itself refuses the page (WebKit's content
+        /// rules), which allowing the host cannot lift.
+        can_continue: bool,
     },
     LinkedDownloadStarted {
         id: ItemId,
@@ -1750,6 +1940,23 @@ pub enum EngineEvent {
     HttpAuthEnded {
         id: ItemId,
         request: u32,
+    },
+    /// A download waits for the person on this tab, until
+    /// [`Engine::answer_download_permission`] or until the engine gives up on
+    /// it, which [`EngineEvent::DownloadPermissionEnded`] reports.
+    DownloadPermissionRequested {
+        id: ItemId,
+        prompt: crate::permissions::DownloadPermissionPrompt,
+    },
+    /// Every download this prompt held has ended without an answer.
+    DownloadPermissionEnded {
+        id: ItemId,
+        request: u32,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; nothing is
+    /// filled until the person says to.
+    InsecureAutofillRequested {
+        id: ItemId,
     },
     DownloadRequested {
         id: ItemId,

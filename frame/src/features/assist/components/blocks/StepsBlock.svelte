@@ -41,6 +41,10 @@
       <li class="confirm assist-rise" aria-label={m.assist_confirm_label()}>
         <h4>{m.assist_confirm_title({ control: controlOf(step.label) })}</h4>
         <p>{consequence(step.category, site)}</p>
+        {#if step.category === "type"}
+          <p>{m.assist_typing_review()}</p>
+          <p class="typing-review">{step.label}</p>
+        {/if}
         <div class="assist-actions">
           <Button
             variant="primary"
@@ -173,6 +177,11 @@
 
   .confirm .assist-actions {
     margin-block-start: 6px;
+  }
+
+  .typing-review {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
   }
 
   .confirm :global(.control) {

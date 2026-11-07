@@ -13,7 +13,8 @@ use webview2_com::{
 use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
+    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, TranslateMessage,
+    MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
 };
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
@@ -36,14 +37,37 @@ fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
 }
 
 fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration) -> Result<T> {
+    wait_using(rx, budget, |remaining| {
+        // SAFETY: waits on this thread's own queue with no handles.
+        unsafe {
+            MsgWaitForMultipleObjectsEx(
+                None,
+                remaining.as_millis().min(u128::from(u32::MAX)) as u32,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
+        }
+    })
+}
+
+/// Pumps this thread's messages until `rx` answers, sleeping in `wait`
+/// between batches; the pump itself may deliver the answer.
+fn wait_using<T>(
+    rx: mpsc::Receiver<windows::core::Result<T>>,
+    budget: Duration,
+    mut wait: impl FnMut(Duration),
+) -> Result<T> {
     let deadline = Instant::now() + budget;
+    let settled = |rx: &mpsc::Receiver<windows::core::Result<T>>| match rx.try_recv() {
+        Ok(result) => Some(result.map_err(|e| e.to_string())),
+        Err(mpsc::TryRecvError::Disconnected) => {
+            Some(Err("Native extension callback was lost.".into()))
+        }
+        Err(mpsc::TryRecvError::Empty) => None,
+    };
     loop {
-        match rx.try_recv() {
-            Ok(result) => return result.map_err(|e| e.to_string()),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                return Err("Native extension callback was lost.".into());
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
+        if let Some(result) = settled(&rx) {
+            return result;
         }
         if Instant::now() >= deadline {
             return Err(TIMED_OUT.into());
@@ -54,7 +78,10 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 if message.message == WM_QUIT {
                     PostQuitMessage(message.wParam.0 as i32);
-                    return Err("The browser is shutting down.".into());
+                    // A completion the pump already ran stands; shutdown
+                    // does not undo an operation that finished.
+                    return settled(&rx)
+                        .unwrap_or_else(|| Err("The browser is shutting down.".into()));
                 }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -63,7 +90,14 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
                 }
             }
         }
-        std::thread::sleep(Duration::from_millis(1));
+        // The pump may just have run the completion, and an empty queue would
+        // not wake the wait below until the deadline.
+        if let Some(result) = settled(&rx) {
+            return result;
+        }
+        // The completion arrives as a message to this thread: sleep until
+        // one does instead of checking a thousand times a second.
+        wait(deadline.saturating_duration_since(Instant::now()));
     }
 }
 
@@ -202,4 +236,109 @@ pub(crate) fn is_runtime_component(id: &str) -> bool {
         id,
         "dgiklkfkllikcanfonkcabmbdfmgleag" | "mhjfbmdgcfjbbpaeojofohoefgiehjai"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::core::w;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW, HWND_MESSAGE,
+        WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+    };
+
+    thread_local! {
+        static COMPLETION: Cell<Option<mpsc::Sender<windows::core::Result<u32>>>> =
+            const { Cell::new(None) };
+    }
+
+    unsafe extern "system" fn deliver(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_APP {
+            if let Some(sender) = COMPLETION.take() {
+                let _ = sender.send(Ok(7));
+            }
+            return LRESULT(0);
+        }
+        // SAFETY: forwards this window's own message unchanged.
+        unsafe { DefWindowProcW(window, message, wparam, lparam) }
+    }
+
+    /// A message-only window whose `WM_APP` sends the completion, as
+    /// WebView2 delivers one through this thread's queue.
+    fn deliver_window() -> HWND {
+        // SAFETY: a message-only window owned and destroyed by this thread.
+        unsafe {
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(deliver),
+                hInstance: instance.into(),
+                lpszClassName: w!("ZephiumExtensionWaitTest"),
+                ..Default::default()
+            };
+            RegisterClassW(&class);
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("ZephiumExtensionWaitTest"),
+                None,
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(instance.into()),
+                None,
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn a_completion_the_pump_delivers_answers_without_waiting() {
+        let (sender, receiver) = mpsc::channel();
+        COMPLETION.set(Some(sender));
+        let window = deliver_window();
+        // SAFETY: the window is live on this thread.
+        unsafe { PostMessageW(Some(window), WM_APP, WPARAM(0), LPARAM(0)).unwrap() };
+
+        let mut waits = 0;
+        let answer = wait_using(receiver, Duration::from_secs(5), |_| waits += 1);
+        // SAFETY: destroys the window this test created.
+        unsafe { DestroyWindow(window).unwrap() };
+
+        assert_eq!(answer, Ok(7));
+        assert_eq!(waits, 0, "the loop slept after the answer had arrived");
+    }
+
+    #[test]
+    fn a_completion_delivered_before_shutdown_still_answers() {
+        let (sender, receiver) = mpsc::channel();
+        COMPLETION.set(Some(sender));
+        let window = deliver_window();
+        // SAFETY: the window is live on this thread; the quit message is
+        // taken back off the queue below.
+        unsafe {
+            PostMessageW(Some(window), WM_APP, WPARAM(0), LPARAM(0)).unwrap();
+            PostQuitMessage(0);
+        }
+
+        let answer = wait_using(receiver, Duration::from_secs(5), |_| {});
+        // SAFETY: drains the quit the loop posted again, then destroys the
+        // window this test created.
+        unsafe {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {}
+            DestroyWindow(window).unwrap();
+        }
+
+        assert_eq!(answer, Ok(7));
+    }
 }

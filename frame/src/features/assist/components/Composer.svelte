@@ -86,7 +86,9 @@
 
   async function send() {
     if (!ready) return;
-    if (await session.ask(draft)) ondraft("");
+    const sent = draft;
+    // Words typed while the question was on its way stay in the field.
+    if ((await session.ask(sent)) && draft === sent) ondraft("");
   }
 
   function onkeydown(event: KeyboardEvent) {

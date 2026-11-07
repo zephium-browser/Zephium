@@ -22,12 +22,6 @@ const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
 const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
-const WATCH: usize = ID + 5;
-// How often the pointer is read for the top of the window. A page's WebView2
-// belongs to another process, so no move over it reaches this thread. With
-// another window in front, or this one minimized, there is nothing to read:
-// the watch stops and activation starts it again.
-const WATCH_MS: u32 = 50;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
 const TOP_REACH: f64 = 20.0;
@@ -66,6 +60,7 @@ struct State {
     page_left: Option<f64>,
     dark: bool,
     previous_focus: HWND,
+    reactivation_focus: HWND,
     laying_out: bool,
     hot_button: HWND,
     // The last button the pointer was on, which outlives the hover itself.
@@ -83,8 +78,6 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
-    // The pointer watch is running.
-    watching: bool,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -175,6 +168,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             page_left: None,
             dark: true,
             previous_focus: HWND::default(),
+            reactivation_focus: HWND::default(),
             laying_out: false,
             hot_button: HWND::default(),
             last_hot: HWND::default(),
@@ -190,7 +184,6 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
-            watching: true,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -208,7 +201,9 @@ pub fn install(window: &WebviewWindow) -> bool {
             return false;
         }
         layout(pointer);
-        SetTimer(Some(strip), WATCH, WATCH_MS, None);
+        // A page's WebView2 belongs to another process, so no move over it
+        // reaches this thread; the shared pointer watch reports them.
+        super::pointer::listen(owner, pointer_moved);
         true
     }
 }
@@ -226,20 +221,33 @@ unsafe fn installed_state(owner: HWND) -> Option<*mut State> {
         .then_some(data as *mut State)
 }
 
+/// The causes left after one holder sets or clears its own, and whether that
+/// cleared the last of them.
+fn apply_suppression(causes: u8, cause: u8, suppressed: bool) -> (u8, bool) {
+    let next = if suppressed {
+        causes | cause
+    } else {
+        causes & !cause
+    };
+    (next, causes != 0 && next == 0)
+}
+
 /// Hides the caption and its reveal edge while page content fills the
 /// screen. Runs on the window's UI thread.
 pub fn set_suppressed(window: &WebviewWindow, cause: Suppression, suppressed: bool) {
     // SAFETY: see `state_of`.
     unsafe {
         if let Some(state) = state_of(window) {
-            let causes = (*state).suppressions;
-            (*state).suppressions = if suppressed {
-                causes | cause as u8
-            } else {
-                causes & !(cause as u8)
-            };
-            (*state).suppressed = (*state).suppressions != 0;
+            let (causes, lifted) =
+                apply_suppression((*state).suppressions, cause as u8, suppressed);
+            (*state).suppressions = causes;
+            (*state).suppressed = causes != 0;
             layout(state);
+            // A pointer already resting at a page's top asks for the caption
+            // now, not at its next move.
+            if lifted {
+                pointer_moved((*state).owner);
+            }
         }
     }
 }
@@ -728,6 +736,33 @@ unsafe fn near_top(p: *mut State) -> bool {
     let reach = (TOP_REACH * scale).round() as i32;
     at.y >= 0 && at.y < reach && at.x >= (page_left * scale).round() as i32 && at.x < client.right
 }
+/// The pointer moved, or the window came to the front or left it: a page's
+/// top asks for the caption after a dwell, and leaving it lets the caption go.
+fn pointer_moved(owner: HWND) {
+    // SAFETY: UI-thread lookup and use of this module's own live state.
+    unsafe {
+        let Some(p) = installed_state(owner) else {
+            return;
+        };
+        let strip = (*p).strip;
+        let near = near_top(p);
+        if near && !(*p).expanded {
+            if !(*p).suppressed
+                && !(*p).changing_state
+                && !(*p).sizing
+                && !(*p).reveal_armed
+                && pointer_moved_on(p)
+            {
+                (*p).reveal_armed = true;
+                SetTimer(Some(strip), REVEAL, TOP_DWELL_MS, None);
+            }
+        } else if !near && (*p).near_top {
+            cancel_reveal(p);
+            SetTimer(Some(strip), HIDE, 450, None);
+        }
+        (*p).near_top = near;
+    }
+}
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
     let mut edge = RECT::default();
@@ -1140,6 +1175,7 @@ unsafe extern "system" fn owner_proc(
     let p = data as *mut State;
     if msg == WM_NCDESTROY {
         let _ = RemoveWindowSubclass(hwnd, Some(owner_proc), ID);
+        super::pointer::forget(hwnd, pointer_moved);
         zephium_engine::forget_window_caption_offset(hwnd.0 as isize);
         // Owned popups are explicitly torn down before freeing subclass state.
         if IsWindow(Some((*p).strip)).as_bool() {
@@ -1168,6 +1204,12 @@ unsafe extern "system" fn owner_proc(
         let mut origin = POINT::default();
         let _ = ClientToScreen(hwnd, &mut origin);
         show_system_menu(p, origin);
+        return LRESULT(0);
+    }
+    // Alt alone asks for keyboard menu mode. With no menu bar it shows
+    // nothing, yet holds the window until the next key, and a close asked
+    // for meanwhile timed out waiting for its drafts to save.
+    if msg == WM_SYSCOMMAND && w.0 as u32 & 0xfff0 == SC_KEYMENU && l.0 == 0 {
         return LRESULT(0);
     }
     if msg == WM_TIMER && w.0 == CLOSE_SETTLED {
@@ -1220,6 +1262,18 @@ unsafe extern "system" fn owner_proc(
             return LRESULT(HTMAXBUTTON as isize);
         }
     }
+    if msg == WM_ACTIVATE && w.0 & 0xffff == WA_INACTIVE as usize {
+        let focus = reactivation_keyboard_focus();
+        (*p).reactivation_focus = if IsChild(hwnd, focus).as_bool() {
+            focus
+        } else {
+            HWND::default()
+        };
+    }
+    // Wry's parent subclass gives activation focus to chrome. Restore the
+    // previous child afterwards, without keeping a pointer to State across it.
+    let restore =
+        (msg == WM_ACTIVATE && activation_restores_focus(w)).then(|| (*p).reactivation_focus);
     let result = DefSubclassProc(hwnd, msg, w, l);
     // Keep the owned caption hidden through all synchronous size/focus messages.
     // WM_SIZE alone is too early: Windows may still be animating the owner.
@@ -1242,18 +1296,53 @@ unsafe extern "system" fn owner_proc(
     if matches!(msg, WM_THEMECHANGED | WM_SETTINGCHANGE) {
         let _ = render(p);
     }
-    // The foreground may not have settled yet, so the first tick decides
-    // whether the watch keeps running.
-    if matches!(
-        msg,
-        WM_ACTIVATE | WM_ACTIVATEAPP | WM_NCACTIVATE | WM_SIZE | WM_SHOWWINDOW
-    ) && !(*p).watching
-        && !IsIconic(hwnd).as_bool()
-    {
-        (*p).watching = true;
-        SetTimer(Some((*p).strip), WATCH, WATCH_MS, None);
+    // A window moved under a resting pointer, as by a snap, makes no input:
+    // read where the pointer now is over it.
+    if msg == WM_WINDOWPOSCHANGED {
+        pointer_moved(hwnd);
+    }
+    if let Some(target) = restore {
+        // Focus callbacks can destroy the owner, so do not read State after this.
+        restore_reactivation_focus(hwnd, target);
     }
     result
+}
+
+unsafe fn reactivation_keyboard_focus() -> HWND {
+    #[cfg(test)]
+    if let Some(focus) = focus_tests::keyboard_focus() {
+        return focus;
+    }
+    GetFocus()
+}
+
+unsafe fn restore_reactivation_focus(owner: HWND, target: HWND) {
+    #[cfg(test)]
+    let foreground = focus_tests::foreground().unwrap_or_else(|| GetForegroundWindow());
+    #[cfg(not(test))]
+    let foreground = GetForegroundWindow();
+    if can_restore_focus(owner, target, foreground) {
+        set_reactivation_focus(target);
+    }
+}
+
+unsafe fn set_reactivation_focus(target: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(target) {
+        return;
+    }
+    let _ = SetFocus(Some(target));
+}
+
+fn activation_restores_focus(activation: WPARAM) -> bool {
+    activation.0 & 0xffff != WA_INACTIVE as usize && activation.0 >> 16 == 0
+}
+
+fn can_restore_focus(owner: HWND, target: HWND, foreground: HWND) -> bool {
+    // SAFETY: Win32 validates these borrowed handles; a closed, hidden or
+    // reparented page must not regain keyboard focus.
+    foreground == owner
+        && unsafe { IsChild(owner, target).as_bool() && IsWindowVisible(target).as_bool() }
 }
 unsafe extern "system" fn strip_proc(
     hwnd: HWND,
@@ -1328,29 +1417,6 @@ unsafe extern "system" fn strip_proc(
                 && pointer_moved_on(p)
             {
                 reveal(p);
-            }
-            return LRESULT(0);
-        }
-        WM_TIMER if w.0 == WATCH => {
-            let near = near_top(p);
-            if near && !(*p).expanded {
-                if !(*p).suppressed
-                    && !(*p).changing_state
-                    && !(*p).sizing
-                    && !(*p).reveal_armed
-                    && pointer_moved_on(p)
-                {
-                    (*p).reveal_armed = true;
-                    SetTimer(Some(hwnd), REVEAL, TOP_DWELL_MS, None);
-                }
-            } else if !near && (*p).near_top {
-                cancel_reveal(p);
-                SetTimer(Some(hwnd), HIDE, 450, None);
-            }
-            (*p).near_top = near;
-            if IsIconic((*p).owner).as_bool() || !in_front((*p).owner) {
-                let _ = KillTimer(Some(hwnd), WATCH);
-                (*p).watching = false;
             }
             return LRESULT(0);
         }
@@ -1601,8 +1667,90 @@ unsafe extern "system" fn button_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 #[cfg(test)]
+#[path = "windows_caption_focus_tests.rs"]
+mod focus_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn activation_does_not_restore_a_minimized_or_inactive_window() {
+        assert!(activation_restores_focus(WPARAM(WA_ACTIVE as usize)));
+        assert!(activation_restores_focus(WPARAM(WA_CLICKACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(WA_INACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(
+            (1 << 16) | WA_ACTIVE as usize
+        )));
+    }
+
+    #[test]
+    fn reactivation_accepts_only_a_visible_live_child_of_its_owner() {
+        // SAFETY: these off-screen, non-activating windows belong to the test
+        // thread and are destroyed before it exits; no profile is opened.
+        unsafe {
+            let owner = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let child = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                50,
+                50,
+                Some(owner),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let other = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(can_restore_focus(owner, child, owner));
+            assert!(!can_restore_focus(owner, child, other));
+            SetParent(child, Some(other)).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            SetParent(child, Some(owner)).unwrap();
+            assert!(!can_restore_focus(owner, owner, owner));
+            assert!(!can_restore_focus(owner, other, owner));
+            assert!(!can_restore_focus(owner, HWND::default(), owner));
+            let _ = ShowWindow(child, SW_HIDE);
+            assert!(!can_restore_focus(owner, child, owner));
+            let _ = ShowWindow(child, SW_SHOWNA);
+            assert!(can_restore_focus(owner, child, owner));
+            DestroyWindow(child).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            DestroyWindow(other).unwrap();
+            DestroyWindow(owner).unwrap();
+        }
+    }
     #[test]
     fn complete_button_rectangles_hit_at_fractional_dpi_and_negative_monitor_coordinates() {
         for dpi in [96, 120, 144, 192] {
@@ -1746,6 +1894,23 @@ mod tests {
         assert!(!button_enabled(0, 0, false));
         assert!(!button_enabled(1, 0, false));
         assert!(button_enabled(1, 0, true));
+    }
+    #[test]
+    fn the_caption_is_suppressed_until_every_holder_lets_go() {
+        let (content, window) = (Suppression::Content as u8, Suppression::Window as u8);
+        assert_eq!(apply_suppression(0, content, true), (content, false));
+        assert_eq!(
+            apply_suppression(content, window, true),
+            (content | window, false)
+        );
+        // One holder letting go while the other still holds lifts nothing.
+        assert_eq!(
+            apply_suppression(content | window, content, false),
+            (window, false)
+        );
+        assert_eq!(apply_suppression(window, window, false), (0, true));
+        assert_eq!(apply_suppression(0, window, false), (0, false));
+        assert_eq!(apply_suppression(content, content, true), (content, false));
     }
     #[test]
     fn a_held_reveal_waits_for_the_pointer_to_leave_the_drag_rectangle() {
