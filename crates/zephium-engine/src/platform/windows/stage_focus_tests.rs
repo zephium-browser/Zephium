@@ -177,7 +177,15 @@ impl ICoreWebView2Controller_Impl for Controller_Impl {
 #[test]
 fn hides_return_focus_after_settlement_including_a_revision_redrive() {
     for redrive in [false, true] {
-        for deny in ["", "selected", "chrome", "background", "null", "visible", "destroyed"] {
+        for deny in [
+            "",
+            "selected",
+            "chrome",
+            "background",
+            "null",
+            "visible",
+            "destroyed",
+        ] {
             let mut windows = Windows(Vec::new());
             let owner = windows.create(None);
             let page = windows.create(Some(owner));
@@ -246,7 +254,11 @@ fn hides_return_focus_after_settlement_including_a_revision_redrive() {
             FOCUS.with(|record| {
                 let record = record.borrow();
                 let expected = if deny.is_empty() { vec![owner] } else { vec![] };
-                assert_eq!(record.as_ref().unwrap().targets, expected, "{redrive}/{deny}");
+                assert_eq!(
+                    record.as_ref().unwrap().targets,
+                    expected,
+                    "{redrive}/{deny}"
+                );
             });
         }
     }
