@@ -1546,7 +1546,15 @@ fn adapt_rules_with(
     };
     let result = match rules.target() {
         CompileTarget::Runtime => {
-            if let Err(error) = rules.verify_official_canary() {
+            let badware_engine = match badware {
+                Some(badware) => Some(
+                    badware
+                        .engine()
+                        .map_err(|_| BlockerCompileFailure::Internal)?,
+                ),
+                None => None,
+            };
+            if let Err(error) = rules.verify_official_canary_against(badware_engine) {
                 eprintln!("content blocker: lists refused: {error}");
                 return Err(BlockerCompileFailure::InvalidSource);
             }
@@ -2513,6 +2521,40 @@ mod tests {
         assert_ne!(
             ContentRuleDigest::from_bytes(*whole.digest().as_bytes()),
             digest("||scam.example^")
+        );
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn the_official_canary_is_judged_with_the_badware_matcher() {
+        let catalog = |badware: &str| {
+            StaticPolicyCatalog::new(vec![
+                PolicySource::new(
+                    SourceId::new("maintained").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example^"),
+                ),
+                PolicySource::new(
+                    SourceId::new("ublock-badware").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(badware),
+                ),
+            ])
+            .unwrap()
+        };
+        let compile = |badware| {
+            compile_policy(
+                &catalog(badware),
+                Compiler::default(),
+                CompileTarget::Runtime,
+            )
+        };
+        assert!(compile("||scam.example^").is_ok());
+        // The lists alone allow the canary's request; badware blocking it
+        // refuses the policy.
+        assert_eq!(
+            compile("||scam.example^\n||example.com/app.js").err(),
+            Some(BlockerCompileFailure::InvalidSource)
         );
     }
 

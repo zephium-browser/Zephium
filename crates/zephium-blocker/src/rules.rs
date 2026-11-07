@@ -213,6 +213,32 @@ impl CompiledRules {
     /// on a neutral page too. Site-scoped exceptions such as uBlock Origin's
     /// `@@*$script,1p,domain=…` must lift neither.
     pub fn verify_official_canary(&self) -> Result<(), String> {
+        self.verify_official_canary_against(None)
+    }
+
+    /// As [`Self::verify_official_canary`], for a policy that asks `badware`,
+    /// the badware list's own matcher, about what these rules allow.
+    #[cfg(feature = "runtime")]
+    pub fn verify_official_canary_with(&self, badware: &Self) -> Result<(), String> {
+        let badware = badware
+            .runtime_engine()
+            .map_err(|error| format!("official canary has no badware matcher: {error:?}"))?;
+        self.verify_official_canary_against(Some(badware))
+    }
+
+    pub(crate) fn verify_official_canary_against(
+        &self,
+        badware: Option<RuntimeEngine<'_>>,
+    ) -> Result<(), String> {
+        let evaluate = |request, source_independent_only| match badware {
+            Some(badware) => evaluate_split(
+                self.runtime_engine()?,
+                badware,
+                request,
+                source_independent_only,
+            ),
+            None => self.evaluate_inner(request, source_independent_only),
+        };
         if self.target() != CompileTarget::Runtime {
             return Ok(());
         }
@@ -236,20 +262,26 @@ impl CompiledRules {
                 #[cfg(feature = "runtime-exact")]
                 (
                     "on a neutral page",
-                    self.evaluate(NetworkRequest::new(
-                        url,
-                        NEUTRAL_PAGE,
-                        ResourceType::Script,
-                        RequestMethod::Get,
-                    )),
+                    evaluate(
+                        NetworkRequest::new(
+                            url,
+                            NEUTRAL_PAGE,
+                            ResourceType::Script,
+                            RequestMethod::Get,
+                        ),
+                        false,
+                    ),
                 ),
                 (
                     "with no page known",
-                    self.evaluate_source_independent(NetworkRequest::source_independent(
-                        url,
-                        ResourceType::Script,
-                        RequestMethod::Get,
-                    )),
+                    evaluate(
+                        NetworkRequest::source_independent(
+                            url,
+                            ResourceType::Script,
+                            RequestMethod::Get,
+                        ),
+                        true,
+                    ),
                 ),
             ];
             for (mode, decision) in decisions {

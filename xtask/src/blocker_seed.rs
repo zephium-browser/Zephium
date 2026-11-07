@@ -1853,7 +1853,7 @@ pub(crate) fn compile_hidden(
     // Windows holds the badware list's blocks in the navigation check's own
     // matcher, which the lists' matcher asks about what it allows.
     #[cfg(feature = "blocker-seed-runtime")]
-    let badware_blocking_entries = {
+    let badware = {
         let path = SOURCES
             .iter()
             .zip(paths)
@@ -1872,9 +1872,9 @@ pub(crate) fn compile_hidden(
                 )],
             )
             .map_err(|error| format!("{error:?}"))?
-            .report()
-            .native_blocking_rule_entries()
     };
+    #[cfg(feature = "blocker-seed-runtime")]
+    let badware_blocking_entries = badware.report().native_blocking_rule_entries();
     #[cfg(not(feature = "blocker-seed-runtime"))]
     let badware_blocking_entries = 0;
     let native_target = match expected_target {
@@ -1903,7 +1903,7 @@ pub(crate) fn compile_hidden(
         .map_err(|error| format!("{error:?}"))?;
     #[cfg(feature = "blocker-seed-runtime")]
     compiled
-        .verify_official_canary()
+        .verify_official_canary_with(&badware)
         .map_err(|error| format!("runtime release seed: {error}"))?;
     if let Some(output) = artifact_output {
         let webkit = compiled
