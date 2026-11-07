@@ -536,19 +536,6 @@ impl CommandQueue {
         state.commands.pop_front()
     }
 
-    pub(crate) fn reopen_after_failed_shutdown(&self) -> Vec<Command> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.closed {
-            state.shutdown_enqueued = false;
-            return state.post_barrier_critical.drain(..).collect();
-        }
-        Vec::new()
-    }
-
     pub(crate) fn close_and_drain(&self) -> Vec<Command> {
         let pending = {
             let mut state = self
@@ -746,6 +733,7 @@ impl CommandQueue {
         timer.favicon_deadlines.remove(&id);
     }
 
+    #[cfg(test)]
     pub(crate) fn schedule_presentation(
         &self,
         id: ItemId,

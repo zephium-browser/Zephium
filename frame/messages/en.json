@@ -1,4 +1,6 @@
 {
+  "shutdown_saving_session": "Saving your browsing session",
+  "startup_still_closing": "Zephium is still closing. Wait a moment, then open it again.",
   "new_tab": "New tab",
   "search_web": "Search the web or enter an address",
   "search_web_short": "Search or enter an address",

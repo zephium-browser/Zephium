@@ -72,8 +72,11 @@ pub fn remove_privileged_version_observer(label: &str) -> bool {
     zephium_engine::detach_privileged_environment_update(label)
 }
 
-pub fn finalize_privileged_environment_observers(expected_labels: &[&str]) -> bool {
-    zephium_engine::finalize_privileged_environment_registrations(expected_labels)
+pub fn finalize_privileged_environment_observers(
+    expected_labels: &[&str],
+    deadline: std::time::Instant,
+) -> (bool, bool) {
+    zephium_engine::finalize_privileged_environment_registrations(expected_labels, deadline)
 }
 
 /// Starts the log before anything can fail, in the folder Tauri will resolve
@@ -140,7 +143,7 @@ pub fn enforce_runtime_security_floor(
 
 #[path = "windows_log.rs"]
 mod windows_log;
-pub use windows_log::redirect_stderr;
+pub use windows_log::{flush_stderr_until, redirect_stderr};
 
 pub fn init(
     window: &WebviewWindow,
