@@ -7,16 +7,28 @@
 //! is the chrome's arithmetic, not the page's.
 
 /// Finds the media element the player follows: in the document and up to
-/// seven same-origin frames, the one playing and heard, else one paused part
-/// way, else one finished; the longest wins a tie. Both scripts use it, so
+/// seven same-origin frames and their open shadow roots (eight levels, 64
+/// roots and 4096 inspected elements at most), the one playing and heard, else
+/// one paused part way, else one finished; the longest wins a tie. Both scripts use it, so
 /// they agree on the element without sharing any state.
 const CHOOSE_JS: &str = r#"
   function documents() {
-    var list = [document];
-    for (var i = 0; i < list.length && list.length < 8; i++) {
-      var frames = list[i].querySelectorAll('iframe,frame');
-      for (var j = 0; j < frames.length && j < 16 && list.length < 8; j++) {
-        try { if (frames[j].contentDocument) list.push(frames[j].contentDocument); } catch (_) {}
+    var list = [document], depths = [0], docCount = 1, nodeCount = 0;
+    for (var i = 0; i < list.length && nodeCount < 4096; i++) {
+      var root = list[i], doc = root.ownerDocument || root;
+      var walker = doc.createTreeWalker(root, 1), node;
+      while (nodeCount < 4096 && (node = walker.nextNode())) {
+        nodeCount++;
+        if (node.shadowRoot && depths[i] < 8 && list.length < 64) {
+          list.push(node.shadowRoot); depths.push(depths[i] + 1);
+        }
+        if ((node.localName === 'iframe' || node.localName === 'frame') && docCount < 8) {
+          try {
+            if (node.contentDocument && list.indexOf(node.contentDocument) < 0 && list.length < 64) {
+              list.push(node.contentDocument); depths.push(0); docCount++;
+            }
+          } catch (_) {}
+        }
       }
     }
     return list;
@@ -81,6 +93,7 @@ pub(super) const MEDIA_WATCH_JS: &str = r#"(function(last){
     var playing = !el.paused && !el.ended;
     var video = el.localName === 'video', owner = el.ownerDocument;
     var pip = video && (owner.pictureInPictureElement === el ||
+        el.getRootNode().pictureInPictureElement === el ||
         el.webkitPresentationMode === 'picture-in-picture');
     var canPip = video && !el.disablePictureInPicture && el.videoWidth > 0 &&
         ((owner.pictureInPictureEnabled && typeof el.requestPictureInPicture === 'function') ||
@@ -164,7 +177,8 @@ pub(super) const MEDIA_ACTION_JS: &str = r#"(async (action, value) => {
     } else if (action === 'pip') {
       if (el.localName !== 'video') return false;
       const doc = el.ownerDocument;
-      if (doc.pictureInPictureElement === el) await doc.exitPictureInPicture();
+      if (doc.pictureInPictureElement === el || el.getRootNode().pictureInPictureElement === el)
+        await doc.exitPictureInPicture();
       else if (el.webkitPresentationMode === 'picture-in-picture') el.webkitSetPresentationMode('inline');
       else if (doc.pictureInPictureEnabled && typeof el.requestPictureInPicture === 'function')
         await el.requestPictureInPicture();
