@@ -684,7 +684,16 @@ impl Shell {
                 if !self.items.set_title(id, title.clone()) {
                     return;
                 }
-                self.amend_recorded_visit_title(id, &title);
+                if self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                }) {
+                    self.pending_visit_titles.insert(id);
+                    if let Some(queue) = &self.self_queue {
+                        queue.schedule_visit_titles(
+                            std::time::Instant::now() + std::time::Duration::from_secs(1),
+                        );
+                    }
+                }
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -892,11 +901,24 @@ impl Shell {
 
     /// A visit is recorded when its URL commits, which is before the document
     /// publishes a title, so the row holds a URL-derived placeholder until the
-    /// real one arrives. Replace it while that visit is still the newest.
+    /// real one arrives. Coalesce titles until the next title wake and
+    /// replace it while that visit is still within its 60-second amend window.
+    pub(super) fn flush_visit_titles(&mut self) {
+        for id in std::mem::take(&mut self.pending_visit_titles) {
+            if let Some(tab) = self.items.tab(id) {
+                let title = tab.title.clone();
+                self.amend_recorded_visit_title(id, &title);
+            }
+        }
+    }
+
     fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) {
-        let Some((recorded_url, _)) = self.last_visits.get(&id) else {
+        let Some((recorded_url, recorded)) = self.last_visits.get(&id) else {
             return;
         };
+        if recorded.elapsed() >= std::time::Duration::from_secs(60) {
+            return;
+        }
         let recorded_url = recorded_url.clone();
         if self
             .items
@@ -932,6 +954,7 @@ impl Shell {
             }
         }
         self.last_visits.insert(id, (url.to_owned(), now));
+        self.pending_visit_titles.remove(&id);
         true
     }
 }

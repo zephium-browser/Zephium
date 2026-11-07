@@ -184,7 +184,9 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
             }
             let mut rows = conn.prepare_cached(&format!(
                 "SELECT {NODE_COLUMNS} FROM bookmarks b WHERE b.parent_id IS ?1
-                 ORDER BY b.position, b.id LIMIT ?2"
+                 ORDER BY b.url IS NOT NULL, b.position, b.id
+                 LIMIT max(?2, (SELECT count(*) FROM bookmarks
+                                WHERE parent_id IS ?1 AND url IS NULL))"
             ))?;
             let nodes = rows
                 .query_map(params![parent, MAX_LISTING], node)?
@@ -914,6 +916,63 @@ mod tests {
     }
 
     #[test]
+    fn folder_listings_keep_all_subfolders_past_the_link_and_folder_caps() {
+        for nested in [false, true] {
+            let (mut hub, profile) = hub();
+            let parent = nested.then(|| {
+                added(hub.bookmarks(
+                    profile,
+                    BookmarkRequest::AddFolder {
+                        parent: None,
+                        title: "Parent".into(),
+                    },
+                ))
+            });
+            let conn = hub.profile_conn(profile).unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, x, 'Link ' || x, 'https://example.com/' || x, 0 FROM n",
+                params![parent, MAX_LISTING + 1],
+            )
+            .unwrap();
+            let folder = added(hub.bookmarks(
+                profile,
+                BookmarkRequest::AddFolder {
+                    parent,
+                    title: "Last folder".into(),
+                },
+            ));
+            let BookmarkReply::Nodes(nodes) =
+                hub.bookmarks(profile, BookmarkRequest::Children { parent })
+            else {
+                panic!("expected a listing");
+            };
+            assert_eq!(nodes.len(), MAX_LISTING as usize);
+            assert!(nodes.iter().any(|node| node.id == folder));
+            assert!(nodes[0].is_folder());
+            assert!(nodes.iter().any(|node| !node.is_folder()));
+
+            let conn = hub.profile_conn(profile).unwrap();
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, ?2 + x, 'Folder ' || x, NULL, 0 FROM n",
+                params![parent, MAX_LISTING],
+            )
+            .unwrap();
+            let BookmarkReply::Nodes(nodes) =
+                hub.bookmarks(profile, BookmarkRequest::Children { parent })
+            else {
+                panic!("expected a listing");
+            };
+            assert!(nodes.len() > MAX_LISTING as usize);
+            assert!(nodes.iter().all(BookmarkNode::is_folder));
+            assert_eq!(nodes.last().unwrap().title, format!("Folder {MAX_LISTING}"));
+        }
+    }
+
+    #[test]
     fn extension_entries_count_places_among_siblings_despite_gaps() {
         let (mut hub, profile) = hub();
         let folder = made(hub.bookmarks(profile, create(None, None, "Folder", None)));
@@ -1376,7 +1435,7 @@ mod tests {
                     parent: Some(top[0].id)
                 }
             )),
-            vec!["https://news.example/", "Docs"]
+            vec!["Docs", "https://news.example/"]
         );
         assert_eq!(
             titles(hub.bookmarks(
@@ -1582,7 +1641,7 @@ mod tests {
         );
         assert_eq!(
             titles(hub.bookmarks(profile, BookmarkRequest::Children { parent: None })),
-            vec!["B", "Folder", "A"]
+            vec!["Folder", "B", "A"]
         );
         hub.bookmarks(
             profile,

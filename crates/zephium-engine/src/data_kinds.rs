@@ -130,8 +130,11 @@ pub(crate) fn webview2_kinds(kinds: EngineDataKinds) -> i32 {
 }
 
 /// Hosts a listing names, one entry per host, in the order a person reads
-/// them. A name that is not a host is dropped.
-pub(crate) fn merge_sites(raw: impl IntoIterator<Item = (String, bool, bool)>) -> Vec<EngineSite> {
+/// them. A name that is not a host is dropped. The flag reports whether the
+/// response bound omitted any hosts.
+pub(crate) fn merge_sites(
+    raw: impl IntoIterator<Item = (String, bool, bool)>,
+) -> (Vec<EngineSite>, bool) {
     let mut sites: Vec<EngineSite> = Vec::new();
     for (name, cookies, storage) in raw {
         let name = name.trim().trim_start_matches('.').to_ascii_lowercase();
@@ -151,8 +154,9 @@ pub(crate) fn merge_sites(raw: impl IntoIterator<Item = (String, bool, bool)>) -
         }
     }
     sites.sort_by(|a, b| a.name.cmp(&b.name));
+    let partial = sites.len() > MAX_ENGINE_SITES;
     sites.truncate(MAX_ENGINE_SITES);
-    sites
+    (sites, partial)
 }
 
 #[cfg(test)]
@@ -248,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_listing_names_each_host_once_sorted_and_only_hosts() {
-        let sites = merge_sites([
+        let (sites, partial) = merge_sites([
             ("Zed.example".to_owned(), true, false),
             (".example.com".to_owned(), false, true),
             ("example.com".to_owned(), true, false),
@@ -256,8 +260,29 @@ mod tests {
             ("Local Files".to_owned(), false, true),
             ("a.example".to_owned(), false, true),
         ]);
+        assert!(!partial);
         let names: Vec<_> = sites.iter().map(|site| site.name.as_str()).collect();
         assert_eq!(names, ["a.example", "example.com", "zed.example"]);
         assert!(sites[1].cookies && sites[1].storage);
+    }
+
+    #[test]
+    fn listing_reports_partial_only_when_distinct_valid_sites_are_omitted() {
+        let raw = std::iter::repeat_n(("Local Files".to_owned(), true, true), 16_384)
+            .chain((0..MAX_ENGINE_SITES).map(|at| (format!("site{at}.example"), true, false)));
+        let (sites, partial) = merge_sites(raw);
+        assert_eq!(sites.len(), MAX_ENGINE_SITES);
+        assert!(!partial);
+        let duplicate = sites[0].name.clone();
+        let raw = sites
+            .into_iter()
+            .map(|site| (site.name, site.cookies, site.storage))
+            .chain([
+                (duplicate, false, true),
+                ("extra.example".to_owned(), true, true),
+            ]);
+        let (sites, partial) = merge_sites(raw);
+        assert_eq!(sites.len(), MAX_ENGINE_SITES);
+        assert!(partial);
     }
 }

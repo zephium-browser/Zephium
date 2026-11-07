@@ -1180,6 +1180,7 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    amended_titles: Mutex<Vec<(String, String)>>,
     pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -1991,6 +1992,10 @@ impl Store for FakeStore {
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        self.amended_titles
+            .lock()
+            .unwrap()
+            .push((url.clone(), title.clone()));
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
             visit.title = title;
