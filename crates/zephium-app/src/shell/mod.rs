@@ -294,6 +294,7 @@ pub struct Shell {
     https_first: https_first::HttpsFirst,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
+    pending_visit_titles: std::collections::HashSet<ItemId>,
     time: time::TimeState,
     window_visible: bool,
     window_focused: bool,
@@ -544,6 +545,7 @@ impl Shell {
             https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
+            pending_visit_titles: std::collections::HashSet::new(),
             window_visible: true,
             window_focused: false,
             content_fullscreen: std::cell::Cell::new(None),
@@ -1469,6 +1471,7 @@ impl Shell {
                     }
                 }
                 self.maintain_blocker_statistics();
+                self.flush_visit_titles();
                 self.flush_time(None);
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
@@ -1513,6 +1516,7 @@ impl Shell {
             Command::SetMemoryPressure(pressure) => self.on_memory_pressure(pressure),
             Command::FocusWake => self.focus_wake(),
             Command::AudioWake => self.audio_wake(),
+            Command::VisitTitlesWake => self.flush_visit_titles(),
             // Accepted only through `Command::Operation`.
             Command::Focus(_) => {}
         }
@@ -1829,6 +1833,7 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        self.flush_visit_titles();
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]

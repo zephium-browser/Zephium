@@ -748,7 +748,7 @@ pub trait Store {
     }
     /// Saves a site's page zoom, or forgets it when `percent` is none. The
     /// oldest sites beyond `zoom::MAX_SITE_LEVELS` are dropped. False when
-    /// not admitted. Clearing history clears the levels it covers.
+    /// not stored. Clearing history clears the levels it covers.
     fn save_zoom_level(
         &self,
         _profile: ProfileId,

@@ -713,3 +713,18 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
         }
     ));
 }
+
+#[test]
+fn visit_title_wakes_do_not_get_postponed_by_later_titles() {
+    let queue = CommandQueue::new();
+    let now = std::time::Instant::now();
+    queue.schedule_visit_titles(now);
+    queue.schedule_visit_titles(now + std::time::Duration::from_secs(1));
+    assert!(matches!(
+        queue.wait_for_timer(now + std::time::Duration::from_secs(60)),
+        TimerWake::VisitTitles
+    ));
+    queue.stop_ticker();
+    queue.schedule_visit_titles(now);
+    assert!(matches!(queue.wait_for_timer(now), TimerWake::Stopped));
+}

@@ -112,3 +112,21 @@ test("a source with nothing to bring says so instead of claiming it is already h
   await expect.element(screen.getByText("Nothing to import")).toBeVisible();
   await expect.element(screen.getByText("Already here")).toBeVisible();
 });
+
+test.each([0, 3])("an import stopped by a limit reports partial with %i added", async (done) => {
+  const fake = importer();
+  browserImport.provide(fake.adapter);
+  const screen = await render(ImportBrowserData);
+  await screen.getByRole("button", { name: "Import" }).click();
+  fake.emit({
+    source: "zen",
+    profile: "p",
+    finished: true,
+    cancelled: false,
+    kinds: [{ kind: "bookmarks", state: "partial", done, total: 40 }],
+  });
+  await expect
+    .element(screen.getByText("Import stopped at a limit. Items already brought over stay."))
+    .toBeVisible();
+  await expect.element(screen.getByText("Already here")).not.toBeInTheDocument();
+});

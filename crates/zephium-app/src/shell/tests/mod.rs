@@ -1180,6 +1180,8 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    amended_titles: Mutex<Vec<(String, String)>>,
+    amend_title_fails: std::sync::atomic::AtomicBool,
     pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -1220,6 +1222,8 @@ pub(crate) struct FakeStore {
     /// Saved page zoom per profile, and how many times each profile was loaded.
     pub(crate) zoom_saved: Mutex<std::collections::HashMap<ProfileId, Vec<SavedLevel>>>,
     pub(crate) zoom_loads: std::sync::atomic::AtomicUsize,
+    zoom_save_fails: std::sync::atomic::AtomicBool,
+    zoom_save_fail_site: Mutex<Option<String>>,
     /// Tasks `resource_call` lists, and the searches it was asked for.
     pub(super) task_rows: Mutex<
         Vec<(
@@ -1970,6 +1974,13 @@ impl Store for FakeStore {
         percent: Option<u16>,
         set_at: i64,
     ) -> bool {
+        if self
+            .zoom_save_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.zoom_save_fail_site.lock().unwrap().as_ref() == Some(&site)
+        {
+            return false;
+        }
         let mut saved = self.zoom_saved.lock().unwrap();
         let levels = saved.entry(profile).or_default();
         levels.retain(|level| level.site != site);
@@ -1984,6 +1995,16 @@ impl Store for FakeStore {
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        if self
+            .amend_title_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.amended_titles
+            .lock()
+            .unwrap()
+            .push((url.clone(), title.clone()));
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
             visit.title = title;

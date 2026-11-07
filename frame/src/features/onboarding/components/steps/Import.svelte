@@ -144,6 +144,8 @@
           >{m.onb_import_allow()}</Button
         >
       {/if}
+    {:else if job?.finished && job.kinds.some((entry) => entry.state === "partial")}
+      <span class="reading">{m.import_kind_partial()}</span>
     {:else if job?.finished && !job.cancelled && job.kinds.every((entry) => entry.total === 0)}
       <span class="reading">{m.import_kind_none()}</span>
     {:else if job?.finished}

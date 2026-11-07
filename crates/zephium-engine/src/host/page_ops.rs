@@ -14,6 +14,18 @@ fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
     }
 }
 
+fn report_find_refusal(
+    accepted: bool,
+    request: Option<FindRequest>,
+    report: impl FnOnce(String, u32, Option<u32>),
+) {
+    if !accepted {
+        if let Some(request) = request {
+            report(request.query, 0, None);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
     read.and_then(|(html, truncated)| (!truncated).then_some(html))
@@ -268,9 +280,12 @@ impl EngineHost {
             use wry::WebViewExtUnix;
             view.view.webview()
         };
-        if !crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report) {
+        let accepted =
+            crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report.clone());
+        if !accepted {
             eprintln!("engine: find is unavailable in this web engine");
         }
+        report_find_refusal(accepted, request, report());
     }
 
     pub(crate) fn print(&self, id: ItemId) {
@@ -288,6 +303,29 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_find_reports_no_results_but_accepted_find_waits_for_native() {
+        for accepted in [false, true] {
+            let mut results = Vec::new();
+            super::report_find_refusal(
+                accepted,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward: true,
+                }),
+                |query, matches, active| results.push((query, matches, active)),
+            );
+            assert_eq!(
+                results,
+                if accepted {
+                    vec![]
+                } else {
+                    vec![("needle".into(), 0, None)]
+                }
+            );
+            super::report_find_refusal(false, None, |_, _, _| panic!("closing find has no result"));
+        }
+    }
     #[cfg(target_os = "macos")]
     #[test]
     fn truncated_html_is_not_offered_for_saving() {

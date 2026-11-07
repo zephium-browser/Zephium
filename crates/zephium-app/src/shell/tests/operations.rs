@@ -1560,6 +1560,19 @@ fn find_follows_the_page_in_front_and_answers_only_for_it() {
             active: Some(1),
         }]
     );
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Find(request("needle", true)));
+    assert_eq!(
+        results.lock().unwrap().last().unwrap(),
+        &zephium_ipc::FindResultView {
+            query: "needle".into(),
+            matches: 0,
+            active: None,
+        }
+    );
+    assert!(shell.find_target.is_none());
 }
 
 #[test]

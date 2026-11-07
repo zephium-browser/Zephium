@@ -405,6 +405,9 @@ test("history lists past conversations, opens one and deletes one", async () => 
   await page.getByRole("menuitem", { name: "History" }).click();
   const row = screen.getByRole("button", { name: /^Pricing on the Pro plan/u });
   await expect.element(row).toBeVisible();
+  await expect
+    .element(screen.getByText("Zephium keeps your 200 most recent conversations."))
+    .toBeVisible();
   await screen.getByRole("button", { name: "Delete “Pricing on the Pro plan”" }).click();
   await expect.poll(() => native.remove.mock.calls.at(-1)).toEqual([SPACE, "c0"]);
   await expect.element(row).not.toBeInTheDocument();

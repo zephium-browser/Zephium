@@ -540,12 +540,13 @@ impl Shell {
         let _ = self.commit(effects);
     }
 
-    fn forget_removed_tab_state(&self, id: ItemId) {
+    fn forget_removed_tab_state(&mut self, id: ItemId) {
         let mut pending = vec![id];
         for _ in 0..zephium_core::session::MAX_SESSION_ITEMS {
             let Some(item) = pending.pop() else {
                 break;
             };
+            self.sources.retain(|held| held != item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));
             }

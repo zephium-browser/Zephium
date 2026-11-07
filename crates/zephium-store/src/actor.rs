@@ -431,7 +431,7 @@ enum Cmd {
     DeleteChat(ProfileId, String, Sender<bool>),
     ClearChats(ProfileId, Option<i64>, Sender<u32>),
     ZoomLevels(ProfileId, Sender<Vec<zephium_core::zoom::SavedLevel>>),
-    SaveZoomLevel(ProfileId, String, Option<u16>, i64),
+    SaveZoomLevel(ProfileId, String, Option<u16>, i64, Sender<bool>),
     PopupSites(
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
@@ -1646,9 +1646,8 @@ impl Store for SqliteStore {
         hub::valid_zoom_site(&site)
             && percent.is_none_or(zephium_core::zoom::valid_percent)
             && self
-                .tx
-                .try_send(Cmd::SaveZoomLevel(profile, site, percent, set_at))
-                .is_ok()
+                .ask(|reply| Cmd::SaveZoomLevel(profile, site, percent, set_at, reply))
+                .unwrap_or(false)
     }
 
     fn popup_sites(
@@ -2273,10 +2272,10 @@ fn actor(
             Some(Cmd::ZoomLevels(profile, reply)) => {
                 let _ = reply.send(hub.zoom_levels(profile));
             }
-            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at)) => {
-                if hub.knows(profile) || flush(&mut hub, &mut pending) {
-                    hub.save_zoom_level(profile, &site, percent, set_at);
-                }
+            Some(Cmd::SaveZoomLevel(profile, site, percent, set_at, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.save_zoom_level(profile, &site, percent, set_at);
+                let _ = reply.send(stored);
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
