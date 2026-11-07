@@ -1221,12 +1221,12 @@ impl fmt::Debug for ImportDestinationCompletion {
     }
 }
 #[derive(Clone)]
-pub struct ImportCompletion(Completion<Option<u32>>);
+pub struct ImportCompletion(Completion<Option<(u32, bool)>>);
 impl ImportCompletion {
-    pub fn new(done: impl FnOnce(Option<u32>) + Send + 'static) -> Self {
+    pub fn new(done: impl FnOnce(Option<(u32, bool)>) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))
     }
-    pub fn finish(self, added: Option<u32>) {
+    pub fn finish(self, added: Option<(u32, bool)>) {
         let done = self
             .0
             .lock()

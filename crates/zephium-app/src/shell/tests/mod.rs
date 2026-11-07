@@ -1220,6 +1220,7 @@ pub(crate) struct FakeStore {
     /// Saved page zoom per profile, and how many times each profile was loaded.
     pub(crate) zoom_saved: Mutex<std::collections::HashMap<ProfileId, Vec<SavedLevel>>>,
     pub(crate) zoom_loads: std::sync::atomic::AtomicUsize,
+    zoom_save_fails: std::sync::atomic::AtomicBool,
     /// Tasks `resource_call` lists, and the searches it was asked for.
     pub(super) task_rows: Mutex<
         Vec<(
@@ -1970,6 +1971,12 @@ impl Store for FakeStore {
         percent: Option<u16>,
         set_at: i64,
     ) -> bool {
+        if self
+            .zoom_save_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
         let mut saved = self.zoom_saved.lock().unwrap();
         let levels = saved.entry(profile).or_default();
         levels.retain(|level| level.site != site);

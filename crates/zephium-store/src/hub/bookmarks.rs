@@ -142,7 +142,7 @@ impl Hub {
             (BookmarkReply::Entries(entries), None) if creates => {
                 entries.first().cloned().map(BookmarkChange::Created)
             }
-            (BookmarkReply::Imported(added), _) if imported && *added > 0 => {
+            (BookmarkReply::Imported { added, .. }, _) if imported && *added > 0 => {
                 Some(BookmarkChange::Imported)
             }
             (BookmarkReply::Done | BookmarkReply::Entries(_), Some(before)) => {
@@ -334,23 +334,28 @@ fn apply(conn: &mut Connection, request: BookmarkRequest) -> Outcome<BookmarkRep
                 tx: &tx,
                 budget: u32::try_from(i64::from(MAX_BOOKMARKS) - count).unwrap_or(0),
                 added: 0,
+                partial: false,
                 now: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |elapsed| elapsed.as_secs() as i64),
             };
             let Some(root) = import.folder(None, &title)? else {
-                return Ok(Err(Refused(BookmarkFailure::Full)));
+                return Ok(Ok(BookmarkReply::Imported {
+                    added: 0,
+                    partial: !nodes.is_empty(),
+                }));
             };
             import.merge(root, 1, &nodes)?;
             let added = import.added;
+            let partial = import.partial;
             if added == 0 {
                 // Nothing came over, so nothing is kept: not the import's
                 // folder, not an empty one inside it. Dropping the
                 // transaction undoes them.
-                return Ok(Ok(BookmarkReply::Imported(0)));
+                return Ok(Ok(BookmarkReply::Imported { added: 0, partial }));
             }
             tx.commit()?;
-            Ok(Ok(BookmarkReply::Imported(added)))
+            Ok(Ok(BookmarkReply::Imported { added, partial }))
         }
         BookmarkRequest::Remove { id } => {
             // Folder contents go with it through ON DELETE CASCADE.
@@ -600,6 +605,7 @@ struct Import<'a> {
     tx: &'a rusqlite::Transaction<'a>,
     budget: u32,
     added: u32,
+    partial: bool,
     now: i64,
 }
 
@@ -628,6 +634,7 @@ impl Import<'_> {
         url: Option<&str>,
     ) -> rusqlite::Result<Option<i64>> {
         if self.budget == 0 {
+            self.partial = true;
             return Ok(None);
         }
         self.tx
@@ -652,6 +659,7 @@ impl Import<'_> {
             .collect::<rusqlite::Result<_>>()?;
         for node in nodes {
             if self.budget == 0 {
+                self.partial = true;
                 break;
             }
             match node {
@@ -1340,8 +1348,20 @@ mod tests {
                 },
             )
         };
-        assert_eq!(import(&mut hub, false), BookmarkReply::Imported(2));
-        assert_eq!(import(&mut hub, true), BookmarkReply::Imported(1));
+        assert_eq!(
+            import(&mut hub, false),
+            BookmarkReply::Imported {
+                added: 2,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, true),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
+        );
         let BookmarkReply::Nodes(top) =
             hub.bookmarks(profile, BookmarkRequest::Children { parent: None })
         else {
@@ -1389,7 +1409,13 @@ mod tests {
                 },
             )
         };
-        assert_eq!(import(&mut hub, vec![]), BookmarkReply::Imported(0));
+        assert_eq!(
+            import(&mut hub, vec![]),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
         // Links the profile cannot hold leave no folder either, nor an empty
         // one inside it.
         assert_eq!(
@@ -1409,7 +1435,10 @@ mod tests {
                     },
                 ]
             ),
-            BookmarkReply::Imported(0)
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
         );
         assert!(top(&mut hub).is_empty());
 
@@ -1419,12 +1448,71 @@ mod tests {
             title: "Яндекс".into(),
             url: "https://ya.ru/".into(),
         }];
-        assert_eq!(import(&mut hub, kept.clone()), BookmarkReply::Imported(1));
-        assert_eq!(import(&mut hub, kept), BookmarkReply::Imported(0));
-        assert_eq!(import(&mut hub, vec![]), BookmarkReply::Imported(0));
+        assert_eq!(
+            import(&mut hub, kept.clone()),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, kept),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
+        assert_eq!(
+            import(&mut hub, vec![]),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false
+            }
+        );
         let folders = top(&mut hub);
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].children, 1);
+    }
+
+    #[test]
+    fn capacity_limited_import_reports_partial_including_zero_added() {
+        let (mut hub, profile) = hub();
+        hub.profile_conn(profile)
+            .unwrap()
+            .execute(
+                "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?1)
+             INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+             SELECT NULL, n, 'Kept', 'https://kept.example/' || n, 0 FROM rows",
+                [MAX_BOOKMARKS - 2],
+            )
+            .unwrap();
+        let request = || BookmarkRequest::Import {
+            folder: "Imported".into(),
+            nodes: vec![
+                ImportNode::Link {
+                    title: "One".into(),
+                    url: "https://one.example/".into(),
+                },
+                ImportNode::Link {
+                    title: "Two".into(),
+                    url: "https://two.example/".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            hub.bookmarks(profile, request()),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: true
+            }
+        );
+        assert_eq!(
+            hub.bookmarks(profile, request()),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: true
+            }
+        );
     }
 
     #[test]
@@ -1448,7 +1536,10 @@ mod tests {
                     nodes: vec![node],
                 },
             ),
-            BookmarkReply::Imported(1)
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false
+            }
         );
         let BookmarkReply::Nodes(found) = hub.bookmarks(
             profile,

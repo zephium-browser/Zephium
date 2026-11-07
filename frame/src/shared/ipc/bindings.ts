@@ -1710,7 +1710,7 @@ export type ImportSourceView = {
 	needs_permission: boolean,
 };
 
-export type ImportStateView = "queued" | "running" | "done" | "failed" | "skipped";
+export type ImportStateView = "queued" | "running" | "done" | "partial" | "failed" | "skipped";
 
 export type ItemId = string;
 

@@ -115,6 +115,18 @@ test("an import that found nothing says so instead of counting zero items brough
   await expect.element(screen.getByText("12 items brought over")).toBeVisible();
 });
 
+test("an import stopped at a limit explains what was kept", async () => {
+  const fake = importer();
+  browserImport.provide(fake.adapter);
+  await browserImport.detect();
+  const screen = await render(Import);
+  fake.emit(finished([{ kind: "bookmarks", state: "partial", done: 0, total: 0 }]));
+  await expect
+    .element(screen.getByText("Import stopped at a limit. Items already brought over stay."))
+    .toBeVisible();
+  await expect.element(screen.getByText("Nothing to import")).not.toBeInTheDocument();
+});
+
 test("a refusal by macOS says what to turn on and offers the setting", async () => {
   const fake = importer();
   const opened: string[] = [];

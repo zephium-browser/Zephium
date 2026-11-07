@@ -194,8 +194,11 @@ pub enum BookmarkReply {
     Nodes(Vec<BookmarkNode>),
     /// The bookmark added, or the existing one an `if_absent` add found.
     Added(i64),
-    /// Links an import added; folders are not counted.
-    Imported(u32),
+    /// Links an import added, and whether capacity stopped it; folders are not counted.
+    Imported {
+        added: u32,
+        partial: bool,
+    },
     Entries(Vec<BookmarkEntry>),
     Done,
     Failed(BookmarkFailure),
