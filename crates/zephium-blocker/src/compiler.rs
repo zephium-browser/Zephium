@@ -1423,6 +1423,18 @@ fn compile_webkit_with(
                 .map_err(|_| CompileError::UpstreamInvariant)?;
             let mut unsplit = Vec::new();
             for mut native in equivalent {
+                // Domain alternatives are sets; canonical cache records require
+                // uniqueness. Preserve first-seen order before pruning/hashing.
+                for domains in [
+                    &mut native.trigger.if_domain,
+                    &mut native.trigger.unless_domain,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let mut seen = HashSet::with_capacity(domains.len());
+                    domains.retain(|domain| seen.insert(domain.clone()));
+                }
                 if let Some(pattern) =
                     crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
                 {
