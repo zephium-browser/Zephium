@@ -8,10 +8,10 @@ license.workspace = true
 zephium-core.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
-notify = { version = "=8.2.0", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "=8.2.1", default-features = false, features = ["macos_fsevent"] }
 pulldown-cmark = { version = "=0.13.6", default-features = false }
 sha2 = "=0.10.9"
-unicode-normalization = "=0.1.25"
+unicode-normalization = "=0.1.26"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.4", features = ["fs"] }
