@@ -40,3 +40,27 @@ for (const opaque of [true, false]) {
     },
   );
 }
+
+test("checkmarked entries expose their checked state and ordinary actions stay menuitems", async () => {
+  render(Host, {
+    entries: [
+      { kind: "item", id: "25", label: "25 minutes", checked: true },
+      { kind: "item", id: "50", label: "50 minutes", checked: false },
+      { kind: "item", id: "breaks", label: "Breaks", checked: false },
+      { kind: "item", id: "action", label: "Action" },
+    ],
+  });
+  await page.getByRole("button", { name: "Actions", exact: true }).click();
+  await expect
+    .element(page.getByRole("menuitemcheckbox", { name: "25 minutes" }))
+    .toHaveAttribute("aria-checked", "true");
+  for (const name of ["50 minutes", "Breaks"]) {
+    await expect
+      .element(page.getByRole("menuitemcheckbox", { name }))
+      .toHaveAttribute("aria-checked", "false");
+  }
+  await expect
+    .element(page.getByRole("menuitem", { name: "Action", exact: true }))
+    .not.toHaveAttribute("aria-checked");
+  await userEvent.keyboard("{Escape}");
+});
