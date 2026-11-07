@@ -263,3 +263,57 @@ fn hides_return_focus_after_settlement_including_a_revision_redrive() {
         }
     }
 }
+
+#[test]
+fn a_page_never_revealed_returns_focus_once_deselected() {
+    for selected in [false, true] {
+        let mut windows = Windows(Vec::new());
+        let owner = windows.create(None);
+        let page = windows.create(Some(owner));
+        let renderer = windows.create(Some(page));
+        // SAFETY: hide this fixture's page as a navigating page stays hidden.
+        let _ = unsafe { ShowWindow(page, windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+        let stage = Stage::new(owner, 8.0, |_, _| {});
+        let id = ItemId::generate();
+        let controller: ICoreWebView2Controller = Controller {
+            on_hide: Box::new(|| panic!("an already hidden page is not hidden again")),
+        }
+        .into();
+        stage.state.borrow_mut().views.insert(
+            id,
+            HostView {
+                container: page,
+                controller,
+                serial: 1,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(false),
+                    controller_visible: Some(false),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        if selected {
+            stage.state.borrow_mut().visible.insert(id);
+        }
+        FOCUS.with(|record| {
+            *record.borrow_mut() = Some(FocusRecord {
+                focus: renderer,
+                foreground: owner,
+                targets: Vec::new(),
+            });
+        });
+        hide_views(&stage.state, &[id]);
+        FOCUS.with(|record| {
+            let expected = if selected { vec![] } else { vec![owner] };
+            assert_eq!(
+                record.borrow().as_ref().unwrap().targets,
+                expected,
+                "{selected}"
+            );
+        });
+    }
+}

@@ -1266,19 +1266,18 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
 
     let hides = {
         let state = state.borrow();
+        // A page already hidden, as one still navigating before its reveal,
+        // may hold native focus too, so it still gets the handoff below.
         ids.iter()
             .filter_map(|id| {
                 let view = state.views.get(id)?;
-                let applied = view.applied.get();
-                ((applied.window_visible != Some(false))
-                    || (applied.controller_visible != Some(false)))
-                .then(|| Hide {
+                Some(Hide {
                     id: *id,
                     serial: view.serial,
                     revision: state.revision,
                     container: view.container,
                     controller: view.controller.clone(),
-                    applied,
+                    applied: view.applied.get(),
                 })
             })
             .collect::<Vec<_>>()
