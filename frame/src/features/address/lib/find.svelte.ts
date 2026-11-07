@@ -23,6 +23,7 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let restoreSidebar: (() => void) | null = null;
 let stop: (() => void) | null = null;
 let disposed = false;
+let request = 0;
 
 export const isOpen = () => open;
 export const searching = () => page;
@@ -47,7 +48,18 @@ function listen() {
 }
 
 function search(value: string, forward: boolean) {
-  void commands.pageFind(value, forward).catch(() => false);
+  const attempt = ++request;
+  const failed = () => {
+    if (!open || query !== value || request !== attempt) return;
+    matches = 0;
+    active = null;
+  };
+  void commands
+    .pageFind(value, forward)
+    .then((accepted) => {
+      if (!accepted) failed();
+    })
+    .catch(failed);
 }
 
 /** Opens the field (revealing a compact sidebar for as long as it is open)
@@ -63,6 +75,7 @@ export function show(tab: string | null) {
 }
 
 export function setText(value: string) {
+  request += 1;
   query = value.slice(0, 512);
   matches = null;
   active = null;
@@ -92,6 +105,7 @@ export function step(forward: boolean, tab: string | null) {
 export function hide() {
   if (!open) return;
   open = false;
+  request += 1;
   page = null;
   clearTimeout(timer);
   query = "";

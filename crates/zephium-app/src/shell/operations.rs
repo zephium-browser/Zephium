@@ -420,13 +420,28 @@ impl Shell {
             let _ = self.engine.find(previous, None);
             self.find_target = None;
         }
-        let (Some(page), Some(request)) = (page, request) else {
+        let Some(request) = request else {
             return;
         };
-        if self.engine.find(page, Some(request))
+        let Some(page) = page else {
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
+            return;
+        };
+        if self.engine.find(page, Some(request.clone()))
             != zephium_core::ports::engine::NativeDispatch::Rejected
         {
             self.find_target = Some(page);
+        } else {
+            self.find_target = None;
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
         }
     }
 
