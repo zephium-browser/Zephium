@@ -15,9 +15,9 @@ export const MIN_EXPANDED_WIDTH = 180;
 export const MAX_EXPANDED_WIDTH = 460;
 
 /**
- * Dragging the handle below this snaps to the rail, and dragging back out of
- * the rail snaps to the minimum expanded width. Nothing settles in the gap,
- * so the sidebar is always in one of its two designed shapes.
+ * A column released below this is put away, and one following the pointer
+ * stops at the minimum expanded width on the way. Nothing settles in the gap,
+ * so the sidebar is always in one of its designed shapes.
  */
 export const SNAP_THRESHOLD = 140;
 
@@ -27,8 +27,13 @@ const WIDTH_SETTING = "sidebar.width";
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
-let drag: { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number } | null =
-  null;
+let drag: {
+  mode: SidebarMode;
+  desired: SidebarMode;
+  expanded: number;
+  pending: number;
+  followed: boolean;
+} | null = null;
 let resizeSettlement = $state(0);
 // One ordering counter, seeded above every earlier owner: an earlier
 // document, and an earlier copy of this module in the same document, which a
@@ -148,22 +153,60 @@ export function applyDragWidth(value: number) {
   if (modeChanged) save(mode);
 }
 
-/** The non-native capture fallback also keeps the rendered layout unchanged. */
+/** The non-native capture fallback; `previewDragWidth` moves the column. */
 export function beginSidebarResize() {
   if (drag) return;
-  drag = { mode, desired: desiredMode, expanded: expandedWidth, pending: effectiveWidth() };
+  drag = {
+    mode,
+    desired: desiredMode,
+    expanded: expandedWidth,
+    pending: effectiveWidth(),
+    followed: false,
+  };
 }
 
 export function finishSidebarResize(value: number) {
   if (!drag) return;
+  const { followed } = drag;
   drag = null;
   adoptResizeWidth(value);
-  // The page travels to the new edge, as it does from the native guide.
-  void commands.sidebarSetWidth(effectiveWidth(), true, resizeRevision);
+  // The page travels to the new edge, unless it has followed there already.
+  void commands.sidebarSetWidth(effectiveWidth(), !followed, resizeRevision);
+}
+
+/** An expanded column follows the drag. Only release saves the width. */
+export function previewDragWidth(value: number) {
+  if (!drag || mode !== "default" || !Number.isFinite(value)) return;
+  drag.followed = true;
+  const next = clampExpanded(value);
+  if (next === expandedWidth) return;
+  expandedWidth = next;
+  void commands.sidebarSetWidth(next, false, resizeRevision);
 }
 
 export function cancelSidebarResize() {
+  const started = drag;
   drag = null;
+  // A drag the column followed gives back the width it started from.
+  if (started?.followed && expandedWidth !== started.expanded) {
+    expandedWidth = started.expanded;
+    void commands.sidebarSetWidth(effectiveWidth(), false, resizeRevision);
+  }
+}
+
+/** Native moved the column with the pointer; release settles and saves it. */
+export function followResizeWidth(value: number, revision = resizeRevision) {
+  if (revision !== resizeRevision || !Number.isFinite(value) || mode !== "default") return;
+  expandedWidth = clampExpanded(value);
+}
+
+/** Native saw a drag released past the narrowest. The column hides, and comes
+ *  back at `width`, where the drag started. */
+export function hideFromDrag(width: number, revision = resizeRevision) {
+  if (revision !== resizeRevision || !Number.isFinite(width)) return;
+  expandedWidth = clampExpanded(width);
+  resizeSettlement++;
+  setMode("hidden");
 }
 
 /** Native has admitted one final width; adopt its display shape without another layout command. */
@@ -197,6 +240,15 @@ function installResizeListener() {
     if (typeof width === "number" && typeof revision === "number")
       adoptResizeWidth(width, revision);
   });
+  const listen = (name: string, handle: (width: number, revision: number) => void) =>
+    window.addEventListener(name, (event) => {
+      if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
+        return;
+      const { width, revision } = event.detail;
+      if (typeof width === "number" && typeof revision === "number") handle(width, revision);
+    });
+  listen("zephium:sidebar-width-following", followResizeWidth);
+  listen("zephium:sidebar-hide-selected", hideFromDrag);
 }
 
 // The shape this column last saved, until the store reports it back. Values

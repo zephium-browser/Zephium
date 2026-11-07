@@ -338,7 +338,7 @@
   let morph: ReturnType<typeof shapeMorph.capture> = null;
   // While the shape changes, the column's width travels with the page
   // instead of jumping, and its contents hold their final width so only the
-  // space beside them moves. A resize guide commits its width immediately on release.
+  // space beside them moves. A drag moves the column as it goes and settles on release.
   let reshaping = $state(false);
   let resizeSettling = $state(false);
   let observedResizeSettlement = sidebarResizeSettlement();

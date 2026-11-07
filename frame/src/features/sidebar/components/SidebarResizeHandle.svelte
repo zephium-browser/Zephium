@@ -2,6 +2,7 @@
   import {
     applyDragWidth,
     claimSidebarResizeOwner,
+    previewDragWidth,
     sidebarResizeRevision,
     beginSidebarResize,
     finishSidebarResize,
@@ -103,6 +104,11 @@
     // Preview where release lands, including the snap to the rail.
     const landing = resolveDragWidth(pending);
     pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
+    // An expanded column follows the pointer and stops at its narrowest.
+    if (startWidth >= MIN_EXPANDED_WIDTH) {
+      pending = Math.round(Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
+      previewDragWidth(pending);
+    }
     guide = pending;
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {

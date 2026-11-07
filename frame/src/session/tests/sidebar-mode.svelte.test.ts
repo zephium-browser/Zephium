@@ -25,6 +25,7 @@ const {
   beginSidebarResize,
   finishSidebarResize,
   cancelSidebarResize,
+  previewDragWidth,
   expanded,
   resolveDragWidth,
   adoptMode,
@@ -131,6 +132,30 @@ describe("which width changes the page travels with", () => {
     finishSidebarResize(315);
     expect(native.width.mock.calls.length).toBe(before + 1);
     expect(last()).toEqual([315, true]);
+  });
+
+  it("a column follows the drag without travel and settles without travel", () => {
+    beginSidebarResize();
+    previewDragWidth(330);
+    expect(expanded()).toBe(330);
+    expect(last()).toEqual([330, false]);
+    const before = native.width.mock.calls.length;
+    previewDragWidth(330);
+    expect(native.width.mock.calls.length).toBe(before);
+    previewDragWidth(0);
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+    finishSidebarResize(MIN_EXPANDED_WIDTH);
+    expect(sidebarMode()).toBe("default");
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+  });
+
+  it("cancelling a drag the column followed gives back its starting width", () => {
+    const originalWidth = expanded();
+    beginSidebarResize();
+    previewDragWidth(originalWidth + 40);
+    cancelSidebarResize();
+    expect(expanded()).toBe(originalWidth);
+    expect(last()).toEqual([originalWidth, false]);
   });
 
   it("cancellation leaves the original shape untouched and emits no layout", () => {
