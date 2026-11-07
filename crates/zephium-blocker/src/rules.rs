@@ -204,10 +204,14 @@ impl CompiledRules {
     }
 
     /// Whether a runtime policy still decides the known requests as its
-    /// official lists must, on a neutral page and with no page known, so a
-    /// list update that silently stops blocking is refused instead of used.
-    /// Each blocked request is checked only when the list that blocks it is
-    /// part of the policy.
+    /// official lists must, so a list update that silently stops blocking is
+    /// refused instead of used. Each blocked request is checked only when the
+    /// list that blocks it is part of the policy.
+    ///
+    /// Every request is judged with no page known, as a native callback without
+    /// the initiating document judges it, and where the matcher knows the page,
+    /// on a neutral page too. Site-scoped exceptions such as uBlock Origin's
+    /// `@@*$script,1p,domain=…` must lift neither.
     pub fn verify_official_canary(&self) -> Result<(), String> {
         if self.target() != CompileTarget::Runtime {
             return Ok(());

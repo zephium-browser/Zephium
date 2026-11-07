@@ -48,6 +48,11 @@ fn main() {
         .expect("Tauri Windows build configuration");
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
+        // The segment heap gives freed memory back to the system; the default
+        // heap keeps whatever a burst such as a filter-list update committed.
+        let heap = Path::new(env!("CARGO_MANIFEST_DIR")).join("segment-heap.manifest");
+        println!("cargo:rerun-if-changed={}", heap.display());
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", heap.display());
     } else {
         tauri_build::build();
     }

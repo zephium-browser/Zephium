@@ -397,6 +397,11 @@ export const commands = {
 	 *  sheet and the page leaves the screen.
 	 */
 	pagePermissionCardHost: (available: boolean) => __TAURI_INVOKE<void>("page_permission_card_host", { available }),
+	/**
+	 *  Whether one of the browser's own dialogs is open over the window. Pages
+	 *  are native views above chrome, so they leave the screen while it shows.
+	 */
+	chromeModal: (open: boolean) => __TAURI_INVOKE<void>("chrome_modal", { open }),
 	tabSetMuted: (id: string, muted: boolean) => __TAURI_INVOKE<OperationAdmission>("tab_set_muted", { id, muted }),
 	mediaPlayer: (id: string, action: MediaPlayerAction) => __TAURI_INVOKE<OperationAdmission>("media_player", { id, action }),
 	/**

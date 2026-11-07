@@ -88,64 +88,139 @@ struct SourceSpec {
     target: &'static str,
     title: &'static str,
     source_url: &'static str,
-    homepage: &'static str,
+    /// uBlock Origin's assembled `.min` lists carry no homepage line.
+    homepage: Option<&'static str>,
     license: &'static LicenseSpec,
     header: HeaderFormat,
     min_bytes: usize,
     min_rules: usize,
     follows_expires: bool,
+    /// Whether the list's `Last modified` dates the seed. A list that changes
+    /// only every few months would otherwise make every seed look stale.
+    dates_seed: bool,
 }
 
-const SOURCES: [SourceSpec; 4] = [
+const SOURCES: [SourceSpec; 9] = [
     SourceSpec {
         id: "easylist",
         target: "easylist.txt",
         title: "EasyList",
         source_url: "https://easylist.to/easylist/easylist.txt",
-        homepage: "https://easylist.to/",
+        homepage: Some("https://easylist.to/"),
         license: &CC_BY_SA,
         header: HeaderFormat::Adblock,
         min_bytes: 256 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "easyprivacy",
         target: "easyprivacy.txt",
         title: "EasyPrivacy",
         source_url: "https://easylist.to/easylist/easyprivacy.txt",
-        homepage: "https://easylist.to/",
+        homepage: Some("https://easylist.to/"),
         license: &CC_BY_SA,
         header: HeaderFormat::Adblock,
         min_bytes: 256 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "ublock-filters",
         target: "ublock-filters.txt",
         title: "uBlock filters",
-        source_url: "https://ublockorigin.github.io/uAssets/filters/filters.txt",
-        homepage: "https://github.com/uBlockOrigin/uAssets",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/filters.min.txt",
+        homepage: None,
         license: &GPL_3,
         header: HeaderFormat::Dated,
         min_bytes: 128 * 1024,
         min_rules: 1000,
         follows_expires: false,
+        dates_seed: true,
     },
     SourceSpec {
         id: "ublock-quick-fixes",
         target: "ublock-quick-fixes.txt",
         title: "uBlock\u{2080} filters \u{2013} Quick fixes",
         source_url: "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt",
-        homepage: "https://github.com/uBlockOrigin/uAssets",
+        homepage: Some(UASSETS),
         license: &GPL_3,
         header: HeaderFormat::Dated,
         min_bytes: 8 * 1024,
         min_rules: 50,
         follows_expires: true,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-link-shorteners",
+        target: "ublock-link-shorteners.txt",
+        title: "uBlock filters \u{2013} Link shorteners",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt",
+        homepage: Some(UASSETS),
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-privacy",
+        target: "ublock-privacy.txt",
+        title: "uBlock filters \u{2013} Privacy",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/privacy.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-resource-abuse",
+        target: "ublock-resource-abuse.txt",
+        title: "uBlock filters \u{2013} Resource abuse",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt",
+        homepage: Some(UASSETS),
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 2 * 1024,
+        min_rules: 20,
+        follows_expires: false,
+        dates_seed: false,
+    },
+    SourceSpec {
+        id: "ublock-unbreak",
+        target: "ublock-unbreak.txt",
+        title: "uBlock filters \u{2013} Unbreak",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 500,
+        follows_expires: false,
+        dates_seed: true,
+    },
+    SourceSpec {
+        id: "ublock-badware",
+        target: "ublock-badware.txt",
+        title: "uBlock filters \u{2013} Badware risks",
+        source_url: "https://ublockorigin.github.io/uAssets/filters/badware.min.txt",
+        homepage: None,
+        license: &GPL_3,
+        header: HeaderFormat::Dated,
+        min_bytes: 32 * 1024,
+        min_rules: 1000,
+        follows_expires: false,
+        dates_seed: true,
     },
 ];
+
+const UASSETS: &str = "https://github.com/uBlockOrigin/uAssets";
 
 #[derive(Clone, Debug)]
 struct SourceInput {
@@ -282,7 +357,9 @@ struct CosmeticGolden {
     generic_hide_controls: usize,
     scriptlet_rules: usize,
     unknown_scriptlet_rules: usize,
+    substituted_scriptlet_rules: usize,
     unsupported_scriptlet_rules: usize,
+    dropped_player_markers: usize,
     scriptlet_hosts: usize,
     scriptlet_calls: usize,
     scriptlet_program_bytes: usize,
@@ -518,16 +595,16 @@ fn check_inner(repository: &Path, webkit_output: Option<&Path>) -> Result<(), St
     Ok(())
 }
 
+/// Reads each list from `source_directory` under its bundled file name.
 pub(crate) fn update(
     repository: &Path,
-    source_paths: [&Path; SOURCES.len()],
+    source_directory: &Path,
     license_paths: [&Path; LICENSES.len()],
 ) -> Result<(), String> {
     let sources = SOURCES
         .iter()
-        .zip(source_paths)
-        .map(|(spec, path)| {
-            let raw = read_regular_file(path, MAX_SOURCE_BYTES)?;
+        .map(|spec| {
+            let raw = read_regular_file(&source_directory.join(spec.target), MAX_SOURCE_BYTES)?;
             let header = parse_source_header(&raw, spec)?;
             Ok(SourceInput { spec, raw, header })
         })
@@ -825,13 +902,12 @@ fn build_catalog(sources: &[SourceInput], revision: u64) -> Result<CatalogManife
     }
     // The oldest list dates the seed, so the release gate measures the
     // stalest list rather than the most recently refreshed one.
-    let created_unix = sources
-        .iter()
+    let dating = || sources.iter().filter(|source| source.spec.dates_seed);
+    let created_unix = dating()
         .map(|source| source.header.modified_unix)
         .min()
         .ok_or_else(|| "blocker seed has no creation time".to_owned())?;
-    let expires_unix = sources
-        .iter()
+    let expires_unix = dating()
         .map(|source| source.header.modified_unix + source.header.expiry_seconds)
         .min()
         .ok_or_else(|| "blocker seed has no expiry time".to_owned())?;
@@ -1016,7 +1092,7 @@ fn parse_source_header(raw: &[u8], spec: &SourceSpec) -> Result<SourceHeader, St
             .ok_or_else(|| format!("{expected_title} has no {name} header"))
     };
     if field("Title")? != expected_title
-        || field("Homepage")? != spec.homepage
+        || fields.get("Homepage").copied() != spec.homepage
         || field(spec.license.terms_header)? != spec.license.terms_url
     {
         return Err(format!("{expected_title} header provenance is invalid"));
@@ -1778,6 +1854,10 @@ pub(crate) fn compile_hidden(
         CompileTarget::Webkit => zephium_blocker::CompileTarget::WebKit,
     };
     let compiler = Compiler::default();
+    // The WebKit artifact is macOS's, which judges the badware list's page
+    // loads with its runtime matcher, though this graph builds only WebKit.
+    #[cfg(feature = "blocker-seed-webkit")]
+    let compiler = compiler.with_navigation_check(true);
     #[cfg(feature = "blocker-seed-webkit")]
     let compiler = if unpruned {
         compiler.without_webkit_pruning()
@@ -1875,7 +1955,9 @@ pub(crate) fn compile_hidden(
                 generic_hide_controls: report.generic_controls,
                 scriptlet_rules: report.scriptlet_rules,
                 unknown_scriptlet_rules: report.unknown_scriptlet_rules,
+                substituted_scriptlet_rules: report.substituted_scriptlet_rules,
                 unsupported_scriptlet_rules: report.unsupported_scriptlet_rules,
+                dropped_player_markers: report.dropped_player_markers,
                 scriptlet_hosts,
                 scriptlet_calls,
                 scriptlet_program_bytes: policy.scriptlet_program().map_or(0, str::len),
@@ -1965,6 +2047,7 @@ const fn webkit_drop_name(reason: zephium_blocker::WebKitDropReason) -> &'static
         WebKitDropReason::ImportantPriority => "important_priority",
         WebKitDropReason::SuppressedByRuleSemantics => "suppressed_by_rule_semantics",
         WebKitDropReason::UrlFilterTooLarge => "url_filter_too_large",
+        WebKitDropReason::NavigationChecked => "navigation_checked",
     }
 }
 
@@ -2038,7 +2121,9 @@ mod tests {
         let quick_fixes = &SOURCES[3];
         let mut list = format!(
             "! Title: {}\n! Last modified: Mon, 02 Nov 2026 14:08:18 +0000\n! Expires: 8 hours\n! License: {}\n! Homepage: {}\n",
-            quick_fixes.title, GPL_3.terms_url, quick_fixes.homepage
+            quick_fixes.title,
+            GPL_3.terms_url,
+            quick_fixes.homepage.unwrap()
         );
         for rule in 0..600 {
             list.push_str(&format!("example{rule}.invalid##.advertisement\n"));
@@ -2305,6 +2390,25 @@ mod tests {
         );
         assert_eq!(next_revision(&old, None).unwrap(), 202611021459);
         assert!(build_catalog(&newer, 202611021459).is_err());
+    }
+
+    #[test]
+    fn a_rarely_changed_list_does_not_date_the_seed() {
+        let abuse = SOURCES
+            .iter()
+            .position(|spec| spec.id == "ublock-resource-abuse")
+            .unwrap();
+        let inputs = [
+            dated_input(0, "202611031000", b"a"),
+            dated_input(3, "202611041000", b"b"),
+            dated_input(abuse, "202610020529", b"c"),
+        ];
+        let catalog = catalog_of(&inputs, 202611041000);
+        assert_eq!(
+            catalog.created_unix,
+            timestamp_from_version("202611031000").unwrap().0
+        );
+        assert!(catalog.expires_unix > catalog.created_unix);
     }
 
     #[test]

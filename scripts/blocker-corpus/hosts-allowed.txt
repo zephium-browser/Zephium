@@ -7,6 +7,8 @@
 # link shorteners; adult sites; gambling and betting, including odds sites;
 # scams. Licensed services such as Netflix, Spotify, Twitch, Vimeo,
 # Crunchyroll and YouTube are fine. See docs/adblock.md.
+# A recording runs only after the owner has approved the exact host list
+# for that run.
 3voor12.vpro.nl
 47news.jp
 abcmouse.com
@@ -566,7 +568,6 @@ www.f5.com
 www.facebook.com
 www.fandom.com
 www.firefox-portal-detection.com
-www.flashscore.com
 www.flickr.com
 www.foodnetwork.com
 www.forbes.com
@@ -627,7 +628,6 @@ www.lencr.org
 www.linkedin.com
 www.live-video.net
 www.live.com
-www.livescore.com
 www.macromedia.com
 www.mail.ru
 www.marca.com

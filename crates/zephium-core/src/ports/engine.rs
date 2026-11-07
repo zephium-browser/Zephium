@@ -983,6 +983,9 @@ pub trait Engine {
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
+    /// Close the warm spare, if one is waiting: browsing has gone quiet, and
+    /// the next completed load warms another.
+    fn release_spare(&self) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
     /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
     /// and resumes implicitly when a view becomes visible again.

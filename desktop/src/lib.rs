@@ -260,10 +260,14 @@ const PRE_SHELL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from
 const PRIVILEGED_PERMISSIONS_POLICY: &str = "accelerometer=(), attribution-reporting=(), autoplay=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(self), compute-pressure=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), join-ad-interest-group=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), private-state-token-issuance=(), private-state-token-redemption=(), publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), unload=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()";
 const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
 // The chrome and launcher load their own pages, so a warm spare renderer
-// waiting for another site would mostly sit in memory.
+// waiting for another site would mostly sit in memory. They load nothing from
+// the network either, so their network service runs inside their browser
+// process instead of a utility process of its own. Page environments never
+// take these arguments.
 #[cfg(any(target_os = "windows", test))]
 const PRIVILEGED_WEBVIEW2_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess";
+    "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
+     --enable-features=NetworkServiceInProcess2";
 
 #[derive(Clone)]
 struct ShutdownCoordinator {
@@ -1827,6 +1831,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
             page_permission_card_host,
+            chrome_modal,
             tab_set_muted,
             media_player,
             site_permissions,
@@ -3536,6 +3541,19 @@ fn page_permission_card_host(caller: WebviewWindow, shell: State<'_, Handle>, av
         return;
     }
     shell.dispatch(Command::SetPagePermissionCardHost(available));
+}
+
+/// Whether one of the browser's own dialogs is open over the window. Pages
+/// are native views above chrome, so they leave the screen while it shows.
+#[tauri::command]
+#[specta::specta]
+fn chrome_modal(caller: WebviewWindow, shell: State<'_, Handle>, open: bool) {
+    if !authorize(&caller, CallerPolicy::Main, "chrome_modal")
+        || shutdown_started(caller.app_handle())
+    {
+        return;
+    }
+    shell.dispatch(Command::SetChromeModal(open));
 }
 
 static SITE_PERMISSIONS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -6867,6 +6885,15 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }
+                    // A replaced document has no dialog open yet; it reports
+                    // its own when it opens one.
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                        && window.label() == MAIN_LABEL
+                    {
+                        if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                            shell.dispatch(Command::SetChromeModal(false));
+                        }
+                    }
                 })
                 .build()?;
             // Onboarding composes for one size; the browser takes the window
@@ -9430,11 +9457,15 @@ mod tests {
     fn privileged_webview2_args_keep_smartscreen_and_process_sandboxes_enabled() {
         assert_eq!(
             super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS,
-            "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess"
+            "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
+             --enable-features=NetworkServiceInProcess2"
         );
         let args = super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS.to_ascii_lowercase();
         assert!(!args.contains("smartscreen"));
         assert!(!args.contains("no-sandbox"));
+        // WebView2 keeps only the last of a repeated feature switch.
+        assert_eq!(args.matches("--enable-features=").count(), 1);
+        assert_eq!(args.matches("--disable-features=").count(), 1);
     }
 
     #[test]
