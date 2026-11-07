@@ -3925,5 +3925,12 @@
   "privacy_windows_diagnostics_failed": "Could not open Windows Settings. Open Windows Settings and search for Diagnostics & feedback.",
   "privacy_microsoft_statement": "Microsoft privacy statement",
   "privacy_microsoft_statement_help": "Read how Microsoft handles SmartScreen and WebView2 data.",
-  "privacy_microsoft_statement_open": "Read privacy statement"
+  "privacy_microsoft_statement_open": "Read privacy statement",
+  "tab_selection_count": "{count} tabs selected",
+  "tab_selection_clear": "Clear tab selection",
+  "tab_selection_actions": "Selected tab actions",
+  "tab_selection_close": "Close selected tabs",
+  "tab_selection_mute": "Mute selected tabs",
+  "tab_selection_unmute": "Unmute selected tabs",
+  "tab_selection_failed": "Could not apply an action to every selected tab. Try again."
 }
