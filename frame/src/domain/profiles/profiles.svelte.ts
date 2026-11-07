@@ -19,6 +19,7 @@ let view = $state.raw<ProfilesView | null>(null);
 let users = 0;
 let stop: (() => void) | null = null;
 let generation = 0;
+let liveRevision = 0;
 
 export const all = (): ProfileEntryView[] => view?.profiles ?? [];
 export const current = (): ProfileEntryView | null =>
@@ -33,11 +34,13 @@ export const others = (): ProfileEntryView[] =>
   all().filter((profile) => profile.id !== view?.current);
 
 async function read(started: number) {
+  const revision = liveRevision;
   const reply = await observe(
     Promise.resolve().then(() => commands.profilesGet()),
     5000,
   );
-  if (started !== generation || reply.state !== "received") return;
+  // A native event can arrive before an older IPC snapshot is delivered.
+  if (started !== generation || revision !== liveRevision || reply.state !== "received") return;
   if (reply.value?.status === "ok" && reply.value.data) view = reply.value.data;
 }
 
@@ -50,7 +53,9 @@ export async function retain() {
   }
   const started = ++generation;
   const unlisten = await events.profilesChanged.listen((event) => {
-    if (started === generation) view = event.payload;
+    if (started !== generation) return;
+    liveRevision += 1;
+    view = event.payload;
   });
   if (started !== generation || users === 0) {
     unlisten();
