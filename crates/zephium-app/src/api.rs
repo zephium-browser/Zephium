@@ -507,6 +507,10 @@ pub enum Command {
     /// Whether the expanded sidebar is on screen to show a page-permission
     /// prompt under its address field.
     SetPagePermissionCardHost(bool),
+    /// Whether one of the browser's own dialogs is open over the window.
+    /// Pages are native views above chrome, so they leave the stage while
+    /// it shows.
+    SetChromeModal(bool),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.

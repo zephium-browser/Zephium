@@ -292,6 +292,11 @@ fn policy() -> (Arc<WorkerBlocker>, Arc<ContentRules>) {
         "easyprivacy",
         "ublock-filters",
         "ublock-quick-fixes",
+        "ublock-link-shorteners",
+        "ublock-privacy",
+        "ublock-resource-abuse",
+        "ublock-unbreak",
+        "ublock-badware",
     ] {
         let mut text = String::new();
         flate2::read::GzDecoder::new(

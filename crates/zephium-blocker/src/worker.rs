@@ -2015,6 +2015,75 @@ mod tests {
         assert_eq!(lists.decide(&request), NetworkDecision::Block);
     }
 
+    /// WebView2 names no frame's parent, so a Windows view judges each frame
+    /// navigation as a subdocument of its main page, as requests are judged.
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_runtime_lists_judge_a_frame_against_its_main_page() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(
+                    CompileTarget::Runtime,
+                    vec![FilterSource::new(
+                        SourceId::new("easylist").unwrap(),
+                        SourceFormat::Standard,
+                        "||adsystem.example^\n\
+                         @@||adsystem.example/kept^$subdocument,domain=shop.example\n\
+                         ||tracker.example^$third-party\n"
+                            .to_owned(),
+                    )],
+                )
+                .unwrap(),
+        );
+        let frame = |url, page| {
+            lists.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    page,
+                    "GET",
+                    NetworkResourceType::Subdocument,
+                    NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let shop = "https://www.shop.example/";
+        assert_eq!(
+            frame("https://s.adsystem.example/iu3?slot=footer", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", shop),
+            NetworkDecision::Allow
+        );
+        // The exception is for frames on shop.example only.
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", "https://news.example/"),
+            NetworkDecision::Block
+        );
+        let script = CoreRequest::top_level_approximation(
+            "https://s.adsystem.example/kept",
+            shop,
+            "GET",
+            NetworkResourceType::Script,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&script), NetworkDecision::Block);
+        assert_eq!(
+            frame("https://tracker.example/frame", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://tracker.example/frame", "https://tracker.example/"),
+            NetworkDecision::Allow
+        );
+    }
+
     #[cfg(all(
         feature = "runtime-exact",
         feature = "webkit",
@@ -2882,10 +2951,9 @@ mod tests {
             |rules: &CompiledRules| rules.evaluate_source_independent(loader).unwrap().action();
         let rules = compile(with_own_rules(vec![blocklist()], CompileTarget::Runtime));
         assert_eq!(action(&rules), NetworkAction::Block);
-        // Without the page, a site-scoped exception would allow the loader on
-        // every site.
+        // Without the page, a site-scoped exception applies on no site.
         let scoped = compile(vec![blocklist(), crate::builtin::source()]);
-        assert_ne!(action(&scoped), NetworkAction::Block);
+        assert_eq!(action(&scoped), NetworkAction::Block);
     }
 
     #[test]
@@ -2984,7 +3052,7 @@ mod tests {
 
     #[cfg(feature = "runtime")]
     #[test]
-    fn runtime_policy_preserves_source_independent_fail_open_semantics() {
+    fn runtime_policy_keeps_a_block_a_page_scoped_exception_could_lift() {
         let rules = Compiler::default()
             .compile(
                 CompileTarget::Runtime,
@@ -3010,7 +3078,7 @@ mod tests {
             source_kind,
         )
         .unwrap();
-        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Allow);
+        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Block);
 
         let generic = CoreRequest::source_independent(
             "https://generic.example/ad.js",
@@ -3181,7 +3249,7 @@ mod tests {
         assert_eq!(decide(cdn, "https://www.cdn.example/"), CoreDecision::Allow);
         assert_eq!(unattributed(cdn), CoreDecision::Allow);
 
-        // Unattributed, a block that one site excepts fails open everywhere.
+        // Unattributed, an exception for one site lifts the block nowhere.
         let loader = "https://ads.example/loader.js";
         assert_eq!(
             decide(loader, "https://publisher.example/"),
@@ -3191,7 +3259,7 @@ mod tests {
             decide(loader, "https://friendly.example/"),
             CoreDecision::Allow
         );
-        assert_eq!(unattributed(loader), CoreDecision::Allow);
+        assert_eq!(unattributed(loader), CoreDecision::Block);
     }
 
     #[cfg(feature = "runtime-exact")]

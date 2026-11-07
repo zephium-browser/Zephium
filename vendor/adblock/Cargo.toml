@@ -111,6 +111,20 @@ version = "0.1"
 [dependencies.regex]
 version = "1.12.3"
 
+[dependencies.regex-automata]
+version = "=0.4.18"
+default-features = false
+features = [
+    "std",
+    "syntax",
+    "meta",
+    "hybrid",
+    "dfa-onepass",
+    "nfa-backtrack",
+    "perf-inline",
+    "perf-literal",
+]
+
 [dependencies.rustc-hash]
 version = "2.1"
 default-features = false
@@ -148,6 +162,12 @@ default-features = false
 
 [dev-dependencies.mock_instant]
 version = "=0.5.1"
+
+# The desktop graph enables dfa-build through bstr; the fork's tests build the
+# regex engine the app ships, so they show the full DFA staying off.
+[dev-dependencies.regex-automata]
+version = "=0.4.18"
+features = ["dfa-build"]
 
 [dev-dependencies.sha2]
 version = "=0.9.9"

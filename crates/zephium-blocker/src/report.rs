@@ -167,6 +167,10 @@ pub enum WebKitDropReason {
     /// Wildcard/separator expansion produced a native URL regex above the
     /// per-rule compiler budget.
     UrlFilterTooLarge,
+    /// A wildcard rule of uBlock Origin's badware list. Each one would cost
+    /// WebKit on every request, and its sites are judged when a page or frame
+    /// starts loading instead.
+    NavigationChecked,
 }
 
 /// A counted WebKit conversion-loss reason.
