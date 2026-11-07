@@ -128,15 +128,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_611_041_052);
+        assert_eq!(identity.revision, 202_611_071_631);
         assert_eq!(identity.source_count, 9);
-        assert_eq!(identity.source_bytes, 6_211_955);
+        assert_eq!(identity.source_bytes, 6_243_441);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0x10, 0x59, 0xb9, 0x7e, 0xa1, 0xf7, 0xe6, 0x4c, 0xb2, 0xf4, 0xfa, 0xfa, 0xd5, 0xfe,
-                0xbc, 0x12, 0x54, 0x5d, 0x39, 0x49, 0xd0, 0x36, 0xe6, 0xfc, 0xe8, 0x49, 0xad, 0xcd,
-                0x67, 0x2f, 0x59, 0xef
+                0xfc, 0xbe, 0xff, 0x37, 0x5b, 0xf8, 0xc8, 0x7b, 0x24, 0xce, 0xf3, 0x5b, 0x37, 0x27,
+                0xec, 0x44, 0x0a, 0x32, 0xda, 0xb5, 0x02, 0xe9, 0x5e, 0xcc, 0xd7, 0x33, 0x7f, 0x2f,
+                0x0c, 0xf8, 0xe3, 0x7a
             ]
         );
     }
@@ -164,7 +164,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_611_041_052));
+        assert_eq!(snapshot.package_revision, Some(202_611_071_631));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -216,11 +216,11 @@ mod tests {
         let own = 8;
         let marker = 1;
         let accepted = if cfg!(target_os = "windows") {
-            116_893
+            117_863
         } else {
-            116_924
+            117_894
         };
-        assert_eq!(rules.coverage().source_rules, 168_465 + own + marker);
+        assert_eq!(rules.coverage().source_rules, 169_498 + own + marker);
         assert_eq!(rules.coverage().accepted_rules, accepted + own);
         // The quick fixes keep their trust: the marker and the edits it is
         // keyed on both reach the page.
