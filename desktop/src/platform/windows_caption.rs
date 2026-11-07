@@ -1263,7 +1263,7 @@ unsafe extern "system" fn owner_proc(
         }
     }
     if msg == WM_ACTIVATE && w.0 & 0xffff == WA_INACTIVE as usize {
-        let focus = GetFocus();
+        let focus = reactivation_keyboard_focus();
         (*p).reactivation_focus = if IsChild(hwnd, focus).as_bool() {
             focus
         } else {
@@ -1301,13 +1301,37 @@ unsafe extern "system" fn owner_proc(
     if msg == WM_WINDOWPOSCHANGED {
         pointer_moved(hwnd);
     }
-    if let Some(target) =
-        restore.filter(|target| can_restore_focus(hwnd, *target, GetForegroundWindow()))
-    {
+    if let Some(target) = restore {
         // Focus callbacks can destroy the owner, so do not read State after this.
-        let _ = SetFocus(Some(target));
+        restore_reactivation_focus(hwnd, target);
     }
     result
+}
+
+unsafe fn reactivation_keyboard_focus() -> HWND {
+    #[cfg(test)]
+    if let Some(focus) = focus_tests::keyboard_focus() {
+        return focus;
+    }
+    GetFocus()
+}
+
+unsafe fn restore_reactivation_focus(owner: HWND, target: HWND) {
+    #[cfg(test)]
+    let foreground = focus_tests::foreground().unwrap_or_else(|| GetForegroundWindow());
+    #[cfg(not(test))]
+    let foreground = GetForegroundWindow();
+    if can_restore_focus(owner, target, foreground) {
+        set_reactivation_focus(target);
+    }
+}
+
+unsafe fn set_reactivation_focus(target: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(target) {
+        return;
+    }
+    let _ = SetFocus(Some(target));
 }
 
 fn activation_restores_focus(activation: WPARAM) -> bool {
@@ -1642,6 +1666,10 @@ unsafe extern "system" fn button_proc(
     }
     DefSubclassProc(hwnd, msg, w, l)
 }
+#[cfg(test)]
+#[path = "windows_caption_focus_tests.rs"]
+mod focus_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
