@@ -1171,6 +1171,9 @@ impl CachedArtifact {
 struct ArtifactCache {
     catalog: Option<PolicyCatalog>,
     artifact: Option<CachedArtifact>,
+    /// A cosmetic policy delivered from the cache before its styles were
+    /// built; the worker builds them once the delivery has returned.
+    pending_styles: Option<Arc<crate::CosmeticPolicy>>,
     #[cfg(test)]
     compilation_attempts: usize,
     #[cfg(test)]
@@ -1182,6 +1185,7 @@ impl ArtifactCache {
         Self {
             catalog: Some(catalog),
             artifact: None,
+            pending_styles: None,
             #[cfg(test)]
             compilation_attempts: 0,
             #[cfg(test)]
@@ -1203,6 +1207,49 @@ impl ArtifactCache {
         &mut self,
         compiler: Compiler,
         persistent: &mut Option<PersistentArtifactCache>,
+    ) -> BlockerCompileOutcome {
+        self.resolve_with(compiler, persistent, true)
+    }
+
+    /// Builds the styles of a policy delivered from the cache. One that cannot
+    /// be built is compiled again from source, which replaces the cached
+    /// record; until then the delivered policy stays, without cosmetics.
+    fn finish_styles(
+        &mut self,
+        compiler: Compiler,
+        persistent: &mut Option<PersistentArtifactCache>,
+    ) {
+        let Some(policy) = self.pending_styles.take() else {
+            return;
+        };
+        let built = policy.finish_styles();
+        drop(policy);
+        if let Err(error) = built {
+            eprintln!("content blocker: cached cosmetics refused ({error}); compiling from source");
+            let delivered = self.artifact.take();
+            let recipe = self.catalog.clone();
+            if let BlockerCompileOutcome::Failed(failure) =
+                self.resolve_with(compiler, persistent, false)
+            {
+                eprintln!("content blocker: cosmetics recompile failed: {failure:?}");
+                self.artifact = delivered;
+                self.catalog = recipe;
+            }
+        }
+        if !self
+            .artifact
+            .as_ref()
+            .is_some_and(CachedArtifact::retains_reload_recipe)
+        {
+            self.catalog = None;
+        }
+    }
+
+    fn resolve_with(
+        &mut self,
+        compiler: Compiler,
+        persistent: &mut Option<PersistentArtifactCache>,
+        load_cached: bool,
     ) -> BlockerCompileOutcome {
         if let Some(cached) = &self.artifact {
             if let Some(outcome) = cached.outcome() {
@@ -1229,18 +1276,23 @@ impl ArtifactCache {
                 return outcome;
             }
         };
-        if let Some(cache) = persistent.as_ref() {
+        if let Some(cache) = persistent.as_ref().filter(|_| load_cached) {
             match cache.load(cache_key, target, compiler.limits()) {
                 Ok(Some(loaded)) => {
+                    let cosmetics = loaded.cosmetics().map(|cosmetics| cosmetics.policy.clone());
                     if let Some(rules) = adapt_loaded_rules(loaded) {
                         #[cfg(test)]
                         {
                             self.persistent_hits += 1;
                         }
                         let artifact = CachedArtifact::compiled(&rules, true);
-                        let retain_catalog = artifact.retains_reload_recipe();
+                        // The source stays until the styles are built, should
+                        // they need compiling again.
+                        let retain_catalog =
+                            artifact.retains_reload_recipe() || cosmetics.is_some();
                         let outcome = BlockerCompileOutcome::Compiled(rules);
                         self.artifact = Some(artifact);
+                        self.pending_styles = cosmetics;
                         if !retain_catalog {
                             self.catalog = None;
                         }
@@ -1374,6 +1426,9 @@ fn complete_job(
         }));
         admission.finish_delivery(job.profile, job.generation);
     }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        artifacts.finish_styles(compiler, persistent);
+    }));
 }
 
 /// uBlock Origin's list of scam and malware sites, which alone judges each
@@ -4128,6 +4183,112 @@ mod tests {
         assert_eq!(warm.persistent_hits, 1);
         assert!(loaded.cosmetics().is_some());
         assert!(released());
+    }
+
+    #[cfg(any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    ))]
+    #[test]
+    fn cached_cosmetics_that_cannot_be_built_are_compiled_again_from_source() {
+        let root = crate::cache::private_test_root();
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^\nnews.zephium.invalid##.healed-banner"),
+        )])
+        .unwrap();
+        let page = "https://news.zephium.invalid/";
+        let hides = |rules: &ContentRules| {
+            rules
+                .cosmetics()
+                .expect("cosmetics")
+                .document_plan(page)
+                .map(|plan| plan.css.contains(".healed-banner"))
+        };
+        let mut cold = ArtifactCache::new(PolicyCatalog::eager(catalog.clone()));
+        let mut cold_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(compiled) =
+            cold.resolve(Compiler::default(), &mut cold_persistent)
+        else {
+            panic!("the policy compiles");
+        };
+        drop((compiled, cold, cold_persistent));
+
+        // The cached record passes its checksum; its styles fail to build.
+        let mut warm = ArtifactCache::new(PolicyCatalog::eager(catalog.clone()));
+        let mut persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(delivered) =
+            warm.resolve(Compiler::default(), &mut persistent)
+        else {
+            panic!("the cached policy loads");
+        };
+        assert_eq!(warm.persistent_hits, 1);
+        crate::cosmetics::REFUSE_NEXT_STYLES.with(|refuse| refuse.set(1));
+        warm.finish_styles(Compiler::default(), &mut persistent);
+        assert!(hides(&delivered).is_err());
+        assert_eq!(warm.compilation_attempts, 1);
+        // The next generation gets the recompiled policy, with cosmetics.
+        let BlockerCompileOutcome::Compiled(next) =
+            warm.resolve(Compiler::default(), &mut persistent)
+        else {
+            panic!("the recompiled policy is delivered");
+        };
+        assert_eq!(hides(&next), Ok(true));
+        drop((delivered, next, warm, persistent));
+
+        // And so does the next launch, from the record the recompile wrote.
+        let mut later = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(loaded) =
+            later.resolve(Compiler::default(), &mut persistent)
+        else {
+            panic!("the rewritten record loads");
+        };
+        assert_eq!(later.persistent_hits, 1);
+        assert_eq!(hides(&loaded), Ok(true));
+    }
+
+    #[cfg(any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    ))]
+    #[test]
+    fn a_failed_cosmetics_recompile_keeps_the_delivered_policy() {
+        let root = crate::cache::private_test_root();
+        let config = CompiledArtifactCacheConfig::new(root.path()).unwrap();
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("maintained").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^\nnews.zephium.invalid##.kept-banner"),
+        )])
+        .unwrap();
+        let mut cold = ArtifactCache::new(PolicyCatalog::eager(catalog.clone()));
+        let mut cold_persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let _ = cold.resolve(Compiler::default(), &mut cold_persistent);
+        drop((cold, cold_persistent));
+        let mut warm = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = Some(PersistentArtifactCache::open(&config).unwrap());
+        let BlockerCompileOutcome::Compiled(delivered) =
+            warm.resolve(Compiler::default(), &mut persistent)
+        else {
+            panic!("the cached policy loads");
+        };
+        assert_eq!(warm.persistent_hits, 1);
+        // Both the cached styles and the recompile fail.
+        crate::cosmetics::REFUSE_NEXT_STYLES.with(|refuse| refuse.set(2));
+        warm.finish_styles(Compiler::default(), &mut persistent);
+        // The network rules delivered stay in force for the next generation,
+        // even once nothing holds them and they must be loaded again.
+        let digest = delivered.digest();
+        drop(delivered);
+        let BlockerCompileOutcome::Compiled(next) =
+            warm.resolve(Compiler::default(), &mut persistent)
+        else {
+            panic!("the delivered policy stays");
+        };
+        assert_eq!(next.digest(), digest);
     }
 
     #[cfg(all(unix, feature = "webkit"))]
