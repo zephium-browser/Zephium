@@ -581,7 +581,10 @@ async fn a_tab_with_a_long_address_is_context_until_it_navigates() {
     .await
     .unwrap();
     assert_eq!(admitted.disclosure.items[0].kind, WorkContextItemKind::Tab);
-    assert_eq!(admitted.disclosure.items[0].revision, url_revision(&message));
+    assert_eq!(
+        admitted.disclosure.items[0].revision,
+        url_revision(&message)
+    );
     assert!(admitted.bodies[0].text.contains(&message));
 
     shell.handle(Command::Engine(EngineEvent::UrlChanged {

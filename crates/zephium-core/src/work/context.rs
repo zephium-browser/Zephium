@@ -629,7 +629,10 @@ mod tests {
 
     #[test]
     fn a_long_url_is_a_bounded_selection_token() {
-        let url = format!("https://outlook.live.com/mail/0/inbox/id/{}", "A".repeat(300));
+        let url = format!(
+            "https://outlook.live.com/mail/0/inbox/id/{}",
+            "A".repeat(300)
+        );
         assert!(selection(&[(1, url.as_str())]).validate().is_err());
         let revision = url_revision(&url);
         assert_eq!(revision.len(), 64);
