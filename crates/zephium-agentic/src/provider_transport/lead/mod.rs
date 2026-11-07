@@ -1041,14 +1041,28 @@ pub(crate) struct Decoded {
 impl Decoded {
     fn absorb(&mut self, next: Decoded) {
         self.stop = next.stop;
-        self.usage.input_tokens += next.usage.input_tokens;
-        self.usage.cached_input_tokens += next.usage.cached_input_tokens;
-        self.usage.output_tokens += next.usage.output_tokens;
-        self.usage.reasoning_tokens += next.usage.reasoning_tokens;
-        self.cache_write_tokens += next.cache_write_tokens;
-        self.searches += next.searches;
+        self.usage.input_tokens = self
+            .usage
+            .input_tokens
+            .saturating_add(next.usage.input_tokens);
+        self.usage.cached_input_tokens = self
+            .usage
+            .cached_input_tokens
+            .saturating_add(next.usage.cached_input_tokens);
+        self.usage.output_tokens = self
+            .usage
+            .output_tokens
+            .saturating_add(next.usage.output_tokens);
+        self.usage.reasoning_tokens = self
+            .usage
+            .reasoning_tokens
+            .saturating_add(next.usage.reasoning_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(next.cache_write_tokens);
+        self.searches = self.searches.saturating_add(next.searches);
         self.provider_cost_micros = match (self.provider_cost_micros, next.provider_cost_micros) {
-            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
             (None, b) if !self.resumed => b,
             _ => None,
         };
