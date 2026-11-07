@@ -90,7 +90,7 @@ impl Keymap {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
         self.resolved()
             .iter()
-            .filter(|command| command.group != Group::Global)
+            .filter(|command| command.id != "launcher.toggle")
             .filter(|command| shown || command.group != Group::Work)
             .filter(|command| self.offers(command.id))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
@@ -504,6 +504,31 @@ pub(crate) fn keymap_reset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn custom_theme_keys_take_precedence_over_zoom_aliases_in_pages() {
+        for id in ["theme.system", "theme.light", "theme.dark"] {
+            let keymap = Keymap::default();
+            write(&keymap.overrides).insert(id.to_owned(), "Ctrl+Shift+=".to_owned());
+            let table = keymap.engine_table();
+            assert_eq!(
+                Shortcut::match_windows(&table, 0xBB, true, true, false)
+                    .map(|shortcut| shortcut.id.as_str()),
+                Some(id)
+            );
+            assert!(!table
+                .iter()
+                .any(|shortcut| shortcut.id == "launcher.toggle"));
+            write(&keymap.overrides).insert(id.to_owned(), String::new());
+            let table = keymap.engine_table();
+            assert_eq!(
+                Shortcut::match_windows(&table, 0xBB, true, true, false)
+                    .map(|shortcut| shortcut.id.as_str()),
+                Some("zoom.in")
+            );
+        }
+    }
 
     #[test]
     fn page_tables_carry_work_keys_only_while_the_pane_is_shown() {
