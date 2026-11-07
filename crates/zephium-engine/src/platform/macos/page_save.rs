@@ -145,6 +145,8 @@ fn write_page(
     mut bytes: impl std::io::Read,
     origin: &str,
 ) -> std::io::Result<()> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path = path.as_path();
     let permissions = match std::fs::metadata(path) {
         Ok(metadata) => Some(metadata.permissions()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -177,7 +179,8 @@ fn write_page(
             file.set_permissions(permissions)?;
         }
         file.sync_all()?;
-        std::fs::rename(&partial, path)
+        std::fs::rename(&partial, path)?;
+        std::fs::File::open(parent)?.sync_all()
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&partial);
@@ -217,12 +220,43 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("page.html");
         std::fs::write(&path, b"original").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+        for mode in [0o640, 0o440] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn saving_through_a_symlink_replaces_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.html");
+        let link = dir.path().join("page.html");
+        std::fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink("target.html", &link).unwrap();
+        write_page(&link, &b"replacement"[..], "https://example.com/").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("target.html"));
+    }
+
+    #[test]
+    fn saving_reports_failure_to_open_the_parent_for_sync_after_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        // Search and write allow the rename, but no read permission prevents
+        // opening the directory for the final durability barrier.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        let result = write_page(&path, &b"replacement"[..], "https://example.com/");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
         assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o640
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
         );
     }
 
