@@ -1360,14 +1360,30 @@ fn hidden_focus_parent(
 }
 
 fn return_hidden_focus(container: HWND, selected: bool) {
+    let (focus, foreground) = hidden_focus_snapshot();
+    if let Some(parent) = hidden_focus_parent(container, focus, foreground, selected) {
+        set_hidden_focus(parent);
+    }
+}
+
+fn hidden_focus_snapshot() -> (HWND, HWND) {
+    #[cfg(test)]
+    if let Some(snapshot) = focus_tests::focus_snapshot() {
+        return snapshot;
+    }
+    // SAFETY: queries on the stage's UI thread; neither activates a window.
+    unsafe { (GetFocus(), GetForegroundWindow()) }
+}
+
+fn set_hidden_focus(parent: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(parent) {
+        return;
+    }
     // SAFETY: called on the stage's UI thread with no State borrow held.
     // The parent's Wry subclass routes WM_SETFOCUS to its chrome controller.
     unsafe {
-        if let Some(parent) =
-            hidden_focus_parent(container, GetFocus(), GetForegroundWindow(), selected)
-        {
-            let _ = SetFocus(Some(parent));
-        }
+        let _ = SetFocus(Some(parent));
     }
 }
 
@@ -1901,6 +1917,12 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
             }
         }
         finish_native_placement(state, placement, applied, failed);
+        // Finishing can schedule another pass or retire the view. Recheck its
+        // identity and revision, then release State before transferring focus.
+        if placement_is_current(state, placement) {
+            let selected = state.borrow().visible.contains(&placement.id);
+            return_hidden_focus(placement.container, selected);
+        }
         return;
     }
 
@@ -2239,6 +2261,10 @@ fn draw_indicator(
         ReleaseDC(None, screen);
     }
 }
+
+#[cfg(test)]
+#[path = "stage_focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod tests {
