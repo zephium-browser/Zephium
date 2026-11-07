@@ -478,6 +478,149 @@ fn extension_navigation_controls_require_a_resident_tab_and_never_wake_a_discard
 }
 
 #[test]
+fn extensions_mute_zoom_and_duplicate_through_the_browser_model() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "https://media.example/watch");
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+    let settled = |index: usize| engine.extension_browser_settlements()[index].2;
+    let complete =
+        ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        1,
+        ExtensionBrowserRequestAction::SetTabMuted { tab, muted: true },
+    )));
+    assert_eq!(settled(0), complete);
+    assert!(shell.items.tab(tab).unwrap().audio.muted);
+    assert!(engine.calls().contains(&format!("mute {tab} true")));
+    let surface = shell
+        .extension_browser_surfaces
+        .published_surface(profile)
+        .unwrap();
+    assert!(surface.tabs().any(|t| t.id() == tab && t.muted()));
+
+    shell.handle(Command::Engine(request(
+        profile,
+        2,
+        ExtensionBrowserRequestAction::SetTabZoom {
+            tab,
+            percent: Some(150),
+        },
+    )));
+    assert_eq!(settled(1), complete);
+    assert!(engine.calls().contains(&format!("zoom {tab} 1.5")));
+    shell.handle(Command::Engine(request(
+        profile,
+        3,
+        ExtensionBrowserRequestAction::SetTabZoom {
+            tab,
+            percent: Some(1_000),
+        },
+    )));
+    assert_eq!(
+        settled(2),
+        ExtensionBrowserRequestSettlement::Rejected(
+            ExtensionBrowserRequestRejection::InvalidRequest
+        )
+    );
+
+    shell.handle(Command::Engine(request(
+        profile,
+        4,
+        ExtensionBrowserRequestAction::DuplicateTab { tab },
+    )));
+    let ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::CreatedTab(copy)) =
+        settled(3)
+    else {
+        panic!("duplicate was not applied: {:?}", settled(3));
+    };
+    assert_ne!(copy, tab);
+    assert!(shell.items.pending_navigation_request(copy).is_some());
+
+    assert!(shell.items.mark_view_discarded(tab));
+    shell.handle(Command::Engine(request(
+        profile,
+        5,
+        ExtensionBrowserRequestAction::SetTabZoom { tab, percent: None },
+    )));
+    assert_eq!(
+        settled(4),
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::TabDiscarded)
+    );
+}
+
+#[test]
+fn extensions_reorder_only_the_days_tabs_of_the_focused_window() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
+    for _ in 0..2 {
+        let (_, effects) = shell.open_tab_with_id().unwrap();
+        shell.commit(effects);
+    }
+    activate_extensions(&mut shell, profile);
+    let today = Placement::Space {
+        space,
+        section: SpaceSection::Today,
+    };
+    let before = shell.items.roots(today).to_vec();
+    assert_eq!(before.len(), 3);
+    assert!(before.contains(&first));
+    let (a, b, c) = (before[0], before[1], before[2]);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        1,
+        ExtensionBrowserRequestAction::MoveTabs {
+            tabs: Box::new([a]),
+            before: Some(c),
+        },
+    )));
+    assert_eq!(shell.items.roots(today), &[b, a, c]);
+    shell.handle(Command::Engine(request(
+        profile,
+        2,
+        ExtensionBrowserRequestAction::MoveTabs {
+            tabs: Box::new([c, b]),
+            before: None,
+        },
+    )));
+    assert_eq!(shell.items.roots(today), &[a, c, b]);
+    assert!(engine.extension_browser_settlements()[..2].iter().all(
+        |(_, _, settlement)| *settlement
+            == ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
+    ));
+    let published: Vec<ItemId> = shell
+        .extension_browser_surfaces
+        .published_surface(profile)
+        .unwrap()
+        .tabs()
+        .map(|tab| tab.id())
+        .collect();
+    assert_eq!(published, [a, c, b]);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        3,
+        ExtensionBrowserRequestAction::MoveTabs {
+            tabs: Box::new([a]),
+            before: Some(a),
+        },
+    )));
+    assert_eq!(
+        engine.extension_browser_settlements()[2].2,
+        ExtensionBrowserRequestSettlement::Rejected(ExtensionBrowserRequestRejection::Unsupported)
+    );
+    assert_eq!(shell.items.roots(today), &[a, c, b]);
+}
+
+#[test]
 fn extension_history_unavailable_is_not_reported_as_applied() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

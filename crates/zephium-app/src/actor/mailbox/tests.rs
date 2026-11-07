@@ -847,3 +847,16 @@ fn observational_status_query_never_evicts_browser_state_at_capacity() {
             if title == "retained presentation"
     )));
 }
+
+#[test]
+fn a_navigation_failure_report_is_never_dropped_for_a_full_queue() {
+    // Its handler starts an https try's http fallback, which nothing retries.
+    assert!(command_is_critical(&Command::Engine(
+        EngineEvent::NavigationFailureReported {
+            id: ItemId::from(1),
+            reason: zephium_core::ports::engine::NavigationFailureReason::Unreachable,
+            url: None,
+            replaced_page: false,
+        }
+    )));
+}

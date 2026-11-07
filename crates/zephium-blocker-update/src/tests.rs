@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use aws_lc_rs::rand::SystemRandom;
 use jiff::Timestamp;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tough::editor::signed::PathExists;
 use tough::editor::RepositoryEditor;
 use tough::key_source::{KeySource, LocalKeySource};
 use tough::schema::{Role, Root, Signature, Signed};
 use url::Url;
+use zephium_blocker::Sha256;
 use zephium_blocker::{
     CatalogPreparationOutcome, CatalogReplacementDispatch, StaticPolicyCatalog, WorkerBlocker,
 };
@@ -2710,14 +2710,14 @@ fn verified_catalog(revision: u64, contents: &str) -> VerifiedCatalog {
             activated: ActivatedCatalog {
                 identity: CatalogIdentity {
                     revision,
-                    manifest_sha256: Sha256::digest(&manifest_bytes).into(),
+                    manifest_sha256: Sha256::digest(&manifest_bytes),
                     created_unix: manifest.created_unix,
                     expires_unix: manifest.expires_unix,
                     source_count: 1,
                     source_bytes: contents.len() as u64,
                 },
                 catalog: zephium_blocker::PolicyCatalog::authenticated(
-                    Sha256::digest(&manifest_bytes).into(),
+                    Sha256::digest(&manifest_bytes),
                     catalog,
                 ),
             },

@@ -35,6 +35,7 @@ import type {
   VoiceLevels,
   SwipeScroll,
   WebExtensionAccessRequested,
+  WebExtensionStoreClicked,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
@@ -79,6 +80,7 @@ export const nativeEventNames = {
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionStoreClicked: "zephium:web-extension-store-click",
   webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
@@ -137,6 +139,9 @@ export const events = {
   ),
   webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
     nativeEventNames.webExtensionAccessRequested,
+  ),
+  webExtensionStoreClicked: scopedEvent<WebExtensionStoreClicked>(
+    nativeEventNames.webExtensionStoreClicked,
   ),
   /** The path of an extension package dropped on the browser. */
   webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),

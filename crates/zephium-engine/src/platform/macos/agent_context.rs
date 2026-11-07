@@ -845,7 +845,7 @@ where
             });
             let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
-                |gate| gate.allows_apple_action(&target, action),
+                |gate| gate.allows_apple_action(&target, action.clone()),
             );
             // An action's own admitted load replaces the document: the old
             // document's reads end, and the runtime waits for the new one.

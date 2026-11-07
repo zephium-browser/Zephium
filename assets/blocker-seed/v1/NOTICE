@@ -1,26 +1,70 @@
 Zephium bundled blocker seed v1
 
-This directory contains unmodified EasyList and EasyPrivacy subscription text.
-Zephium changes only the storage representation by applying deterministic gzip
+This directory contains unmodified filter list subscription text. Zephium
+changes only the storage representation by applying deterministic gzip
 compression; the decompressed source bytes are unchanged.
 
+EasyList, EasyPrivacy
 Attribution: The EasyList authors (https://easylist.to/)
 Selected license: CC BY-SA 3.0 Unported (CC-BY-SA-3.0)
 License text: LICENSE-CC-BY-SA-3.0.txt
 Upstream terms: https://easylist.to/pages/licence.html
 
+uBlock filters, uBlock₀ filters – Quick fixes, uBlock filters – Link shorteners, uBlock filters – Privacy, uBlock filters – Resource abuse, uBlock filters – Unbreak, uBlock filters – Badware risks
+Attribution: uBlock Origin's uAssets authors (https://github.com/uBlockOrigin/uAssets)
+License: GNU General Public License, version 3 (GPL-3.0-only)
+These lists are conveyed in source form, unmodified, without additional
+terms and without warranty.
+License text: LICENSE-GPL-3.0.txt
+Upstream terms: https://github.com/uBlockOrigin/uAssets/blob/master/LICENSE
+
 EasyList
 Source: https://easylist.to/easylist/easylist.txt
-Version: 202610281352
-Commit: 7f43c18d0023f4590e731c9aa8367d2a229ad2eb
-Raw SHA-256: c0241bb9bcca8f82aaff6b1571f039c2e507a0db8b760c97a7df72197514f4cd
+Version: 202611041052
+Commit: fe19e45cb877dc8db09a23062e1cfb0fccb2a3dc
+Raw SHA-256: 6021a051477fa01ca38ab32494b9ae05035130d188054bf912500ec1a5f7a351
 
 EasyPrivacy
 Source: https://easylist.to/easylist/easyprivacy.txt
-Version: 202610281345
-Commit: ad903d7529f40e9fb4aff4d4c6070a812c6b0f73
-Raw SHA-256: 54bfdef988fe9af20df6916456d88b268700da7b2a5cee462687f9536de5ae38
+Version: 202611041012
+Commit: 9064ceed70c2d6a517c9eff5d8dfaa75b0288208
+Raw SHA-256: 8bc6991ad3177a1e347fe72fe06b5afe567891879267db66aac49d01547c5f1a
+
+uBlock filters
+Source: https://ublockorigin.github.io/uAssets/filters/filters.min.txt
+Version: 202611040630
+Raw SHA-256: 112950326a15991549487bb5e1f25fdca46e857aab1287711f732eb40e51cdb6
+
+uBlock₀ filters – Quick fixes
+Source: https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt
+Version: 202611040447
+Raw SHA-256: 16737f89a8f265338d4dca109ae9576495d42cd42fcb04fee9f6b8d03b0ae864
+
+uBlock filters – Link shorteners
+Source: https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt
+Version: 202611040352
+Raw SHA-256: ac04349363aafe39e56645dae080ebecd1985ec2bd6468d88bf3c4f357a06351
+
+uBlock filters – Privacy
+Source: https://ublockorigin.github.io/uAssets/filters/privacy.min.txt
+Version: 202611031430
+Raw SHA-256: a09fe478e501df23fc7c624250402f14369856ae24b6f480f40430ca82dd3b46
+
+uBlock filters – Resource abuse
+Source: https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt
+Version: 202610020529
+Raw SHA-256: e77991b337dad1ef43ea181b36504fc9ff9bfa549eb2b9a9aec47181339e8584
+
+uBlock filters – Unbreak
+Source: https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt
+Version: 202611020541
+Raw SHA-256: 3b3d92ac90e978788626542b0bd3679309fbbbdbfc7adec91787a9b7ea5ed980
+
+uBlock filters – Badware risks
+Source: https://ublockorigin.github.io/uAssets/filters/badware.min.txt
+Version: 202611040514
+Raw SHA-256: 817cf844e57ce900b1d178069ccdb24e1d30b23d8ba814585055e05782baef70
 
 The upstream authors do not endorse Zephium. Release engineering must regenerate
-and verify this record with `cargo xtask update-blocker-seed` whenever either
+and verify this record with `cargo xtask update-blocker-seed` whenever a
 subscription changes.

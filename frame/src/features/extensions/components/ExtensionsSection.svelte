@@ -37,14 +37,14 @@
 </script>
 
 <!-- Stays mounted while the panel is closed: an extension's key opens its
-     action from the buttons here. The name and the way to manage them on the
-     left, each extension's own button on the right. -->
+     action from the buttons here. The name and the way to manage them, then
+     a row for each extension. -->
 {#if webext.isAvailable()}
   <div class="extensions" data-tray-tools>
     <div class="row">
       <ManageExtensions />
-      <ExtensionActions />
     </div>
+    <ExtensionActions />
     {#if failure !== null}
       <p role="status" aria-live="polite" class="failure">{failureMessage(failure)}</p>
     {/if}

@@ -85,8 +85,21 @@ pub(super) struct Source {
     view: Retained<WKWebView>,
     window: Retained<NSWindow>,
     initial_open: bool,
+    /// An extension asked, from its popup if anywhere: the popup holds the
+    /// keyboard while the window it belongs to stays the main one.
+    extension: bool,
 }
 impl Source {
+    pub(super) fn in_front(&self) -> bool {
+        self.window.isKeyWindow() || (self.extension && self.window.isMainWindow())
+    }
+
+    /// The page that started the download is still the one in the view,
+    /// whether or not the person is looking at it.
+    pub(super) fn current(&self) -> bool {
+        self.permit.active_token().is_some() && self.navigation.matches_activity(self.activity)
+    }
+
     pub(super) fn live(&self) -> bool {
         self.permit.active_token().is_some()
             && (self.initial_open || self.surface_intent.load(Ordering::Acquire))
@@ -171,7 +184,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.ensure_timer();
-        (self.notify)(profile);
+        self.changed(profile);
     }
 
     /// The person paused a download. WebKit has no pause: stopping it hands
@@ -236,7 +249,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
     }
 
     /// WebKit stopped a transfer and kept what it needs to continue. A
@@ -266,7 +279,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
         true
     }
     pub(super) fn ensure_timer(self: &Rc<Self>) {
@@ -304,9 +317,10 @@ impl Downloads {
         permit: EventPermit,
         surface_intent: Arc<AtomicBool>,
         navigation: NavigationEpochTracker,
-        native: &WKDownload,
+        request: (&WKDownload, Option<super::SiteAsk>),
         mut initial: Option<InitialDownload>,
-    ) {
+    ) -> Option<DownloadId> {
+        let (native, ask) = request;
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
             || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
@@ -316,7 +330,7 @@ impl Downloads {
             || (initial.is_none() && !surface_intent.load(Ordering::Acquire))
         {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
         let request_url = unsafe { native.originalRequest().and_then(|request| request.URL()) };
         let scheme = request_url
@@ -335,11 +349,11 @@ impl Downloads {
         };
         if network_url.is_none() && !matches!(scheme.as_deref(), Some("blob" | "data")) {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
         let Some(view) = (unsafe { native.webView() }) else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let initial_open = initial.is_some();
         let Some(window) = initial
@@ -348,11 +362,11 @@ impl Downloads {
             .or_else(|| view.window())
         else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let Some(activity) = navigation.activity_snapshot() else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let source = Source {
             navigation,
@@ -362,11 +376,24 @@ impl Downloads {
             view,
             window,
             initial_open,
+            extension: self.extension_admission.get(),
         };
-        if !source.live() || !source.window.isKeyWindow() {
+        if !source.live() || !source.in_front() {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
+        // WebKit's word that nobody clicked. A new tab a click opened counts
+        // as that click; one an allowed site opened by itself does not.
+        // Before macOS 15.2 WebKit cannot say, and the save sheet below still
+        // asks about every such download.
+        let clicked = (initial_open && ask.as_ref().is_some_and(|ask| ask.opened_by_click))
+            || unsafe {
+                !native.respondsToSelector(objc2::sel!(isUserInitiated)) || native.isUserInitiated()
+            };
+        let subframe = unsafe {
+            native.respondsToSelector(objc2::sel!(originatingFrame))
+                && !native.originatingFrame().isMainFrame()
+        };
         let origin = unsafe {
             if native.respondsToSelector(objc2::sel!(originatingFrame)) {
                 let native_origin = native.originatingFrame().securityOrigin();
@@ -401,11 +428,30 @@ impl Downloads {
         });
         let Some(origin) = origin else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
+        };
+        // A frame from another site that nobody clicked in, such as an ad,
+        // may not download at all.
+        if subframe
+            && !clicked
+            && ask
+                .as_ref()
+                .is_some_and(|ask| ask.site.as_ref().is_none_or(|site| *site != origin))
+        {
+            unsafe { native.cancel(None) };
+            return None;
+        }
+        let site = match self.site_admission(partition.profile(), ask, &origin, clicked) {
+            super::site::SiteAdmission::Refuse => {
+                unsafe { native.cancel(None) };
+                return None;
+            }
+            super::site::SiteAdmission::Open => None,
+            super::site::SiteAdmission::Hold(hold) => Some(hold),
         };
         let Some(mtm) = MainThreadMarker::new() else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let id = DownloadId::generate();
         let delegate = DownloadDelegate::new(mtm, Rc::downgrade(self), id);
@@ -429,6 +475,7 @@ impl Downloads {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         self.active.borrow_mut().insert(
             id,
@@ -450,15 +497,59 @@ impl Downloads {
                 persisting_terminal: false,
                 kept: false,
                 user_pausing: false,
+                name: None,
                 resume: None,
                 resuming: false,
+                site,
+                confirmed: false,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
         unsafe { native.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         self.ensure_recovery(partition);
         self.ensure_timer();
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
+        Some(id)
+    }
+
+    /// [`Self::admit`] for a download an extension asked for.
+    pub(in crate::host) fn admit_for_extension(
+        self: &Rc<Self>,
+        partition: Partition,
+        permit: EventPermit,
+        surface_intent: Arc<AtomicBool>,
+        navigation: NavigationEpochTracker,
+        native: &WKDownload,
+    ) -> Option<DownloadId> {
+        self.extension_admission.set(true);
+        let id = self.admit(
+            partition,
+            permit,
+            surface_intent,
+            navigation,
+            (native, None),
+            None,
+        );
+        self.extension_admission.set(false);
+        id
+    }
+
+    /// A download an extension started: named as it asked, and shown as
+    /// coming from the address it named rather than the page it ran in.
+    /// Generated data keeps the page as its context, as a page's would.
+    pub(in crate::host) fn extension_started(
+        &self,
+        id: DownloadId,
+        name: Option<String>,
+        origin: Option<PageOrigin>,
+    ) {
+        if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
+            transfer.name = name;
+            match origin {
+                Some(origin) => transfer.record.source = origin.as_str().into(),
+                None => transfer.record.source_is_context = true,
+            }
+        }
     }
     pub(super) fn destination(
         self: &Rc<Self>,
@@ -489,7 +580,13 @@ impl Downloads {
                 .map_or(std::ptr::null_mut(), |url| Retained::as_ptr(url).cast_mut()),));
             return;
         }
-        let name = bounded(suggested, 4096)
+        let asked = self
+            .active
+            .borrow()
+            .get(&id)
+            .and_then(|transfer| transfer.name.clone());
+        let name = asked
+            .or_else(|| bounded(suggested, 4096))
             .map(|value| safe_filename(&value))
             .unwrap_or_else(|| "download".into());
         let accepts = self.active.borrow().get(&id).is_some_and(|transfer| {
@@ -509,6 +606,15 @@ impl Downloads {
             };
             transfer.record.filename = name;
             transfer.record.total = u64::try_from(response.expectedContentLength()).ok();
+            // The response's own address, after every redirect. One that is
+            // missing, too long or unreadable is held as insecure.
+            transfer.record.insecure = is_insecure_response(
+                response
+                    .URL()
+                    .and_then(|url| url.absoluteString())
+                    .and_then(|url| bounded(&url, 8192))
+                    .as_deref(),
+            );
             let completion = completion.copy();
             transfer.destination_reply = Some(DestinationReply::new(move |path| {
                 let url = path.and_then(|path| {
@@ -521,10 +627,11 @@ impl Downloads {
             }));
             transfer.partition
         };
-        if let Some(preferences) = self.preferences.borrow().get(&partition.profile()).cloned() {
-            self.choose_destination(id, preferences);
+        let cached = self.preferences.borrow().get(&partition.profile()).cloned();
+        if let Some(preferences) = cached {
+            self.decide(id, preferences);
         } else if matches!(partition, Partition::Ephemeral(_)) {
-            self.choose_destination(id, DownloadPreferences::default());
+            self.decide(id, DownloadPreferences::default());
         } else {
             self.work.set(self.work.get() + 1);
             let sender = self.sender.clone();
@@ -553,20 +660,22 @@ impl Downloads {
                 transfer.source.as_ref().map(|source| {
                     (
                         source.live(),
+                        source.in_front(),
                         source.window.clone(),
                         transfer.record.filename.clone(),
                         transfer.record.source.clone(),
-                        unsafe {
-                            transfer
-                                .native
-                                .respondsToSelector(objc2::sel!(isUserInitiated))
-                                && transfer.native.isUserInitiated()
-                        },
+                        transfer.confirmed
+                            || unsafe {
+                                transfer
+                                    .native
+                                    .respondsToSelector(objc2::sel!(isUserInitiated))
+                                    && transfer.native.isUserInitiated()
+                            },
                     )
                 })
             })
         };
-        let Some((true, window, filename, source, user_initiated)) = context else {
+        let Some((true, in_front, window, filename, source, user_initiated)) = context else {
             self.cancel(id, None);
             return;
         };
@@ -590,7 +699,7 @@ impl Downloads {
             );
             return;
         }
-        if window.attachedSheet().is_some() || !window.isKeyWindow() {
+        if window.attachedSheet().is_some() || !in_front {
             self.cancel(id, Some(DownloadError::Capacity));
             return;
         }
@@ -611,9 +720,13 @@ impl Downloads {
             panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(&path))));
         }
         let live = self.active.borrow().get(&id).is_some_and(|transfer| {
-            !transfer.cancelling && transfer.source.as_ref().is_some_and(Source::live)
+            !transfer.cancelling
+                && transfer
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.live() && source.in_front())
         });
-        if !live || !window.isKeyWindow() || window.attachedSheet().is_some() {
+        if !live || window.attachedSheet().is_some() {
             self.cancel(id, Some(DownloadError::Unavailable));
             return;
         }
@@ -674,7 +787,7 @@ impl Downloads {
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
-            (self.notify)(transfer.partition.profile());
+            self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
                 transfer.destination_reply.take(),

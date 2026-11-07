@@ -10,6 +10,7 @@ pub mod certificates;
 pub mod commands;
 pub mod downloads;
 pub mod export;
+pub mod extension_data;
 pub mod extensions;
 pub mod geometry;
 pub mod http_auth;

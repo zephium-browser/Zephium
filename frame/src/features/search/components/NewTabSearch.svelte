@@ -8,6 +8,7 @@
   import IconButton from "$shared/ui/IconButton";
   import ResultList from "./ResultList.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
+  import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     tabId,
@@ -103,8 +104,10 @@
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
+    const unpark = input ? parkCaret(input) : () => {};
     return () => {
       window.removeEventListener("resize", measure);
+      unpark();
       stop();
     };
   });

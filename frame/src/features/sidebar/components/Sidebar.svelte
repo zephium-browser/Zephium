@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
@@ -255,9 +256,9 @@
     );
   }
   /** Something in the card still needs it: a field being typed in, an open
-   *  panel, or a drag. */
+   *  panel, a drag, or a question or download that brought it out. */
   const needed = () => {
-    if (!aside || sidebarResizeActive()) return !!aside;
+    if (!aside || sidebarResizeActive() || attention.wanted()) return !!aside;
     const typing =
       document.activeElement instanceof HTMLInputElement && aside.contains(document.activeElement);
     return typing || !!aside.querySelector('[data-open="true"]');
@@ -299,6 +300,14 @@
     };
     window.addEventListener("zephium:sidebar-edge", edge);
     return () => window.removeEventListener("zephium:sidebar-edge", edge);
+  });
+  $effect(() => {
+    const wanted = attention.wanted();
+    if (!away) return;
+    untrack(() => {
+      if (wanted) peek();
+      else if (peeking && !pointerIn && !atEdge) release();
+    });
   });
   $effect(() => {
     if (away) return;
@@ -409,6 +418,12 @@
   // own view can leave standing; leaving the document or the window losing
   // focus ends it too.
   let pointerIn = $state(false);
+  function entered() {
+    pointerIn = true;
+    // Back on the card as it leaves, it comes back.
+    if (away && !peeking && lowered !== undefined) peek();
+    else if (away) clearTimeout(linger);
+  }
   $effect(() => {
     // Leaving the window lets the card go too, wherever it was left from.
     const out = () => {
@@ -436,9 +451,15 @@
     if (command.id === "sidebar.toggleCompact") queueMicrotask(toggleShape);
   });
 
+  /** Long enough for the column to go and come back as the card. */
+  const HIDING_SHOWN_MS = 1600;
+
   function toggleShape() {
-    if (tools.activeTool() !== null) tools.close();
-    else toggleMode();
+    if (tools.activeTool() !== null) return tools.close();
+    toggleMode();
+    // Put away from its own button, the column comes straight back as the
+    // card it now is, and leaves with the pointer as any card does.
+    if (isHidden()) attention.pulse(HIDING_SHOWN_MS);
   }
 </script>
 
@@ -466,12 +487,12 @@
   data-reshaping={reshaping}
   data-sidebar-resize-settling={resizeSettling}
   data-header-fresh={headerFresh}
-  data-pointer-in={pointerIn}
-  onpointerenter={() => {
-    pointerIn = true;
-    // Back on the card as it leaves, it comes back.
-    if (away && !peeking && lowered !== undefined) peek();
-    else if (away) clearTimeout(linger);
+  data-pointer-in={pointerIn || attention.wanted()}
+  onpointerenter={entered}
+  onpointermove={() => {
+    // An arrival from the page's own view, or while another window had the
+    // keyboard, can come without an enter; the first move inside counts.
+    if (!pointerIn) entered();
   }}
   onpointerleave={() => {
     pointerIn = false;
