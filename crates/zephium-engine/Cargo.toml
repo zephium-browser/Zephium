@@ -19,7 +19,6 @@ windows-cdp-spike = []
 # that refusal at its own boundary below.
 native-agentic-input-probe = [
     "dep:serde",
-    "dep:tempfile",
     "dep:windows-probe-sys",
     "dep:zephium-agentic",
     "zephium-agentic/probe-harness",
@@ -30,7 +29,6 @@ native-agentic-input-probe = [
 # target-specific and support only the Windows resource evidence path.
 native-agentic-semantic-probe = [
     "agentic-browser",
-    "dep:tempfile",
     "dep:windows-probe-sys",
     "zephium-agentic/probe-harness",
 ]
@@ -107,7 +105,7 @@ base64 = "0.22"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
 sha2 = "=0.10.9"
 serde = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 url.workspace = true
 zeroize = "=1.9.0"
 

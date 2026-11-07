@@ -74,6 +74,9 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
             .map(|title| title.to_string())
             .unwrap_or_default(),
     );
+    let origin = unsafe { page.URL().and_then(|url| url.absoluteString()) }
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| "about:blank".into());
     let host = page.clone();
     let archived = RcBlock::new(move |data: *mut NSData, _error: *mut NSError| {
         // SAFETY: WebKit passes an autoreleased NSData or null, on the main thread.
@@ -106,6 +109,7 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
         panel.setAllowedFileTypes(Some(&NSArray::from_retained_slice(&kinds)));
         let chosen = panel.clone();
         let source = source.clone();
+        let origin = origin.clone();
         let done = RcBlock::new(move |result: NSModalResponse| {
             let path = (result == NSModalResponseOK)
                 .then(|| chosen.URL())
@@ -120,11 +124,12 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
                 (Format::Source, Some(html)) => html.as_bytes().to_vec(),
                 _ => data.to_vec(),
             };
+            let origin = origin.clone();
             // Writing can be large; the main thread has a page to draw.
             let _ = std::thread::Builder::new()
                 .name("save-page".into())
                 .spawn(move || {
-                    if let Err(error) = std::fs::write(&path, bytes) {
+                    if let Err(error) = write_page(&path, &bytes[..], &origin) {
                         eprintln!("engine: could not save the page: {}", error.kind());
                     }
                 });
@@ -135,11 +140,72 @@ pub(crate) fn save_page(page: Retained<WKWebView>, source: Arc<Mutex<Option<Stri
     true
 }
 
+fn write_page(
+    path: &std::path::Path,
+    mut bytes: impl std::io::Read,
+    origin: &str,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("missing page directory"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut bytes, &mut file)?;
+    crate::host::download_files::quarantine(file.path(), origin)
+        .map_err(|_| std::io::Error::other("page quarantine failed"))?;
+    crate::host::download_files::verify_quarantine(file.as_file())
+        .map_err(|_| std::io::Error::other("page quarantine verification failed"))?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn failed_page_write_preserves_the_original() {
+        use std::io::{self, Read};
+        struct Failed;
+        impl Read for Failed {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("injected failure"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        std::fs::write(&path, b"original").unwrap();
+        let bytes = (&b"partial"[..]).chain(Failed);
+        assert!(write_page(&path, bytes, "https://example.com/").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        write_page(&path, &b"replacement"[..], "https://example.com/").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn saved_pages_carry_quarantine() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["page.html", "page.webarchive"] {
+            let path = dir.path().join(name);
+            write_page(&path, &b"saved page"[..], "https://example.com/").unwrap();
+            let file = std::fs::File::open(path).unwrap();
+            let size = unsafe {
+                libc::fgetxattr(
+                    file.as_raw_fd(),
+                    c"com.apple.quarantine".as_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                )
+            };
+            assert!(size > 0, "saved page has no quarantine");
+        }
+    }
 
     #[test]
     fn a_title_becomes_one_plain_file_name() {
