@@ -5,6 +5,7 @@
     HourglassIcon,
     Link04Icon,
   } from "@hugeicons/core-free-icons";
+  import * as attention from "$session/attention.svelte";
   import * as notices from "$session/notice.svelte";
   import Icon from "$shared/ui/Icon";
 
@@ -22,6 +23,10 @@
 
   let current = $derived(notices.notice());
   let leaving = $state(false);
+
+  $effect(() => {
+    if (current?.kind === "focus" || current?.kind === "download") return attention.hold();
+  });
 
   $effect(() => {
     const shown = current;

@@ -24,7 +24,7 @@
   import { mediaPlayer } from "$domain/media-player";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionsSection } from "$features/extensions";
+  import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
@@ -263,6 +263,9 @@
   let newTabShown = $derived.by(() => {
     const tab = tabs.activeTab();
     if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    // A first load that failed stands in the pane instead, and the sky's
+    // glass over the window would wash it out.
+    if (failedPane(tab)) return false;
     return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
   });
   // Beside a new tab the window, whatever it is made of, takes on the
@@ -395,7 +398,9 @@
             {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
                 {m.choose_split()}
               </p>{/if}
-            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab}>
+              {#snippet extras()}<PinnedExtensions />{/snippet}
+            </SidebarBody>
             <!-- Brief notices and downloads sit at the foot of the column, by the dock. -->
             <SidebarNotice />
             {#if tabs.profile()?.id}<DownloadStatus

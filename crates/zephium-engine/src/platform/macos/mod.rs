@@ -6,6 +6,8 @@ mod agent_history;
 pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser-qa")]
 pub(crate) mod profile_seed_probe;
+#[cfg(feature = "blocker-bench")]
+pub mod qa_capture;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(all(
@@ -80,6 +82,7 @@ pub(crate) use work_observation_presentation::retained_page_hidden;
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
 mod pointer_cover;
 mod stage;
+pub(crate) mod store_button;
 mod webext_action_icon;
 
 pub(crate) use find::{find, FindReport, FindSession};

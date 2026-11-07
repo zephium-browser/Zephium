@@ -229,6 +229,22 @@ SaveAsUIShowing cancellation registration because document Save As is distinct
 from DownloadStarting. Privileged/agent defaults remain unchanged. See the
 [application qualification record](../../docs/native-links-implementation.md).
 
+### Navigation source frame and context-menu download marker (macOS, 2026-11-05)
+
+`AppleNavigationAction.source` carries `AppleNavigationSource`: whether the
+action's `sourceFrame` is the main frame, and that frame's security-origin
+scheme, host and port. Scheme and host are read with `ORIGIN_PART_LIMIT`
+(512 UTF-16 units / UTF-8 bytes); one that does not fit is reported empty, never
+truncated, so the host can tell a frame it cannot name from the main frame and
+refuse it. `source` is `None` when WebKit names no source frame. The struct
+holds strings, so `AppleNavigationAction` is `Clone` and no longer `Copy`.
+
+`context_menu_download_in_progress()` is true while the native download handler
+runs for a download started from WebKit's own context menu
+(`_webView:contextMenuDidCreateDownload:`), marked by a scoped thread-local
+guard that restores the previous value on drop. The host uses it to tell a
+download the person chose from one a page started.
+
 ### Page dialogs and failure categories (macOS)
 
 `alert`, `confirm` and `prompt` show as an `NSAlert` sheet on the view's window,
@@ -252,7 +268,24 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 not reported as one, so the failure lands on the document the person asked for
 and the host can show its own explanation. The handler's `FailedDocument` says
 when that error document replaced the shown page, with the address from Wry's
-in-flight navigation record; macOS always reports `Kept`.
+in-flight navigation record.
+
+On macOS, `WebKitErrorDomain` 104 (a content rule blocked the frame load) maps
+to `NavigationFailure::Blocked`, and its `FailedDocument` is `Refused { url }`:
+the address the error's `NSURLErrorFailingURLErrorKey` names, bounded like
+every page URL. The view's own URL is still the previous page at that point,
+so the host must not name the refusal by it. Other macOS failures report
+`Kept`.
+
+### macOS https-first navigation policy (2026-11-05)
+
+`AppleHttpsUpgrade` and the builder's `with_https_upgrade` set WebKit's
+`WKWebpagePreferences.preferredHTTPSNavigationPolicy` on the view's default
+page preferences: `AutomaticFallback` tries plain http addresses over https and
+falls back to http when that fails; `UserMediatedFallback` asks first. The
+setter is called only where the preferences respond to it (macOS 15.2 and
+later); earlier systems keep WebKit's own upgrades of known https hosts. Other
+platforms ignore the attribute. Without the builder call nothing changes.
 
 ### Independent Windows controller initialization (2026-10-27)
 

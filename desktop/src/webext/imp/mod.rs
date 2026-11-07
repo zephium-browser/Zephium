@@ -17,6 +17,7 @@ use std::time::Duration;
 use zephium_app::{Handle, WebExtensionStatus};
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_core::ports::engine::WebExtensionLoad;
+use zephium_webext::limits::{self, Platform};
 use zephium_webext::manifest::Manifest;
 use zephium_webext::{archive, crx, permissions, ExtensionId};
 
@@ -61,7 +62,7 @@ impl Drop for Preparing {
     }
 }
 
-const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 
 mod platform;
 use platform::{compat_revision, prepare_package};
@@ -170,7 +171,8 @@ impl WebExtensions {
                 zephium_webext::permissions::external_native_messaging_allowed(
                     &entry.reviewed_permissions,
                     entry.publisher_verified,
-                ),
+                ) || (entry.publisher_verified && entry.native_messaging_granted),
+            native_messaging_grantable: entry.publisher_verified,
             match_patterns: granted_sites(entry),
             start_background,
         }
@@ -182,6 +184,8 @@ impl WebExtensions {
     fn prune(&self) {
         let root = self.root.clone();
         std::thread::spawn(move || {
+            // Catalog icons ship with the frame now; older builds cached them here.
+            let _ = std::fs::remove_dir_all(root.join("catalog-icons"));
             let Ok(_publication) = PUBLICATION.lock() else {
                 return;
             };
@@ -331,7 +335,15 @@ impl WebExtensions {
                 continue;
             }
             let revision = compat_revision(&entry.access);
-            if entry.compat != revision
+            let too_deep = match self.too_deep(entry) {
+                Ok(too_deep) => too_deep,
+                Err(error) => {
+                    push_failure(&mut failures, entry, error);
+                    continue;
+                }
+            };
+            if too_deep
+                || entry.compat != revision
                 || entry.source.is_empty()
                 || entry.prepared_digest.is_empty()
             {
@@ -339,13 +351,7 @@ impl WebExtensions {
                     Ok(()) => changed = true,
                     Err(error) => {
                         eprintln!("extensions: could not rebuild {}: {error}", entry.id);
-                        if failures.len()
-                            < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE
-                        {
-                            if let Some(install) = ExtensionInstallId::parse(&entry.install) {
-                                failures.push((install, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into()));
-                            }
-                        }
+                        push_failure(&mut failures, entry, "The extension package could not be prepared. Retry, or reinstall it from its original source.".into());
                         continue;
                     }
                 }
@@ -364,6 +370,24 @@ impl WebExtensions {
             loads.push(self.load(entry, install, start_background));
         }
         (loads, failures, changed)
+    }
+
+    /// Whether a package sits too deep for WebView2 to load and must be
+    /// republished under a short name; only one published under a long name,
+    /// before names were shortened, can be. An error says why it can't load
+    /// even so, as when the profile's data has moved somewhere deeper.
+    fn too_deep(&self, entry: &Entry) -> Result<bool, String> {
+        if !cfg!(target_os = "windows") {
+            return Ok(false);
+        }
+        let packages = self.packages(&entry.id);
+        // A missing tree fails its load the usual way.
+        let Ok(longest) =
+            zephium_webext::windows::longest_relative_path(&packages.join(&entry.package))
+        else {
+            return Ok(false);
+        };
+        republish_for_depth(&packages, &entry.package, longest)
     }
 
     fn rebuild(
@@ -453,6 +477,54 @@ impl WebExtensions {
         }
         result
     }
+}
+
+fn push_failure(failures: &mut Vec<(ExtensionInstallId, String)>, entry: &Entry, message: String) {
+    if failures.len() < zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+        if let Some(install) = ExtensionInstallId::parse(&entry.install) {
+            failures.push((install, message));
+        }
+    }
+}
+
+/// Whether a package published as `package` under `packages`, its longest file
+/// path inside being `longest`, loads where it is; if not, whether a short name
+/// would make it (`true`, to republish) or why nothing will (the error).
+fn republish_for_depth(packages: &Path, package: &str, longest: usize) -> Result<bool, String> {
+    use zephium_webext::package::{is_long_publication, publication_identity};
+    use zephium_webext::windows::path_budget;
+    let Err(refusal) = path_budget(&packages.join(package), longest) else {
+        return Ok(false);
+    };
+    // A short name is as short as one gets.
+    if !is_long_publication(package) {
+        return Err(refusal);
+    }
+    path_budget(&packages.join(publication_identity("", "", "")), longest)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+#[test]
+fn a_package_past_the_path_limit_is_republished_only_where_a_short_name_fits() {
+    use zephium_webext::package::publication_identity;
+    use zephium_webext::windows::MAX_LOADABLE_PATH;
+    let packages = Path::new(r"C:\Users\user\AppData\Roaming\app.zephium\webext\packages\ext");
+    let short = publication_identity("crx-a", "windows-1", "digest");
+    let long = format!("pkg-{}", "0".repeat(64));
+    let root_len = |name: &str| packages.join(name).to_string_lossy().encode_utf16().count();
+    // The longest path that still loads under a short name.
+    let fits_short = MAX_LOADABLE_PATH - root_len(&short) - 1;
+    assert_eq!(republish_for_depth(packages, &short, fits_short), Ok(false));
+    assert_eq!(republish_for_depth(packages, &long, fits_short), Ok(true));
+    assert_eq!(
+        republish_for_depth(packages, &long, fits_short - 48),
+        Ok(false)
+    );
+    // Too deep even for a short name: it says so rather than loading nothing.
+    let refused = republish_for_depth(packages, &short, fits_short + 1).unwrap_err();
+    assert!(refused.contains("can't load on Windows"), "{refused}");
+    assert!(republish_for_depth(packages, &long, fits_short + 1).is_err());
 }
 
 /// The sites an extension is granted under the user's access choice.
@@ -632,6 +704,12 @@ pub(in crate::webext) async fn list(
                 .as_ref()
                 .map(permissions::warnings)
                 .unwrap_or_default();
+            let limitations = manifest
+                .as_ref()
+                .map(|manifest| {
+                    limits::limitations(manifest, &entry.reviewed_permissions, platform())
+                })
+                .unwrap_or_default();
             let has_options = manifest.as_ref().is_some_and(|manifest| {
                 let raw = manifest.raw();
                 raw.get("options_page").is_some()
@@ -657,15 +735,25 @@ pub(in crate::webext) async fn list(
                 state: state.to_owned(),
                 error,
                 warnings,
+                limitations,
                 access: access.to_owned(),
                 sites,
                 site_scoped: !entry.hosts.is_empty(),
                 has_options,
                 held_update: entry.held_update,
                 sideloaded: entry.sideloaded,
+                pinned: entry.pinned,
             }
         })
         .collect())
+}
+
+fn platform() -> Platform {
+    if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else {
+        Platform::Macos
+    }
 }
 
 fn extension_state(
@@ -687,6 +775,7 @@ fn extension_state(
 
 enum RegistryMutation {
     Enabled { id: String, enabled: bool },
+    Pinned { id: String, pinned: bool },
     Access { id: String, access: Access },
     Uninstall { id: String },
 }
@@ -722,6 +811,7 @@ fn execute_mutation(
     let mut registry = extensions.registry(profile);
     let id = match &mutation {
         RegistryMutation::Enabled { id, .. }
+        | RegistryMutation::Pinned { id, .. }
         | RegistryMutation::Access { id, .. }
         | RegistryMutation::Uninstall { id } => id,
     };
@@ -738,6 +828,12 @@ fn execute_mutation(
         RegistryMutation::Access { access, .. } => {
             registry.extensions[position].access = access;
             None
+        }
+        RegistryMutation::Pinned { pinned, .. } => {
+            // Where its button sits is the frame's business; the runtime
+            // has nothing to reload.
+            registry.extensions[position].pinned = pinned;
+            return extensions.save_existing(profile, &registry);
         }
         RegistryMutation::Uninstall { .. } => Some(registry.extensions.remove(position)),
     };
@@ -788,6 +884,25 @@ pub(in crate::webext) async fn set_enabled(
         RegistryMutation::Enabled {
             id: id.to_owned(),
             enabled,
+        },
+    )
+    .await
+}
+
+pub(in crate::webext) async fn set_pinned(
+    shell: &Handle,
+    extensions: &WebExtensions,
+    id: &str,
+    pinned: bool,
+) -> Result<(), String> {
+    let profile = target(shell, None).await?.profile;
+    mutate_profile(
+        shell,
+        extensions,
+        profile,
+        RegistryMutation::Pinned {
+            id: id.to_owned(),
+            pinned,
         },
     )
     .await
@@ -898,6 +1013,9 @@ pub(in crate::webext) fn answer_access(
             .iter_mut()
             .find(|entry| entry.id == request.extension_id)
         {
+            if request.permissions.iter().any(|p| p == "nativeMessaging") {
+                entry.native_messaging_granted = entry.publisher_verified;
+            }
             for permission in request.permissions {
                 if !entry.permissions.contains(&permission) {
                     entry.permissions.push(permission);
@@ -917,6 +1035,41 @@ pub(in crate::webext) fn answer_access(
         allowed,
     });
     Ok(())
+}
+
+pub(in crate::webext) fn access_removed(
+    extensions: &WebExtensions,
+    removal: zephium_ipc::WebExtensionAccessRemovalView,
+) -> Result<(), String> {
+    let profile = ProfileId::parse(&removal.profile_id).ok_or("Invalid profile.")?;
+    let _publication = PUBLICATION
+        .lock()
+        .map_err(|_| "Extension state is unavailable.")?;
+    let mut registry = extensions.registry(profile);
+    let Some(entry) = registry
+        .extensions
+        .iter_mut()
+        .find(|entry| entry.id == removal.extension_id)
+    else {
+        return Ok(());
+    };
+    // Access the person accepted at install stays; only what was granted
+    // later can be given up.
+    let native = entry.native_messaging_granted
+        && removal.permissions.iter().any(|p| p == "nativeMessaging");
+    entry.native_messaging_granted &= !native;
+    let reviewed = |permission: &String| {
+        entry.reviewed_permissions.contains(permission) || permission == "nativeMessaging"
+    };
+    let before = (entry.permissions.len(), entry.hosts.len());
+    entry
+        .permissions
+        .retain(|permission| reviewed(permission) || !removal.permissions.contains(permission));
+    entry.hosts.retain(|host| !removal.patterns.contains(host));
+    if !native && before == (entry.permissions.len(), entry.hosts.len()) {
+        return Ok(());
+    }
+    extensions.save_existing(profile, &registry)
 }
 
 pub(in crate::webext) async fn uninstall(

@@ -47,7 +47,7 @@ const defaults = {
   "focus.goal": "120",
   "focus.blocked": "",
   "performance.sleep": "true",
-  "performance.after": "15",
+  "performance.after": "30",
   "performance.memory": "balanced",
   "performance.exceptions": "",
   "updates.auto-check": "true",

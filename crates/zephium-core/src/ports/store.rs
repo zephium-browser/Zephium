@@ -594,6 +594,27 @@ pub trait Store {
     ) -> crate::bookmarks::BookmarkReply {
         crate::bookmarks::BookmarkReply::Failed(crate::bookmarks::BookmarkFailure::Unavailable)
     }
+    /// [`Self::bookmarks`], also describing what a write changed for the
+    /// extensions listening. Blocking; callers run it off the shell.
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: crate::bookmarks::BookmarkRequest,
+    ) -> (
+        crate::bookmarks::BookmarkReply,
+        Option<crate::bookmarks::BookmarkChange>,
+    ) {
+        (self.bookmarks(profile, request), None)
+    }
+    /// History as extensions read and change it. Blocking; callers run it
+    /// off the shell.
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        _request: crate::extension_data::HistoryRequest,
+    ) -> crate::extension_data::HistoryReply {
+        crate::extension_data::HistoryReply::Failed
+    }
     /// Removes visits at or after `since`, or all of them when it is absent.
     fn load_blocker_statistics(
         &self,
@@ -770,6 +791,43 @@ pub trait Store {
         _profile: ProfileId,
         _origin: crate::permissions::PageOrigin,
         _allowed: bool,
+    ) -> bool {
+        false
+    }
+    /// The sites `profile` lets open a kind of application link without
+    /// asking, as (site, scheme), or None when they cannot be read.
+    fn app_link_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, String)>> {
+        None
+    }
+    /// Keeps or forgets one (site, scheme). False when nothing was written,
+    /// including when the list is full.
+    fn set_app_link_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _scheme: String,
+        _allowed: bool,
+    ) -> bool {
+        false
+    }
+    /// The download decision `profile` keeps per site, true for Allow and
+    /// false for Block, or None when they cannot be read.
+    fn download_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, bool)>> {
+        None
+    }
+    /// Keeps one site's download decision, or forgets it with None. False
+    /// when nothing was written, including when the list is full.
+    fn set_download_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _allowed: Option<bool>,
     ) -> bool {
         false
     }

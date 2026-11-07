@@ -5,16 +5,17 @@ import { clearRequest } from "$domain/site-data";
 import * as notices from "$session/notice.svelte";
 import ClearSiteData from "../components/ClearSiteData.svelte";
 
-const native = vi.hoisted(() => ({ call: vi.fn() }));
+const native = vi.hoisted(() => ({ call: vi.fn(), modal: vi.fn(async (_open: boolean) => {}) }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ browsingDataCall: native.call as never });
+  return mockBindings({ browsingDataCall: native.call as never, chromeModal: native.modal });
 });
 vi.mock("$domain/tabs", () => ({ tabs: { profile: () => ({ id: "profile" }) } }));
 
 afterEach(() => {
   native.call.mockReset();
+  native.modal.mockClear();
   clearRequest.dismiss();
 });
 
@@ -79,4 +80,15 @@ test("a private window says it has nothing to clear", async () => {
     .element(page.getByRole("alert"))
     .toHaveTextContent("A private window keeps nothing to clear.");
   await page.getByRole("button", { name: "Cancel" }).click();
+});
+
+test("pages leave the screen while the dialog is open, and come back when it closes", async () => {
+  await render(ClearSiteData);
+  clearRequest.ask("https://www.example.com/");
+  await expect.element(page.getByRole("dialog")).toBeVisible();
+  await expect.poll(() => native.modal.mock.calls.at(-1)).toEqual([true]);
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect.poll(() => native.modal.mock.calls.at(-1)).toEqual([false]);
+  expect(native.call).not.toHaveBeenCalled();
 });

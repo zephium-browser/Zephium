@@ -36,10 +36,12 @@
   /** A folder whose removal waits for a second press, because it takes its
    *  contents with it. */
   let confirming = $state<string | null>(null);
-  let adding = $state(false);
-  let address = $state("");
-  let name = $state("");
-  let addProblem = $state<"invalid" | "failed" | null>(null);
+  let adding = $state<{
+    address: string;
+    name: string;
+    pending: boolean;
+    problem: "invalid" | "failed" | null;
+  } | null>(null);
   /** The row a native menu was opened on; the menu is modal, so one at a time. */
   let menuTarget: BookmarkView | null = null;
   /** A link just deleted, kept long enough to put it back. */
@@ -64,6 +66,16 @@
       const index = session.items.findIndex((candidate) => candidate.id === landing.id);
       if (index >= 0) void session.reorder(item.id, landing.kind === "after" ? index + 1 : index);
     },
+  });
+
+  // The ghost stays over the panel: past it, pages are native views above
+  // the chrome and would hide it.
+  let panel = $state<HTMLElement>();
+  let ghostWidth = $state(0);
+  const ghostX = $derived.by(() => {
+    const x = drag.at.x + 12;
+    const edge = panel?.getBoundingClientRect().right;
+    return edge === undefined ? x : Math.max(0, Math.min(x, edge - ghostWidth - 4));
   });
 
   function landingAt(item: BookmarkView, target: Element | null, y: number): Landing | null {
@@ -94,23 +106,25 @@
 
   function openAdd() {
     confirming = null;
-    adding = true;
-    address = "";
-    name = "";
-    addProblem = null;
+    adding = { address: "", name: "", pending: false, problem: null };
   }
 
   function leaveAdd(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
     event.stopPropagation();
-    adding = false;
+    adding = null;
   }
 
   async function submitAdd() {
-    if (!address.trim()) return;
-    const outcome = await session.addLink(address.trim(), name.trim());
-    if (outcome === "added") adding = false;
-    else addProblem = outcome;
+    const form = adding;
+    if (!form || form.pending || !form.address.trim()) return;
+    form.pending = true;
+    form.problem = null;
+    const outcome = await session.addLink(form.address.trim(), form.name.trim());
+    form.pending = false;
+    if (adding !== form) return;
+    if (outcome === "added") adding = null;
+    else form.problem = outcome;
   }
 
   // Only the owning profile decides which session this is; the first view is
@@ -120,6 +134,7 @@
     return untrack(() => {
       const current = new BookmarksSession(owner);
       session = current;
+      adding = null;
       const wanted = reveal.take();
       void (wanted ? current.reveal(wanted) : current.open(null));
       return () => current.stop();
@@ -291,7 +306,7 @@
   };
 </script>
 
-<div class="bookmarks">
+<div class="bookmarks" bind:this={panel}>
   {#if !session.searching && session.folder !== null}
     <div class="place">
       <IconButton
@@ -340,8 +355,11 @@
         maxlength={8192}
         spellcheck={false}
         autocapitalize="off"
-        bind:value={address}
-        oninput={() => (addProblem = null)}
+        bind:value={adding.address}
+        readonly={adding.pending}
+        oninput={() => {
+          if (adding) adding.problem = null;
+        }}
         onkeydown={leaveAdd}
         use:focusAndSelect
       />
@@ -350,18 +368,23 @@
         aria-label={m.bookmarks_name_optional()}
         placeholder={m.bookmarks_name_optional()}
         maxlength={512}
-        bind:value={name}
+        bind:value={adding.name}
+        readonly={adding.pending}
         onkeydown={leaveAdd}
       />
-      {#if addProblem}<p class="add-problem" role="alert">
-          {addProblem === "invalid" ? m.bookmarks_add_invalid() : m.bookmarks_add_failed()}
+      {#if adding.problem}<p class="add-problem" role="alert">
+          {adding.problem === "invalid" ? m.bookmarks_add_invalid() : m.bookmarks_add_failed()}
         </p>{/if}
       <div class="add-actions">
-        <Button size="compact" variant="ghost" onclick={() => (adding = false)}
+        <Button size="compact" variant="ghost" onclick={() => (adding = null)}
           >{m.action_cancel()}</Button
         >
-        <Button size="compact" variant="primary" type="submit" disabled={!address.trim()}
-          >{m.action_add()}</Button
+        <Button
+          size="compact"
+          variant="primary"
+          type="submit"
+          pending={adding.pending}
+          disabled={!adding.address.trim()}>{m.action_add()}</Button
         >
       </div>
     </form>
@@ -519,7 +542,12 @@
 {/if}
 {#if drag.item}
   {@const carried = drag.item}
-  <div class="ghost" style:translate={`${drag.at.x + 12}px ${drag.at.y + 8}px`} aria-hidden="true">
+  <div
+    class="ghost"
+    bind:clientWidth={ghostWidth}
+    style:translate={`${ghostX}px ${drag.at.y + 8}px`}
+    aria-hidden="true"
+  >
     <span class="glyph"
       >{#if carried.url === null}<Icon icon={Folder01Icon} size={14} />{:else}<FavIcon
           image={favicons.mark(carried.icon, carried.url)?.image ?? null}

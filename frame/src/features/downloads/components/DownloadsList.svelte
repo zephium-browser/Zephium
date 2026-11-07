@@ -94,7 +94,8 @@
       return transferLine(entry, rate) || labels.receiving();
     }
     if (entry.state === "paused" && !entry.error) return m.download_user_paused();
-    if (entry.state === "held") return m.download_held_prompt();
+    if (entry.state === "held")
+      return entry.insecure ? m.download_held_insecure_prompt() : m.download_held_prompt();
     if (entry.state === "failed" || entry.state === "interrupted" || entry.state === "paused")
       return entry.error
         ? downloadReason(entry.error, entry.state === "paused")

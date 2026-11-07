@@ -1,0 +1,258 @@
+//! A program the browser runs in every page's main world, from an extension
+//! context of its own. The host never lists it with installed extensions, so
+//! it has no toolbar action, storage or background. Whatever must vary by
+//! site, such as a paused site, the program decides itself: a match pattern
+//! sees each frame's own address, never the page it is embedded in.
+
+use std::cell::RefCell;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::{MainThreadMarker, Message};
+use objc2_foundation::{NSError, NSOperatingSystemVersion, NSProcessInfo, NSString, NSURL};
+use objc2_web_kit::{
+    WKWebExtension, WKWebExtensionContext, WKWebExtensionContextError,
+    WKWebExtensionContextErrorDomain, WKWebExtensionContextPermissionStatus,
+    WKWebExtensionController, WKWebExtensionMatchPattern,
+};
+
+use crate::runtime::describe;
+
+const ID: &str = "zephium-page-script";
+const PROGRAM: &str = "program.js";
+const MANIFEST: &str = r#"{
+  "manifest_version": 3,
+  "name": "Zephium",
+  "version": "1.0",
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["program.js"],
+    "run_at": "document_start",
+    "all_frames": true,
+    "match_about_blank": true,
+    "world": "MAIN"
+  }]
+}
+"#;
+
+pub struct PageScript {
+    controller: Retained<WKWebExtensionController>,
+    private_data: bool,
+    state: Rc<RefCell<State>>,
+}
+
+#[derive(Default)]
+struct State {
+    generation: u64,
+    /// The package running now, with its context. A failed load keeps the
+    /// one before it, so the next `set` tries again.
+    loaded: Option<(PathBuf, Retained<WKWebExtensionContext>)>,
+}
+
+impl PageScript {
+    /// Main-world content scripts need macOS 15.4.
+    pub fn supported() -> bool {
+        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+            majorVersion: 15,
+            minorVersion: 4,
+            patchVersion: 0,
+        })
+    }
+
+    /// `private_data` lets the program run in private browsing views, and
+    /// belongs only on a controller that private views alone use.
+    pub fn new(controller: &WKWebExtensionController, private_data: bool) -> Self {
+        Self {
+            controller: controller.retain(),
+            private_data,
+            state: Rc::default(),
+        }
+    }
+
+    /// Writes a package for `program` into `dir`, which must not exist yet,
+    /// readable by its owner alone. The package is complete before `dir`
+    /// appears.
+    pub fn write(dir: &Path, program: &str) -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let parent = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let name = dir.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+        let staging = parent.join(format!(".{}.partial", name.to_string_lossy()));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(&staging)?;
+        for (file, text) in [("manifest.json", MANIFEST), (PROGRAM, program)] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(staging.join(file))?
+                .write_all(text.as_bytes())?;
+        }
+        std::fs::rename(&staging, dir)
+    }
+
+    /// Whether `dir` holds exactly the package `write` makes for `program`.
+    pub fn holds(dir: &Path, program: &str) -> bool {
+        let same = |file: &str, text: &str| {
+            std::fs::metadata(dir.join(file)).is_ok_and(|meta| meta.len() == text.len() as u64)
+                && std::fs::read(dir.join(file)).is_ok_and(|bytes| bytes == text.as_bytes())
+        };
+        same("manifest.json", MANIFEST) && same(PROGRAM, program)
+    }
+
+    /// The package now loaded, if any.
+    pub fn root(&self) -> Option<PathBuf> {
+        self.state
+            .borrow()
+            .loaded
+            .as_ref()
+            .map(|(root, _)| root.clone())
+    }
+
+    /// Runs the package in `root` from the next document on, or nothing with
+    /// `None`. A replacement takes over in one main-thread turn, so no page
+    /// starts with both programs or with neither. True when WebKit is still
+    /// reading the package; `done` runs once it is in place.
+    pub fn set(
+        &self,
+        root: Option<&Path>,
+        done: impl FnOnce(Result<(), String>) + 'static,
+    ) -> bool {
+        let generation = {
+            let mut state = self.state.borrow_mut();
+            state.generation += 1;
+            if state.loaded.as_ref().map(|(loaded, _)| loaded.as_path()) == root {
+                drop(state);
+                done(Ok(()));
+                return false;
+            }
+            state.generation
+        };
+        let Some(root) = root else {
+            let mut state = self.state.borrow_mut();
+            let result = state
+                .loaded
+                .as_ref()
+                .map_or(Ok(()), |(_, old)| unload(&self.controller, old));
+            if result.is_ok() {
+                state.loaded = None;
+            }
+            drop(state);
+            done(result);
+            return false;
+        };
+        if !root.is_dir() {
+            done(Err(format!("{} is not a directory", root.display())));
+            return false;
+        }
+        let url =
+            NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&root.to_string_lossy()), true);
+        let state = Rc::downgrade(&self.state);
+        let root = root.to_path_buf();
+        let controller = self.controller.clone();
+        let private_data = self.private_data;
+        let done = RefCell::new(Some(done));
+        let completion =
+            RcBlock::new(move |extension: *mut WKWebExtension, error: *mut NSError| {
+                let Some(done) = done.take() else {
+                    return;
+                };
+                let Some(state) = state.upgrade() else {
+                    return done(Err("the page script was closed".to_owned()));
+                };
+                if state.borrow().generation != generation {
+                    return done(Ok(()));
+                }
+                let Some(extension) = (unsafe { extension.as_ref() }) else {
+                    return done(Err(describe(unsafe { error.as_ref() })));
+                };
+                done(activate(
+                    &state,
+                    &controller,
+                    extension,
+                    root.clone(),
+                    private_data,
+                ));
+            });
+        unsafe {
+            WKWebExtension::extensionWithResourceBaseURL_completionHandler(
+                &url,
+                &completion,
+                MainThreadMarker::from(&*self.controller),
+            )
+        };
+        true
+    }
+}
+
+impl Drop for PageScript {
+    fn drop(&mut self) {
+        if let Some((_, context)) = self.state.borrow_mut().loaded.take() {
+            let _ = unload(&self.controller, &context);
+        }
+    }
+}
+
+fn activate(
+    state: &Rc<RefCell<State>>,
+    controller: &WKWebExtensionController,
+    extension: &WKWebExtension,
+    root: PathBuf,
+    private_data: bool,
+) -> Result<(), String> {
+    let mtm = MainThreadMarker::from(controller);
+    let context = unsafe { WKWebExtensionContext::contextForExtension(extension) };
+    unsafe {
+        context.setUniqueIdentifier(&NSString::from_str(ID));
+        context.setInspectable(false);
+        context.setHasAccessToPrivateData(private_data);
+        context.setPermissionStatus_forMatchPattern(
+            WKWebExtensionContextPermissionStatus::GrantedExplicitly,
+            &WKWebExtensionMatchPattern::allURLsMatchPattern(mtm),
+        );
+    }
+    let mut state = state.borrow_mut();
+    let old = state.loaded.take();
+    if let Some((_, old)) = &old {
+        let _ = unload(controller, old);
+    }
+    match unsafe { controller.loadExtensionContext_error(&context) } {
+        Ok(()) => {
+            state.loaded = Some((root, context));
+            Ok(())
+        }
+        Err(error) => {
+            // The old program keeps running when the new one cannot.
+            if let Some((old_root, old)) = old {
+                if unsafe { controller.loadExtensionContext_error(&old) }.is_ok() {
+                    state.loaded = Some((old_root, old));
+                }
+            }
+            Err(describe(Some(&error)))
+        }
+    }
+}
+
+/// Unloads `context`; one already unloaded is not an error.
+fn unload(
+    controller: &WKWebExtensionController,
+    context: &WKWebExtensionContext,
+) -> Result<(), String> {
+    match unsafe { controller.unloadExtensionContext_error(context) } {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.code() == WKWebExtensionContextError::NotLoaded.0
+                && error
+                    .domain()
+                    .isEqualToString(unsafe { WKWebExtensionContextErrorDomain }) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(describe(Some(&error))),
+    }
+}
