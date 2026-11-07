@@ -109,6 +109,7 @@ impl EngineHost {
             self.desired_dormant.remove(&id);
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
+            self.suspend_retries.remove(&id);
             self.suspend_uncertain.remove(&id);
             self.styles_missed.remove(&id);
         }
@@ -277,6 +278,7 @@ impl EngineHost {
         self.desired_dormant.clear();
         self.suspending.clear();
         self.suspend_failed.clear();
+        self.suspend_retries.clear();
         self.suspend_uncertain.clear();
         (obligations, provenance_valid)
     }
@@ -341,6 +343,8 @@ impl EngineHost {
         self.stages.clear();
         #[cfg(target_os = "macos")]
         self.macos_ephemeral_data_stores.clear();
+        #[cfg(target_os = "macos")]
+        self.scriptlets.end_private();
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.anonymous_work_stores.clear();
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]

@@ -323,7 +323,9 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    release_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -351,6 +353,15 @@ pub(crate) struct FakeEngine {
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
+    pub(crate) extension_data_answers: Mutex<
+        Vec<(
+            ProfileId,
+            u64,
+            zephium_core::extension_data::ExtensionDataReply,
+        )>,
+    >,
+    pub(crate) extension_data_changes:
+        Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
 }
 
 impl FakeEngine {
@@ -365,6 +376,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn release_spare_calls(&self) -> usize {
+        self.release_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn warm_spare_calls(&self) -> usize {
         self.warm_spare_calls
@@ -508,6 +523,19 @@ impl Engine for FakeEngine {
             .unwrap()
             .push((profile, origins.iter().map(ToString::to_string).collect()));
     }
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        self.download_sites.lock().unwrap().push((
+            profile,
+            sites
+                .iter()
+                .map(|(origin, allowed)| (origin.to_string(), *allowed))
+                .collect(),
+        ));
+    }
     fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
         self.automatic_pip
             .lock()
@@ -643,6 +671,29 @@ impl Engine for FakeEngine {
                 .push(request);
         }
         admission
+    }
+    fn answer_web_extension_data(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        reply: zephium_core::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        self.extension_data_answers
+            .lock()
+            .unwrap()
+            .push((profile, request, reply));
+        NativeDispatch::Scheduled
+    }
+    fn web_extension_data_changed(
+        &self,
+        profile: ProfileId,
+        change: zephium_core::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        self.extension_data_changes
+            .lock()
+            .unwrap()
+            .push((profile, change));
+        NativeDispatch::Scheduled
     }
     fn settle_extension_browser_request(
         &self,
@@ -853,6 +904,12 @@ impl Engine for FakeEngine {
         }
         self.native_admission()
     }
+    fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+        self.log(format!(
+            "store-button {id} {} {:?}",
+            button.extension, button.state
+        ));
+    }
     fn capture(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -866,6 +923,10 @@ impl Engine for FakeEngine {
     }
     fn autofill_password(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("autofill {id}"));
+        self.native_admission()
+    }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
         self.native_admission()
     }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
@@ -915,6 +976,10 @@ impl Engine for FakeEngine {
         self.log(format!("open-app {url}"));
         self.native_admission()
     }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
+        self.native_admission()
+    }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         self.log(format!("allow-certificate {item} {url}"));
         self.native_admission()
@@ -935,6 +1000,16 @@ impl Engine for FakeEngine {
         self.log(format!("http-auth {item} {request} {answer}"));
         self.native_admission()
     }
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        let answer = if allow { "allow" } else { "refuse" };
+        self.log(format!("download-permission {item} {request} {answer}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -947,6 +1022,18 @@ impl Engine for FakeEngine {
     fn warm_spare(&self, _partition: Partition) {
         self.warm_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn release_spare(&self) {
+        self.release_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn prepare_profile(&self, partition: Partition) {
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("prepare-profile {kind} {}", partition.profile()));
     }
     fn install_content_rules(
         &self,
@@ -1077,6 +1164,16 @@ pub(crate) struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
     pub(crate) popup_sites:
         Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::permissions::PageOrigin>>>,
+    pub(crate) download_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
+    >,
+    pub(crate) app_link_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
+    >,
+    /// Every durable read of a pop-up, download or app-link list, by list.
+    pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
+    /// Application link writes report failure, as a store that timed out.
+    pub(crate) app_link_writes_fail: std::sync::atomic::AtomicBool,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1101,6 +1198,14 @@ pub(crate) struct FakeStore {
     >,
     pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+/// The serial of the request the tab shows, as its card would answer.
+pub(crate) fn shown_serial(shell: &Shell, id: ItemId) -> u32 {
+    shell.items.tab(id).map_or(0, |tab| tab.page_request_serial)
+}
+
+/// One list of download decisions the shell handed the engine.
+type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 
 type AvatarWrite = (
     ProfileId,
@@ -1135,6 +1240,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<zephium_core::permissions::PageOrigin>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("popup_sites", profile));
         Some(
             self.popup_sites
                 .lock()
@@ -1155,6 +1264,75 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("app_link_sites", profile));
+        Some(
+            self.app_link_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        if self
+            .app_link_writes_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let mut sites = self.app_link_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|site| *site != (origin.clone(), scheme.clone()));
+        if allowed {
+            list.push((origin, scheme));
+        }
+        true
+    }
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("download_sites", profile));
+        Some(
+            self.download_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        let mut sites = self.download_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|(site, _)| *site != origin);
+        if let Some(allowed) = allowed {
+            list.push((origin, allowed));
         }
         true
     }
@@ -1589,6 +1767,44 @@ impl Store for FakeStore {
                 .collect(),
         )
     }
+    fn extension_history(
+        &self,
+        _profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::{HistoryEntry, HistoryReply, HistoryRequest};
+        let visits = self.recorded_visits.lock().unwrap();
+        let entry = |url: &str| {
+            let of: Vec<_> = visits.iter().filter(|visit| visit.url == url).collect();
+            of.first().map(|first| HistoryEntry {
+                id: first.id,
+                url: url.to_owned(),
+                title: of.last().map(|last| last.title.clone()).unwrap_or_default(),
+                last_visit: of
+                    .iter()
+                    .map(|visit| visit.visited_at)
+                    .max()
+                    .unwrap_or_default(),
+                visits: of.len() as u32,
+            })
+        };
+        match request {
+            HistoryRequest::Address { url } => {
+                HistoryReply::Entries(entry(&url).into_iter().collect())
+            }
+            HistoryRequest::Search { text, .. } => {
+                let mut urls: Vec<&str> = visits
+                    .iter()
+                    .rev()
+                    .map(|visit| visit.url.as_str())
+                    .filter(|url| url.contains(text.as_str()))
+                    .collect();
+                urls.dedup();
+                HistoryReply::Entries(urls.into_iter().filter_map(entry).collect())
+            }
+            _ => HistoryReply::Failed,
+        }
+    }
     fn history_page(
         &self,
         _profile: ProfileId,
@@ -1978,6 +2194,8 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActionShortcut(_) => {}
         Projection::PagePermissionPrompt(_) => {}
         Projection::WebExtensionAccessRequest(_) => {}
+        Projection::WebExtensionAccessRemoved(_) => {}
+        Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}
@@ -2297,6 +2515,7 @@ mod export;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod favicons;
 mod fullscreen;
 mod history;

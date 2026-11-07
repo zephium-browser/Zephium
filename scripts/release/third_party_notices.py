@@ -168,7 +168,8 @@ def main() -> int:
         "Zephium third-party notices\n\n"
         "Zephium is licensed under the Mozilla Public License 2.0. It includes the\n"
         "following third-party software, each under its own license. The bundled\n"
-        "EasyList and EasyPrivacy filter lists are covered by licenses/blocker/.\n"
+        "EasyList, EasyPrivacy and uBlock Origin filter lists are covered by\n"
+        "licenses/blocker/.\n"
     )
     apache = (ROOT / "vendor/tauri/LICENSE_APACHE-2.0").read_text(encoding="utf-8").strip()
     mpl = (ROOT / "LICENSE").read_text(encoding="utf-8").strip()

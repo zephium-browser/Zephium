@@ -440,14 +440,14 @@ impl EngineHost {
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
-        // Off-screen views drop to the low-memory hint (reversible, nothing
-        // freezes); actual suspension waits for the shell's idle verdict.
-        // Becoming visible resumes a suspended view natively.
+        // Off-screen views keep their memory: the low-memory hint only paged
+        // it out to be paged back in on return, and freed no commit. Actual
+        // suspension waits for the shell's idle verdict; becoming visible
+        // resumes a suspended view natively.
         #[cfg(target_os = "windows")]
         {
-            use wry::{MemoryUsageLevel, WebViewExtWindows};
             let mut woken = Vec::new();
-            for (id, view) in &self.views {
+            for id in self.views.keys() {
                 // A layout belongs to one window; resource policy belongs to
                 // the whole host. Updating window A must not mark a visible
                 // view in window B hidden or make it eligible for suspension.
@@ -457,7 +457,6 @@ impl EngineHost {
                 }
                 if off {
                     self.hidden.insert(*id);
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
                 } else {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
@@ -466,13 +465,14 @@ impl EngineHost {
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
                     self.suspend_failed.remove(id);
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+                    self.suspend_retries.remove(id);
                     woken.push(*id);
                 }
             }
             for id in woken {
                 self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);
+                self.resume_store_button_poll(id);
             }
         }
         self.refresh_visible_generic_styles();

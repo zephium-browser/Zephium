@@ -13,6 +13,11 @@ name = "webext-lab"
 path = "src/bin/webext-lab.rs"
 required-features = ["lab"]
 
+[[bin]]
+name = "page-script-lab"
+path = "src/bin/page-script-lab.rs"
+required-features = ["lab"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
@@ -24,6 +29,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "objc2-core-foundation",
     "WKContentWorld",
     "WKFrameInfo",
+    "WKHTTPCookieStore",
     "WKNavigation",
     "WKNavigationAction",
     "WKNavigationDelegate",
@@ -55,5 +61,8 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 ] }
 base64.workspace = true
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
+objc2-user-notifications = "=0.3.2"
 serde_json.workspace = true
+url.workspace = true
+zephium-core.workspace = true
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }

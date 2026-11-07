@@ -92,7 +92,7 @@ Work 内置 25 项技能，包括旅行规划、调研、对比与选择、规�
 
 - macOS 上使用原生 WebKit，Windows 上使用 WebView2，网页运行在系统本就持续更新的引擎上。
 - 不活跃的标签页会进入休眠，你回来时再唤醒，所以即使打开很多标签页，内存占用也很低。
-- 原生的广告和跟踪器拦截器，默认开启，基于 Brave 的 [adblock-rust](https://github.com/brave/adblock-rust)，搭配 EasyList 和 EasyPrivacy。请求在页面发出之前就被拦下，页面上的其他内容，点一下就能隐藏。
+- 原生的广告和跟踪器拦截器，默认开启，基于 Brave 的 [adblock-rust](https://github.com/brave/adblock-rust)，搭配 EasyList、EasyPrivacy 和 uBlock Origin 的过滤规则。请求在页面发出之前就被拦下，页面上的其他内容，点一下就能隐藏。
 
 ### 为长期使用而设计
 

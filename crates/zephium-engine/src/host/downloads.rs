@@ -9,8 +9,10 @@ mod platform;
 #[path = "downloads/platform_windows.rs"]
 mod platform;
 mod recovery;
+mod site;
 mod ui;
 use platform::{Delegate, DialogLease, DirectoryPanel, Native, SavePanel, Source, Timer};
+pub(in crate::host) use site::SiteAsk;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -35,6 +37,7 @@ use crate::navigation_epoch::{NavigationActivity, NavigationEpochTracker};
 
 type SharedStore = Arc<dyn Store + Send + Sync>;
 type Notify = Arc<dyn Fn(ProfileId) + Send + Sync>;
+type Watch = Box<dyn Fn(ProfileId)>;
 struct DestinationReply(Option<Box<dyn FnOnce(Option<PathBuf>)>>);
 impl DestinationReply {
     fn new(done: impl FnOnce(Option<PathBuf>) + 'static) -> Self {
@@ -77,6 +80,8 @@ enum DecisionPhase {
     /// A finished download of a type that must be confirmed, waiting to be
     /// kept or deleted.
     KeepDecision,
+    /// The site's question waits for the person under the address field.
+    SitePermission,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +103,7 @@ impl DecisionDeadline {
             DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
             DecisionPhase::UserPaused => Duration::from_secs(30 * 60),
             DecisionPhase::KeepDecision => Duration::from_secs(60 * 60),
+            DecisionPhase::SitePermission => zephium_core::permissions::DOWNLOAD_PERMISSION_TIMEOUT,
         };
         Self {
             phase,
@@ -157,6 +163,9 @@ struct Transfer {
     /// A pause the person asked for is in flight; the native stop that
     /// follows is theirs, not a failure.
     user_pausing: bool,
+    /// The name an extension asked for, in place of the server's.
+    #[cfg(target_os = "macos")]
+    name: Option<String>,
     /// What WebKit gave back to continue a stopped download from where it
     /// was. Memory only: it names a partial file this run owns.
     #[cfg(target_os = "macos")]
@@ -164,6 +173,11 @@ struct Transfer {
     /// A continuing download will ask for its destination again.
     #[cfg(target_os = "macos")]
     resuming: bool,
+    /// Waits for the person before it may choose its destination.
+    site: Option<site::SiteHold>,
+    /// The person answered for this download on its card, which counts as
+    /// their click.
+    confirmed: bool,
     deadline: DecisionDeadline,
 }
 
@@ -215,6 +229,9 @@ pub(crate) struct Downloads {
     timer: RefCell<Option<Timer>>,
     /// The running timer is the slow one: nothing is moving, only waiting.
     timer_slow: Cell<bool>,
+    /// When the running timer fires; a sooner deadline replaces it.
+    #[cfg(target_os = "windows")]
+    timer_due: Cell<Option<Instant>>,
     stopping: Cell<bool>,
     retired: RefCell<HashSet<ProfileId>>,
     drained_profiles: RefCell<HashSet<ProfileId>>,
@@ -225,6 +242,14 @@ pub(crate) struct Downloads {
     directory_panels: RefCell<HashMap<u64, (DirectoryPanel, DialogLease)>>,
     #[cfg(target_os = "windows")]
     retained_views: RefCell<Vec<super::ObservedView>>,
+    /// Hears every change the shell hears, on this thread.
+    watch: RefCell<Option<Watch>>,
+    #[cfg(target_os = "macos")]
+    extension_admission: Cell<bool>,
+    /// What each profile keeps per site, true to allow and false to block.
+    sites: RefCell<HashMap<ProfileId, HashMap<PageOrigin, bool>>>,
+    prompts: RefCell<HashMap<u32, site::Prompt>>,
+    next_prompt: Cell<u32>,
 }
 
 impl Downloads {
@@ -256,6 +281,18 @@ impl Downloads {
                 .any(|call| call.partition.profile() == profile)
         })
     }
+    fn changed(&self, profile: ProfileId) {
+        (self.notify)(profile);
+        if let Some(watch) = &*self.watch.borrow() {
+            watch(profile);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_watch(&self, watch: Watch) {
+        *self.watch.borrow_mut() = Some(watch);
+    }
+
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
         let (sender, receiver) = mpsc::channel();
         let manager = Rc::new(Self {
@@ -272,6 +309,8 @@ impl Downloads {
             receiver: RefCell::new(receiver),
             timer: RefCell::new(None),
             timer_slow: Cell::new(false),
+            #[cfg(target_os = "windows")]
+            timer_due: Cell::new(None),
             stopping: Cell::new(false),
             retired: RefCell::new(HashSet::new()),
             drained_profiles: RefCell::new(HashSet::new()),
@@ -282,6 +321,12 @@ impl Downloads {
             directory_panels: RefCell::new(HashMap::new()),
             #[cfg(target_os = "windows")]
             retained_views: RefCell::new(Vec::new()),
+            watch: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            extension_admission: Cell::new(false),
+            sites: RefCell::new(HashMap::new()),
+            prompts: RefCell::new(HashMap::new()),
+            next_prompt: Cell::new(1),
         });
         manager.initialize_recovery();
         manager
@@ -381,7 +426,11 @@ impl Downloads {
             if transfer.cancelling || transfer.record.state != DownloadState::Receiving {
                 return;
             }
-            if needs_confirmation(transfer.kept, &transfer.record.filename) {
+            if needs_confirmation(
+                transfer.kept,
+                &transfer.record.filename,
+                transfer.record.insecure,
+            ) {
                 // Received in full, but not placed among the person's files
                 // until they have been asked.
                 transfer.record.state = DownloadState::Held;
@@ -393,7 +442,7 @@ impl Downloads {
                 let profile = transfer.partition.profile();
                 drop(active);
                 self.persist(id);
-                (self.notify)(profile);
+                self.changed(profile);
                 return;
             }
             transfer.record.state = DownloadState::Finalizing;
@@ -421,7 +470,7 @@ impl Downloads {
                 return;
             }
         };
-        (self.notify)(profile);
+        self.changed(profile);
         self.work.set(self.work.get() + 1);
         let sender = self.sender.clone();
         if std::thread::Builder::new()
@@ -465,7 +514,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
         true
     }
 
@@ -514,6 +563,7 @@ impl Downloads {
     }
 
     fn terminal(&self, id: DownloadId, state: DownloadState, error: Option<DownloadError>) {
+        self.release_site(id);
         let (destination, on_started) = {
             let mut active = self.active.borrow_mut();
             let Some(transfer) = active.get_mut(&id) else {
@@ -596,6 +646,26 @@ impl Downloads {
             })
     }
 
+    /// Paused and held transfers only wait for their deadlines, so the slow
+    /// timer sleeps until the earliest one; a pending transfer is also
+    /// watched for its page going away.
+    #[cfg(target_os = "windows")]
+    fn waiting_period(&self) -> std::time::Duration {
+        let active = self.active.borrow();
+        if active
+            .values()
+            .any(|transfer| transfer.record.state == DownloadState::Pending)
+        {
+            return WAITING_TICK;
+        }
+        let now = Instant::now();
+        active
+            .values()
+            .map(|transfer| transfer.deadline.expires.saturating_duration_since(now))
+            .min()
+            .map_or(WAITING_TICK, |until| until.max(WAITING_TICK))
+    }
+
     /// The timer's period for what is going on now, and whether that is the slow one.
     fn tick_period(&self) -> (std::time::Duration, bool) {
         if self.only_waiting() {
@@ -631,7 +701,14 @@ impl Downloads {
             }
         }
         for (id, transfer) in self.active.borrow().iter() {
-            if transfer.record.state == DownloadState::Pending
+            if Self::waits_for_site(transfer) {
+                // The card stays while the person looks at another tab; the
+                // page going away or the deadline ends it.
+                if transfer.deadline.expired(Instant::now()) || !Self::site_source_current(transfer)
+                {
+                    cancel.push((*id, DownloadError::Unavailable));
+                }
+            } else if transfer.record.state == DownloadState::Pending
                 && (transfer.deadline.expired(Instant::now())
                     || (!transfer.authorized
                         && !transfer.source.as_ref().is_some_and(Source::live)))
@@ -663,7 +740,7 @@ impl Downloads {
         changed.sort();
         changed.dedup();
         for profile in changed {
-            (self.notify)(profile);
+            self.changed(profile);
         }
         #[cfg(target_os = "windows")]
         self.release_retained_views();
@@ -750,7 +827,7 @@ impl Downloads {
             #[cfg(target_os = "windows")]
             Message::RuntimeExited(clean) => self.runtime_exit_result(clean),
             Message::Preferences(id, DownloadStoreReply::Preferences(preferences)) => {
-                self.choose_destination(id, preferences)
+                self.decide(id, preferences)
             }
             Message::Preferences(id, _) => self.cancel(id, Some(DownloadError::Storage)),
             Message::Prepared(id, result) => match result {
@@ -829,7 +906,7 @@ impl Downloads {
                             }
                         }
                         drop(recent);
-                        (self.notify)(profile);
+                        self.changed(profile);
                         self.schedule_recovery(profile);
                     }
                 } else if saved {
@@ -857,7 +934,7 @@ impl Downloads {
                         if let Some(started) = on_started {
                             started();
                         }
-                        (self.notify)(profile);
+                        self.changed(profile);
                     }
                 } else {
                     self.cancel(id, Some(DownloadError::Storage));
@@ -904,9 +981,10 @@ impl Downloads {
     }
 }
 
-/// A finished download waits to be confirmed unless the person already kept it.
-fn needs_confirmation(kept: bool, filename: &str) -> bool {
-    !kept && is_dangerous_file(filename)
+/// A finished download waits to be confirmed unless the person already kept
+/// it: a type that can run, or a file that came over plain http.
+fn needs_confirmation(kept: bool, filename: &str, insecure: bool) -> bool {
+    !kept && (insecure || is_dangerous_file(filename))
 }
 
 /// Only a transfer that is receiving, still has its staging folder, and is
@@ -1109,10 +1187,13 @@ mod state_tests {
 
     #[test]
     fn a_dangerous_type_is_held_until_kept_and_then_published_like_any_other() {
-        assert!(needs_confirmation(false, "setup.exe"));
-        assert!(needs_confirmation(false, "disk.dmg"));
-        assert!(!needs_confirmation(true, "setup.exe"));
-        assert!(!needs_confirmation(false, "report.pdf"));
+        assert!(needs_confirmation(false, "setup.exe", false));
+        assert!(needs_confirmation(false, "disk.dmg", false));
+        assert!(!needs_confirmation(true, "setup.exe", false));
+        assert!(!needs_confirmation(false, "report.pdf", false));
+        // A file that came over plain http waits whatever its type, until kept.
+        assert!(needs_confirmation(false, "report.pdf", true));
+        assert!(!needs_confirmation(true, "report.pdf", true));
         // Only the file that is waiting can be kept or deleted, once.
         assert!(may_decide_held(DownloadState::Held, false, false));
         for state in [

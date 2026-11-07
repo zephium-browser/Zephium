@@ -136,6 +136,7 @@ impl Shell {
         if self.recently_closed.len() != before {
             self.project_recently_closed_if_changed();
             self.schedule_persist();
+            self.extension_sessions_changed(profile);
         }
     }
 

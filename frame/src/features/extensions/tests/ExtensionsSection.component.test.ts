@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { userEvent } from "vitest/browser";
 import "$styles/global.css";
 import "$shared/ui/Menu/surface.css";
 import ExtensionsSection from "../components/ExtensionsSection.svelte";
@@ -27,8 +26,22 @@ const native = vi.hoisted(() => ({
   invoke: vi.fn(async (..._args: unknown[]) => {}),
   consume: vi.fn((_revision: string) => true),
   open: vi.fn(async (_page: string) => {}),
+  pinned: [] as string[],
+  setPinned: vi.fn(async (_id: string, _pinned: boolean) => {}),
 }));
-vi.mock("$domain/webext", () => ({ webext: { isAvailable: () => native.available } }));
+vi.mock("$domain/webext", () => ({
+  webext: {
+    isAvailable: () => native.available,
+    byInstall: (install: string) => ({
+      id: `ext-${install}`,
+      name: `Extension ${install}`,
+      pinned: native.pinned.includes(install),
+    }),
+    pinnedCount: () => native.pinned.length,
+    MAX_PINNED: 3,
+    setPinned: native.setPinned,
+  },
+}));
 vi.mock("$domain/surface", () => ({ surface: { open: native.open } }));
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: "profile" }), activeId: () => "tab" },
@@ -60,6 +73,7 @@ beforeEach(() => {
   native.available = true;
   native.actions = [];
   native.shortcut = null;
+  native.pinned = [];
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -125,70 +139,47 @@ const panelWidth = "228px";
 
 const rect = (element: Element) => element.getBoundingClientRect();
 
-test("one row at the default column: the name and the way on at the left, each extension's button at the right", async () => {
+test("the way to manage them heads a row for each extension", async () => {
   native.actions = [action("a"), action("b"), action("c")];
   const screen = await render(ExtensionsSection);
   screen.container.style.inlineSize = panelWidth;
-  const row = screen.container.querySelector<HTMLElement>(".row")!;
+  const head = screen.container.querySelector<HTMLElement>(".row")!;
   const manage = screen.getByRole("button", { name: "Manage extensions" });
-  await expect.element(manage).toBeVisible();
   await expect.element(manage).toHaveTextContent("Extensions");
-  expect(row.offsetHeight).toBe(34);
-  expect(row.querySelector(".ui-menu-icon")).toBeNull();
-
-  const tiles = [...row.querySelectorAll<HTMLElement>("button[data-extension-install]")];
-  expect(tiles).toHaveLength(3);
-  const button = manage.element();
-  expect(rect(button).right).toBeLessThanOrEqual(rect(tiles[0]!).left);
-  expect(rect(button).left).toBe(rect(row).left);
-  // The name's text starts where the icons of the rows around it do.
-  expect(Math.round(rect(button.querySelector(".name")!).left - rect(row).left)).toBe(8);
-  // The buttons end at the row's end, each on the same line and the same size.
-  expect(rect(row).right - rect(tiles[2]!).right).toBeLessThanOrEqual(4.5);
-  for (const tile of tiles) {
-    expect(Math.abs(rect(tile).top - rect(tiles[0]!).top)).toBeLessThan(1);
-    expect(rect(tile).width).toBe(28);
-    expect(rect(tile).bottom).toBeLessThanOrEqual(rect(row).bottom);
+  expect(head.offsetHeight).toBe(34);
+  expect(Math.round(rect(manage.element().querySelector(".name")!).left - rect(head).left)).toBe(8);
+  const items = [
+    ...screen.container.querySelectorAll<HTMLElement>("button[data-extension-install]"),
+  ];
+  expect(items).toHaveLength(3);
+  for (const [index, item] of items.entries()) {
+    expect(rect(item).top).toBeGreaterThanOrEqual(rect(head).bottom);
+    if (index > 0) expect(rect(item).top).toBeGreaterThanOrEqual(rect(items[index - 1]!).bottom);
+    expect(item.textContent).toContain(`Extension ${["a", "b", "c"][index]}`);
   }
-  expect(rect(button).height).toBe(28);
 });
 
-test("the way to manage them is the name and its chevron, not the row", async () => {
-  native.actions = [action("a")];
+test("a row pins its extension to the address field, up to three", async () => {
+  native.actions = [action("a"), action("b"), action("c"), action("d")];
+  native.pinned = ["b", "c", "d"];
+  const screen = await render(ExtensionsSection);
+  await expect.element(screen.getByRole("button", { name: "Pin to sidebar" })).toBeDisabled();
+  const unpin = screen.getByRole("button", { name: "Unpin from sidebar" }).first();
+  await expect.element(unpin).toHaveAttribute("aria-pressed", "true");
+  await unpin.click();
+  expect(native.setPinned).toHaveBeenCalledExactlyOnceWith("ext-b", false);
+});
+
+test("many extensions stay inside the panel", async () => {
+  native.actions = Array.from({ length: 9 }, (_, index) => action(`x${index}`));
   const screen = await render(ExtensionsSection);
   screen.container.style.inlineSize = panelWidth;
-  const manage = screen.getByRole("button", { name: "Manage extensions" });
-  await expect.element(manage).toBeVisible();
-  const row = screen.container.querySelector<HTMLElement>(".row")!;
-  const button = manage.element();
-  const tile = row.querySelector<HTMLElement>("button[data-extension-install]")!;
-
-  expect(rect(button).width).toBeLessThan(rect(row).width / 2);
-  const gap = [
-    (rect(button).right + rect(tile).left) / 2,
-    rect(row).top + rect(row).height / 2,
-  ] as const;
-  expect(rect(tile).left - rect(button).right).toBeGreaterThan(40);
-  const under = document.elementFromPoint(...gap);
-  expect(button.contains(under)).toBe(false);
-  expect(tile.contains(under)).toBe(false);
-  await userEvent.click(under!);
-  expect(native.open).not.toHaveBeenCalled();
-
-  await expect.element(manage).toBeVisible();
-  const centre = (element: Element) =>
-    [
-      rect(element).left + rect(element).width / 2,
-      rect(element).top + rect(element).height / 2,
-    ] as const;
-  for (const part of [".name", ".chevron"]) {
-    expect(
-      document.elementFromPoint(...centre(button.querySelector(part)!))!.closest("button"),
-    ).toBe(button);
+  await expect.element(screen.getByRole("button", { name: "Extension x8" })).toBeVisible();
+  const box = rect(screen.container.querySelector(".extensions")!);
+  for (const item of screen.container.querySelectorAll("button[data-extension-install]")) {
+    expect(rect(item).left).toBeGreaterThanOrEqual(box.left);
+    expect(rect(item).right).toBeLessThanOrEqual(box.right);
   }
-  expect(tile.contains(document.elementFromPoint(...centre(tile)))).toBe(true);
-  await manage.click();
-  expect(native.open).toHaveBeenCalledExactlyOnceWith("extensions");
 });
 
 test("each button has its own hover, and the others keep none", async () => {
@@ -212,25 +203,6 @@ test("each button has its own hover, and the others keep none", async () => {
   await expect.poll(() => lit(manage)).toBe(true);
   await expect.poll(() => lit(a)).toBe(false);
   expect(lit(b)).toBe(false);
-});
-
-test("many extensions wrap beside the name instead of leaving the row", async () => {
-  native.actions = Array.from({ length: 9 }, (_, index) => action(`x${index}`));
-  const screen = await render(ExtensionsSection);
-  screen.container.style.inlineSize = panelWidth;
-  const row = screen.container.querySelector<HTMLElement>(".row")!;
-  await expect.element(screen.getByRole("button", { name: "Extension x8" })).toBeVisible();
-  expect(row.offsetHeight).toBeGreaterThan(34);
-  expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
-  const box = rect(row);
-  for (const tile of row.querySelectorAll("button[data-extension-install]")) {
-    expect(rect(tile).left).toBeGreaterThanOrEqual(box.left);
-    expect(rect(tile).right).toBeLessThanOrEqual(box.right);
-    expect(rect(tile).top).toBeGreaterThanOrEqual(box.top);
-    expect(rect(tile).bottom).toBeLessThanOrEqual(box.bottom);
-  }
-  const name = screen.container.querySelector(".manage .name")!;
-  expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth);
 });
 
 test("the keyboard reaches the manager and then each extension, each with a ring", async () => {

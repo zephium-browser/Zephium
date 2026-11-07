@@ -92,7 +92,7 @@ Work에는 여행 계획, 리서치, 비교하고 선택하기, 내 하루 계�
 
 - macOS에서는 네이티브 WebKit, Windows에서는 WebView2를 사용하므로 페이지는 시스템이 이미 최신으로 관리하는 엔진에서 실행됩니다.
 - 활성 상태가 아닌 탭은 잠들었다가 돌아오면 깨어나므로, 탭을 많이 열어 두어도 메모리 사용량이 낮게 유지됩니다.
-- 기본으로 켜져 있는 네이티브 광고 및 트래커 차단기는 Brave의 [adblock-rust](https://github.com/brave/adblock-rust)를 기반으로 하며 EasyList와 EasyPrivacy를 사용합니다. 요청은 페이지가 보내기 전에 차단되고, 페이지의 다른 요소는 클릭 한 번으로 숨길 수 있습니다.
+- 기본으로 켜져 있는 네이티브 광고 및 트래커 차단기는 Brave의 [adblock-rust](https://github.com/brave/adblock-rust)를 기반으로 하며 EasyList, EasyPrivacy, uBlock Origin 필터를 사용합니다. 요청은 페이지가 보내기 전에 차단되고, 페이지의 다른 요소는 클릭 한 번으로 숨길 수 있습니다.
 
 ### 오래 머물 수 있게 설계했습니다
 
