@@ -62,9 +62,24 @@ function details(props: Partial<ComponentProps<typeof SiteDetails>> = {}) {
   return render(SiteDetails, { page: pageOf(), open: true, ...props });
 }
 
-const CAMERA = { origin: "https://meet.example", kind: "camera", decision: "allow" } as const;
-const GEO = { origin: "https://meet.example", kind: "geolocation", decision: "block" } as const;
-const POPUPS = { origin: "https://meet.example", kind: "popups", decision: "allow" } as const;
+const CAMERA = {
+  origin: "https://meet.example",
+  kind: "camera",
+  decision: "allow",
+  scheme: null,
+} as const;
+const GEO = {
+  origin: "https://meet.example",
+  kind: "geolocation",
+  decision: "block",
+  scheme: null,
+} as const;
+const POPUPS = {
+  origin: "https://meet.example",
+  kind: "popups",
+  decision: "allow",
+  scheme: null,
+} as const;
 
 test("closed, it loads nothing and reads nothing; opening loads it and reads once", async () => {
   native.list.mockResolvedValue(view([CAMERA]));
@@ -283,7 +298,12 @@ test("a permission is its name and its choice, with no icon; zoom and Clear data
   ];
   native.list.mockResolvedValue(
     view(
-      kinds.map((kind) => ({ origin: "https://meet.example", kind, decision: "allow" as const })),
+      kinds.map((kind) => ({
+        origin: "https://meet.example",
+        kind,
+        decision: "allow" as const,
+        scheme: null,
+      })),
       { kinds },
     ),
   );

@@ -6,6 +6,8 @@ mod agent_history;
 pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser-qa")]
 pub(crate) mod profile_seed_probe;
+#[cfg(feature = "blocker-bench")]
+pub mod qa_capture;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(all(

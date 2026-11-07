@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use crate::storage_io::StoreError;
 use crate::storage_io::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use zephium_blocker::Sha256;
 use zephium_blocker::{BlockerCompileFailure, PolicyCatalog, StaticPolicyCatalog};
 
 use crate::manifest::{decode_sha256, CatalogManifest};
@@ -642,8 +642,8 @@ impl CatalogStore {
     ) -> Result<(), StoreError> {
         let previous_bytes = encode_canonical(&self.state)?;
         let next_bytes = encode_canonical(&next_state)?;
-        let previous_sha256: [u8; 32] = Sha256::digest(&previous_bytes).into();
-        let next_sha256: [u8; 32] = Sha256::digest(&next_bytes).into();
+        let previous_sha256: [u8; 32] = Sha256::digest(&previous_bytes);
+        let next_sha256: [u8; 32] = Sha256::digest(&next_bytes);
         let journal = ActivationJournal {
             schema_version: JOURNAL_SCHEMA_VERSION,
             generation: next_state.generation,
@@ -1153,7 +1153,7 @@ fn recover_journal_chain(
     state: &mut StoreState,
     state_bytes: &mut Vec<u8>,
 ) -> Result<Option<ActivatedCatalog>, StoreError> {
-    let mut state_sha256: [u8; 32] = Sha256::digest(&*state_bytes).into();
+    let mut state_sha256: [u8; 32] = Sha256::digest(&*state_bytes);
     let checkpoint = read_checkpoint(&root.join("recovery-checkpoint.json"))?;
     if checkpoint.generation > state.generation
         || (checkpoint.generation == state.generation && checkpoint.state_sha256 != state_sha256)
@@ -1295,7 +1295,7 @@ fn recover_journal_chain(
     *state = prepared.next_state.clone();
     *state_bytes = next_bytes;
     state_sha256 = prepared.next_state_sha256;
-    let recovered_sha256: [u8; 32] = Sha256::digest(&*state_bytes).into();
+    let recovered_sha256: [u8; 32] = Sha256::digest(&*state_bytes);
     if state_sha256 != recovered_sha256 {
         return Err(StoreError::JournalAmbiguous);
     }
@@ -1321,7 +1321,7 @@ fn read_checkpoint(path: &Path) -> Result<RecoveryCheckpoint, StoreError> {
             Ok(RecoveryCheckpoint {
                 schema_version: CHECKPOINT_SCHEMA_VERSION,
                 generation: 0,
-                state_sha256: Sha256::digest(bytes).into(),
+                state_sha256: Sha256::digest(bytes),
             })
         }
         Err(error) => Err(error),
@@ -1332,7 +1332,7 @@ fn write_checkpoint(root: &Path, state: &StoreState, state_bytes: &[u8]) -> Resu
     let checkpoint = RecoveryCheckpoint {
         schema_version: CHECKPOINT_SCHEMA_VERSION,
         generation: state.generation,
-        state_sha256: Sha256::digest(state_bytes).into(),
+        state_sha256: Sha256::digest(state_bytes),
     };
     atomic_write(
         &root.join("recovery-checkpoint.json"),
@@ -1911,7 +1911,7 @@ fn ingest_tuf_stage(
         aggregate_bytes = aggregate_bytes
             .checked_add(bytes.len() as u64)
             .ok_or(StoreError::StateCorrupt)?;
-        let sha256: [u8; 32] = Sha256::digest(bytes).into();
+        let sha256: [u8; 32] = Sha256::digest(bytes);
         descriptors.push(StoredTufFile {
             name: (*name).to_owned(),
             length: bytes.len() as u64,
@@ -1944,7 +1944,7 @@ pub(crate) fn seal_tuf_stage(
         descriptors.push(StoredTufFile {
             name: name.to_owned(),
             length: bytes.len() as u64,
-            sha256: Sha256::digest(bytes).into(),
+            sha256: Sha256::digest(bytes),
         });
     }
     tuf_descriptor_sha256(&descriptors)
@@ -2052,7 +2052,7 @@ fn validate_committed_tuf(
 
 fn tuf_descriptor_sha256(files: &[StoredTufFile]) -> Result<[u8; 32], StoreError> {
     let bytes = serde_json::to_vec(files).map_err(|_| StoreError::StateCorrupt)?;
-    Ok(Sha256::digest(bytes).into())
+    Ok(Sha256::digest(bytes))
 }
 
 fn tuf_file_max_bytes(name: &str, config: &RepositoryConfig) -> Option<u64> {
@@ -2210,7 +2210,7 @@ mod tests {
         let objects = root.path().canonicalize().unwrap().join("objects");
         create_private_directory(&objects).unwrap();
         let expected = b"correct";
-        let digest: [u8; 32] = Sha256::digest(expected).into();
+        let digest: [u8; 32] = Sha256::digest(expected);
         let path = objects.join(hex_digest(&digest));
 
         for corrupt in [

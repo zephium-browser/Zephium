@@ -6,6 +6,7 @@ use crate::SourceId;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeCoverage {
     pub(crate) regexes: usize,
+    pub(crate) omitted_regexes: usize,
     pub(crate) regex_limit: usize,
     pub(crate) pattern_bytes: usize,
     pub(crate) pattern_bytes_limit: usize,
@@ -19,9 +20,16 @@ pub struct RuntimeCoverage {
 }
 
 impl RuntimeCoverage {
-    /// Returns eagerly compiled regular-expression objects.
+    /// Returns eagerly prepared regular-expression entries, the omitted ones
+    /// that never match included.
     pub const fn regexes(self) -> usize {
         self.regexes
+    }
+
+    /// Returns regexes past the size limits, prepared as never matching; one
+    /// can stand for several rules the optimizer merged.
+    pub const fn omitted_regexes(self) -> usize {
+        self.omitted_regexes
     }
 
     /// Returns the hard regular-expression count ceiling.
@@ -105,6 +113,9 @@ pub enum InputDropReason {
     /// A `$domain` or `$from` condition contains a value that is not a
     /// canonicalizable DNS hostname.
     InvalidDomainPredicate,
+    /// A regular-expression rule uses syntax the runtime matcher's regex
+    /// engine cannot compile within its bounds, such as backreferences.
+    UnsupportedRegularExpression,
 }
 
 /// A counted input-drop reason.
@@ -156,6 +167,10 @@ pub enum WebKitDropReason {
     /// Wildcard/separator expansion produced a native URL regex above the
     /// per-rule compiler budget.
     UrlFilterTooLarge,
+    /// A wildcard rule of uBlock Origin's badware list. Each one would cost
+    /// WebKit on every request, and its sites are judged when a page or frame
+    /// starts loading instead.
+    NavigationChecked,
 }
 
 /// A counted WebKit conversion-loss reason.
@@ -221,7 +236,9 @@ impl SourceReport {
     }
 
     /// Returns rules whose source predicates or declared request types cannot
-    /// be evaluated by the audited WebView2 interception API.
+    /// be evaluated exactly by the audited WebView2 interception API. Source
+    /// predicates are judged against the view's main document, not the
+    /// initiating frame, and only once the view has committed one.
     pub const fn runtime_omitted_rules(&self) -> usize {
         self.runtime_omitted_rules
     }
@@ -274,6 +291,7 @@ impl SourceReport {
 pub struct WebKitCoverage {
     pub(crate) accepted_input_rules: usize,
     pub(crate) converted_input_rules: usize,
+    pub(crate) pruned_input_rules: usize,
     pub(crate) approximated_input_rules: usize,
     pub(crate) attribution_approximated_input_rules: usize,
     pub(crate) resource_approximated_input_rules: usize,
@@ -317,9 +335,15 @@ impl WebKitCoverage {
         self.blocking_rule_entries
     }
 
-    /// Returns runtime-admitted rules omitted from the WebKit artifact.
+    /// Returns wildcard block rules left out because the recorded page
+    /// corpus never matched them. They are supported, not omitted.
+    pub const fn pruned_input_rules(&self) -> usize {
+        self.pruned_input_rules
+    }
+
+    /// Returns runtime-admitted rules WebKit syntax could not represent.
     pub const fn omitted_input_rules(&self) -> usize {
-        self.accepted_input_rules - self.converted_input_rules
+        self.accepted_input_rules - self.converted_input_rules - self.pruned_input_rules
     }
 
     /// Returns the number of emitted WebKit rules, including synthetic rules.
@@ -394,8 +418,9 @@ impl CompilationReport {
             .sum()
     }
 
-    /// Returns runtime rules which cannot match any audited WebView2 request
-    /// context.
+    /// Returns runtime rules which WebView2 cannot evaluate exactly: their
+    /// source predicates see only the view's main document, or their request
+    /// types reach no audited context.
     pub fn runtime_omitted_rules(&self) -> usize {
         self.sources
             .iter()

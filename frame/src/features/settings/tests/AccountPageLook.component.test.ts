@@ -29,6 +29,7 @@ vi.mock("$domain/account/account-model", async (original) => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    chromeModal: async () => {},
     accountGet: async () => ({ account: state.account!, fault: null, retry_after: null }),
     accountUsageHistory: async () => state.history ?? history,
     profilesGet: async () => ({ status: "ok" as const, data: null }),
