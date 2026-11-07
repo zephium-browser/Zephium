@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn protected_files_aliases_and_links_are_not_staged() {
-        let scratch = tempfile::tempdir().unwrap();
+        let scratch = crate::work_files::test_tempdir();
         let root = scratch.path().canonicalize().unwrap();
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join(".git/config"), "inert hidden config").unwrap();

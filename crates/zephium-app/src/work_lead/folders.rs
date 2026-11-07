@@ -487,10 +487,7 @@ mod tests {
 
     #[test]
     fn picker_answers_persist_only_real_settled_roots_without_a_starting_path() {
-        let folder = tempfile::Builder::new()
-            .prefix("zephium-picker-home-")
-            .tempdir()
-            .unwrap();
+        let folder = crate::work_files::test_tempdir();
         let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
         let project = folder.path().join("Documents/project");
         std::fs::create_dir_all(&project).unwrap();
@@ -523,10 +520,7 @@ mod tests {
         if let Ok(home) = std::env::var("HOME") {
             assert!(chosen_root(&home).is_none());
         }
-        let folder = tempfile::Builder::new()
-            .prefix("zephium-picker-home-")
-            .tempdir()
-            .unwrap();
+        let folder = crate::work_files::test_tempdir();
         let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
         let project = folder.path().join("Documents/project");
         std::fs::create_dir_all(&project).unwrap();
