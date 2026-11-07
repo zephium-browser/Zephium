@@ -54,6 +54,11 @@ pub struct WebExtensionLoad {
     pub extension_id: String,
     pub root: std::path::PathBuf,
     pub permissions: Vec<String>,
+    /// Explicit original native-app grant bound to authenticated package provenance.
+    pub external_native_messaging: bool,
+    /// The authenticated package may ask for native-app access it declares
+    /// optional; the person answers at run time.
+    pub native_messaging_grantable: bool,
     pub match_patterns: Vec<String>,
     /// Set when the package changed since WebKit last ran it, so its
     /// background runs once and WebKit relearns what it listens for.
@@ -549,6 +554,25 @@ pub struct FindRequest {
     pub forward: bool,
 }
 
+/// The browser's own install button on a Chrome Web Store listing, shown in
+/// the page where the store's "Add to Chrome" is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreButton {
+    /// The listing's extension ID; the page shows the button only there.
+    pub extension: String,
+    pub state: StoreButtonState,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreButtonState {
+    Add,
+    Adding,
+    Remove,
+}
+
+pub const MAX_STORE_BUTTON_LABEL_CHARS: usize = 200;
+
 /// A resolved keyboard shortcut for platforms where the engine must
 /// intercept keys natively (WebView2 AcceleratorKeyPressed).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -696,10 +720,57 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Names the storage of a profile's views before the first one exists,
+    /// so native state made ahead of them, such as the profile's scriptlet
+    /// context, is made where those views will look for it. Call it before
+    /// the profile's first content policy.
+    fn prepare_profile(&self, _partition: Partition) {}
+    /// Replaces the sites in `profile` whose pages may open a new tab
+    /// without a click.
+    fn set_popup_sites(&self, _profile: ProfileId, _origins: Vec<crate::permissions::PageOrigin>) {}
+    /// Replaces the download decision `profile` keeps per site: true lets a
+    /// site save files without asking, false refuses them.
+    fn set_download_sites(
+        &self,
+        _profile: ProfileId,
+        _sites: Vec<(crate::permissions::PageOrigin, bool)>,
+    ) {
+    }
+    /// The decisions the engine itself saved in `profile`. None when it keeps
+    /// none of its own, as on macOS, or cannot read them now.
+    fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
+        done(None);
+    }
+    /// Saves one decision in the engine's own store for `profile`; None
+    /// forgets it so the site is asked again.
+    fn set_site_permission(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _kind: crate::permissions::SitePermissionKind,
+        _decision: Option<crate::permissions::RememberedPagePermission>,
+        done: crate::permissions::SitePermissionSetDone,
+    ) {
+        done(false);
+    }
     /// Replaces the Ask panel page style of one registrable site in
     /// `profile`; an empty sheet removes it. The CSS must come from the
     /// page-assist validator, never from a page or a model directly.
     fn set_page_style(&self, _profile: ProfileId, _site: String, _css: Arc<str>) {}
+    /// Clears or lists the website data of one persistent profile's engine
+    /// store. Only trusted Shell admission supplies the partition; a private
+    /// partition, another profile's or Work's own store is never reachable
+    /// from here. The completion answers once, after the engine has finished.
+    fn browsing_data_call(
+        &self,
+        _partition: Partition,
+        _call: crate::browsing_data::EngineDataCall,
+        completion: crate::browsing_data::EngineDataCompletion,
+    ) {
+        completion.finish(crate::browsing_data::EngineDataReply::Failed(
+            crate::browsing_data::EngineDataFailure::Unsupported,
+        ));
+    }
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(
@@ -736,9 +807,25 @@ pub trait Engine {
         NativeDispatch::Unsupported
     }
     fn reload(&self, id: ItemId) -> NativeDispatch;
+    /// Reloads without using the cache, where the engine offers it; a plain
+    /// reload where it does not.
+    fn hard_reload(&self, id: ItemId) -> NativeDispatch {
+        self.reload(id)
+    }
     fn stop(&self, id: ItemId) -> NativeDispatch;
     fn go_back(&self, id: ItemId) -> NativeDispatch;
     fn go_forward(&self, id: ItemId) -> NativeDispatch;
+    /// Asks for the entries the view can go back and forward to. The answer
+    /// arrives as `EngineEvent::HistoryEntries` carrying `request`.
+    fn history_entries(&self, _id: ItemId, _request: HistoryRequestId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Goes to the entry `offset` steps from the current one, negative for
+    /// back. The engine goes only if that entry is still at `url`, so a page
+    /// that navigated since the list was read is never sent somewhere else.
+    fn go_to_history_entry(&self, _id: ItemId, _offset: i32, _url: &str) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's
     /// content when `region` is `None`. The engine owns pane geometry so
@@ -754,6 +841,21 @@ pub trait Engine {
     fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Stacks the chrome over the content while a hidden sidebar is shown, or
+    /// back beneath it. Only the stacking changes; nothing is laid out.
+    /// `card` is where the column stands over the page, in window
+    /// coordinates, for a platform whose chrome must be cut to it.
+    /// `slide` follows the card as it slides in or out, rather than cutting
+    /// to it at once.
+    fn raise_chrome(
+        &self,
+        _window: WindowId,
+        _raised: bool,
+        _card: Rect,
+        _slide: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Asks the next content layout applied to `window` to move rather than
     /// jump, because it follows a deliberate change of the window's shape
     /// and not a resize. Consumed by that layout whether or not it moved
@@ -765,18 +867,75 @@ pub trait Engine {
     /// Queue admission is not application: the authoritative native scale
     /// arrives as [`EngineEvent::ZoomSettled`] carrying the same `request`.
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch;
+    /// Mutes or unmutes the current native view. The view keeps it across
+    /// navigations; a new view starts unmuted, so the shell sends it again.
     fn set_muted(&self, id: ItemId, muted: bool) -> NativeDispatch;
+    /// Whether [`Engine::set_muted`] works here, so chrome can offer it.
+    fn can_mute(&self) -> bool {
+        false
+    }
+    /// Watches the current document's media until it has none, reporting
+    /// each change as [`EngineEvent::MediaChanged`]. A tab already watched is
+    /// left as it is.
+    fn watch_media(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Acts on the media the watch reports. The new state arrives through
+    /// the watch.
+    fn media_action(&self, _id: ItemId, _action: MediaAction) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// One step of finding text in the page; `None` ends the session and
     /// clears its highlights. Results arrive as `EngineEvent::FindResult`.
     fn find(&self, id: ItemId, request: Option<FindRequest>) -> NativeDispatch;
+    /// Shows the install button on the Web Store listing `id` displays.
+    /// Clicks arrive as `EngineEvent::StoreButtonClicked`.
+    fn show_store_button(&self, _id: ItemId, _button: StoreButton) {}
     /// Result arrives as `EngineEvent::Captured`.
     fn capture(&self, id: ItemId) -> NativeDispatch;
     /// Result arrives as `EngineEvent::HtmlExtracted`.
     fn extract_html(&self, id: ItemId) -> NativeDispatch;
-    /// Asks the sandboxed page renderer to fetch and decode its best icon;
-    /// an exact 32x32 RGBA result arrives as `EngineEvent::FaviconPixels`.
-    /// Repeated calls poll the renderer-owned asynchronous decode state.
+    /// Saves the page in front through the engine's own Save As: the web
+    /// engine's dialog on Windows, a save panel offering a web archive or the
+    /// page's source on macOS. Only a page a person reads is ever saved, and
+    /// nothing is written until they choose where.
+    fn save_page(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Opens the system's saved-passwords panel at the text field focused in
+    /// the page, as the page's right-click AutoFill menu does. Nothing opens
+    /// unless the page has the keyboard and a field in it has focus. WebView2
+    /// offers saved passwords itself as a field takes focus.
+    fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Whether the engine itself tries every top-level `http` page over
+    /// https first and falls back on failure, so the browser does not.
+    fn upgrades_https_natively(&self) -> bool {
+        false
+    }
+    /// Opens the passwords panel on a page that is not encrypted, once the
+    /// person has said to fill there anyway; the page gets the keyboard back
+    /// first.
+    fn autofill_insecure_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Starts watching the committed document's icon links: what they name
+    /// arrives as `EngineEvent::FaviconCandidates` when the head first has
+    /// icons and whenever they change until the page has loaded. One call per
+    /// committed document; a later call replaces the earlier watch. Nothing is
+    /// polled.
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch;
+    /// Asks the sandboxed page renderer to fetch and decode one icon address
+    /// the page declared. An exact 32x32 RGBA result arrives as
+    /// `EngineEvent::FaviconPixels`, a failure as `FaviconRasterFailed`.
+    fn rasterize_favicon(&self, id: ItemId, url: &str) -> NativeDispatch;
+    /// Whether the engine reports each page's icon itself as
+    /// `EngineEvent::FaviconImage`, the exact one the web engine chose. The
+    /// declared candidates then only back it up.
+    fn native_favicons(&self) -> bool {
+        false
+    }
     /// Asynchronously asks the exact live native-view generation and its
     /// current committed navigation whether it is safe to discard. A missing
     /// or malformed response is deliberately not a positive result. Callers
@@ -818,9 +977,15 @@ pub trait Engine {
         content: UserContent,
     ) -> NativeDispatch;
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>);
+    /// The proxy views created from now on go through, or none for the
+    /// system's. Views already open keep what they were made with.
+    fn set_proxy(&self, _proxy: Option<crate::proxy::ProxyServer>) {}
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
+    /// Close the warm spare, if one is waiting: browsing has gone quiet, and
+    /// the next completed load warms another.
+    fn release_spare(&self) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
     /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
     /// and resumes implicitly when a view becomes visible again.
@@ -879,6 +1044,24 @@ pub trait Engine {
     fn remove_web_extension(&self, _profile: ProfileId, _load: WebExtensionLoad) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles a [`EngineEvent::WebExtensionDataRequested`].
+    fn answer_web_extension_data(
+        &self,
+        _profile: ProfileId,
+        _request: u64,
+        _reply: crate::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Tells the profile's extensions what changed in its data; sent only
+    /// for what [`EngineEvent::WebExtensionDataInterest`] said they hear.
+    fn web_extension_data_changed(
+        &self,
+        _profile: ProfileId,
+        _change: crate::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Requests one complete effective toolbar-action cohort for the exact
     /// published logical tab generation. The terminal result arrives as
     /// [`EngineEvent::ExtensionActionsSnapshotSettled`]. This query may read
@@ -925,6 +1108,44 @@ pub trait Engine {
         _request: PagePermissionRequestId,
         _settlement: PagePermissionRequestSettlement,
     ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// The person chose to continue past the certificate the tab's engine
+    /// refused at `url`. The engine accepts only an https address on a local
+    /// host, with the exact leaf it refused there; anything else is ignored.
+    fn allow_certificate_exception(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// The person chose to open the page the lists refused at `url` anyway.
+    /// Its host stays allowed in the tab's profile until the app quits.
+    fn allow_blocked_navigation(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Answers the tab's sign-in prompt with credentials, or cancels it with
+    /// None. A stale or unknown request is ignored and its credentials are
+    /// dropped.
+    fn answer_http_auth(
+        &self,
+        _item: ItemId,
+        _request: u32,
+        _credentials: Option<crate::http_auth::HttpCredentials>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Answers the download prompt `request` on `item`: true lets every
+    /// download it holds continue, false cancels them. A stale or unknown
+    /// request is ignored.
+    fn answer_download_permission(
+        &self,
+        _item: ItemId,
+        _request: u32,
+        _allow: bool,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Ends a page that stopped responding: its view is closed as if its
+    /// renderer had crashed, and `EngineEvent::Crashed` follows.
+    fn end_unresponsive_page(&self, _item: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
     /// How a page's element fullscreen is presented on this engine.
@@ -1028,6 +1249,70 @@ pub struct NavigationRequestId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ZoomRequestId(pub u64);
 
+/// Process-local correlation identity for one request of a view's history
+/// list. A list read before the page navigated again is told apart by it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HistoryRequestId(pub u64);
+
+/// Entries kept on each side of the current one.
+pub const MAX_HISTORY_SIDE: usize = 50;
+pub const MAX_HISTORY_TITLE_CHARS: usize = 200;
+
+/// One place a view can go back or forward to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    /// Steps from the current entry: negative is back, positive forward.
+    pub offset: i32,
+    pub title: String,
+    pub url: String,
+}
+
+/// The entries on each side of the current one, nearest first, so
+/// `back[0]` is one step back and `forward[0]` one step ahead.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistoryEntries {
+    pub back: Vec<HistoryEntry>,
+    pub forward: Vec<HistoryEntry>,
+}
+
+impl HistoryEntries {
+    /// Builds the list from every entry of a view in order and the index of the
+    /// current one. Entries that are not an address the browser would load,
+    /// such as the blank page a warm view starts on, are left out; the
+    /// offsets keep counting through them, because they are still steps.
+    pub fn from_session(entries: &[(String, String)], current: usize) -> Self {
+        if current >= entries.len() {
+            return Self::default();
+        }
+        let entry = |at: usize, offset: i32| {
+            let (title, url) = entries.get(at)?;
+            let web = url::Url::parse(url).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https") && crate::navigation::is_allowed(&url)
+            });
+            web.then(|| HistoryEntry {
+                offset,
+                title: crate::item::sanitize_page_title(title)
+                    .chars()
+                    .take(MAX_HISTORY_TITLE_CHARS)
+                    .collect(),
+                url: url.clone(),
+            })
+        };
+        let step = |at: usize| i32::try_from(at).unwrap_or(i32::MAX);
+        Self {
+            back: (0..current)
+                .rev()
+                .take(MAX_HISTORY_SIDE)
+                .filter_map(|at| entry(at, -step(current - at)))
+                .collect(),
+            forward: (current.saturating_add(1)..entries.len())
+                .take(MAX_HISTORY_SIDE)
+                .filter_map(|at| entry(at, step(at - current)))
+                .collect(),
+        }
+    }
+}
+
 /// Process-local correlation identity for one renderer-state discard probe.
 /// It is never persisted or accepted from page content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1047,12 +1332,27 @@ pub enum NavigationFailureReason {
     Unreachable,
     TimedOut,
     Insecure,
+    /// The server's certificate was refused, and what the engine could tell
+    /// about why.
+    Certificate(crate::certificates::CertificateProblem),
+    /// The person's filter lists refused the page.
+    Blocked(NavigationBlockReason),
     Other,
+}
+
+/// Why the filter lists refused a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeAction {
     Reload,
+    HardReload,
     GoBack,
     GoForward,
 }
@@ -1131,6 +1431,34 @@ pub struct WebExtensionAccessRequest {
     pub patterns: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionDataRequest {
+    pub profile: ProfileId,
+    pub request: u64,
+    pub call: crate::extension_data::ExtensionDataCall,
+}
+
+/// Access an extension gave up itself (`permissions.remove`), so it is not
+/// granted again when the extension next starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRemoval {
+    pub profile: ProfileId,
+    pub extension_id: String,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+/// What the sidebar's player may ask of a tab's media.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MediaAction {
+    Play,
+    Pause,
+    /// Seconds from the start.
+    Seek(f64),
+    /// Enters picture in picture, or leaves it.
+    PictureInPicture,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
     /// A native browser environment reported that a newer runtime is
@@ -1138,6 +1466,12 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// The engine can no longer prove which browser process owns this
+    /// profile's data, so it retired the profile's views and refuses new ones
+    /// until Zephium restarts. Sticky for the life of the process.
+    ProfileRestartRequired {
+        profile: ProfileId,
+    },
     /// One exact native content-policy installation attempt settled.
     ///
     /// Replacement failure reports `Retained` with the prior known-good
@@ -1224,6 +1558,15 @@ pub enum EngineEvent {
     /// An extension asked at run time for access the user must approve;
     /// answered through [`EnginePort::answer_web_extension_access`].
     WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
+    WebExtensionAccessRemoved(Box<WebExtensionAccessRemoval>),
+    /// An extension asked for the profile's history, bookmarks or closed
+    /// tabs; answered through [`EnginePort::answer_web_extension_data`].
+    WebExtensionDataRequested(Box<WebExtensionDataRequest>),
+    /// Which data changes the profile's extensions now listen to.
+    WebExtensionDataInterest {
+        profile: ProfileId,
+        interest: crate::extension_data::ExtensionDataInterest,
+    },
     /// A native command matched the reserved browser-action shortcut for one
     /// exact published runtime and resident tab. The event carries no popup
     /// geometry: Shell must rejoin it to the current action snapshot and ask
@@ -1268,11 +1611,19 @@ pub enum EngineEvent {
         request: NavigationRequestId,
     },
     /// Why the view's current main-frame navigation failed, reported before
-    /// its failure settles, only where the engine can tell (macOS; WebView2
-    /// shows its own error pages).
+    /// its failure settles.
     NavigationFailureReported {
         id: ItemId,
         reason: NavigationFailureReason,
+        /// The main-frame address that failed, from the engine's own
+        /// navigation record: for a refused certificate, and whenever
+        /// `replaced_page` is set. It may differ from the one asked for after
+        /// redirects.
+        url: Option<String>,
+        /// The engine put an empty error document in place of the page that
+        /// was showing (WebView2). The view and its history stay; chrome
+        /// shows the failure over it until another document commits.
+        replaced_page: bool,
     },
     /// The exact native zoom invocation settled. `applied_scale` is the
     /// adapter's last successfully applied scale for this view generation, so
@@ -1284,6 +1635,13 @@ pub enum EngineEvent {
         applied_scale: f64,
         succeeded: bool,
     },
+    /// The person zoomed the page itself, such as with Ctrl and the mouse
+    /// wheel, and the view already shows `scale`. It carries no request:
+    /// nothing was asked of the engine.
+    ZoomGesture {
+        id: ItemId,
+        scale: f64,
+    },
     /// A reload/history platform call returned an error. An `Ok` call is only
     /// native invocation success, never a claim that navigation completed.
     NativeActionFailed {
@@ -1294,10 +1652,36 @@ pub enum EngineEvent {
         id: ItemId,
         loading: bool,
     },
+    /// The view's native filters left it unprotected while resumed
+    /// (`degraded`), or a replaced policy left filters behind on it that a
+    /// retry on its next navigation tries to take back.
+    ContentProtectionChanged {
+        id: ItemId,
+        degraded: bool,
+        stranded_filters: u32,
+    },
     MediaCaptureChanged {
         id: ItemId,
         navigation: NavigationPresentationId,
         state: MediaCaptureState,
+    },
+    /// The page's renderer stopped responding (`responding: false`, repeated
+    /// every few seconds while it stays hung) or ran again.
+    PageResponsiveness {
+        id: ItemId,
+        responding: bool,
+    },
+    /// The page started or stopped making sound, muted or not. Native state
+    /// that page script cannot fake.
+    AudioChanged {
+        id: ItemId,
+        audible: bool,
+    },
+    /// What the page's media is doing, as page script reports it; `None`
+    /// once the document has none it can control, or is gone.
+    MediaChanged {
+        id: ItemId,
+        media: Option<Box<crate::media::MediaSnapshot>>,
     },
     /// The page entered or left element fullscreen. At most one view per
     /// engine is reported active at a time.
@@ -1309,6 +1693,27 @@ pub enum EngineEvent {
         id: ItemId,
         page_url: String,
         rgba: Vec<u8>,
+    },
+    /// The page renderer could not decode the address it was asked to.
+    FaviconRasterFailed {
+        id: ItemId,
+        page_url: String,
+        url: String,
+    },
+    /// The icon addresses a committed document's head names. Every report is
+    /// a full snapshot; `complete` marks the last one the watch makes.
+    FaviconCandidates {
+        id: ItemId,
+        page_url: String,
+        complete: bool,
+        candidates: Vec<crate::icon::IconCandidate>,
+    },
+    /// The icon the web engine itself chose for a page, as a bounded PNG. The
+    /// privileged side decodes it with the same decoders as any fetched icon.
+    FaviconImage {
+        id: ItemId,
+        page_url: String,
+        png: Vec<u8>,
     },
     /// The same renderer-side discovery as [`EngineEvent::FaviconPixels`],
     /// run on a Work page the agent read. It names no item: the icon is
@@ -1350,6 +1755,12 @@ pub enum EngineEvent {
         can_go_back: bool,
         can_go_forward: bool,
     },
+    /// The answer to `Engine::history_entries`.
+    HistoryEntries {
+        id: ItemId,
+        request: HistoryRequestId,
+        entries: HistoryEntries,
+    },
     /// The engine already owns this fully configured native child. Shell must
     /// adopt the exact id or reject the lease; it must never replay the URL.
     NativeTabOpened {
@@ -1374,11 +1785,26 @@ pub enum EngineEvent {
         app: Option<String>,
         /// The person clicked, rather than the page navigating by itself.
         user_gesture: bool,
+        /// Which document asked.
+        initiator: crate::navigation::AppLinkSource,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {
         id: ItemId,
         url: String,
+    },
+    /// The filter lists refused the page the view's main frame was about to
+    /// load; the page that was showing stays, and nothing was requested.
+    NavigationBlocked {
+        id: ItemId,
+        url: String,
+        reason: NavigationBlockReason,
+        /// The navigation the shell asked for that this refuses, when the
+        /// engine can tell; a refused link or redirect names none.
+        request: Option<NavigationRequestId>,
+        /// False where the engine itself refuses the page (WebKit's content
+        /// rules), which allowing the host cannot lift.
+        can_continue: bool,
     },
     LinkedDownloadStarted {
         id: ItemId,
@@ -1390,7 +1816,40 @@ pub enum EngineEvent {
     PermissionRequested {
         id: ItemId,
         profile: ProfileId,
+        /// The committed document that asked. The engine settles an Allow
+        /// only while this document is still the view's current one.
+        navigation: NavigationPresentationId,
         request: PagePermissionRequest,
+    },
+    /// The tab's site, or its proxy, asks the person to sign in. The native
+    /// request waits until [`Engine::answer_http_auth`] or until the
+    /// engine cancels it, which [`EngineEvent::HttpAuthEnded`] reports.
+    HttpAuthRequested {
+        id: ItemId,
+        prompt: crate::http_auth::HttpAuthPrompt,
+    },
+    /// The engine cancelled this prompt itself: the tab navigated, a newer
+    /// challenge replaced it, or it waited too long.
+    HttpAuthEnded {
+        id: ItemId,
+        request: u32,
+    },
+    /// A download waits for the person on this tab, until
+    /// [`Engine::answer_download_permission`] or until the engine gives up on
+    /// it, which [`EngineEvent::DownloadPermissionEnded`] reports.
+    DownloadPermissionRequested {
+        id: ItemId,
+        prompt: crate::permissions::DownloadPermissionPrompt,
+    },
+    /// Every download this prompt held has ended without an answer.
+    DownloadPermissionEnded {
+        id: ItemId,
+        request: u32,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; nothing is
+    /// filled until the person says to.
+    InsecureAutofillRequested {
+        id: ItemId,
     },
     DownloadRequested {
         id: ItemId,
@@ -1429,6 +1888,12 @@ pub enum EngineEvent {
         matches: u32,
         /// One-based position of the current match, when the engine knows it.
         active: Option<u32>,
+    },
+    /// A person clicked the install button the browser showed on the Web
+    /// Store listing `extension`, the page `id` has committed.
+    StoreButtonClicked {
+        id: ItemId,
+        extension: String,
     },
     SplitChanged {
         window: WindowId,
@@ -1648,5 +2113,109 @@ mod native_tab_adoption_tests {
         drop(retained);
         assert!(receive.recv().unwrap());
         assert!(receive.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod history_entries_tests {
+    use super::*;
+
+    fn session(urls: &[&str]) -> Vec<(String, String)> {
+        urls.iter()
+            .map(|url| (format!("Title of {url}"), (*url).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn entries_are_counted_in_steps_from_the_current_one_nearest_first() {
+        let list = HistoryEntries::from_session(
+            &session(&[
+                "https://a.example/",
+                "https://b.example/",
+                "https://c.example/",
+                "https://d.example/",
+                "https://e.example/",
+            ]),
+            2,
+        );
+        fn steps(entries: &[HistoryEntry]) -> Vec<(i32, &str)> {
+            entries
+                .iter()
+                .map(|entry| (entry.offset, entry.url.as_str()))
+                .collect()
+        }
+        assert_eq!(
+            steps(&list.back),
+            [(-1, "https://b.example/"), (-2, "https://a.example/")]
+        );
+        assert_eq!(
+            steps(&list.forward),
+            [(1, "https://d.example/"), (2, "https://e.example/")]
+        );
+        assert_eq!(list.back[0].title, "Title of https://b.example/");
+    }
+
+    #[test]
+    fn each_side_is_bounded_to_the_nearest_entries() {
+        let urls: Vec<String> = (0..300)
+            .map(|at| format!("https://e{at}.example/"))
+            .collect();
+        let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+        let list = HistoryEntries::from_session(&session(&urls), 150);
+        assert_eq!(list.back.len(), MAX_HISTORY_SIDE);
+        assert_eq!(list.forward.len(), MAX_HISTORY_SIDE);
+        assert_eq!(list.back[0].offset, -1);
+        assert_eq!(list.back.last().unwrap().offset, -(MAX_HISTORY_SIDE as i32));
+        assert_eq!(list.forward.last().unwrap().offset, MAX_HISTORY_SIDE as i32);
+        assert_eq!(list.back[0].url, "https://e149.example/");
+    }
+
+    #[test]
+    fn a_blank_start_page_and_unloadable_entries_are_hidden_but_still_count_as_steps() {
+        let list = HistoryEntries::from_session(
+            &session(&[
+                "about:blank",
+                "https://a.example/",
+                "javascript:alert(1)",
+                "https://current.example/",
+                "file:///etc/hosts",
+                "https://z.example/",
+            ]),
+            3,
+        );
+        assert_eq!(
+            list.back
+                .iter()
+                .map(|entry| entry.offset)
+                .collect::<Vec<_>>(),
+            [-2]
+        );
+        assert_eq!(
+            list.forward
+                .iter()
+                .map(|entry| entry.offset)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+    }
+
+    #[test]
+    fn titles_are_cleaned_and_bounded_and_a_bad_index_yields_an_empty_list() {
+        let list = HistoryEntries::from_session(
+            &[
+                (
+                    "a\u{7}\nb".to_owned() + &"x".repeat(500),
+                    "https://a.example/".into(),
+                ),
+                ("now".into(), "https://b.example/".into()),
+            ],
+            1,
+        );
+        assert!(list.back[0].title.starts_with("abxx"));
+        assert!(list.back[0].title.chars().count() <= MAX_HISTORY_TITLE_CHARS);
+        assert_eq!(
+            HistoryEntries::from_session(&session(&["https://a.example/"]), 9),
+            HistoryEntries::default()
+        );
     }
 }

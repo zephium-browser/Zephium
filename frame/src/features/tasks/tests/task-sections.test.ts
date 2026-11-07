@@ -276,3 +276,9 @@ test("a task that moves is placed again", () => {
   });
   expect(held.map((section) => section.key)).toEqual(["today"]);
 });
+
+test("search highlights keep original offsets after lowercase expansion", () => {
+  expect(matchRange("İstanbul News", "news")).toEqual([9, 13]);
+  expect(matchRange("İstanbul", "i")).toEqual([0, 1]);
+  expect(matchRange("🙂İstanbul", "tan")).toEqual([4, 7]);
+});

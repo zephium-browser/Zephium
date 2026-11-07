@@ -7,6 +7,8 @@ fn load(seed: u128) -> WebExtensionLoad {
         install: ExtensionInstallId::from(seed),
         extension_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         root: format!("/fixture/{seed}").into(),
+        external_native_messaging: false,
+        native_messaging_grantable: false,
         permissions: vec![],
         match_patterns: vec![],
         start_background: false,

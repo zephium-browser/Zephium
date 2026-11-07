@@ -37,6 +37,10 @@ export function createSearchController(options: {
   update: (snapshot: SearchSnapshot) => void;
   /** New Tab shows nothing for an empty field, so it never asks native. */
   emptyQuery?: "search" | "skip";
+  /** What the host is already showing. A controller made for a new presentation
+   *  starts from it, so its first publication keeps those rows on screen
+   *  instead of emptying the list until the first answer lands. */
+  shown?: { results: SearchResult[]; answered: string };
   id?: () => string;
 }) {
   let query = "";
@@ -45,8 +49,8 @@ export function createSearchController(options: {
   let active: SearchContext | null = null;
   let settledContext: SearchContext | null = null;
   let received = false;
-  let visible: SearchResult[] = [];
-  let answered = "";
+  let visible: SearchResult[] = options.shown?.results ?? [];
+  let answered = options.shown?.answered ?? "";
   let completion: string | null = null;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;

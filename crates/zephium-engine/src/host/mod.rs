@@ -4,9 +4,17 @@ mod agent_context;
 mod agent_cookie_source;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod automatic_pip;
+#[cfg(all(
+    feature = "blocker-bench",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
+mod browsing_data;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod certificates;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -23,13 +31,17 @@ mod element_picker;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
+mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod generic_styles;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod http_auth;
 mod lifecycle;
+mod media;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod page_open;
@@ -42,13 +54,26 @@ mod page_permissions;
 ))]
 pub(crate) mod page_reader;
 mod permits;
+mod popup_sites;
 mod profiles;
 mod resources;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod scriptlet_source;
+#[cfg(target_os = "macos")]
+mod scriptlets;
+#[cfg(target_os = "windows")]
+#[path = "scriptlets_windows.rs"]
+mod scriptlets;
 mod scripts;
+mod site_permissions;
 mod stages;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod store_button;
 mod style_worker;
 #[cfg(target_os = "macos")]
 mod webext;
+#[cfg(target_os = "macos")]
+mod webext_downloads;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(
@@ -75,6 +100,8 @@ pub(crate) use work_resource::notify_work_resource;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::try_perform_extension_command;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
@@ -159,10 +186,25 @@ struct ObservedView {
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
+    _audio_observer: Option<objc2::rc::Retained<crate::platform::macos::audio::AudioObserver>>,
+    #[cfg(target_os = "windows")]
+    audio_observer: Option<crate::platform::imp::AudioObserver>,
+    #[cfg(target_os = "macos")]
     _fullscreen_observer:
         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
     #[cfg(target_os = "windows")]
     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
+    #[cfg(target_os = "windows")]
+    _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
+    // Which icon watch of this view's document is current; an older watch's
+    // reports are ignored.
+    favicon_watch: Cell<u64>,
+    // The document an AutoFill warning was shown for; an approval fills only
+    // that document.
+    #[cfg(target_os = "macos")]
+    insecure_autofill: Cell<Option<crate::navigation_epoch::NavigationEpoch>>,
+    // The media watch's generation, and whether it is running.
+    media_watch: Cell<(u64, bool)>,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
     #[cfg(target_os = "macos")]
@@ -171,6 +213,8 @@ struct ObservedView {
     discard_settle_timer: std::cell::RefCell<Option<crate::platform::imp::ContentPolicyTimeout>>,
     #[cfg(target_os = "windows")]
     request_witness: Option<crate::platform::imp::RequestWitness>,
+    #[cfg(target_os = "windows")]
+    scriptlet: scriptlets::ViewScriptlet,
     // The DevTools window id of this exact controller, which never changes:
     // asked once instead of on every extension toolbar refresh.
     #[cfg(target_os = "windows")]
@@ -186,9 +230,15 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
+    #[cfg(target_os = "macos")]
+    popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    http_auth: Rc<http_auth::HttpAuthBroker>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
@@ -205,7 +255,10 @@ struct ObservedView {
     // platform call succeeds and is returned with every settlement, making a
     // newest-per-item result authoritative even if intermediate results are
     // coalesced before the shell processes them.
-    applied_zoom: f64,
+    //
+    // Shared with the Windows zoom listener, which tells a zoom made in the
+    // page from one this engine applied by comparing against it.
+    applied_zoom: Rc<Cell<f64>>,
     // False until privileged chrome has applied and verified this exact
     // committed main-frame URL/revision and the shell returns the same opaque
     // epoch. It is reset
@@ -229,6 +282,8 @@ struct ObservedView {
     #[cfg(target_os = "windows")]
     _accelerator_registration: Option<crate::platform::imp::AcceleratorRegistration>,
     #[cfg(target_os = "windows")]
+    _zoom_registration: crate::platform::imp::ZoomRegistration,
+    #[cfg(target_os = "windows")]
     _security_policy: crate::platform::imp::SecurityPolicy,
     // `AllowAll` also has an explicit no-op registration. An absent field is
     // never used to authorize browsing. `Option` exists solely so teardown
@@ -243,6 +298,8 @@ struct ObservedView {
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // Before `view`, so a running search is stopped while its view lives.
     find: Option<crate::platform::imp::FindSession>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    store_button: store_button::StoreButtonSlot,
     // Before `view`: the Ask panel's reader removes its scripts and
     // handlers from the view's controller while the view lives.
     #[cfg(all(
@@ -330,6 +387,8 @@ impl Drop for ObservedView {
         self.navigation.revoke();
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        self.http_auth.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -407,6 +466,8 @@ struct AppliedContentPolicy {
 struct CompilingContentPolicy {
     generation: ContentPolicyGeneration,
     cosmetics: Option<Arc<dyn zephium_core::blocker::DocumentStyleProvider>>,
+    navigation: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
+    lists: Option<Arc<dyn zephium_core::blocker::NetworkRequestPolicy>>,
     superseded: bool,
 }
 
@@ -418,7 +479,7 @@ struct QueuedContentPolicy {
 #[cfg(not(target_os = "windows"))]
 struct DeclarativeContentPolicyJob {
     digest: [u8; 32],
-    encoded: Arc<str>,
+    encoded: Arc<dyn zephium_core::blocker::DeclarativeRuleText>,
     encoded_bytes: usize,
 }
 
@@ -532,11 +593,24 @@ pub(crate) struct EngineHost {
     )>,
     #[cfg(not(target_os = "windows"))]
     preflight_cache_digests: std::collections::VecDeque<[u8; 32]>,
+    /// Compiled lists the blocker's own cache still names, such as a list
+    /// update checked in an earlier run, kept through cache collection.
+    #[cfg(not(target_os = "windows"))]
+    retained_cache_digests: Vec<[u8; 32]>,
     blocker_statistics: HashMap<ProfileId, zephium_core::blocker::BlockedLoadCounter>,
     /// Read by every view's navigation policy, so a focus change reaches
     /// views already open without touching them.
     focus_gate: focus::SharedFocusGate,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    blocker_navigation: HashMap<ProfileId, content_styles::NavigationSlot>,
+    popup_sites: HashMap<ProfileId, Rc<popup_sites::PopupSites>>,
+    /// Handed from a native new-tab request to the view it builds, so a
+    /// download that tab starts at once is asked about on its opener.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    native_tab_download_ask: Option<downloads::SiteAsk>,
+    /// Certificates people chose to continue past, per profile, until quit.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    certificate_exceptions: HashMap<ProfileId, certificates::SharedExceptions>,
     /// Ask panel page styles: validated CSS per registrable site.
     page_styles: HashMap<ProfileId, HashMap<String, Arc<str>>>,
     picker: Option<Arc<element_picker::PickerSession>>,
@@ -630,10 +704,12 @@ pub(crate) struct EngineHost {
     work_site_loads: HashMap<(ProfileId, String), u64>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
-    // Off-screen views carrying the low-memory hint, and the subset the
-    // shell's idle policy asked WebView2 to suspend.
+    // Off-screen views, and the subset the shell's idle policy asked WebView2
+    // to suspend.
     #[cfg(target_os = "windows")]
     hidden: std::collections::HashSet<ItemId>,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -644,6 +720,9 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    // A refused view's one retry.
+    #[cfg(target_os = "windows")]
+    suspend_retries: HashMap<ItemId, discard::SuspendRetry>,
     #[cfg(target_os = "windows")]
     suspend_uncertain: std::collections::HashSet<ItemId>,
     // Dormant views that skipped a cosmetic refresh, owed one when they wake.

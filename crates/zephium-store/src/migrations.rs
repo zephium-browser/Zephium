@@ -1810,6 +1810,19 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 28,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE session_snapshot_backup (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     saved_at INTEGER NOT NULL,
+                     schema_version INTEGER NOT NULL,
+                     data BLOB NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
@@ -2690,6 +2703,88 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 37,
+        up: |tx| {
+            // The icon a page declares when it differs from its origin's, so
+            // pages of one origin can wear different marks. The origin rows in
+            // `favicons` stay the fallback. The row cap is held by the write;
+            // the page key bound mirrors zephium_core::icon::MAX_PAGE_KEY_BYTES.
+            tx.execute_batch(
+                "CREATE TABLE page_favicons (
+                     page TEXT PRIMARY KEY NOT NULL CHECK (length(CAST(page AS BLOB)) <= 1024),
+                     icon BLOB NOT NULL CHECK (length(icon) = 4096),
+                     fetched_at INTEGER NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
+    Migration {
+        version: 38,
+        up: |tx| {
+            // The page zoom a person chose for a site, by registrable domain.
+            // The row cap is held by the write; the bounds mirror
+            // zephium_core::zoom.
+            tx.execute_batch(
+                "CREATE TABLE site_zoom (
+                     site TEXT PRIMARY KEY NOT NULL
+                         CHECK (length(CAST(site AS BLOB)) BETWEEN 1 AND 253),
+                     percent INTEGER NOT NULL CHECK (percent BETWEEN 30 AND 300),
+                     set_at INTEGER NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
+    Migration {
+        version: 39,
+        up: |tx| {
+            // Sites that may open new tabs without a click. The origin bound
+            // mirrors zephium_core::permissions::MAX_PAGE_ORIGIN_BYTES; the
+            // row cap is held by the write.
+            tx.execute_batch(
+                "CREATE TABLE popup_sites (
+                     origin TEXT PRIMARY KEY NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
+    Migration {
+        version: 40,
+        up: |tx| {
+            // Whether each site may save files, 1 to allow and 0 to block; a
+            // site without a row is asked. Bounds as popup_sites; the row cap
+            // is held by the write.
+            tx.execute_batch(
+                "CREATE TABLE download_sites (
+                     origin TEXT PRIMARY KEY NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0),
+                     allowed INTEGER NOT NULL CHECK (allowed IN (0, 1))
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
+    Migration {
+        version: 41,
+        up: |tx| {
+            // Kinds of application link a site may open without asking. The
+            // scheme bound mirrors zephium_core::navigation::app_link_scheme;
+            // the row cap is held by the write.
+            tx.execute_batch(
+                "CREATE TABLE app_link_sites (
+                     origin TEXT NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0),
+                     scheme TEXT NOT NULL
+                         CHECK (length(CAST(scheme AS BLOB)) BETWEEN 1 AND 64
+                                AND instr(CAST(scheme AS BLOB), X'00') = 0),
+                     PRIMARY KEY (origin, scheme)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2745,6 +2840,7 @@ mod tests {
         (25, 0xdd0b59247509897e),
         (26, 0x8cf0e4639f17eb73),
         (27, 0x6c555aa33142ef81),
+        (28, 0xdce79131820ba8c9),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2783,6 +2879,11 @@ mod tests {
         (34, 0x1a93a832df64a4a1),
         (35, 0x3c4c67becd54e02a),
         (36, 0xa35d00504cb31a89),
+        (37, 0xf0c5b1fc2e38c27c),
+        (38, 0xdd557da59b6d8285),
+        (39, 0xd1ea23938fb85e46),
+        (40, 0x7ff9aa66128d00ab),
+        (41, 0x98234ca2f9d7e6bb),
     ];
 
     #[test]
@@ -3003,7 +3104,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -3072,6 +3173,106 @@ mod tests {
     }
 
     #[test]
+    fn profile_v37_adds_page_favicons_beside_the_origin_rows_it_leaves_untouched() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..36]).unwrap();
+        conn.execute(
+            "INSERT INTO favicons(origin, content_type, icon, fetched_at)
+             VALUES ('https://example.com', 'application/x-zephium-rgba32', zeroblob(4096), 7)",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, &PROFILE[..37]).unwrap();
+        apply(&mut conn, &PROFILE[..37]).unwrap();
+        assert_eq!(validate_current(&conn, &PROFILE[..37]).unwrap(), 37);
+        let origins = |conn: &Connection| -> (i64, i64) {
+            conn.query_row(
+                "SELECT count(*), min(fetched_at) FROM favicons",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(origins(&conn), (1, 7));
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM page_favicons", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let insert = |page: &str, icon: Vec<u8>| {
+            conn.execute(
+                "INSERT INTO page_favicons(page, icon, fetched_at) VALUES (?1, ?2, 1)",
+                rusqlite::params![page, icon],
+            )
+        };
+        insert("https://example.com/docs", vec![0; 4096]).unwrap();
+        insert(
+            &format!("https://example.com/{}", "a".repeat(1000)),
+            vec![0; 4096],
+        )
+        .unwrap();
+        for refused in [
+            insert("https://example.com/docs", vec![0; 4096]),
+            insert("https://example.com/other", vec![0; 4095]),
+            insert("https://example.com/other", vec![0; 4097]),
+            insert(
+                &format!("https://example.com/{}", "a".repeat(1024)),
+                vec![0; 4096],
+            ),
+        ] {
+            assert!(refused.is_err());
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO page_favicons(page, icon, fetched_at) VALUES ('https://example.com/text', 'not a blob', 1)",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn profile_v38_adds_bounded_site_zoom_and_keeps_existing_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..37]).unwrap();
+        conn.execute(
+            "INSERT INTO history(url, title, visited_at) VALUES ('https://example.com/', 'Kept', 1)",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
+        let count = |table: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!((count("history"), count("site_zoom")), (1, 0));
+
+        let insert = |site: &str, percent: i64| {
+            conn.execute(
+                "INSERT INTO site_zoom(site, percent, set_at) VALUES (?1, ?2, 1)",
+                rusqlite::params![site, percent],
+            )
+        };
+        insert("github.com", 30).unwrap();
+        insert("example.org", 300).unwrap();
+        insert(&"a".repeat(253), 100).unwrap();
+        for refused in [
+            insert("github.com", 100),
+            insert("", 100),
+            insert(&"a".repeat(254), 100),
+            insert("low.example", 29),
+            insert("high.example", 301),
+        ] {
+            assert!(refused.is_err());
+        }
+    }
+
+    #[test]
     fn profile_v36_adds_empty_bounded_chats_and_keeps_existing_data() {
         use zephium_core::ports::store::{
             MAX_CHAT_BODY_BYTES, MAX_CHAT_ID_BYTES, MAX_CHAT_SPACE_BYTES, MAX_CHAT_TITLE_BYTES,
@@ -3085,7 +3286,7 @@ mod tests {
         .unwrap();
         apply(&mut conn, PROFILE).unwrap();
         apply(&mut conn, PROFILE).unwrap();
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
         assert_eq!(
             conn.query_row("SELECT title FROM history", [], |row| row
                 .get::<_, String>(0))
@@ -4409,7 +4610,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(36));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(41));
     }
 
     #[test]

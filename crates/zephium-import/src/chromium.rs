@@ -1,59 +1,155 @@
-//! Chrome, Brave and Edge share Chromium's profile layout: a user-data
-//! directory listing profiles in `Local State`, each with a `Bookmarks` JSON
-//! file and a `History` database. A profile signed in to an account may keep
-//! that account's bookmarks apart, in `AccountBookmarks`, in the same shape.
+//! Chrome and the browsers built on Chromium share its profile layout: a
+//! user-data directory listing profiles in `Local State`, each with a
+//! `Bookmarks` JSON file and a `History` database. A profile signed in to an
+//! account may keep that account's bookmarks apart, in `AccountBookmarks`, in
+//! the same shape.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::{child, snapshot, Browser, ImportError, ImportNode, ImportedVisit, Locations, Profile};
+use crate::{
+    child, snapshot, Browser, ImportError, ImportNode, ImportedVisit, Locations, Os, Profile,
+};
 
 /// Microseconds between 1601-01-01 (Chromium's epoch) and 1970-01-01.
 const EPOCH_OFFSET_SECONDS: i64 = 11_644_473_600;
 /// The profile's own bookmarks, and those of the account it is signed in to.
 const BOOKMARK_FILES: [&str; 2] = ["Bookmarks", "AccountBookmarks"];
+/// The id of a profile kept in the user-data directory itself, as Opera does
+/// on macOS and Linux.
+const FLAT: &str = ".";
 
-pub(crate) fn user_data(locations: &Locations, browser: Browser) -> Option<PathBuf> {
-    let parts: &[&str] = match browser {
-        Browser::Chrome => &["Google", "Chrome"],
-        Browser::Brave => &["BraveSoftware", "Brave-Browser"],
-        Browser::Edge => &["Microsoft Edge"],
-        _ => return None,
-    };
-    let root = if cfg!(target_os = "macos") {
-        parts.iter().fold(
-            locations.home.join("Library").join("Application Support"),
-            |path, part| path.join(part),
-        )
-    } else if cfg!(windows) {
-        let windows: &[&str] = match browser {
-            Browser::Chrome => &["Google", "Chrome", "User Data"],
-            Browser::Brave => &["BraveSoftware", "Brave-Browser", "User Data"],
-            Browser::Edge => &["Microsoft", "Edge", "User Data"],
-            _ => return None,
-        };
-        windows
-            .iter()
-            .fold(locations.local_app_data.clone()?, |path, part| {
-                path.join(part)
-            })
-    } else {
-        let linux: &[&str] = match browser {
-            Browser::Chrome => &["google-chrome"],
-            Browser::Brave => &["BraveSoftware", "Brave-Browser"],
-            Browser::Edge => &["microsoft-edge"],
-            _ => return None,
-        };
-        linux
-            .iter()
-            .fold(locations.home.join(".config"), |path, part| path.join(part))
-    };
-    root.is_dir().then_some(root)
+fn under(base: PathBuf, parts: &[&str]) -> PathBuf {
+    parts.iter().fold(base, |path, part| path.join(part))
+}
+
+/// Where each browser keeps its user-data directory, most likely first. On
+/// Linux the same browser may be a native package, a Flatpak or a Snap. A
+/// browser absent from a platform has no roots there.
+fn roots(locations: &Locations, browser: Browser) -> Vec<PathBuf> {
+    match locations.os {
+        Os::Mac => {
+            let parts: &[&str] = match browser {
+                Browser::Chrome => &["Google", "Chrome"],
+                Browser::Brave => &["BraveSoftware", "Brave-Browser"],
+                Browser::Edge => &["Microsoft Edge"],
+                Browser::Helium => &["net.imput.helium"],
+                Browser::Dia => &["Dia", "User Data"],
+                Browser::Vivaldi => &["Vivaldi"],
+                Browser::Opera => &["com.operasoftware.Opera"],
+                Browser::OperaGx => &["com.operasoftware.OperaGX"],
+                Browser::Comet => &["Comet"],
+                Browser::Chromium => &["Chromium"],
+                _ => return Vec::new(),
+            };
+            vec![under(locations.support(), parts)]
+        }
+        Os::Windows => {
+            let local = |parts: &[&str]| {
+                locations
+                    .local_app_data
+                    .clone()
+                    .map(|base| under(base, parts))
+            };
+            let roaming =
+                |parts: &[&str]| locations.app_data.clone().map(|base| under(base, parts));
+            match browser {
+                Browser::Chrome => local(&["Google", "Chrome", "User Data"])
+                    .into_iter()
+                    .collect(),
+                Browser::Brave => local(&["BraveSoftware", "Brave-Browser", "User Data"])
+                    .into_iter()
+                    .collect(),
+                Browser::Edge => local(&["Microsoft", "Edge", "User Data"])
+                    .into_iter()
+                    .collect(),
+                Browser::Helium => local(&["imput", "Helium", "User Data"])
+                    .into_iter()
+                    .collect(),
+                // A Store package, like Arc's.
+                Browser::Dia => locations
+                    .store_packages("TheBrowserCompany.Dia")
+                    .into_iter()
+                    .map(|package| under(package, &["LocalCache", "Local", "Dia", "User Data"]))
+                    .chain(local(&["Dia", "User Data"]))
+                    .collect(),
+                Browser::Vivaldi => local(&["Vivaldi", "User Data"]).into_iter().collect(),
+                Browser::Opera => roaming(&["Opera Software", "Opera Stable"])
+                    .into_iter()
+                    .collect(),
+                Browser::OperaGx => roaming(&["Opera Software", "Opera GX Stable"])
+                    .into_iter()
+                    .collect(),
+                Browser::Comet => local(&["Perplexity", "Comet", "User Data"])
+                    .into_iter()
+                    .collect(),
+                Browser::Chromium => local(&["Chromium", "User Data"]).into_iter().collect(),
+                _ => Vec::new(),
+            }
+        }
+        Os::Linux => {
+            let config = |parts: &[&str]| under(locations.home.join(".config"), parts);
+            let flatpak = |app: &str, parts: &[&str]| {
+                under(
+                    locations
+                        .home
+                        .join(".var")
+                        .join("app")
+                        .join(app)
+                        .join("config"),
+                    parts,
+                )
+            };
+            match browser {
+                Browser::Chrome => vec![
+                    config(&["google-chrome"]),
+                    flatpak("com.google.Chrome", &["google-chrome"]),
+                ],
+                Browser::Brave => vec![
+                    config(&["BraveSoftware", "Brave-Browser"]),
+                    flatpak("com.brave.Browser", &["BraveSoftware", "Brave-Browser"]),
+                ],
+                Browser::Edge => vec![
+                    config(&["microsoft-edge"]),
+                    flatpak("com.microsoft.Edge", &["microsoft-edge"]),
+                ],
+                Browser::Helium => vec![config(&["net.imput.helium"])],
+                Browser::Vivaldi => vec![
+                    config(&["vivaldi"]),
+                    flatpak("com.vivaldi.Vivaldi", &["vivaldi"]),
+                ],
+                Browser::Opera => vec![config(&["opera"]), flatpak("com.opera.Opera", &["opera"])],
+                Browser::Chromium => vec![
+                    config(&["chromium"]),
+                    under(
+                        locations.home.clone(),
+                        &["snap", "chromium", "common", "chromium"],
+                    ),
+                    flatpak("org.chromium.Chromium", &["chromium"]),
+                ],
+                _ => Vec::new(),
+            }
+        }
+    }
+}
+
+/// The first of the browser's roots with something to import, and its
+/// profiles. Two installs of one browser would make profile ids ambiguous, so
+/// only one is read.
+pub(crate) fn installed(
+    locations: &Locations,
+    browser: Browser,
+) -> Option<(PathBuf, Vec<Profile>)> {
+    roots(locations, browser).into_iter().find_map(|root| {
+        let found = profiles(&root);
+        (!found.is_empty()).then_some((root, found))
+    })
 }
 
 /// Profiles named in `Local State`, Default first, keeping only those with a
-/// bookmarks file or a history database.
+/// bookmarks file or a history database. A root with none of those but a
+/// profile's files of its own is a single profile (Opera's layout).
 pub(crate) fn profiles(root: &Path) -> Vec<Profile> {
     let named: Vec<(String, String)> = std::fs::read(root.join("Local State"))
         .ok()
@@ -77,21 +173,25 @@ pub(crate) fn profiles(root: &Path) -> Vec<Profile> {
         .unwrap_or_else(|| vec![("Default".into(), "Default".into())]);
     let mut profiles: Vec<Profile> = named
         .into_iter()
-        .filter_map(|(id, name)| {
-            let dir = child(root, &id)?;
-            let bookmarks = BOOKMARK_FILES.iter().any(|file| dir.join(file).is_file());
-            let history = dir.join("History").is_file();
-            (bookmarks || history).then_some(Profile {
-                id,
-                name,
-                bookmarks,
-                history,
-                essentials: false,
-            })
-        })
+        .filter_map(|(id, name)| profile(&child(root, &id)?, id, name))
         .collect();
     profiles.sort_by(|a, b| (a.id != "Default", &a.id).cmp(&(b.id != "Default", &b.id)));
+    if profiles.is_empty() {
+        profiles.extend(profile(root, FLAT.into(), "Default".into()));
+    }
     profiles
+}
+
+fn profile(dir: &Path, id: String, name: String) -> Option<Profile> {
+    let bookmarks = BOOKMARK_FILES.iter().any(|file| dir.join(file).is_file());
+    let history = dir.join("History").is_file();
+    (bookmarks || history).then_some(Profile {
+        id,
+        name,
+        bookmarks,
+        history,
+        essentials: false,
+    })
 }
 
 pub(crate) fn profile_dir(
@@ -99,10 +199,13 @@ pub(crate) fn profile_dir(
     browser: Browser,
     profile: &str,
 ) -> Result<PathBuf, ImportError> {
-    let root = user_data(locations, browser).ok_or(ImportError::Missing)?;
+    let (root, known) = installed(locations, browser).ok_or(ImportError::Missing)?;
     // Only a profile this source still lists may be read.
-    if !profiles(&root).iter().any(|known| known.id == profile) {
+    if !known.iter().any(|known| known.id == profile) {
         return Err(ImportError::Missing);
+    }
+    if profile == FLAT {
+        return Ok(root);
     }
     child(&root, profile).ok_or(ImportError::Missing)
 }
@@ -479,6 +582,265 @@ mod tests {
                 ("Profile 1", "Work", false, true)
             ]
         );
+    }
+
+    /// Where each browser's user-data directory sits under the home, spelled
+    /// out apart from the code that looks there.
+    const LAYOUTS: &[(Os, Browser, &str)] = &[
+        (
+            Os::Mac,
+            Browser::Chrome,
+            "Library/Application Support/Google/Chrome",
+        ),
+        (
+            Os::Mac,
+            Browser::Brave,
+            "Library/Application Support/BraveSoftware/Brave-Browser",
+        ),
+        (
+            Os::Mac,
+            Browser::Edge,
+            "Library/Application Support/Microsoft Edge",
+        ),
+        (
+            Os::Mac,
+            Browser::Helium,
+            "Library/Application Support/net.imput.helium",
+        ),
+        (
+            Os::Mac,
+            Browser::Dia,
+            "Library/Application Support/Dia/User Data",
+        ),
+        (
+            Os::Mac,
+            Browser::Vivaldi,
+            "Library/Application Support/Vivaldi",
+        ),
+        (
+            Os::Mac,
+            Browser::Opera,
+            "Library/Application Support/com.operasoftware.Opera",
+        ),
+        (
+            Os::Mac,
+            Browser::OperaGx,
+            "Library/Application Support/com.operasoftware.OperaGX",
+        ),
+        (Os::Mac, Browser::Comet, "Library/Application Support/Comet"),
+        (
+            Os::Mac,
+            Browser::Chromium,
+            "Library/Application Support/Chromium",
+        ),
+        (
+            Os::Windows,
+            Browser::Chrome,
+            "Local/Google/Chrome/User Data",
+        ),
+        (
+            Os::Windows,
+            Browser::Brave,
+            "Local/BraveSoftware/Brave-Browser/User Data",
+        ),
+        (Os::Windows, Browser::Edge, "Local/Microsoft/Edge/User Data"),
+        (Os::Windows, Browser::Helium, "Local/imput/Helium/User Data"),
+        (Os::Windows, Browser::Dia, "Local/Dia/User Data"),
+        (Os::Windows, Browser::Vivaldi, "Local/Vivaldi/User Data"),
+        (
+            Os::Windows,
+            Browser::Opera,
+            "Roaming/Opera Software/Opera Stable",
+        ),
+        (
+            Os::Windows,
+            Browser::OperaGx,
+            "Roaming/Opera Software/Opera GX Stable",
+        ),
+        (
+            Os::Windows,
+            Browser::Comet,
+            "Local/Perplexity/Comet/User Data",
+        ),
+        (Os::Windows, Browser::Chromium, "Local/Chromium/User Data"),
+        (Os::Linux, Browser::Chrome, ".config/google-chrome"),
+        (
+            Os::Linux,
+            Browser::Chrome,
+            ".var/app/com.google.Chrome/config/google-chrome",
+        ),
+        (
+            Os::Linux,
+            Browser::Brave,
+            ".config/BraveSoftware/Brave-Browser",
+        ),
+        (
+            Os::Linux,
+            Browser::Brave,
+            ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+        ),
+        (Os::Linux, Browser::Edge, ".config/microsoft-edge"),
+        (
+            Os::Linux,
+            Browser::Edge,
+            ".var/app/com.microsoft.Edge/config/microsoft-edge",
+        ),
+        (Os::Linux, Browser::Helium, ".config/net.imput.helium"),
+        (Os::Linux, Browser::Vivaldi, ".config/vivaldi"),
+        (
+            Os::Linux,
+            Browser::Vivaldi,
+            ".var/app/com.vivaldi.Vivaldi/config/vivaldi",
+        ),
+        (Os::Linux, Browser::Opera, ".config/opera"),
+        (
+            Os::Linux,
+            Browser::Opera,
+            ".var/app/com.opera.Opera/config/opera",
+        ),
+        (Os::Linux, Browser::Chromium, ".config/chromium"),
+        (
+            Os::Linux,
+            Browser::Chromium,
+            "snap/chromium/common/chromium",
+        ),
+        (
+            Os::Linux,
+            Browser::Chromium,
+            ".var/app/org.chromium.Chromium/config/chromium",
+        ),
+    ];
+
+    const CHROMIUM_BASED: [Browser; 10] = [
+        Browser::Chrome,
+        Browser::Brave,
+        Browser::Edge,
+        Browser::Helium,
+        Browser::Dia,
+        Browser::Vivaldi,
+        Browser::Opera,
+        Browser::OperaGx,
+        Browser::Comet,
+        Browser::Chromium,
+    ];
+
+    fn history_file(profile: &Path) {
+        std::fs::create_dir_all(profile).unwrap();
+        std::fs::write(profile.join("History"), b"").unwrap();
+    }
+
+    #[test]
+    fn each_browser_is_found_where_it_keeps_its_data_and_nowhere_else() {
+        for (os, browser, tree) in LAYOUTS {
+            let home = tempfile::tempdir().unwrap();
+            history_file(&home.path().join(tree).join("Default"));
+            let locations = Locations::scratch(*os, home.path());
+            let (root, found) = installed(&locations, *browser)
+                .unwrap_or_else(|| panic!("{} on {os:?} at {tree}", browser.name()));
+            assert_eq!(root, home.path().join(tree));
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].id, "Default");
+            assert_eq!(
+                profile_dir(&locations, *browser, "Default").unwrap(),
+                root.join("Default")
+            );
+            for other in CHROMIUM_BASED.into_iter().filter(|other| other != browser) {
+                assert!(
+                    installed(&locations, other).is_none(),
+                    "{} on {os:?} sees {}'s data",
+                    other.name(),
+                    browser.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_browser_is_only_looked_for_on_the_platforms_it_exists_on() {
+        let home = tempfile::tempdir().unwrap();
+        let locations = |os| Locations::scratch(os, home.path());
+        for browser in [Browser::Dia, Browser::Comet, Browser::OperaGx] {
+            assert!(
+                roots(&locations(Os::Linux), browser).is_empty(),
+                "{browser:?}"
+            );
+        }
+        for browser in CHROMIUM_BASED {
+            for os in [Os::Mac, Os::Windows] {
+                assert!(
+                    !roots(&locations(os), browser).is_empty(),
+                    "{browser:?} {os:?}"
+                );
+            }
+        }
+        assert!(roots(&locations(Os::Mac), Browser::Firefox).is_empty());
+        assert!(roots(&locations(Os::Mac), Browser::Arc).is_empty());
+    }
+
+    #[test]
+    fn dia_for_windows_is_a_store_package_found_by_its_name() {
+        let home = tempfile::tempdir().unwrap();
+        let package = home
+            .path()
+            .join("Local/Packages/TheBrowserCompany.Dia_ttt1ap7aakyb4");
+        history_file(&package.join("LocalCache/Local/Dia/User Data/Default"));
+        // Another app of the same publisher is not Dia.
+        history_file(
+            &home
+                .path()
+                .join("Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4")
+                .join("LocalCache/Local/Dia/User Data/Default"),
+        );
+        let locations = Locations::scratch(Os::Windows, home.path());
+        let (root, found) = installed(&locations, Browser::Dia).unwrap();
+        assert_eq!(root, package.join("LocalCache/Local/Dia/User Data"));
+        assert_eq!(found[0].id, "Default");
+    }
+
+    #[test]
+    fn the_first_install_with_something_to_import_is_the_one_read() {
+        let home = tempfile::tempdir().unwrap();
+        let locations = Locations::scratch(Os::Linux, home.path());
+        // A native install left empty, and a Flatpak that holds the data.
+        std::fs::create_dir_all(home.path().join(".config/chromium/Default")).unwrap();
+        let flatpak = home
+            .path()
+            .join(".var/app/org.chromium.Chromium/config/chromium");
+        history_file(&flatpak.join("Default"));
+        assert_eq!(installed(&locations, Browser::Chromium).unwrap().0, flatpak);
+    }
+
+    #[test]
+    fn opera_may_keep_its_one_profile_in_the_user_data_directory_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let locations = Locations::scratch(Os::Linux, home.path());
+        let root = home.path().join(".config/opera");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Bookmarks"), b"{}").unwrap();
+        history_file(&root);
+        let (_, found) = installed(&locations, Browser::Opera).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|p| (p.id.as_str(), p.bookmarks, p.history))
+                .collect::<Vec<_>>(),
+            vec![(".", true, true)]
+        );
+        assert_eq!(profile_dir(&locations, Browser::Opera, ".").unwrap(), root);
+
+        // Once it lists a profile of its own, the root's loose files are old ones.
+        std::fs::write(
+            root.join("Local State"),
+            br#"{"profile":{"info_cache":{"Default":{"name":"Person 1"}}}}"#,
+        )
+        .unwrap();
+        history_file(&root.join("Default"));
+        let (_, found) = installed(&locations, Browser::Opera).unwrap();
+        assert_eq!(
+            found.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["Default"]
+        );
+        assert!(profile_dir(&locations, Browser::Opera, ".").is_err());
     }
 
     #[test]

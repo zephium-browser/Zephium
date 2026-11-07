@@ -156,3 +156,149 @@ fn explicit_content_policy_brackets_every_first_native_navigation() {
         "native policy must install after hardening and before first navigation"
     );
 }
+
+#[test]
+fn only_tabs_a_person_reads_sign_in_or_get_certificate_exceptions() {
+    let file = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    let (tabs, rest) = file
+        .split_once("fn build_view_inner(")
+        .expect("construction lost build_view_inner")
+        .1
+        .split_once("/// Why a profile's WebView2 environment could not be established.")
+        .expect("construction lost build_view_inner's end");
+    for routed in [
+        ".with_http_auth_handler(",
+        ".route_basic_authentication(",
+        ".with_server_trust_exceptions(",
+        ".route_certificate_errors(",
+    ] {
+        assert!(tabs.contains(routed), "tabs lost {routed}");
+    }
+    // Agent, extension and bootstrap views keep cancelling every challenge.
+    for (name, source) in [
+        ("profile bootstrap", rest),
+        (
+            "macOS agent",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/platform/macos/agent_context.rs"
+            )),
+        ),
+        (
+            "Windows agent",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/platform/windows/agent_context.rs"
+            )),
+        ),
+        (
+            "macOS extension",
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/webext.rs")),
+        ),
+        (
+            "Windows extension",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/webext_windows.rs"
+            )),
+        ),
+        (
+            "Windows extension popup",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/webext_windows_popup.rs"
+            )),
+        ),
+    ] {
+        assert!(
+            !source.contains("with_http_auth_handler")
+                && !source.contains("route_basic_authentication"),
+            "{name} views must never route a sign-in challenge"
+        );
+        assert!(
+            !source.contains("with_server_trust_exceptions")
+                && !source.contains("route_certificate_errors")
+                && !source.contains("certificate_exceptions"),
+            "{name} views must never get a certificate exception"
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn an_app_link_from_another_site_is_heard_only_after_a_click() {
+    use zephium_core::navigation::AppLinkSource;
+    let tab = zephium_core::permissions::PageOrigin::parse_exact("https://news.example").unwrap();
+    let ad = zephium_core::permissions::PageOrigin::parse_exact("https://ads.example").unwrap();
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(tab.clone()), Some(&tab), false),
+        Some(AppLinkSource::Page)
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(ad.clone()), Some(&tab), false),
+        None
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(ad.clone()), Some(&tab), true),
+        Some(AppLinkSource::Frame(ad))
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Unknown, Some(&tab), false),
+        Some(AppLinkSource::Unknown)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_frame_whose_site_cannot_be_named_never_speaks_for_the_tab() {
+    use zephium_core::navigation::AppLinkSource;
+    let source = |is_main_frame, scheme: &str, host: &str| wry::AppleNavigationSource {
+        is_main_frame,
+        scheme: scheme.into(),
+        host: host.into(),
+        port: 0,
+    };
+    assert_eq!(apple_app_link_source(None), Some(AppLinkSource::Unknown));
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "", ""))),
+        None,
+        "an opaque or oversized frame origin is refused"
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "file", ""))),
+        None
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(true, "", ""))),
+        Some(AppLinkSource::Page)
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "https", "widget.example"))),
+        Some(AppLinkSource::Frame(
+            zephium_core::permissions::PageOrigin::parse_exact("https://widget.example").unwrap()
+        ))
+    );
+}
+
+#[test]
+fn a_webview2_origin_that_is_no_site_is_unknown_rather_than_the_tab() {
+    use zephium_core::navigation::AppLinkSource;
+    assert_eq!(webview2_app_link_source(None), AppLinkSource::Unknown);
+    assert_eq!(
+        webview2_app_link_source(Some("zoommtg://")),
+        AppLinkSource::Unknown
+    );
+    assert_eq!(
+        webview2_app_link_source(Some("not an origin")),
+        AppLinkSource::Unknown
+    );
+    assert_eq!(
+        webview2_app_link_source(Some("https://widget.example")),
+        AppLinkSource::Frame(
+            zephium_core::permissions::PageOrigin::parse_exact("https://widget.example").unwrap()
+        )
+    );
+}

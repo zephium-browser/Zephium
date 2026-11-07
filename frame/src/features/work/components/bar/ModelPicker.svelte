@@ -518,6 +518,11 @@
   }
 
   function returned(event: Event) {
+    // Positioning can replace the focus scope while the menu is still open.
+    if (open) {
+      event.preventDefault();
+      return;
+    }
     if (!toWords) {
       const field = trigger?.closest(".surface")?.querySelector("textarea");
       if (field && document.activeElement === field) event.preventDefault();
@@ -608,6 +613,8 @@
         aria-label={m.work_model_label()}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
+          const at = document.activeElement;
+          if (at && main?.closest(".model-menu")?.contains(at)) return;
           (list ?? main)?.focus({ preventScroll: true });
         }}
         onCloseAutoFocus={returned}

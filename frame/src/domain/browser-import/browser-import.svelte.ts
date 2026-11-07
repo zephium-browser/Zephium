@@ -62,6 +62,7 @@ let job = $state.raw<ImportJob | null>(null);
 let starting = $state(false);
 let stop: (() => void) | null = null;
 let generation = 0;
+let lifetime = 0;
 
 /** Whether native can import at all in this build. */
 export const available = () => adapter !== null;
@@ -93,12 +94,14 @@ export async function start(source: string, profile: string, kinds: ImportKind[]
   const port = adapter;
   if (!port || busy() || kinds.length === 0) return false;
   starting = true;
+  const owner = lifetime;
   try {
-    return await port.start(source, profile, kinds);
+    const accepted = await port.start(source, profile, kinds);
+    return owner === lifetime && accepted;
   } catch {
     return false;
   } finally {
-    starting = false;
+    if (owner === lifetime) starting = false;
   }
 }
 
@@ -116,6 +119,7 @@ export async function openPermissionSettings(source: string) {
 }
 
 function reset() {
+  lifetime++;
   generation++;
   stop?.();
   stop = null;

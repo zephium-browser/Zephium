@@ -4,8 +4,14 @@
 //! temporary, and scheme grants. A content match pattern is eligibility, not
 //! authority, and therefore does not appear in this module.
 
+mod downloads;
 mod page;
+mod site;
 
+pub use downloads::{
+    download_answer_allows, download_gate, DownloadGate, DownloadPermissionPrompt,
+    DOWNLOAD_PERMISSION_TIMEOUT, MAX_DOWNLOAD_SITES,
+};
 pub use page::{
     PageOrigin, PageOriginError, PagePermissionApplyError, PagePermissionCatalog,
     PagePermissionCatalogError, PagePermissionCatalogRevision, PagePermissionChange,
@@ -16,4 +22,8 @@ pub use page::{
     RememberedPagePermission, MAX_PAGE_ORIGIN_BYTES, MAX_PAGE_PERMISSION_CATALOG_RETAINED_BYTES,
     MAX_PAGE_PERMISSION_GRANTS_PER_PROFILE, MAX_PAGE_PERMISSION_PATCH_CHANGES,
     MAX_PENDING_PAGE_PERMISSION_REQUESTS,
+};
+pub use site::{
+    SitePermission, SitePermissionKind, SitePermissionSetDone, SitePermissionsDone,
+    MAX_SITE_PERMISSIONS,
 };

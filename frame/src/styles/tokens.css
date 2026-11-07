@@ -68,6 +68,7 @@
      a light one white on pale grey needs a hairline to stay crisp. */
   --shadow-card: none;
 
+  --newtab-image-dim: rgb(0 0 0 / 35%);
   --color-border: rgb(255 255 255 / 0.07);
   --color-border-strong: rgb(255 255 255 / 0.13);
 
@@ -355,6 +356,7 @@
   /* Matches the native content view's layer radius, so the new tab pane and a
      live page occupy the same shape. Changing one requires changing both. */
   --content-radius: 12px;
+  --content-radius-windows: 8px; /* how Windows rounds a page, and so a card cut over it */
 
   /* Traffic lights sit at window (7, 22) and the chrome WebView starts at the
      8px window padding, so within the chrome they span y 14..28 and end near
@@ -391,6 +393,9 @@
   --shadow-float: 0 6px 22px rgb(0 0 0 / 0.34), 0 0 0 0.5px rgb(255 255 255 / 0.08);
   --shadow-overlay: 0 12px 36px rgb(0 0 0 / 0.3), 0 0 0 0.5px rgb(255 255 255 / 0.08);
   --shadow-popover: var(--shadow-float);
+
+  /* The hidden sidebar's card's own edge, out over the page. */
+  --sidebar-card-edge: rgb(255 255 255 / 0.14);
 
   /* A rim and one wide soft drop, and nothing else. Stacked or tight shadows
      read as weight pressing down rather than as height, which is what makes a
@@ -769,6 +774,7 @@
   --shadow-raised: 0 1px 2px rgb(24 24 27 / 0.08), 0 0 0 0.5px rgb(24 24 27 / 0.06);
   --shadow-float: 0 6px 22px rgb(24 24 27 / 0.16), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
+  --sidebar-card-edge: rgb(24 24 27 / 0.12);
   --shadow-popover: var(--shadow-float);
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
   --shine: inset 0 1px 0 0 rgb(255 255 255 / 0.3);

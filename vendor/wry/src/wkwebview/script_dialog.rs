@@ -21,7 +21,13 @@ use objc2_app_kit::{
 use objc2_foundation::{ns_string, NSPoint, NSRect, NSSize, NSString};
 use objc2_web_kit::{WKFrameInfo, WKWebView};
 
+use crate::native_bounds::{bounded_nsstring, NativeStringLimit, PAGE_TITLE_LIMIT, PAGE_URL_LIMIT};
+
 const MAX_MESSAGE_CHARS: usize = 1024;
+const DIALOG_TEXT_LIMIT: NativeStringLimit = NativeStringLimit {
+  max_utf16_units: 2048,
+  max_utf8_bytes: 4096,
+};
 /// A second dialog this soon after the last offers to silence the page.
 const REPEAT_WINDOW: Duration = Duration::from_secs(10);
 
@@ -55,16 +61,21 @@ impl ScriptDialogs {
     let Some(mtm) = MainThreadMarker::new() else {
       return done(Answer::Dismissed);
     };
+    let Some(message) = dialog_text(message) else {
+      return done(Answer::Dismissed);
+    };
     let page = unsafe { webview.URL() }
       .and_then(|url| url.absoluteString())
-      .map(|url| url.to_string());
+      .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT));
     if page.is_some() && *self.silenced.borrow() == page {
       return done(Answer::Dismissed);
     }
     // A hidden tab cannot be asked; its page gets the answer of a person
     // who said no, as before. One sheet at a time per window.
     let Some(window) = webview.window().filter(|window| {
-      window.isVisible() && window.attachedSheet().is_none() && !webview.isHiddenOrHasHiddenAncestor()
+      window.isVisible()
+        && window.attachedSheet().is_none()
+        && !webview.isHiddenOrHasHiddenAncestor()
     }) else {
       return done(Answer::Dismissed);
     };
@@ -77,7 +88,7 @@ impl ScriptDialogs {
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(&title(frame)));
-    alert.setInformativeText(&NSString::from_str(&bounded(&message.to_string())));
+    alert.setInformativeText(&NSString::from_str(&bounded(&message)));
     alert.addButtonWithTitle(ns_string!("OK"));
     if !matches!(kind, Kind::Alert) {
       alert.addButtonWithTitle(ns_string!("Cancel"));
@@ -85,7 +96,10 @@ impl ScriptDialogs {
     let field: Option<Retained<NSTextField>> = match &kind {
       Kind::Prompt(default) => {
         let field = NSTextField::textFieldWithString(&NSString::from_str(default), mtm);
-        field.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(280.0, 24.0)));
+        field.setFrame(NSRect::new(
+          NSPoint::new(0.0, 0.0),
+          NSSize::new(280.0, 24.0),
+        ));
         alert.setAccessoryView(Some(&field));
         Some(field)
       }
@@ -113,7 +127,12 @@ impl ScriptDialogs {
         *silenced.borrow_mut() = page.clone();
       }
       done(if response == NSAlertFirstButtonReturn {
-        Answer::Accepted(field.as_ref().map(|field| field.stringValue().to_string()))
+        match &field {
+          Some(field) => dialog_text(&field.stringValue())
+            .map(|text| Answer::Accepted(Some(text)))
+            .unwrap_or(Answer::Dismissed),
+          None => Answer::Accepted(None),
+        }
       } else {
         Answer::Dismissed
       });
@@ -125,7 +144,8 @@ impl ScriptDialogs {
 /// Who is speaking, the way other browsers say it: the frame's own host, and
 /// that it is embedded when it is not the page itself.
 fn title(frame: &WKFrameInfo) -> String {
-  let host = unsafe { frame.securityOrigin().host() }.to_string();
+  let native_host = unsafe { frame.securityOrigin().host() };
+  let host = bounded_nsstring(&native_host, PAGE_TITLE_LIMIT).unwrap_or_default();
   match (host.is_empty(), unsafe { frame.isMainFrame() }) {
     (true, _) => "This page says".to_owned(),
     (false, true) => format!("{host} says"),
@@ -140,4 +160,26 @@ fn bounded(message: &str) -> String {
     text.push('…');
   }
   text
+}
+
+/// Copies a page-owned dialog string.
+pub(crate) fn dialog_text(value: &NSString) -> Option<String> {
+  bounded_nsstring(value, DIALOG_TEXT_LIMIT)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn native_dialog_inputs_are_bounded_before_copying() {
+    assert_eq!(
+      dialog_text(&NSString::from_str("hello")).as_deref(),
+      Some("hello")
+    );
+    for value in ["a".repeat(4097), "水".repeat(2048), "😀".repeat(2049)] {
+      assert!(dialog_text(&NSString::from_str(&value)).is_none());
+    }
+    assert!(dialog_text(&NSString::from_str(&"😀".repeat(1024))).is_some());
+  }
 }

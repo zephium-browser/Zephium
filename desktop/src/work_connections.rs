@@ -745,8 +745,13 @@ pub(crate) async fn work_sign_in_connection(
             else {
                 return Err(WorkError::Invalid);
             };
-            let tokens =
-                zephium_app::work_connections::client::keychain::oauth_store(&owner, &server.id);
+            // Browser sign-in can wait for minutes. Revoke only around actual
+            // credential writes, leaving existing and unrelated sessions usable.
+            let tokens = store.track_tokens(
+                &owner,
+                &server.id,
+                zephium_app::work_connections::client::keychain::oauth_store(&owner, &server.id),
+            );
             let signed = sign_in_flow(&app, &owner, &id, url, tokens).await;
             use zephium_app::work_connections::client::McpError;
             let check = match signed {

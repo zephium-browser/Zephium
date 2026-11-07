@@ -131,13 +131,18 @@ impl EngineHost {
         {
             let views = &self.views;
             let partitions = &self.partitions;
-            self.webext.publish(&surface, |id| {
-                partitions
-                    .get(&id)
-                    .filter(|partition| partition.profile() == profile)
-                    .and_then(|_| views.get(&id))
-                    .map(|view| crate::platform::imp::native_webview(&view.view))
-            });
+            let stages = &self.stages;
+            self.webext.publish(
+                &surface,
+                |id| {
+                    partitions
+                        .get(&id)
+                        .filter(|partition| partition.profile() == profile)
+                        .and_then(|_| views.get(&id))
+                        .map(|view| crate::platform::imp::native_webview(&view.view))
+                },
+                |window| stages.get(&window).and_then(|stage| stage.window()),
+            );
         }
         #[cfg(target_os = "windows")]
         self.reconcile_windows_extension_popup(&surface);

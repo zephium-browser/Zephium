@@ -83,7 +83,7 @@
           <span class="status"
             >{m.webext_state_failed()}{#if extension.error}: {extension.error}{/if}</span
           >
-          <button type="button" class="inline" onclick={() => void webext.retry(extension.id)}
+          <button type="button" class="inline" onclick={() => void webext.retry(extension)}
             >{m.webext_retry()}</button
           >
         </span>
@@ -103,7 +103,11 @@
       {:else}
         <span class="status"
           >{m.webext_state_version({ version: extension.version })}{#if extension.sideloaded}
-            · {m.webext_state_file()}{/if}</span
+            · {m.webext_state_file()}{/if}{#if extension.limitations.length > 0}
+            ·
+            <span class="limits" title={extension.limitations.join("\n")}
+              >{m.webext_limits_short()}</span
+            >{/if}</span
         >
       {/if}
     </span>
@@ -212,6 +216,11 @@
     color: var(--color-muted);
     white-space: nowrap;
     text-overflow: ellipsis;
+  }
+
+  .limits {
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
   }
 
   /* The action stays whole beside its message, however long the message. */

@@ -20,6 +20,8 @@ afterEach(() => vi.clearAllMocks());
 
 function extension(overrides: Partial<WebExtensionView> = {}): WebExtensionView {
   return {
+    profile_id: "profile-a",
+    install_id: "install-a",
     id: "eimadpbcbfnmbkopoojfekhnkhdbieeh",
     name: "Dark Reader",
     version: "4.9.130",
@@ -29,12 +31,14 @@ function extension(overrides: Partial<WebExtensionView> = {}): WebExtensionView 
     state: "running",
     error: null,
     warnings: [],
+    limitations: [],
     access: "all",
     sites: [],
     site_scoped: true,
     has_options: true,
     held_update: null,
     sideloaded: false,
+    pinned: false,
     ...overrides,
   };
 }
@@ -45,13 +49,22 @@ test("a running extension shows its version and site access", async () => {
   await expect.element(page.getByText("1 site")).toBeVisible();
 });
 
+test("an extension with limitations says so and lists them on hover", async () => {
+  render(ExtensionRow, { extension: extension({ limitations: ["Can't manage downloads"] }) });
+  const note = page.getByText("Some features unavailable");
+  await expect.element(note).toBeVisible();
+  await expect.element(note).toHaveAttribute("title", "Can't manage downloads");
+});
+
 test("a failed extension offers a retry", async () => {
   render(ExtensionRow, {
     extension: extension({ state: "failed", error: "The background crashed." }),
   });
   await expect.element(page.getByText(/Couldn't start: The background crashed\./)).toBeVisible();
   await userEvent.click(page.getByRole("button", { name: "Retry" }));
-  expect(actions.retry).toHaveBeenCalledWith("eimadpbcbfnmbkopoojfekhnkhdbieeh");
+  expect(actions.retry).toHaveBeenCalledWith(
+    expect.objectContaining({ profile_id: "profile-a", install_id: "install-a" }),
+  );
 });
 
 test("an update waiting for approval can be reviewed", async () => {

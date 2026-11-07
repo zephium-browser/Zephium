@@ -1524,7 +1524,9 @@ where
     /// the same budget again. `Some` ends the run.
     async fn budget(&self) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let left = self.run.remaining();
-        if left.cost_micro_usd >= FLOOR_COST && left.model_tokens >= FLOOR_TOKENS {
+        if (self.run.grant.no_usage_charge || left.cost_micro_usd >= FLOOR_COST)
+            && left.model_tokens >= FLOOR_TOKENS
+        {
             return Ok(None);
         }
         let limits = self.run.limits();
@@ -1543,10 +1545,11 @@ where
                 .min(1024),
             ..limits
         };
-        let room = grown
-            .cost_micro_usd
-            .saturating_sub(self.run.used().cost_micro_usd)
-            >= FLOOR_COST
+        let room = (self.run.grant.no_usage_charge
+            || grown
+                .cost_micro_usd
+                .saturating_sub(self.run.used().cost_micro_usd)
+                >= FLOOR_COST)
             && grown
                 .model_tokens
                 .saturating_sub(self.run.used().model_tokens)
@@ -1560,7 +1563,11 @@ where
             .run
             .ask(
                 WorkAskPurposeV1::Budget,
-                format!("Used ${spent:.2}. Keep going?"),
+                if self.run.grant.no_usage_charge {
+                    "This run reached its token limit. Keep going?".into()
+                } else {
+                    format!("Used ${spent:.2}. Keep going?")
+                },
                 vec![KEEP_GOING.into(), "Stop".into()],
                 None,
             )

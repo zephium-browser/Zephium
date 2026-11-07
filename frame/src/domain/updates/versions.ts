@@ -1,9 +1,13 @@
 import type { RuntimeSecurityAdvisory } from "$shared/ipc/bindings";
 
-const RELEASES = "https://github.com/zephium-browser/Zephium/releases/tag/v";
+const CHANGELOG = "https://zephium.app/changelog#v";
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u;
 
-export const releaseNotesUrl = (version: string) => `${RELEASES}${encodeURIComponent(version)}`;
+/** The site's changelog entry for a version: its anchor is the version with
+ *  dots as hyphens (1.0.0-beta.2 is v1-0-0-beta-2), and build metadata, which
+ *  is not part of a release's name, left off. */
+export const releaseNotesUrl = (version: string) =>
+  `${CHANGELOG}${(version.split("+")[0] ?? "").replace(/[^0-9A-Za-z]+/gu, "-")}`;
 
 function comparePrerelease(a: string | undefined, b: string | undefined): number {
   if (a === b) return 0;
@@ -50,7 +54,7 @@ export type SystemUpdateTarget = "operating_system" | "browser_runtime";
 export function systemUpdateTarget(
   advisories: readonly RuntimeSecurityAdvisory[],
 ): SystemUpdateTarget | null {
-  for (const advisory of advisories.slice(0, 5)) {
+  for (const advisory of advisories.slice(0, 6)) {
     if (advisory.kind !== "update_recommended") continue;
     if (advisory.update_target === "operating_system") return "operating_system";
     if (advisory.update_target === "browser_runtime") return "browser_runtime";

@@ -324,6 +324,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
         max_workers: 4,
     };
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -343,6 +344,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
     };
     grant.validate().unwrap();
     assert!(WorkAgentGrantV1 {
+        no_usage_charge: false,
         lead: None,
         ..grant.clone()
     }
@@ -430,6 +432,7 @@ fn parts_and_inputs_are_lead_facts_that_steps_and_objects_name() {
     let mut legacy = fact.clone();
     legacy.spec.nodes[0].capability = WorkCapability::Agent {
         grant: WorkAgentGrantV1 {
+            no_usage_charge: false,
             lead: None,
             max_turns: 8,
             max_steps: 24,

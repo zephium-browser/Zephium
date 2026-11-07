@@ -29,8 +29,9 @@ impl zephium_core::ports::notes::Notes for FakeNotes {
         done(NoteResponse::Page { items, next: None });
     }
 
-    fn release(&self, _profile: ProfileId, done: Box<dyn FnOnce() + Send>) {
+    fn release(&self, _profile: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
         done();
+        true
     }
 }
 

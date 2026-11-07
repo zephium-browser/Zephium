@@ -15,6 +15,8 @@ use std::{
 use block2::Block;
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
 use objc2::{
   define_class, msg_send,
   rc::Retained,
@@ -166,6 +168,8 @@ pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
   #[cfg(target_os = "macos")]
+  autofill_button_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
   script_dialogs: super::super::script_dialog::ScriptDialogs,
 }
 
@@ -246,7 +250,13 @@ define_class!(
       completion_handler: &Block<dyn Fn(*mut objc2_foundation::NSString)>,
     ) {
       let completion = completion_handler.copy();
-      let default = default_text.map(|text| text.to_string()).unwrap_or_default();
+      let default = match default_text {
+        Some(text) => match super::super::script_dialog::dialog_text(text) {
+          Some(text) => text,
+          None => return completion.call((null_mut(),)),
+        },
+        None => String::new(),
+      };
       self.ivars().script_dialogs.present(
         webview,
         frame,
@@ -516,6 +526,48 @@ define_class!(
       })()
     }
   }
+
+  impl WryWebViewUIDelegate {
+    // Public on macOS 27; WebKit asks through the private spelling below on
+    // the releases before it. Each is called only when this delegate answers
+    // `respondsToSelector:`, and both settle through the same broker. They
+    // sit outside the protocol impl: objc2 verifies protocol methods against
+    // the runtime's protocol, which has neither before macOS 27 and never the
+    // private one, and fails class registration if one is missing.
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+    fn request_geolocation_permission(
+      &self,
+      _webview: &WryWebView,
+      origin: &WKSecurityOrigin,
+      _frame: &WKFrameInfo,
+      decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+    ) {
+      self.geolocation_permission(origin, decision_handler);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+    fn request_geolocation_permission_before_27(
+      &self,
+      _webview: &WryWebView,
+      origin: &WKSecurityOrigin,
+      _frame: &WKFrameInfo,
+      decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+    ) {
+      self.geolocation_permission(origin, decision_handler);
+    }
+
+    // Private; WebKit sends it for a click on the AutoFill button a content
+    // world allowed to drive AutoFill put in a field.
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(_webView:didClickAutoFillButtonWithUserInfo:))]
+    fn did_click_autofill_button(&self, _webview: &WryWebView, _user_info: Option<&AnyObject>) {
+      if let Some(handler) = &self.ivars().autofill_button_handler {
+        handler();
+      }
+    }
+  }
 );
 
 impl WryWebViewUIDelegate {
@@ -603,6 +655,25 @@ impl WryWebViewUIDelegate {
   }
 
   #[cfg(target_os = "macos")]
+  fn geolocation_permission(
+    &self,
+    origin: &WKSecurityOrigin,
+    decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+  ) {
+    let kind = PermissionRequestKind::Single(PermissionKind::Geolocation);
+    if self.broker_permission_request(origin, kind, decision_handler) {
+      return;
+    }
+    let decision = self
+      .ivars()
+      .permission_handler
+      .as_ref()
+      .map(|handler| permission_decision(handler(PermissionKind::Geolocation)))
+      .unwrap_or(WKPermissionDecision::Deny);
+    decision_handler.call((decision,));
+  }
+
+  #[cfg(target_os = "macos")]
   pub fn resolve_permission_request(
     &self,
     request: PermissionRequestId,
@@ -634,6 +705,7 @@ impl WryWebViewUIDelegate {
     #[cfg(target_os = "macos")] file_upload_handler: Option<
       Box<crate::file_upload::FileUploadHandler>,
     >,
+    #[cfg(target_os = "macos")] autofill_button_handler: Option<Box<dyn Fn()>>,
   ) -> Retained<Self> {
     #[cfg(target_os = "ios")]
     let _new_window_req_handler = new_window_req_handler;
@@ -654,6 +726,8 @@ impl WryWebViewUIDelegate {
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
         #[cfg(target_os = "macos")]
         file_upload_handler,
+        #[cfg(target_os = "macos")]
+        autofill_button_handler,
         #[cfg(target_os = "macos")]
         script_dialogs: Default::default(),
       });

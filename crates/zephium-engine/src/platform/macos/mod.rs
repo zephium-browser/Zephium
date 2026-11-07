@@ -6,6 +6,8 @@ mod agent_history;
 pub(crate) mod agentic_liveness_probe;
 #[cfg(feature = "agentic-browser-qa")]
 pub(crate) mod profile_seed_probe;
+#[cfg(feature = "blocker-bench")]
+pub mod qa_capture;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(all(
@@ -31,21 +33,28 @@ mod apps;
 mod automatic_pip;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod browse_reader;
+pub(crate) mod browsing_data;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
 #[cfg(feature = "page-reader-probe")]
 mod page_reader_probe;
 #[cfg(feature = "page-reader-probe")]
 pub(crate) use page_reader_probe::run as run_page_reader_probe;
+pub(crate) mod audio;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
 pub(crate) use automatic_pip::automatic_pip;
 pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
+pub(crate) mod autofill;
 mod content_filter;
 mod credentials;
 mod find;
+mod location;
 mod native;
 mod navigation;
+pub(crate) mod page_save;
+pub mod private_api;
+pub(crate) mod proxy;
 pub(crate) use apps::{external_app_name, open_external_app};
 mod paint;
 pub(crate) use paint::{PageSnapshot, PaintCover};
@@ -73,6 +82,7 @@ pub(crate) use work_observation_presentation::retained_page_hidden;
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
 mod pointer_cover;
 mod stage;
+pub(crate) mod store_button;
 mod webext_action_icon;
 
 pub(crate) use find::{find, FindReport, FindSession};
@@ -146,6 +156,7 @@ pub use agentic_semantic_probe::{
 
 use dispatch2::DispatchObject as _;
 
+pub(crate) use location::blocked_by_system as location_blocked_by_system;
 pub(crate) use native::permission_owner_is_focused;
 #[cfg(feature = "native-page-permission-probes")]
 pub(crate) use native::run_page_permission_probe;
@@ -154,8 +165,9 @@ pub(crate) use native::run_principal_isolation_probe;
 pub(crate) use native::set_warm_spare_layout;
 pub(crate) use native::webkit as native_webview;
 pub use native::{
-    add_user_script, configure, query_document_playback, set_media_suspended, stop_loading,
-    user_script_refusal, user_style_refusal,
+    add_user_script, configure, go_to_history_entry, history_session, query_document_playback,
+    reload_ignoring_cache, set_media_suspended, stop_loading, user_script_refusal,
+    user_style_refusal,
 };
 pub(crate) use native::{native_discard_idle, page_footprint, set_background_suspension};
 pub use navigation::NavigationObserver;
@@ -414,6 +426,7 @@ pub(crate) fn new_configuration_with_data_store(
     if Retained::as_ptr(&configured_store) != Retained::as_ptr(store) {
         return Err("WKWebViewConfiguration did not retain the requested website data store");
     }
+    proxy::apply(&configuration, crate::network::current().as_ref())?;
     Ok(configuration)
 }
 

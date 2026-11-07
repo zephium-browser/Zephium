@@ -96,6 +96,26 @@ describe("search request lifecycle", () => {
     controller.dispose();
   });
 
+  it("starts from the rows the host is already showing, unsettled", async () => {
+    const snapshots: SearchSnapshot[] = [];
+    const controller = createSearchController({
+      owner,
+      send: async () => true,
+      update: (state) => snapshots.push(state),
+      shown: { results: [row("rust")], answered: "rust" },
+      id: () => "request",
+    });
+    controller.start();
+    expect(snapshots.at(0)).toMatchObject({
+      results: [row("rust")],
+      answered: "rust",
+      pending: true,
+      settled: false,
+    });
+    expect(controller.context()).toBeNull();
+    controller.dispose();
+  });
+
   it("retains rows through an empty intermediate response and settles only at the end", async () => {
     const snapshots: SearchSnapshot[] = [];
     const controller = createSearchController({

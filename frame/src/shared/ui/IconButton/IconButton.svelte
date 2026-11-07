@@ -15,6 +15,7 @@
     controls,
     class: className = "",
     onclick,
+    onmenu,
     pending = false,
     shape = "rounded",
   }: {
@@ -32,7 +33,54 @@
     controls?: string;
     class?: string;
     onclick?: (event: MouseEvent) => void;
+    /** Opens a menu for the button: on a right click, the context-menu key,
+     *  or a press held in place. The click that ends a held press is not a
+     *  click. Gets the button's box, for a menu to hang from. */
+    onmenu?: (anchor: DOMRect) => void;
   } = $props();
+
+  const HOLD_MS = 450;
+  const SLOP = 6;
+  let hold: ReturnType<typeof setTimeout> | undefined;
+  let held = false;
+  let origin = { x: 0, y: 0 };
+
+  function press(event: PointerEvent) {
+    // A held press may have opened a menu that swallowed its release, so the
+    // next press is what says the last one is over.
+    held = false;
+    clearTimeout(hold);
+    if (!onmenu || event.button !== 0) return;
+    origin = { x: event.clientX, y: event.clientY };
+    const button = event.currentTarget as HTMLElement;
+    hold = setTimeout(() => {
+      held = true;
+      onmenu(button.getBoundingClientRect());
+    }, HOLD_MS);
+  }
+
+  function drift(event: PointerEvent) {
+    if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > SLOP) clearTimeout(hold);
+  }
+
+  function release() {
+    clearTimeout(hold);
+  }
+
+  function menu(event: MouseEvent) {
+    if (!onmenu) return;
+    event.preventDefault();
+    clearTimeout(hold);
+    onmenu((event.currentTarget as HTMLElement).getBoundingClientRect());
+  }
+
+  function click(event: MouseEvent) {
+    if (held) {
+      held = false;
+      return;
+    }
+    onclick?.(event);
+  }
 </script>
 
 <button
@@ -47,7 +95,12 @@
   aria-controls={controls}
   disabled={disabled || pending}
   aria-busy={pending || undefined}
-  {onclick}
+  onclick={click}
+  onpointerdown={press}
+  onpointermove={drift}
+  onpointerup={release}
+  onpointercancel={release}
+  oncontextmenu={menu}
   class={["icon-button", active && "icon-button-active", className]}
   style:--icon-button-size={`${buttonSize}px`}
 >

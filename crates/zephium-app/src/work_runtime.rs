@@ -353,6 +353,7 @@ impl WorkNodeAttempt {
     /// restart the attempt.
     pub fn probe(&self) -> WorkAttemptProbe {
         WorkAttemptProbe {
+            no_usage_charge: matches!(&self.spec.capability, WorkCapability::Agent { grant } if grant.no_usage_charge),
             screenshots: self.screenshots.clone(),
             lifetime: self.lifetime.clone(),
             basis_revision: self.basis_revision.clone(),
@@ -1150,6 +1151,7 @@ impl Drop for WorkPersonHold {
 }
 #[derive(Clone)]
 pub struct WorkAttemptProbe {
+    no_usage_charge: bool,
     screenshots: Arc<crate::work_screenshots::consent::RunScreenshots>,
     lifetime: Lifetime,
     basis_revision: Arc<Mutex<WorkRevision>>,
@@ -1165,6 +1167,11 @@ pub struct WorkAttemptProbe {
     node: WorkPlanNodeId,
 }
 impl WorkAttemptProbe {
+    /// Original admitted pricing fact; it grants no page or provider authority.
+    pub fn no_usage_charge(&self) -> bool {
+        self.no_usage_charge
+    }
+
     pub(crate) async fn wait_image_cancelled(&self) {
         let mut receiver = self.lifetime.state().cancellation.subscribe();
         loop {

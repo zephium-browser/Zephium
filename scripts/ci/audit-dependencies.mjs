@@ -1,5 +1,6 @@
 // GHSA-vfj7-8cjw-p6xm is excepted only for the exact locally patched
-// braces 3.0.3 files. All other high/critical findings and registry errors fail.
+// braces 3.0.3 files. High/critical findings and registry errors fail.
+// All moderate findings warn for review, regardless of dependency exposure.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, realpathSync } from "node:fs";
@@ -61,17 +62,23 @@ function installedEntry(path) {
   return resolve(dirname(entry), "index.js");
 }
 
-export function inspect(report, verify = verifyBraces) {
+export function inspect(report, verify = verifyBraces, warn = console.warn) {
   assert.ok(report && !report.error && report.advisories && report.metadata, "Registry audit did not return a complete report");
-  const serious = Object.values(report.advisories).filter((item) => ["high", "critical"].includes(item.severity));
-  assert.equal(serious.length, report.metadata.vulnerabilities.high + report.metadata.vulnerabilities.critical,
+  const severities = ["moderate", "high", "critical"];
+  const serious = Object.values(report.advisories).filter((item) => severities.includes(item.severity));
+  assert.equal(serious.length, severities.reduce((total, severity) => total + (report.metadata.vulnerabilities[severity] ?? 0), 0),
     "Audit summary and advisory details disagree");
   const checked = new Set();
   const failures = [];
   for (const finding of Object.values(report.advisories)) {
-    if (!["high", "critical"].includes(finding.severity)) continue;
+    if (!severities.includes(finding.severity)) continue;
+    const description = `${finding.module_name}: ${finding.github_advisory_id ?? finding.title}`;
+    if (finding.severity === "moderate") {
+      warn(`Moderate advisory; review required: ${description}`);
+      continue;
+    }
     if (finding.github_advisory_id !== advisory || finding.module_name !== "braces") {
-      failures.push(`${finding.module_name}: ${finding.github_advisory_id ?? finding.title}`);
+      failures.push(description);
       continue;
     }
     assert.ok(finding.findings?.length, "Missing affected dependency paths");
@@ -97,5 +104,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     {cwd: root, encoding: "utf8", shell: windows, maxBuffer: 16 * 1024 * 1024});
   assert.ok(!result.error && [0, 1].includes(result.status), result.stderr || "Audit process failed");
   const checked = inspect(JSON.parse(result.stdout));
-  console.log(`Full dependency audit passed; ${checked} installed braces patch verified with hostile-pattern regression tests.`);
+  console.log(`Dependency audit gate passed (review all moderate warnings); ${checked} installed braces patch verified with hostile-pattern regression tests.`);
 }

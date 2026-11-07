@@ -39,6 +39,10 @@ pub struct Items {
     // use TabState::url, which changes only after an authoritative native
     // UrlChanged observation.
     pending_navigations: HashMap<ItemId, PendingNavigation>,
+    /// The address a native view was created for, until its first document
+    /// commits. A first load that fails has no page to show, so this is what
+    /// chrome names and offers again, also for restored tabs.
+    opening: HashMap<ItemId, Url>,
     next_navigation_request: u64,
 }
 
@@ -96,6 +100,36 @@ impl Items {
         }
         tab.capture = capture;
         true
+    }
+
+    /// Applies the engine's report of sound; true when the speaker changed.
+    pub fn observe_audio(&mut self, id: ItemId, audible: bool, now: std::time::Instant) -> bool {
+        self.tab_mut(id)
+            .filter(|tab| tab.view)
+            .is_some_and(|tab| tab.audio.observe(audible, now))
+    }
+
+    /// Hides the speaker of a tab quiet past its hold; true when it did.
+    pub fn settle_audio(&mut self, id: ItemId, now: std::time::Instant) -> bool {
+        self.tab_mut(id).is_some_and(|tab| tab.audio.settle(now))
+    }
+
+    /// The tab's native view or its process is gone, and its sound with it.
+    pub fn silence_audio(&mut self, id: ItemId) -> bool {
+        self.tab_mut(id).is_some_and(|tab| tab.audio.silence())
+    }
+
+    /// Records the person's mute for a web tab; true when it changed.
+    pub fn set_muted(&mut self, id: ItemId, muted: bool) -> bool {
+        let Some(tab) = self
+            .tab_mut(id)
+            .filter(|tab| tab.content == TabContent::Web)
+        else {
+            return false;
+        };
+        let changed = tab.audio.muted != muted;
+        tab.audio.muted = muted;
+        changed
     }
 
     pub fn roots(&self, placement: Placement) -> &[ItemId] {
@@ -186,7 +220,8 @@ impl Items {
     ) -> bool {
         // Settings is a window-scoped browser page. Keep the enum variant only
         // to decode and discard snapshots produced by an earlier QA build.
-        if page == BrowserOwnedTab::Settings {
+        // A source tab carries a document, so it has its own constructor.
+        if matches!(page, BrowserOwnedTab::Settings | BrowserOwnedTab::Source) {
             return false;
         }
         self.insert(Item {
@@ -194,6 +229,19 @@ impl Items {
             parent: None,
             placement,
             kind: ItemKind::Tab(TabState::browser_owned(page)),
+        })
+    }
+
+    /// Inserts a tab that shows the source of a page. Any number may exist,
+    /// each titled for its page; none is ever persisted.
+    pub fn insert_source_tab(&mut self, id: ItemId, placement: Placement, title: &str) -> bool {
+        let mut tab = TabState::browser_owned(BrowserOwnedTab::Source);
+        tab.title = sanitize_page_title(title);
+        self.insert(Item {
+            id,
+            parent: None,
+            placement,
+            kind: ItemKind::Tab(tab),
         })
     }
 
@@ -289,6 +337,7 @@ impl Items {
         while let Some(next) = stack.pop() {
             stack.extend(self.children.remove(&next).unwrap_or_default());
             self.pending_navigations.remove(&next);
+            self.opening.remove(&next);
             if let Some(removed) = self.items.remove(&next) {
                 if removed.tab().is_some_and(TabState::has_view) {
                     effects.push(Effect::Close { id: next });
@@ -298,21 +347,19 @@ impl Items {
         effects
     }
 
-    /// Removes items whose ownership is directly proven by a profile's
-    /// favorites placement or by the exact `Spaces` aggregate removal proof.
-    /// A space absent from that proof is never inferred to belong to the
-    /// profile. Returns at most `MAX_SESSION_ITEMS` native close effects.
+    /// Removes items whose ownership is directly proven by the exact `Spaces`
+    /// aggregate removal proof. A space absent from that proof is never
+    /// inferred to belong to the profile. Returns at most `MAX_SESSION_ITEMS`
+    /// native close effects.
     pub fn remove_for_profile(&mut self, spaces: &RemovedProfileSpaces) -> Vec<Effect> {
         let removed_spaces: HashSet<_> = spaces.ids().iter().copied().collect();
         let owned: HashSet<ItemId> = self
             .items
             .iter()
             .filter_map(|(id, item)| {
-                let owned = match item.placement {
-                    Placement::Favorites { profile } => profile == spaces.profile(),
-                    Placement::Space { space, .. } => removed_spaces.contains(&space),
-                };
-                owned.then_some(*id)
+                let (Placement::Favorites { space } | Placement::Space { space, .. }) =
+                    item.placement;
+                removed_spaces.contains(&space).then_some(*id)
             })
             .collect();
         if owned.is_empty() {
@@ -367,6 +414,7 @@ impl Items {
         }
         for id in ordered {
             self.pending_navigations.remove(&id);
+            self.opening.remove(&id);
             self.items.remove(&id);
         }
         self.roots.retain(|_, roots| !roots.is_empty());
@@ -400,13 +448,24 @@ impl Items {
             self.pending_navigations.remove(&id);
             return Vec::new();
         };
-        tab.failure = None;
-        let url = url.to_string();
+        // An error document still fills the view until the next one commits.
+        if !tab.failure_covers_page() {
+            tab.failure = None;
+        }
         if tab.view {
-            vec![Effect::Navigate { id, url, request }]
+            vec![Effect::Navigate {
+                id,
+                url: url.to_string(),
+                request,
+            }]
         } else {
             tab.view = true;
-            vec![Effect::CreateView { id, url }]
+            let effect = Effect::CreateView {
+                id,
+                url: url.to_string(),
+            };
+            self.opening.insert(id, url);
+            vec![effect]
         }
     }
 
@@ -473,10 +532,12 @@ impl Items {
             if tab.content == TabContent::Web && !tab.view {
                 if let Some(url) = tab.url.clone() {
                     tab.view = true;
-                    return vec![Effect::CreateView {
+                    let effect = Effect::CreateView {
                         id,
                         url: url.to_string(),
-                    }];
+                    };
+                    self.opening.insert(id, url);
+                    return vec![effect];
                 }
             }
         }
@@ -514,6 +575,7 @@ impl Items {
     /// exact view generation and released its same-id reuse gate.
     pub fn mark_view_discarded(&mut self, id: ItemId) -> bool {
         self.pending_navigations.remove(&id);
+        self.opening.remove(&id);
         let Some(tab) = self.tab_mut(id) else {
             return false;
         };
@@ -522,8 +584,13 @@ impl Items {
         }
         tab.view = false;
         tab.capture = None;
+        tab.audio.silence();
         tab.loading = false;
         tab.lifecycle = Lifecycle::Hibernated;
+        // The error document went with the view.
+        if tab.failure_covers_page() {
+            tab.failure = None;
+        }
         true
     }
 
@@ -542,14 +609,39 @@ impl Items {
     /// Roll back the optimistic `view` bit when the native engine cannot
     /// create a controller. The next explicit navigation/activation can then
     /// retry instead of leaving an unrecoverable blank tab.
+    /// A tab whose page could not be opened keeps its address and says why,
+    /// with the address to try again, instead of an empty pane.
     pub fn view_creation_failed(&mut self, id: ItemId) {
-        self.pending_navigations.remove(&id);
+        let pending = self
+            .pending_navigations
+            .remove(&id)
+            .and_then(|pending| pending.url);
+        let opening = self.opening.remove(&id);
         if let Some(tab) = self.tab_mut(id) {
             tab.view = false;
             tab.capture = None;
+            tab.audio.silence();
             tab.loading = false;
             tab.lifecycle = Lifecycle::Hibernated;
-            tab.title = "Page failed to open".into();
+            if tab.content == TabContent::Web && tab.failure.is_none() {
+                if let Some(url) = pending.or(opening).or_else(|| tab.url.clone()) {
+                    tab.failure = Some(Box::new(crate::item::NavigationFailure {
+                        url,
+                        reason: crate::ports::engine::NavigationFailureReason::Other,
+                        covers_page: false,
+                        can_continue: false,
+                    }));
+                }
+            }
+            if tab.url.is_none() {
+                if let Some(host) = tab
+                    .failure
+                    .as_ref()
+                    .and_then(|failure| failure.url.host_str())
+                {
+                    tab.title = host.to_owned();
+                }
+            }
         }
     }
 
@@ -572,10 +664,21 @@ impl Items {
         }
     }
 
+    /// A sign-in prompt holds the page's load, so nothing else replaces it
+    /// while it waits; a newer sign-in prompt does.
     pub fn set_page_request(&mut self, id: ItemId, request: crate::item::PageRequest) -> bool {
+        use crate::item::PageRequest;
         match self.tab_mut(id) {
-            Some(tab) if tab.content == TabContent::Web => {
+            Some(tab)
+                if tab.content == TabContent::Web
+                    && (matches!(request, PageRequest::HttpAuth(_))
+                        || !matches!(
+                            tab.page_request.as_deref(),
+                            Some(PageRequest::HttpAuth(_))
+                        )) =>
+            {
                 tab.page_request = Some(Box::new(request));
+                tab.page_request_serial = tab.page_request_serial.wrapping_add(1);
                 true
             }
             _ => false,
@@ -604,7 +707,30 @@ impl Items {
             _ => false,
         }
     }
+    /// Whether `url` is the blank page a refused first page is built on,
+    /// which never replaces the explanation.
+    pub fn is_refused_stand_in(&self, id: ItemId, url: &Url) -> bool {
+        url.as_str() == "about:blank"
+            // A blank page the person asked for is theirs, and commits.
+            && self
+                .pending_navigations
+                .get(&id)
+                .is_none_or(|pending| pending.url.as_ref() != Some(url))
+            && self
+                .tab(id)
+                .and_then(|tab| tab.failure.as_deref())
+                .is_some_and(|failure| {
+                    matches!(
+                        failure.reason,
+                        crate::ports::engine::NavigationFailureReason::Blocked(_)
+                    )
+                })
+    }
+
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
+        if self.is_refused_stand_in(id, &url) {
+            return false;
+        }
         if let Some(tab) = self.tab_mut(id) {
             if tab.content != TabContent::Web {
                 return false;
@@ -613,10 +739,28 @@ impl Items {
             tab.page_request = None;
             tab.failure = None;
             self.pending_navigations.remove(&id);
+            self.opening.remove(&id);
             true
         } else {
             false
         }
+    }
+
+    /// A tab whose only page was refused before it loaded keeps neither its
+    /// address nor its title, as a new tab would.
+    pub fn forget_unloaded_page(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.url = None;
+        tab.title = TabState::new().title;
+        true
+    }
+
+    /// Drops the tab's failure, so the page under it, if any, shows again.
+    pub fn clear_navigation_failure(&mut self, id: ItemId) -> bool {
+        self.tab_mut(id)
+            .is_some_and(|tab| tab.failure.take().is_some())
     }
 
     /// Clears only the still-current intent. A delayed failure from an older
@@ -632,25 +776,108 @@ impl Items {
         current
     }
 
-    /// Remembers why the address the person asked for did not load, so chrome
-    /// can say so and offer it again. A page's own navigation has no pending
-    /// address and is left alone.
+    /// Remembers why the address the person asked for, or the one a view was
+    /// opened for, did not load, so chrome can say so and offer it again. A
+    /// page's own navigation away from a shown document is left alone, unless
+    /// the engine replaced that document (`replaced_page`): then the failure
+    /// covers the view whoever started the navigation. `failed` is the
+    /// address the engine itself names, when it names one.
     pub fn record_navigation_failure(
         &mut self,
         id: ItemId,
         reason: crate::ports::engine::NavigationFailureReason,
+        failed: Option<Url>,
+        replaced_page: bool,
     ) -> bool {
-        let Some(url) = self
+        let asked = self
             .pending_navigations
             .get(&id)
             .and_then(|pending| pending.url.clone())
-        else {
+            .or_else(|| self.opening.get(&id).cloned());
+        // A refused page requested nothing, and a tab's first one may be
+        // refused before its view is counted; it covers either way.
+        let refused = matches!(
+            reason,
+            crate::ports::engine::NavigationFailureReason::Blocked(_)
+        );
+        let covers_page =
+            replaced_page && (refused || self.tab(id).is_some_and(TabState::has_view));
+        if asked.is_none() && !covers_page {
+            return false;
+        }
+        let Some(url) = failed.or(asked) else {
             return false;
         };
         let Some(tab) = self.tab_mut(id) else {
             return false;
         };
-        tab.failure = Some(Box::new(crate::item::NavigationFailure { url, reason }));
+        tab.failure = Some(Box::new(crate::item::NavigationFailure {
+            url,
+            reason,
+            covers_page,
+            can_continue: false,
+        }));
+        true
+    }
+
+    /// A failure of `url` the tab no longer waits on, such as an https try
+    /// whose http load could not be sent: it shows as any failed load does.
+    pub fn record_failure_at(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationFailureReason,
+        url: Url,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.failure = Some(Box::new(crate::item::NavigationFailure {
+            url,
+            reason,
+            covers_page: false,
+            can_continue: false,
+        }));
+        true
+    }
+
+    /// A page the lists refused covers the tab. A refusal is dropped when the
+    /// person has since asked for something else: it must name the pending
+    /// request, or, unattributed, the very address that request is for.
+    pub fn record_refusal(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationBlockReason,
+        url: Url,
+        request: Option<NavigationRequestId>,
+        can_continue: bool,
+    ) -> bool {
+        if let Some(pending) = self.pending_navigations.get(&id) {
+            let current = match request {
+                Some(request) => request == pending.request,
+                // A view's first load reaches the engine without a request,
+                // so a refusal where it redirects names none and is still it.
+                None => {
+                    pending.url.as_ref() == Some(&url)
+                        || (pending.url.is_some() && self.opening.get(&id) == pending.url.as_ref())
+                }
+            };
+            if !current {
+                return false;
+            }
+        }
+        if !self.record_navigation_failure(
+            id,
+            crate::ports::engine::NavigationFailureReason::Blocked(reason),
+            Some(url),
+            true,
+        ) {
+            return false;
+        }
+        // The refused navigation is over; nothing else waits on it.
+        self.pending_navigations.remove(&id);
+        if let Some(failure) = self.tab_mut(id).and_then(|tab| tab.failure.as_mut()) {
+            failure.can_continue = can_continue;
+        }
         true
     }
 
@@ -752,7 +979,12 @@ mod tests {
         let target_folder = id(5);
         let structurally_foreign_child = id(6);
         let mut items = Items::default();
-        assert!(items.insert_tab(target_favorite, Placement::Favorites { profile: target },));
+        assert!(items.insert_tab(
+            target_favorite,
+            Placement::Favorites {
+                space: target_space
+            },
+        ));
         assert!(items.insert_tab(
             target_tab,
             Placement::Space {
@@ -777,12 +1009,14 @@ mod tests {
         assert!(items.insert(Item {
             id: target_folder,
             parent: None,
-            placement: Placement::Favorites { profile: target },
+            placement: Placement::Favorites {
+                space: target_space,
+            },
             kind: ItemKind::Folder { name: "F".into() },
         }));
         assert!(items.insert_tab(
             structurally_foreign_child,
-            Placement::Favorites { profile: other },
+            Placement::Favorites { space: other_space },
         ));
 
         for tab in [target_favorite, target_tab, other_tab, unknown_tab] {
@@ -793,7 +1027,7 @@ mod tests {
         // not ancestry, must decide whether the child is deleted.
         items
             .roots
-            .get_mut(&Placement::Favorites { profile: other })
+            .get_mut(&Placement::Favorites { space: other_space })
             .unwrap()
             .retain(|id| *id != structurally_foreign_child);
         items
@@ -826,7 +1060,7 @@ mod tests {
         }
         assert_eq!(items.get(structurally_foreign_child).unwrap().parent, None);
         assert_eq!(
-            items.roots(Placement::Favorites { profile: other }),
+            items.roots(Placement::Favorites { space: other_space }),
             &[structurally_foreign_child]
         );
     }
@@ -853,6 +1087,94 @@ mod tests {
             kind: ItemKind::Tab(TabState::new()),
         }));
         assert_eq!(items.items.len(), crate::session::MAX_ITEM_TREE_DEPTH + 1);
+    }
+
+    #[test]
+    fn a_restored_page_that_fails_to_load_keeps_its_address_and_reason() {
+        use crate::ports::engine::NavigationFailureReason as Reason;
+        let mut items = Items::default();
+        let url = Url::parse("http://localhost:5173/app").unwrap();
+        assert!(items.insert_unloaded_tab(id(1), today(), url.clone(), "Dev app"));
+        assert_eq!(items.ensure_view(id(1)).len(), 1);
+
+        assert!(items.record_navigation_failure(id(1), Reason::Unreachable, None, false));
+        items.view_creation_failed(id(1));
+
+        let tab = items.tab(id(1)).unwrap();
+        assert!(!tab.has_view());
+        assert_eq!(tab.title, "Dev app");
+        assert_eq!(tab.url.as_ref(), Some(&url));
+        let failure = tab.failure.as_deref().unwrap();
+        assert_eq!((&failure.url, failure.reason), (&url, Reason::Unreachable));
+    }
+
+    #[test]
+    fn a_page_navigation_after_commit_is_not_a_tab_failure() {
+        use crate::ports::engine::NavigationFailureReason as Reason;
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        items.navigate(id(1), "example.com");
+        assert!(items.set_committed_url_str(id(1), "https://example.com/"));
+
+        assert!(!items.record_navigation_failure(id(1), Reason::Offline, None, false));
+        assert!(items.tab(id(1)).unwrap().failure.is_none());
+    }
+
+    #[test]
+    fn a_replaced_page_is_covered_by_its_failure_until_a_document_commits() {
+        use crate::ports::engine::NavigationFailureReason as Reason;
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        items.navigate(id(1), "example.com");
+        assert!(items.set_committed_url_str(id(1), "https://example.com/"));
+        let failed = Url::parse("https://example.com/down").unwrap();
+
+        // A link the page followed: no address was asked for, yet the page
+        // it left is gone.
+        assert!(items.record_navigation_failure(
+            id(1),
+            Reason::Unreachable,
+            Some(failed.clone()),
+            true
+        ));
+        let tab = items.tab(id(1)).unwrap();
+        let failure = tab.failure.as_deref().unwrap();
+        assert_eq!((&failure.url, failure.covers_page), (&failed, true));
+        assert!(tab.has_view() && !tab.shows_page());
+        assert_eq!(tab.url.as_ref().unwrap().as_str(), "https://example.com/");
+
+        // Retrying keeps the error document covered while it loads.
+        assert_eq!(items.navigate(id(1), failed.as_str()).len(), 1);
+        assert!(!items.tab(id(1)).unwrap().shows_page());
+
+        assert!(items.set_committed_url(id(1), failed.clone()));
+        let tab = items.tab(id(1)).unwrap();
+        assert!(tab.failure.is_none() && tab.shows_page());
+    }
+
+    #[test]
+    fn a_covering_failure_needs_a_view_and_goes_with_it() {
+        use crate::ports::engine::NavigationFailureReason as Reason;
+        let failed = Url::parse("https://example.com/down").unwrap();
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        assert!(!items.record_navigation_failure(
+            id(1),
+            Reason::Offline,
+            Some(failed.clone()),
+            true
+        ));
+
+        items.navigate(id(1), "example.com");
+        assert!(items.set_committed_url_str(id(1), "https://example.com/"));
+        assert!(items.record_navigation_failure(id(1), Reason::Offline, Some(failed), true));
+        assert!(items.mark_view_discarded(id(1)));
+        let tab = items.tab(id(1)).unwrap();
+        assert!(
+            tab.failure.is_none(),
+            "the error document went with the view"
+        );
+        assert!(!tab.shows_page());
     }
 
     #[test]
@@ -908,7 +1230,7 @@ mod tests {
     fn an_unloaded_tab_knows_its_page_without_a_view() {
         let mut items = Items::default();
         let kept = Placement::Favorites {
-            profile: ProfileId::from(1),
+            space: SpaceId::from(1),
         };
         let url = Url::parse("https://app.slack.com/client").unwrap();
         assert!(items.insert_unloaded_tab(id(1), kept, url, "Slack\u{202e}"));
@@ -972,6 +1294,42 @@ mod tests {
         assert!(items.navigation_failed(id(1), request));
         assert_eq!(items.pending_navigation(id(1)), None);
         assert!(items.tab(id(1)).unwrap().url.is_none());
+    }
+
+    #[test]
+    fn a_refused_first_page_s_blank_stand_in_is_expected_and_never_commits() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        let blank = Url::parse("about:blank").unwrap();
+        // Before any refusal a blank page is an ordinary commit.
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        assert!(items.is_refused_stand_in(id(1), &blank));
+        assert!(!items.set_committed_url(id(1), blank.clone()));
+        assert!(items.tab(id(1)).unwrap().failure.is_some());
+        // A blank page the person asks for themselves commits over it.
+        items.navigate(id(1), "about:blank");
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.set_committed_url(id(1), blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        // A real page the person then opens commits as usual.
+        let page = Url::parse("https://news.example/").unwrap();
+        assert!(!items.is_refused_stand_in(id(1), &page));
+        assert!(items.set_committed_url(id(1), page));
     }
 
     #[test]

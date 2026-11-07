@@ -564,4 +564,14 @@ mod tests {
             assert_eq!(reload.key, 0x52);
         }
     }
+
+    #[test]
+    fn bare_function_keys_and_alt_arrows_match_as_written() {
+        let f5 = shortcut("nav.reload.alt", "F5").expect("F5 key");
+        assert!(!f5.ctrl && !f5.shift && !f5.alt);
+        assert_eq!(f5.key, 0x74);
+        let back = shortcut("nav.back.alt", "Alt+Left").expect("Alt+Left key");
+        assert!(back.alt && !back.ctrl && !back.shift);
+        assert_eq!(back.key, 0x25);
+    }
 }

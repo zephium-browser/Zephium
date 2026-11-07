@@ -19,20 +19,24 @@ export function editingAddress(url: string | null | undefined): string {
   return url ?? "";
 }
 
-export type AddressSecurity = "none" | "secure" | "insecure";
+export type AddressSecurity = "none" | "secure" | "insecure" | "untrusted";
 
 /**
  * Transport standing of one authoritative URL. Anything that is not an exact
  * known web scheme reports `none` rather than guessing, so an internal page or
- * a malformed authoritative value never renders a reassuring lock.
+ * a malformed authoritative value never renders a reassuring lock. An
+ * encrypted page whose certificate the person continued past is `untrusted`.
  */
-export function addressSecurity(url: string | null | undefined): AddressSecurity {
+export function addressSecurity(
+  url: string | null | undefined,
+  certificateException = false,
+): AddressSecurity {
   if (!url) return "none";
   try {
     switch (new URL(url).protocol) {
       case "https:":
       case "wss:":
-        return "secure";
+        return certificateException ? "untrusted" : "secure";
       case "http:":
       case "ws:":
         return "insecure";
@@ -43,3 +47,16 @@ export function addressSecurity(url: string | null | undefined): AddressSecurity
     return "none";
   }
 }
+
+/** What the site panel is told about the page in front, when it has a site. */
+export type SitePage = {
+  url: string;
+  security: AddressSecurity;
+  /** What is wrong with the connection, in words; null when nothing is. */
+  warning: string | null;
+  capture: { camera: string; microphone: string } | null;
+  privateWindow: boolean;
+  /** The page's own zoom, once it has one, and what pages show at otherwise. */
+  zoom: number | null;
+  standardZoom: number;
+};

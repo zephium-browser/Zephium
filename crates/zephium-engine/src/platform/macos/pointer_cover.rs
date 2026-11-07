@@ -62,10 +62,11 @@ define_class!(
 
 impl Cover {
     fn sync(&self) {
-        let covered = self.ivars().view.load().filter(|view| pointer_inside(view));
-        match covered {
-            Some(view) => self.park(&view),
-            None => self.release(),
+        // Released first: a canvas parked earlier may since have been stacked
+        // above the covering view, and must have its cursor back.
+        self.release();
+        if let Some(view) = self.ivars().view.load().filter(|view| pointer_inside(view)) {
+            self.park(&view);
         }
     }
 
@@ -100,20 +101,7 @@ impl Cover {
 
     fn release(&self) {
         for canvas in self.ivars().parked.take() {
-            let last = HELD.with_borrow_mut(|held| {
-                let key = std::ptr::from_ref(&*canvas).addr();
-                let count = held.get_mut(&key).map(|count| {
-                    *count -= 1;
-                    *count
-                });
-                if count == Some(0) {
-                    held.remove(&key);
-                }
-                count == Some(0)
-            });
-            if last {
-                canvas.set_tracking_parked(false);
-            }
+            unhold(&canvas);
         }
     }
 
@@ -124,6 +112,45 @@ impl Cover {
             view.removeTrackingArea(&area);
         }
         self.release();
+    }
+}
+
+fn unhold(canvas: &WryWebView) {
+    let last = HELD.with_borrow_mut(|held| {
+        let key = std::ptr::from_ref(canvas).addr();
+        let count = held.get_mut(&key).map(|count| {
+            *count -= 1;
+            *count
+        });
+        if count == Some(0) {
+            held.remove(&key);
+        }
+        count == Some(0)
+    });
+    if last {
+        canvas.set_tracking_parked(false);
+    }
+}
+
+/// Parks canvases for a cover that is not a view laid over them, such as the
+/// chrome stacked above a stage's pages, counted with every other cover's.
+pub(crate) struct Parked(Vec<Retained<WryWebView>>);
+
+impl Parked {
+    pub(crate) fn hold(canvases: impl IntoIterator<Item = Retained<WryWebView>>) -> Self {
+        let canvases: Vec<_> = canvases.into_iter().collect();
+        for canvas in &canvases {
+            hold(canvas);
+        }
+        Self(canvases)
+    }
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        for canvas in self.0.drain(..) {
+            unhold(&canvas);
+        }
     }
 }
 

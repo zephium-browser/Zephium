@@ -12,10 +12,19 @@ test("the panel is as tall as its kind needs and grows and shrinks to it, with t
   await expect.poll(height).toBeGreaterThan(250);
   const tall = height();
 
-  await page.getByRole("button", { name: "Links" }).click();
-  // Both kinds are in the place while one slides out and the next in.
-  await expect.poll(() => screen.container.querySelectorAll(".morph .view").length).toBe(2);
-  await expect.poll(() => screen.container.querySelectorAll(".morph .view").length).toBe(1);
+  const views = () => screen.container.querySelectorAll(".morph .view").length;
+  let overlap = views();
+  const observer = new MutationObserver(() => (overlap = Math.max(overlap, views())));
+  observer.observe(box(".morph"), { childList: true });
+  try {
+    await page.getByRole("button", { name: "Links" }).click();
+    // The driver may return after the outro. Record overlap as it happens,
+    // then verify it after the new view has settled instead of racing the animation.
+    await expect.poll(views).toBe(1);
+    expect(overlap).toBe(2);
+  } finally {
+    observer.disconnect();
+  }
   await expect.poll(height).toBeLessThan(tall - 60);
   await expect.element(page.getByPlaceholder("Paste a link")).toBeVisible();
 

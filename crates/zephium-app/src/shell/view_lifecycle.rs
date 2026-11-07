@@ -11,14 +11,15 @@ use zephium_core::ports::engine::MemoryPressure;
 // budget; it is a backstop for kept-awake and protected pages, while OS
 // memory pressure is the real budget. Pages are never force-discarded: the
 // engine probe still vetoes anything a reload would lose.
-pub(super) const WARM_VIEW_LIMIT: usize = 4;
+pub(super) const WARM_VIEW_LIMIT: usize = 2;
 pub(super) const LIVE_VIEW_PRESSURE_LIMIT: usize = 24;
 pub(super) const LIVE_VIEW_ABSOLUTE_LIMIT: usize = 64;
 const _: () = assert!(LIVE_VIEW_ABSOLUTE_LIMIT >= LIVE_VIEW_PRESSURE_LIMIT + MAX_VISIBLE_PANES);
 pub(super) const MAX_CONCURRENT_DISCARD_PROBES: usize = 4;
-pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
-// Suspension keeps page state, so it can start well before a discard.
-const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+// Suspension keeps page state and resumes in an instant, so a hidden page
+// stops running soon after the person leaves it.
+const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 // A system memory warning can last for hours on small machines; a short
 // grace keeps tabs the user is actively switching between from reloading.
 const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
@@ -27,6 +28,10 @@ const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2
 // the most recent hidden page stays for instant back-and-forth.
 const HEAVY_PAGE: (u64, std::time::Duration) = (256 << 20, std::time::Duration::from_secs(3 * 60));
 const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+// The warm spare saves about 150 ms on the next page a person opens, at the
+// cost of a renderer process. Once browsing has been quiet this long it is let
+// go; the next completed load warms another.
+pub(super) const SPARE_IDLE: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 pub(super) const DISCARD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const DISCARD_PROTECTED_RETRY: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
@@ -82,6 +87,8 @@ pub(super) struct ResidencyState {
     pub(super) next_discard_probe: u64,
     pub(super) discard_probes: std::collections::HashMap<ItemId, PendingDiscardProbe>,
     pub(super) discard_protected_until: std::collections::HashMap<ItemId, std::time::Instant>,
+    /// While a warm spare may be waiting, the last browsing activity.
+    pub(super) spare_activity: Option<std::time::Instant>,
 }
 
 impl Default for ResidencyState {
@@ -112,6 +119,7 @@ impl Default for ResidencyState {
             next_discard_probe: 0,
             discard_probes: std::collections::HashMap::new(),
             discard_protected_until: std::collections::HashMap::new(),
+            spare_activity: None,
         }
     }
 }
@@ -139,7 +147,7 @@ impl ResidencyState {
         match key {
             "performance.sleep" => self.sleeping = value == "true",
             "performance.after" => {
-                let minutes = value.parse::<u64>().unwrap_or(15);
+                let minutes = value.parse::<u64>().unwrap_or(30);
                 self.discard_idle_min = std::time::Duration::from_secs(minutes * 60);
                 self.dormant_min = self.discard_idle_min.min(DORMANT_GRACE);
             }
@@ -201,6 +209,8 @@ pub(super) struct Warmth {
 pub(super) struct CrashState {
     pub(super) crashes: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) presentations: std::collections::HashSet<ItemId>,
+    /// When the person chose to wait for a page that stopped responding.
+    pub(super) unresponsive_waits: std::collections::HashMap<ItemId, std::time::Instant>,
 }
 
 impl Shell {
@@ -219,9 +229,37 @@ impl Shell {
         }
     }
 
+    /// A completed load in `id`'s partition: warm a spare for the next page.
+    pub(super) fn warm_spare_after_load(&mut self, id: ItemId) {
+        self.engine.warm_spare(self.partition_of(id));
+        self.residency.spare_activity = Some(std::time::Instant::now());
+    }
+
+    pub(super) fn note_browsing_activity(&mut self) {
+        if let Some(at) = self.residency.spare_activity.as_mut() {
+            *at = std::time::Instant::now();
+        }
+    }
+
+    /// Lets a waiting spare go once browsing has been quiet for SPARE_IDLE.
+    pub(super) fn release_idle_spare(&mut self) {
+        if self
+            .residency
+            .spare_activity
+            .is_some_and(|at| at.elapsed() >= SPARE_IDLE)
+        {
+            self.residency.spare_activity = None;
+            self.engine.release_spare();
+        }
+    }
+
     pub(super) fn on_memory_pressure(&mut self, pressure: MemoryPressure) {
         if self.residency.memory_pressure != pressure {
             self.residency.memory_pressure = pressure;
+            // The engine closes its spare itself under pressure.
+            if pressure != MemoryPressure::Normal {
+                self.residency.spare_activity = None;
+            }
             self.engine.set_memory_pressure(pressure);
             self.residency.update_limits();
             self.maintain_views();
@@ -239,6 +277,26 @@ impl Shell {
                     .iter()
                     .any(|site| zephium_core::time::site_covers(site, host.trim_end_matches('.')))
             })
+    }
+
+    /// Suspending or discarding would cut off what the person hears, watches
+    /// in picture in picture, or sends from a camera or microphone.
+    pub(super) fn keeps_running(&self, id: ItemId) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.audio.shown()
+                || tab
+                    .capture
+                    .as_ref()
+                    .is_some_and(|(_, state)| state.is_capturing())
+        }) || self.media.get(id).is_some_and(|media| media.in_pip)
+    }
+
+    /// A page that starts sound, capture or picture in picture wakes now, and
+    /// one that stops sleeps on this pass instead of the next.
+    pub(super) fn follow_running(&mut self, id: ItemId, was_running: bool) {
+        if self.keeps_running(id) != was_running {
+            self.maintain_views();
+        }
     }
 
     /// Only a foreground intent may wait for an acknowledged safe close. The
@@ -375,6 +433,11 @@ impl Shell {
         self.cancel_pending_presentation(id);
         self.clear_discard_after_retirement(id);
         self.items.view_creation_failed(id);
+        if self.https_first_reopen(id) {
+            let _ = self.relayout();
+            self.project_tab(id);
+            return;
+        }
         let split_collapsed = self.collapse_failed_split_leaf(id);
         if split_collapsed {
             self.schedule_persist();
@@ -387,7 +450,7 @@ impl Shell {
         }
     }
 
-    // Sleeping-tabs model: hidden views carry a low-memory hint, then a
+    // Sleeping-tabs model: hidden idle views are suspended, then a
     // bounded set of exact-generation/epoch probes may authorize full native
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
@@ -398,6 +461,9 @@ impl Shell {
         self.crash
             .presentations
             .retain(|id| self.items.tab(*id).is_some());
+        self.crash
+            .unresponsive_waits
+            .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
         self.zoom
             .pending
             .retain(|id, _| self.items.tab(*id).is_some_and(TabState::has_view));
@@ -410,9 +476,23 @@ impl Shell {
             .retain(|id, _| self.items.tab(*id).is_some_and(|tab| !tab.has_view()));
         self.retry_capacity_requests();
         let shown: std::collections::HashSet<ItemId> = if self.window_visible {
-            self.visible_tree()
+            let mut shown: std::collections::HashSet<ItemId> = self
+                .visible_tree()
                 .map(|t| t.tabs().into_iter().collect())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // A failure in front of the page is what the person is looking
+            // at; its view must not go to sleep under it.
+            shown.extend(
+                self.windows
+                    .focused()
+                    .and_then(|window| window.active)
+                    .filter(|id| {
+                        self.items
+                            .tab(*id)
+                            .is_some_and(|tab| tab.has_view() && tab.failure_covers_page())
+                    }),
+            );
+            shown
         } else {
             std::collections::HashSet::new()
         };
@@ -529,6 +609,7 @@ impl Shell {
             .filter(|id| {
                 self.residency.sleeping
                     && !self.site_kept_awake(*id)
+                    && !self.keeps_running(*id)
                     && !shown.contains(id)
                     && !self.residency.discard_probes.contains_key(id)
                     && self
@@ -542,6 +623,31 @@ impl Shell {
         if dormant != self.residency.dormant_sent {
             self.residency.dormant_sent = dormant.clone();
             self.engine.set_dormant(dormant);
+        }
+        // The grace is short next to the maintenance tick: wake when the next
+        // hidden page is due rather than up to a tick late.
+        if let Some(queue) = &self.self_queue {
+            let now = std::time::Instant::now();
+            let next = self
+                .items
+                .view_ids()
+                .into_iter()
+                .filter(|id| {
+                    self.residency.sleeping
+                        && !shown.contains(id)
+                        && !self.residency.dormant_sent.contains(id)
+                        && !self.site_kept_awake(*id)
+                        && !self.keeps_running(*id)
+                })
+                .filter_map(|id| {
+                    self.last_view_activity(id)
+                        .map(|at| *at + self.residency.dormant_min)
+                })
+                .filter(|due| *due > now)
+                .min();
+            if let Some(next) = next {
+                queue.schedule_dormancy(next);
+            }
         }
 
         let urgent = self.discard_is_urgent(live_count);
@@ -683,9 +789,10 @@ impl Shell {
     /// Policy intent only; the engine probe still vetoes unsafe pages. The
     /// user's choices are honored: kept-awake sites never sleep, and with
     /// sleeping off only critical OS pressure, where the alternative is the
-    /// OS killing renderers outright, may still discard.
+    /// OS killing renderers outright, may still discard. A page that keeps
+    /// running is not asked: the probe would refuse it, and over and over.
     fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
-        if self.site_kept_awake(id) {
+        if self.site_kept_awake(id) || self.keeps_running(id) {
             return false;
         }
         if self.discard_is_urgent(live_count) {
@@ -735,11 +842,16 @@ impl Shell {
         {
             return;
         }
+        // A sleeping page does not grow: once measured, it is not asked again.
         let hidden: Vec<ItemId> = self
             .items
             .view_ids()
             .into_iter()
-            .filter(|id| !shown.contains(id))
+            .filter(|id| {
+                !shown.contains(id)
+                    && (!self.residency.dormant_sent.contains(id)
+                        || !self.residency.page_bytes.contains_key(id))
+            })
             .collect();
         if !hidden.is_empty() {
             self.residency.memory_sampled = Some(now);
@@ -960,6 +1072,7 @@ impl Shell {
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {
         self.residency.resident_since.remove(&id);
         self.residency.inactive_since.remove(&id);
+        self.forget_view_protection(id);
     }
 
     fn record_inactive_leaves(
@@ -986,21 +1099,20 @@ impl Shell {
         self.residency.last_shown = shown.clone();
     }
 
-    fn retire_crashed_view(&mut self, id: ItemId) {
+    /// A shown tab's crash is said in its pane. A hidden one (often reclaimed
+    /// by the system for memory) just sleeps and reloads when opened.
+    fn retire_crashed_view(&mut self, id: ItemId, shown: bool) {
         // Renderer death is physical retirement proof and supersedes an
         // unfinished discard. Its old terminal callback may never arrive.
         self.clear_discard_after_retirement(id);
         self.record_view_retirement(id);
         self.zoom.pending.remove(&id);
-        let title = self.items.tab(id).map(|tab| tab.title.clone());
-        self.items.view_creation_failed(id);
-        if let Some(title) = title {
-            // `view_creation_failed` owns the generic create-failure label.
-            // A renderer crash is different: its label is transient chrome
-            // state and must not replace the last committed document title.
-            self.items.set_title(id, title);
+        self.items.mark_view_discarded(id);
+        if shown {
+            self.crash.presentations.insert(id);
+        } else {
+            self.crash.presentations.remove(&id);
         }
-        self.crash.presentations.insert(id);
     }
 
     fn clear_discard_after_retirement(&mut self, id: ItemId) {
@@ -1024,15 +1136,15 @@ impl Shell {
         // and revoked the exact native-view generation. Sending a second,
         // id-only close here could be reordered behind recovery and destroy
         // the replacement generation.
-        self.retire_crashed_view(id);
+        let active = self.windows.focused().and_then(|window| window.active);
+        let visible = active == Some(id) || self.work_pane_shows(id);
+        self.retire_crashed_view(id, visible);
         self.items.set_loading(id, false);
         let recent = self
             .crash
             .crashes
             .insert(id, std::time::Instant::now())
             .is_some_and(|t| t.elapsed() < RETRY_WINDOW);
-        let active = self.windows.focused().and_then(|window| window.active);
-        let visible = active == Some(id) || self.work_pane_shows(id);
         let effects = if !recent && visible {
             self.items.ensure_view(id)
         } else {
@@ -1069,7 +1181,7 @@ impl Shell {
                 .crashes
                 .insert(id, std::time::Instant::now())
                 .is_some_and(|time| time.elapsed() < RETRY_WINDOW);
-            self.retire_crashed_view(id);
+            self.retire_crashed_view(id, visible.contains(&id));
             // A browser-process loss can report hundreds of tabs at once.
             // Recreate every currently visible split leaf, because native
             // layout admission requires a live token for every leaf. Hidden

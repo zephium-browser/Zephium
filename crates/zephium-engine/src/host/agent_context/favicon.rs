@@ -1,33 +1,23 @@
-//! A Work page the agent read discovers its icon the way a tab does: the
-//! same renderer-side script and decoder, polled while the document settles.
-//! Only a fixed 32x32 raster leaves the page, named by the committed URL.
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+//! A Work page the agent read discovers its icon the way a tab does: one
+//! watch of the document's icon links, then the page decodes one same-origin
+//! address. Only a fixed 32x32 raster leaves the page, named by the committed
+//! URL. Nothing is polled.
 
 use zephium_agentic::{ContextId, ContextNavigationTarget};
+use zephium_core::icon::{rank, CandidateReport};
 use zephium_core::ports::engine::EngineEvent;
 
-use super::super::scripts::{decode_favicon_eval_result, FAVICON_JS};
+use super::super::favicon::{rasterize, same_address, watch, MAX_WATCH_RUNS};
 use super::super::EngineHost;
 
-/// Delays before each repeat poll after the first evaluation at commit.
-pub(super) const AGENT_FAVICON_POLL_DELAYS: [Duration; 6] = [
-    Duration::from_millis(250),
-    Duration::from_millis(500),
-    Duration::from_secs(1),
-    Duration::from_millis(1500),
-    Duration::from_millis(2500),
-    Duration::from_secs(4),
-];
+/// Same-origin addresses tried before giving up; a canvas can read only those.
+const MAX_ADDRESSES: usize = 3;
 
-/// One bounded discovery for one committed document. Dropping it with the
-/// context cancels the pending poll timer.
-pub(super) struct AgentFaviconPoll {
+/// One discovery for one committed document. Dropping it with the context
+/// abandons the watch: its reports find no matching binding.
+pub(super) struct AgentFaviconWatch {
     target: ContextNavigationTarget,
-    found: Arc<AtomicBool>,
-    timer: Option<crate::platform::imp::ContentPolicyTimeout>,
+    generation: u64,
 }
 
 fn discoverable(target: &ContextNavigationTarget) -> bool {
@@ -39,59 +29,131 @@ impl EngineHost {
         let Some(binding) = self.agent_contexts.get_mut(&id) else {
             return;
         };
+        let generation = binding
+            .favicon
+            .as_ref()
+            .map_or(0, |watch| watch.generation)
+            .wrapping_add(1)
+            .max(1);
         binding.favicon = binding
             .committed_target
             .clone()
             .filter(discoverable)
-            .map(|target| AgentFaviconPoll {
-                target,
-                found: Arc::new(AtomicBool::new(false)),
-                timer: None,
-            });
-        self.poll_agent_favicon(id, 0);
+            .map(|target| AgentFaviconWatch { target, generation });
+        self.agent_favicon_run(id, generation, None, 1);
     }
 
-    fn poll_agent_favicon(&mut self, id: ContextId, attempt: usize) {
-        let Some(binding) = self.agent_contexts.get_mut(&id) else {
-            return;
-        };
-        let Some(poll) = binding.favicon.as_ref() else {
-            return;
-        };
-        if binding.renderer_lost
-            || binding.pending_navigation.is_some()
-            || binding.committed_target.as_ref() != Some(&poll.target)
-            || poll.found.load(Ordering::Acquire)
-        {
-            binding.favicon = None;
+    /// The watch still belongs to the committed, settled document.
+    fn current_agent_favicon(
+        &self,
+        id: ContextId,
+        generation: u64,
+    ) -> Option<&ContextNavigationTarget> {
+        let binding = self.agent_contexts.get(&id)?;
+        let watch = binding.favicon.as_ref()?;
+        (!binding.renderer_lost
+            && binding.pending_navigation.is_none()
+            && binding.committed_target.as_ref() == Some(&watch.target)
+            && watch.generation == generation)
+            .then_some(&watch.target)
+    }
+
+    fn agent_favicon_run(&mut self, id: ContextId, generation: u64, last: Option<String>, run: u8) {
+        if self.current_agent_favicon(id, generation).is_none() {
+            if let Some(binding) = self.agent_contexts.get_mut(&id) {
+                binding.favicon = None;
+            }
             return;
         }
-        let target = poll.target.clone();
-        let found = poll.found.clone();
-        let _ = binding
-            .view
-            .view()
-            .evaluate_script_with_callback(FAVICON_JS, move |result| {
-                let Some(rgba) = decode_favicon_eval_result(&result) else {
-                    return;
-                };
-                if found.swap(true, Ordering::AcqRel) {
-                    return;
-                }
-                let target = target.clone();
-                let _ = crate::host::try_with(move |host| {
-                    host.accept_agent_favicon(id, &target, rgba);
-                });
-            });
-        let Some(delay) = AGENT_FAVICON_POLL_DELAYS.get(attempt).copied() else {
-            binding.favicon = None;
+        let Some(binding) = self.agent_contexts.get(&id) else {
             return;
         };
-        let timer = crate::platform::imp::schedule_content_policy_timeout(delay, move || {
-            let _ = crate::host::try_with(move |host| host.poll_agent_favicon(id, attempt + 1));
+        let queued = last.clone();
+        let started = watch(binding.view.view(), last.as_deref(), move |report| {
+            let _ = crate::host::try_with(move |host| {
+                host.agent_favicon_report(id, generation, run, queued, report);
+            });
         });
-        if let Some(poll) = binding.favicon.as_mut() {
-            poll.timer = timer;
+        if !started {
+            if let Some(binding) = self.agent_contexts.get_mut(&id) {
+                binding.favicon = None;
+            }
+        }
+    }
+
+    fn agent_favicon_report(
+        &mut self,
+        id: ContextId,
+        generation: u64,
+        run: u8,
+        last: Option<String>,
+        report: Option<CandidateReport>,
+    ) {
+        let Some(target) = self.current_agent_favicon(id, generation).cloned() else {
+            return;
+        };
+        let Some(report) = report else {
+            return;
+        };
+        let url = target.as_url();
+        if !same_address(&report.page_url, url.as_str()) {
+            if run < MAX_WATCH_RUNS {
+                self.agent_favicon_run(id, generation, last, run + 1);
+            }
+            return;
+        }
+        let origin = url.origin();
+        let addresses: Vec<String> = rank(url, &report.candidates)
+            .into_iter()
+            .filter(|candidate| {
+                url::Url::parse(&candidate.url).is_ok_and(|candidate| candidate.origin() == origin)
+            })
+            .take(MAX_ADDRESSES)
+            .map(|candidate| candidate.url)
+            .collect();
+        if !report.candidates.is_empty() || report.complete || run >= MAX_WATCH_RUNS {
+            self.agent_favicon_decode(id, generation, addresses);
+        } else {
+            self.agent_favicon_run(id, generation, Some(report.token), run + 1);
+        }
+    }
+
+    fn agent_favicon_decode(&mut self, id: ContextId, generation: u64, mut addresses: Vec<String>) {
+        if self.current_agent_favicon(id, generation).is_none() || addresses.is_empty() {
+            if let Some(binding) = self.agent_contexts.get_mut(&id) {
+                binding.favicon = None;
+            }
+            return;
+        }
+        let address = addresses.remove(0);
+        let Some(binding) = self.agent_contexts.get(&id) else {
+            return;
+        };
+        let started = rasterize(binding.view.view(), &address, move |rgba| {
+            let _ = crate::host::try_with(move |host| {
+                host.agent_favicon_decoded(id, generation, addresses, rgba);
+            });
+        });
+        if !started {
+            if let Some(binding) = self.agent_contexts.get_mut(&id) {
+                binding.favicon = None;
+            }
+        }
+    }
+
+    fn agent_favicon_decoded(
+        &mut self,
+        id: ContextId,
+        generation: u64,
+        remaining: Vec<String>,
+        rgba: Option<Vec<u8>>,
+    ) {
+        let Some(target) = self.current_agent_favicon(id, generation).cloned() else {
+            return;
+        };
+        match rgba {
+            Some(rgba) => self.accept_agent_favicon(id, &target, rgba),
+            None => self.agent_favicon_decode(id, generation, remaining),
         }
     }
 
@@ -124,9 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_is_bounded_and_only_for_web_documents() {
-        let total: Duration = AGENT_FAVICON_POLL_DELAYS.iter().sum();
-        assert!(total <= Duration::from_secs(10));
+    fn discovery_is_only_for_web_documents() {
         assert!(discoverable(
             &ContextNavigationTarget::parse("https://example.com/a").unwrap()
         ));

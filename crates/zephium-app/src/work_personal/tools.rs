@@ -141,7 +141,7 @@ impl LeadToolSet for PersonalTools {
             },
             WorkModelTool {
                 name: "search_history".into(),
-                description: "The person's history in this browser. With query: pages whose title or address has the words, most visited and recent first (\"the flight comparison I read last week\"). Without query: what they visited when (today unless said), newest first, with the tabs open now, for \"check my history\" or \"what did I look at today\". Returns title, site, address and last visit; never page content. The person is asked once per work.".into(),
+                description: "The person's history in this browser. With query: pages whose title or address has the words, most visited and recent first (\"the flight comparison I read last week\"). Without query: what they visited when (today unless said), newest first, for \"check my history\" or \"what did I look at today\". Returns title, site, address and last visit; never page content. The person is asked once per work.".into(),
                 schema: schema(
                     json!({
                         "query": {"type": "string", "maxLength": 200},
@@ -374,7 +374,7 @@ async fn search_history(context: LeadToolContext<'_>, arguments: &Value) -> Lead
 }
 
 /// What the person visited today, yesterday or this week, newest first,
-/// and the tabs open now: "check my history" needs no words to search.
+/// each address once: "check my history" needs no words to search.
 async fn recent_history(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOutcome {
     let (since, until, when) = match text_arg(arguments, "when") {
         Some("yesterday") => (
@@ -402,21 +402,6 @@ async fn recent_history(context: LeadToolContext<'_>, arguments: &Value) -> Lead
     context
         .input(input(WorkInputKindV1::History, "Your history", None))
         .await;
-    let receiver = context.handle().window_tabs(context.profile());
-    let tabs: Vec<Value> = tokio::task::spawn_blocking(move || receiver.recv_timeout(super::TIMEOUT))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|tab| {
-            let url = tab.url.as_deref()?;
-            url.starts_with("https://").then(|| {
-                json!({"title": clip(&tab.title, 120), "site": host(url), "url": without_fragment(url)})
-            })
-        })
-        .take(MAX_TABS)
-        .collect();
     let pages: Vec<Value> = hits
         .iter()
         .map(|hit| {
@@ -428,10 +413,10 @@ async fn recent_history(context: LeadToolContext<'_>, arguments: &Value) -> Lead
             })
         })
         .collect();
-    if pages.is_empty() && tabs.is_empty() {
-        return LeadToolOutcome::ok(format!("No page was visited {when}, and no tab is open."));
+    if pages.is_empty() {
+        return LeadToolOutcome::ok(format!("No page was visited {when}."));
     }
-    LeadToolOutcome::ok(json!({"when": when, "pages": pages, "open_tabs": tabs}).to_string())
+    LeadToolOutcome::ok(json!({"when": when, "pages": pages}).to_string())
 }
 
 /// "2026-09-30 14:02" in local time.

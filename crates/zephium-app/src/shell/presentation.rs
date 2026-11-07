@@ -5,8 +5,10 @@ use super::*;
 // A committed document is acknowledged as soon as privileged chrome verifies
 // its exact revision-bearing URL projection. This deadline bounds only
 // callback/native-dispatch admission retries; it is never an intentional
-// first-paint delay or authority for a timeout reveal.
-const PRESENTATION_ADMISSION_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+// first-paint delay or authority for a timeout reveal. It is generous because
+// a busy chrome renderer (launch restoring many tabs, an occluded window) is
+// slow, not wrong, and missing it retires a healthy page.
+const PRESENTATION_ADMISSION_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
     std::time::Duration::from_millis(25),
     std::time::Duration::from_millis(50),
@@ -16,7 +18,7 @@ const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
     std::time::Duration::from_millis(800),
     std::time::Duration::from_secs(1),
 ];
-pub(super) const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 12;
+pub(super) const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingPresentation {
@@ -51,6 +53,8 @@ pub(super) struct PresentationState {
     /// The last sidebar snapshot offered to chrome. Chrome holds it plus the
     /// per-tab deltas since, so a snapshot equal to it would change nothing.
     pub(super) last_items: std::cell::RefCell<Option<zephium_ipc::ItemsState>>,
+    /// The player last offered to chrome, as of its page's report.
+    pub(super) last_media_player: std::cell::RefCell<Option<Option<zephium_ipc::MediaPlayerView>>>,
 }
 
 impl Shell {
@@ -224,15 +228,8 @@ impl Shell {
             self.cancel_exact_pending_presentation(id, navigation);
             return;
         };
-        let projection = self.presentation_tab_view(
-            id,
-            tab,
-            self.icon_ref(
-                zephium_ipc::IconSurface::Chrome,
-                tab,
-                self.profile_of_item(id),
-            ),
-        );
+        let projection =
+            self.presentation_tab_view(id, tab, self.tab_icon(id, tab, self.profile_of_item(id)));
         let projection_revision = projection.projection_revision.clone();
         self.record_tab_projection_revision(id, &projection_revision);
         self.remember_tab_view(id, &projection);
@@ -496,7 +493,21 @@ impl Shell {
         // lifecycle callback; either way this id cannot silently keep using
         // the hidden generation after the shell marks it failed.
         let _ = self.engine.close(id);
-        self.on_view_creation_failed(id);
+        let shown = self.windows.focused().and_then(|window| window.active) == Some(id)
+            || self.work_pane_shows(id)
+            || self
+                .visible_tree()
+                .is_some_and(|tree| tree.tabs().contains(&id));
+        if shown {
+            self.on_view_creation_failed(id);
+        } else {
+            // Nobody saw this page; it sleeps and loads again when opened.
+            self.record_view_retirement(id);
+            self.zoom.pending.remove(&id);
+            self.cancel_pending_presentation(id);
+            self.items.mark_view_discarded(id);
+            self.project_tab(id);
+        }
     }
 
     pub(super) fn on_presentation_fallback(

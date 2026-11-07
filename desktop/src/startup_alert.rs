@@ -31,7 +31,7 @@ pub(crate) enum StartupProblem {
     DamagedProfile,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     UnsupportedSystem,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     RendererFailed,
     /// No WebView2 Runtime is installed.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -54,7 +54,7 @@ pub(crate) enum StartupProblem {
 
 impl StartupProblem {
     fn title(self) -> &'static str {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if self == Self::RendererFailed {
             return "Zephium needs to restart";
         }
@@ -93,7 +93,7 @@ impl StartupProblem {
 
     fn message_with_log(self, detail: &str, log: Option<&Path>) -> String {
         let mut message = match self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Self::RendererFailed => "Zephium couldn't restore its browser controls. \
                 Close this message and open Zephium again. Your saved browsing data is kept, \
                 but edits that hadn't been saved may be lost."

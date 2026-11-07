@@ -56,6 +56,48 @@ pub fn prepare(dir: &Path, sites: Option<&[String]>) -> Result<(), String> {
     fs::write(dir.join(READY_FILE), access_revision(sites)).map_err(|e| e.to_string())
 }
 
+/// WebView2 reads an unpacked extension without long-path support, so every
+/// file's full path has to fit in MAX_PATH; past it, AddBrowserExtension only
+/// reports E_FAIL.
+pub const MAX_LOADABLE_PATH: usize = 259;
+
+/// The longest path of any file under `tree`, relative to it, in UTF-16 units.
+pub fn longest_relative_path(tree: &Path) -> std::io::Result<usize> {
+    fn visit(tree: &Path, directory: &Path, longest: &mut usize) -> std::io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                visit(tree, &path, longest)?;
+            } else {
+                let relative = path.strip_prefix(tree).map_err(std::io::Error::other)?;
+                *longest = (*longest).max(utf16_len(relative));
+            }
+        }
+        Ok(())
+    }
+    let mut longest = 0;
+    visit(tree, tree, &mut longest)?;
+    Ok(longest)
+}
+
+/// Whether a package whose longest relative file path is `longest` can load
+/// from `root`, and if not, why, in words the person can act on.
+pub fn path_budget(root: &Path, longest: usize) -> Result<(), String> {
+    let full = utf16_len(root) + 1 + longest;
+    if full <= MAX_LOADABLE_PATH {
+        return Ok(());
+    }
+    Err(format!(
+        "This extension can't load on Windows: one of its files would sit at a path {full} characters long, \
+         past the {MAX_LOADABLE_PATH} that Windows extensions can use. Its files are nested too deeply for \
+         where this profile keeps its data."
+    ))
+}
+
+fn utf16_len(path: &Path) -> usize {
+    path.to_string_lossy().encode_utf16().count()
+}
+
 pub fn is_prepared(dir: &Path, revision: &str) -> bool {
     fs::read_to_string(dir.join(READY_FILE)).is_ok_and(|value| value == revision)
 }
@@ -273,5 +315,65 @@ mod tests {
         assert!(fs::read_to_string(dir.join("worker.js"))
             .unwrap()
             .contains("observer.js"));
+    }
+}
+
+#[cfg(test)]
+mod path_budget_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Bitwarden 2026.10.1's deepest file.
+    const BITWARDEN_DEEPEST: &str =
+        "images/at-risk-password-carousel/review_at-risk_logins.light.png";
+
+    fn package_root(app_data: &str, identity: &str, package: &str) -> PathBuf {
+        Path::new(app_data)
+            .join(identity)
+            .join("webext")
+            .join("packages")
+            .join("nngceckbapebfimnlniiiahkandclblb")
+            .join(package)
+    }
+
+    fn short() -> String {
+        crate::package::publication_identity("crx-a", "windows-1", "digest")
+    }
+
+    fn long() -> String {
+        format!("pkg-{}", "0".repeat(64))
+    }
+
+    #[test]
+    fn a_long_user_name_still_loads_once_package_names_are_short() {
+        let app_data = format!(r"C:\Users\{}\AppData\Roaming", "u".repeat(60));
+        let deepest = BITWARDEN_DEEPEST.len();
+        assert!(path_budget(&package_root(&app_data, "app.zephium", &short()), deepest).is_ok());
+        assert!(path_budget(&package_root(&app_data, "app.zephium", &long()), deepest).is_err());
+    }
+
+    #[test]
+    fn redirected_packaged_app_data_fits_with_short_names_and_says_why_when_not() {
+        // A process started by a packaged (MSIX) app sees Roaming redirected here.
+        let app_data =
+            r"C:\Users\user\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming";
+        let deepest = BITWARDEN_DEEPEST.len();
+        let identity = "app.zephium.performance";
+        assert!(path_budget(&package_root(app_data, identity, &short()), deepest).is_ok());
+        let refused = path_budget(&package_root(app_data, identity, &long()), deepest).unwrap_err();
+        assert!(refused.contains("283 characters long"), "{refused}");
+        assert!(refused.contains("259"), "{refused}");
+    }
+
+    #[test]
+    fn the_longest_relative_path_counts_every_level() {
+        let tree = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tree.path().join("a").join("bb")).unwrap();
+        fs::write(tree.path().join("a").join("bb").join("nested.js"), "").unwrap();
+        fs::write(tree.path().join("manifest.json"), "{}").unwrap();
+        assert_eq!(
+            longest_relative_path(tree.path()).unwrap(),
+            "a/bb/nested.js".len()
+        );
     }
 }

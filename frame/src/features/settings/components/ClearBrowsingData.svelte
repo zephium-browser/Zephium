@@ -1,7 +1,8 @@
 <script lang="ts">
   import { Dialog } from "bits-ui";
-  import { commands, type HistoryRange } from "$shared/ipc/bindings";
+  import type { BrowsingDataRange } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
+  import { clearBrowsingData, type ClearKinds } from "$domain/site-data";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
   import Checkbox from "$shared/ui/Checkbox";
@@ -10,31 +11,45 @@
   import { fields } from "../lib/catalog";
 
   const field = fields["privacy.clear"];
+  const ranges: ReadonlyArray<{ value: BrowsingDataRange; label: () => string }> = [
+    { value: "hour", label: m.privacy_clear_range_hour },
+    { value: "day", label: m.privacy_clear_range_day },
+    { value: "week", label: m.privacy_clear_range_week },
+    { value: "four_weeks", label: m.privacy_clear_range_month },
+    { value: "everything", label: m.privacy_clear_range_all },
+  ];
+  const choices: ReadonlyArray<{
+    kind: keyof ClearKinds;
+    label: () => string;
+    help: () => string;
+  }> = [
+    { kind: "history", label: m.privacy_clear_history, help: m.privacy_clear_history_help },
+    { kind: "cookies", label: m.privacy_clear_cookies, help: m.privacy_clear_cookies_help },
+    { kind: "cache", label: m.privacy_clear_cache, help: m.privacy_clear_cache_help },
+    { kind: "downloads", label: m.privacy_clear_downloads, help: m.privacy_clear_downloads_help },
+  ];
+
   let open = $state(false);
-  let range = $state<HistoryRange>("hour");
-  let history = $state(true);
+  let range = $state<BrowsingDataRange>("hour");
+  let kinds = $state<ClearKinds>({ history: true, cookies: true, cache: true, downloads: false });
   let pending = $state(false);
-  let failed = $state(false);
+  let failure = $state<"failed" | "private" | null>(null);
   let cleared = $state(false);
   let opener: HTMLElement | null = null;
+  let chosen = $derived(Object.values(kinds).some(Boolean));
 
   async function clear() {
     const profile = tabs.profile()?.id;
-    if (!profile || !history || pending) return;
+    if (!profile || !chosen || pending) return;
     pending = true;
-    failed = false;
-    try {
-      const result = await commands.historyCall(profile, { kind: "clear", range });
-      if (result.kind !== "removed") {
-        failed = true;
-        return;
-      }
+    failure = null;
+    const outcome = await clearBrowsingData(profile, range, { ...kinds });
+    pending = false;
+    if (outcome === "cleared") {
       cleared = true;
       open = false;
-    } catch {
-      failed = true;
-    } finally {
-      pending = false;
+    } else {
+      failure = outcome;
     }
   }
 </script>
@@ -45,7 +60,7 @@
       onclick={() => {
         opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         cleared = false;
-        failed = false;
+        failure = null;
         open = true;
       }}>{m.privacy_clear_open()}</Button
     >
@@ -77,26 +92,28 @@
       >
         <div class="settings-dialog-body">
           <Select
-            label={m.preview_time_range()}
+            label={m.privacy_clear_range()}
             value={range}
-            options={[
-              { value: "hour", label: m.history_range_hour() },
-              { value: "day", label: m.history_range_day() },
-              { value: "week", label: m.history_range_week() },
-              { value: "everything", label: m.history_range_all() },
-            ]}
-            onchange={(value) => (range = value as HistoryRange)}
+            options={ranges.map((option) => ({ value: option.value, label: option.label() }))}
+            onchange={(value) => (range = value as BrowsingDataRange)}
           />
-          <Checkbox
-            label={m.preview_history()}
-            checked={history}
-            onchange={(value) => (history = value)}
-          />
-          {#if failed}<p class="result error" role="alert">{m.privacy_clear_failed()}</p>{/if}
+          <div class="choices">
+            {#each choices as choice (choice.kind)}
+              <Checkbox
+                label={choice.label()}
+                description={choice.help()}
+                checked={kinds[choice.kind]}
+                onchange={(value) => (kinds[choice.kind] = value)}
+              />
+            {/each}
+          </div>
+          {#if failure}<p class="result error" role="alert">
+              {failure === "private" ? m.privacy_clear_private() : m.privacy_clear_failed()}
+            </p>{/if}
         </div>
         <footer>
           <Button onclick={() => (open = false)}>{m.action_cancel()}</Button>
-          <Button type="submit" variant="primary" disabled={!history} {pending}
+          <Button type="submit" variant="primary" disabled={!chosen} {pending}
             >{m.privacy_clear_apply()}</Button
           >
         </footer>
@@ -106,6 +123,11 @@
 </Dialog.Root>
 
 <style>
+  .choices {
+    display: grid;
+    gap: 14px;
+  }
+
   .result {
     margin: 12px 18px;
     color: var(--color-muted);

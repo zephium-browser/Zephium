@@ -48,20 +48,24 @@ pub(super) fn kept_site(id: &str) -> Option<&'static KeptSite> {
 }
 
 impl Shell {
-    /// Keeps one catalog site in the focused profile's Essentials, unloaded,
+    /// Keeps one catalog site in the focused space's Essentials, unloaded,
     /// with its mark already in place. A site already kept is left as it is,
     /// so a repeated request cannot stack duplicates.
     pub(super) fn operation_keep_site(&mut self, id: &str) -> OperationDisposition {
         let Some(site) = kept_site(id) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
-        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+        let Some((profile, space)) = self
+            .windows
+            .focused()
+            .map(|window| (window.profile, window.space))
+        else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
         let Ok(url) = url::Url::parse(site.url) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
-        let placement = Placement::Favorites { profile };
+        let placement = Placement::Favorites { space };
         let kept = self.items.roots(placement).iter().any(|existing| {
             self.items
                 .tab(*existing)
@@ -89,13 +93,13 @@ impl Shell {
         let Some(site) = kept_site(id) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
-        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+        let Some(space) = self.windows.focused().map(|window| window.space) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
         let Ok(url) = url::Url::parse(site.url) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
-        let placement = Placement::Favorites { profile };
+        let placement = Placement::Favorites { space };
         let Some(kept) = self
             .items
             .roots(placement)
@@ -118,14 +122,15 @@ impl Shell {
         mutation_result(self.commit(fx))
     }
 
-    /// Keeps sites another browser kept, after those already kept and without
-    /// repeating one. They wait unloaded, as kept sites do until opened.
+    /// Keeps sites another browser kept in `space`, after those already kept
+    /// and without repeating one. They wait unloaded, as kept sites do until
+    /// opened.
     pub(super) fn keep_imported_sites(
         &mut self,
-        profile: ProfileId,
+        space: SpaceId,
         sites: Vec<crate::ImportedSite>,
     ) -> u32 {
-        let placement = Placement::Favorites { profile };
+        let placement = Placement::Favorites { space };
         let mut kept: std::collections::HashSet<url::Url> = self
             .items
             .roots(placement)

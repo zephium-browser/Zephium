@@ -229,10 +229,11 @@ test("New Space makes one at once, with no icon, and opens it to be named", asyn
   await expect.element(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Space 3");
 });
 
-test("an empty space offers a new tab instead of a blank column", async () => {
+test("a space with nothing listed draws no empty state; the row's plus still opens a tab", async () => {
   const screen = await mount(true);
-  await expect.element(screen.getByText("Nothing open in Home")).toBeVisible();
-  await screen.getByRole("button", { name: "New tab", exact: true }).nth(1).click();
+  await expect.element(screen.getByRole("button", { name: "Spaces — Home" })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Nothing open");
+  await screen.getByRole("button", { name: "New tab", exact: true }).click();
   expect(native.open).toHaveBeenCalledOnce();
 });
 
@@ -315,6 +316,19 @@ test("a neighbour the window has shown is drawn as it was, its own tab lit", asy
   // A drawn copy is never a tab to native: it carries none of its markers.
   expect(next.querySelector("[data-zephium-tab-id]")).toBeNull();
   expect(next.inert).toBe(true);
+});
+
+test("a neighbour holding no tab peeks as empty until the window opens a tab in it", async () => {
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  project({ spaces: [HOME, spaceFixture("quiet", "Quiet", { tabs: 0 })] });
+  await frame();
+  swipe(list, 30);
+  await frame();
+  await frame();
+  const next = screen.container.querySelector<HTMLElement>('.peek[data-sheet="next"]')!;
+  expect(next.textContent).toContain("Nothing open in Quiet");
+  expect(next.querySelector("button")).toBeNull();
 });
 
 test("a swipe the native side refuses brings the sheet back", async () => {

@@ -7,17 +7,20 @@
 mod agent_audit;
 #[cfg(feature = "work-execution")]
 mod agent_work;
+mod app_link_sites;
 mod blocker;
 mod bookmarks;
 mod chats;
 mod compatibility;
 mod deletion;
+mod download_sites;
 mod downloads;
 mod favicons;
 mod filesystem;
 mod history;
 pub mod media;
 mod page_permissions;
+mod popup_sites;
 pub mod profile_avatars;
 mod resources;
 mod session;
@@ -32,6 +35,8 @@ mod work_document;
 mod work_record_media;
 #[cfg(all(windows, feature = "work-execution"))]
 pub use windows_work_storage::WindowsWorkStorage;
+mod zoom;
+pub(crate) use zoom::valid_zoom_site;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -50,7 +55,7 @@ use zephium_core::session::{
     MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES,
 };
 
-use crate::{bounded_json, migrations};
+use crate::{bounded_json, essentials, migrations};
 
 pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EVENTS};
 #[cfg(all(
@@ -69,7 +74,7 @@ pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
 pub(crate) use compatibility::{LEGACY_HISTORY_MARKER, MAX_SPLIT_JSON_BYTES};
 use deletion::deletion_process_generation;
-pub(crate) use favicons::{valid_favicon_origin, validated_favicon};
+pub(crate) use favicons::{valid_favicon_key, validated_favicon};
 pub(crate) use history::{
     MAX_HISTORY_BYTES, MAX_HISTORY_FORGET_URLS, MAX_HISTORY_PAGE, MAX_HISTORY_QUERY_BYTES,
     MAX_HISTORY_RESULTS,
@@ -81,7 +86,9 @@ use filesystem::{
     profile_artifacts_exist, regular_file_exists,
 };
 
-const SESSION_SCHEMA_VERSION: i64 = 1;
+/// 2 gave every space its own Essentials. A session saved as 1 holds one set
+/// per profile; reading it copies that set into each of the profile's spaces.
+const SESSION_SCHEMA_VERSION: i64 = 2;
 pub(crate) const MAX_SESSION_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_URL_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_TITLE_BYTES: usize = zephium_core::item::MAX_PAGE_TITLE_CHARS * 4;
@@ -112,6 +119,10 @@ pub struct Hub {
     legacy_state_purged: bool,
     /// The session this Hub last committed, to skip rewriting an identical one.
     committed_session: Option<String>,
+    /// Exact source bytes awaiting a backup before canonical state replaces them.
+    pending_session_backup: Option<session::SessionBackupSource>,
+    session_backup_checkpoint_pending: bool,
+    session_backup_expiry: Option<session::SessionBackupExpiry>,
     recovery_required: Option<String>,
     /// One unpredictable token shared by every Hub constructed in this
     /// process. A completed Windows unlink may be reconciled only by a Hub
@@ -204,6 +215,9 @@ impl Hub {
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
+            pending_session_backup: None,
+            session_backup_checkpoint_pending: false,
+            session_backup_expiry: None,
             recovery_required,
             deletion_process_generation,
             #[cfg(test)]
@@ -215,8 +229,11 @@ impl Hub {
             #[cfg(test)]
             ambiguous_time_commit_once: false,
         };
+        if let Err(error) = hub.arm_session_backup_expiry() {
+            eprintln!("store: session backup expiration deferred: {error}");
+        }
         hub.load_registry()?;
-        let _ = hub.recover_canonical_form_quarantine()?;
+        let _ = hub.recover_liftable_quarantine()?;
         // The snapshot and registry must agree before profile files are
         // migrated, purged, or reconciled. A corrupt authoritative row must
         // fail startup without destroying the only recoverable profile data.
@@ -320,6 +337,9 @@ impl Hub {
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
+            pending_session_backup: None,
+            session_backup_checkpoint_pending: false,
+            session_backup_expiry: None,
             recovery_required: None,
             deletion_process_generation: deletion_process_generation(),
             #[cfg(test)]

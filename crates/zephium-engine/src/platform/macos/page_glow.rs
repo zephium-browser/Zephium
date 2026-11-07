@@ -1,4 +1,4 @@
-//! The working glow: a soft aurora along the inner edges of a Browse tab's
+//! The working glow: a soft blue light along the inner edges of a Browse tab's
 //! page while the assistant acts on it. Core Animation only. The layers hang
 //! from the web view's own backing layer above its content, outside the
 //! page's process and DOM, so they follow the view's clip, visibility and
@@ -59,18 +59,20 @@ const CORNER_STEPS: usize = 12;
 const TRAVEL: &str = "zephium.glow.travel";
 const FADE: &str = "zephium.glow.fade";
 
-/// Calm aurora stops, sRGB: cool blue, violet, rose, amber.
+/// Zephium's blues, sRGB: azure, sky, periwinkle and a cooler sky. The
+/// light travels through one family of colour, so it reads as the window's
+/// own light at work rather than a spectrum running round the page.
 const AURORA_LIGHT: [[f64; 3]; 4] = [
-    [86.0, 132.0, 240.0],
-    [142.0, 108.0, 236.0],
-    [226.0, 108.0, 152.0],
-    [232.0, 158.0, 68.0],
+    [58.0, 118.0, 238.0],
+    [86.0, 156.0, 250.0],
+    [112.0, 116.0, 238.0],
+    [64.0, 170.0, 244.0],
 ];
 const AURORA_DARK: [[f64; 3]; 4] = [
-    [124.0, 166.0, 255.0],
-    [176.0, 146.0, 255.0],
-    [255.0, 146.0, 186.0],
-    [255.0, 196.0, 120.0],
+    [104.0, 156.0, 255.0],
+    [138.0, 190.0, 255.0],
+    [150.0, 146.0, 255.0],
+    [110.0, 198.0, 255.0],
 ];
 
 define_class!(

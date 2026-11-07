@@ -1,3 +1,13 @@
 # Upstream
 
 Based on the exact crates.io tauri-plugin-updater 2.10.1 source from Tauri plugins-workspace commit d6a3898001a4bcc659e045f9501498751b77dbe6 (plugins/updater). The normalized Cargo.toml, source, build script, plugin assets, permissions and licenses form the baseline. Local macOS changes use descriptor-relative atomic RENAME_SWAP publication on the same filesystem, with displaced-bundle retention on uncertain rollback, and refuse administrator replacement instead of the destructive, panic-prone shell fallback. Archive extraction accepts one bounded app bundle with safe paths and links; bounded XML/binary plist validation requires its regular executable before replacement. The manifest uses libc and the already locked plist parser and no longer needs osakit. Release metadata is also bounded to 256 KiB before JSON decoding, including chunked responses. The extracted bundle's CFBundleShortVersionString must exactly match the advertised version. Permission/read-only/cross-volume installation limits have a typed manual-install outcome. Every install entry verifies the payload signature before touching files or launching an installer. Windows installer launch failures are returned to the application instead of exiting successfully.
+
+Windows execution additionally requires the authenticated minisign trusted comment
+`zephium-updater-v1 version=<canonical-semver> target=windows-<arch>-<installer>`
+to match the advertised version, actual installer format and native architecture.
+The authenticated version must advance the running version by semver precedence.
+Legacy signatures with timestamp/file comments fail closed on Windows; old clients
+can verify new standard minisign signatures. `cargo xtask sign-windows-updater`
+signs and verifies final Authenticode-signed NSIS bytes using the existing Tauri
+key environment. This binds release identity to the payload and prevents old
+signed installers from being relabelled; it does not prevent update withholding.

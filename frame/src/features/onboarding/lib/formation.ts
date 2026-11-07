@@ -131,7 +131,10 @@ export function formName(
   function stop() {
     stopped = true;
     cancelAnimationFrame(frame);
-    context!.clearRect(0, 0, stage.width, stage.height);
+    // An empty canvas gives its window-sized buffer back now; a removed one
+    // keeps it until it is collected.
+    canvas.width = 0;
+    canvas.height = 0;
   }
 
   frame = requestAnimationFrame(step);

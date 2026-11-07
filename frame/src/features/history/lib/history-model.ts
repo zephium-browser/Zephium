@@ -79,10 +79,4 @@ export function toRows(
   return rows;
 }
 
-/** The span of `title` the query accounts for, or null when it matches nowhere. */
-export function matchRange(title: string, query: string): [number, number] | null {
-  const needle = query.trim().toLocaleLowerCase();
-  if (!needle) return null;
-  const at = title.toLocaleLowerCase().indexOf(needle);
-  return at < 0 ? null : [at, at + needle.length];
-}
+export { matchRange } from "$shared/lib/match-range";

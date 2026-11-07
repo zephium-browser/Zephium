@@ -46,7 +46,11 @@
   --wash-launcher: 82%;
 }
 
+/* Mica is near-opaque and already dark-framed, so the wash only lays the
+   theme's colour into it; any heavier and the wallpaper's hue is lost. */
 :root[data-material="mica"] {
+  --wash-window: 20%;
+  --material-window-ground: color-mix(in srgb, var(--color-chrome) var(--wash-window), transparent);
   --wash-raised: 70%;
   --wash-launcher: 86%;
 }

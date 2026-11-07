@@ -45,9 +45,10 @@ impl Shell {
                 EngineEvent::PermissionRequested {
                     id,
                     profile,
+                    navigation,
                     request,
                 } => {
-                    self.on_page_permission_request(*profile, *id, request.clone());
+                    self.on_page_permission_request(*profile, *id, *navigation, request.clone());
                     return;
                 }
                 _ => {
@@ -66,6 +67,7 @@ impl Shell {
                 id,
                 profile,
                 request,
+                ..
             } = &event
             {
                 let _ = self.engine.settle_page_permission_request(
@@ -82,9 +84,16 @@ impl Shell {
         // completion. Close the browser-owned surface in the same actor turn
         // so stale consent never follows a document, renderer, or profile.
         match &event {
-            EngineEvent::UrlChanged { id, .. }
-            | EngineEvent::PresentationPending { id, .. }
-            | EngineEvent::PresentationReady { id, .. }
+            // Only another document ends a prompt and the one-time answers.
+            // The same document finishing its load, or changing its address
+            // in place through the History API, keeps both.
+            EngineEvent::PresentationPending { id, navigation, .. }
+            | EngineEvent::PresentationReady { id, navigation, .. } => {
+                self.end_page_permission_documents_except(*id, *navigation);
+            }
+            // The engine refuses a waiting request as soon as its tab starts
+            // another navigation; the prompt goes with it.
+            EngineEvent::LoadingChanged { id, loading: true }
             | EngineEvent::NavigationFailed { id, .. }
             | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ViewCreationFailed { id }
@@ -98,13 +107,24 @@ impl Shell {
                         | EngineEvent::ViewDiscarded { .. }
                 );
                 if capture_invalidated {
+                    // Its native sign-in request went with the view.
+                    self.end_http_auth_prompt(*id, None);
+                    self.forget_page_permission_documents_of_item(*id);
                     self.items.set_media_capture(*id, None);
+                    self.silence_tab_audio(*id);
                     // A replacement view starts out of fullscreen.
                     self.forget_content_fullscreen(*id);
                 }
             }
-            EngineEvent::ProfileProcessExited { profile, .. } => {
+            // A quarantined profile's views are gone, and its prompt with them.
+            EngineEvent::ProfileRestartRequired { profile } => {
                 self.cancel_page_permission_for_profile(*profile);
+            }
+            EngineEvent::ProfileProcessExited { profile, ids } => {
+                self.cancel_page_permission_for_profile(*profile);
+                for id in ids {
+                    self.end_http_auth_prompt(*id, None);
+                }
             }
             _ => {}
         }
@@ -113,6 +133,14 @@ impl Shell {
                 if !self.runtime_restart_required {
                     self.runtime_restart_required = true;
                     self.project_runtime_status();
+                }
+            }
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.runtime_restart_required = true;
+                if self.restart_profiles.insert(profile) {
+                    // The status now names the profile as the reason.
+                    self.project_runtime_status();
+                    self.project_items();
                 }
             }
             EngineEvent::ContentRulesSettled {
@@ -273,6 +301,23 @@ impl Shell {
                 install,
                 result,
             } => self.on_web_extension_settled(profile, install, result),
+            EngineEvent::WebExtensionAccessRemoved(removal) => {
+                let removal = *removal;
+                (self.emit)(Projection::WebExtensionAccessRemoved(
+                    zephium_ipc::WebExtensionAccessRemovalView {
+                        profile_id: removal.profile.to_string(),
+                        extension_id: removal.extension_id,
+                        permissions: removal.permissions,
+                        patterns: removal.patterns,
+                    },
+                ));
+            }
+            EngineEvent::WebExtensionDataRequested(request) => {
+                self.on_extension_data_request(*request)
+            }
+            EngineEvent::WebExtensionDataInterest { profile, interest } => {
+                self.set_extension_data_interest(profile, interest)
+            }
             EngineEvent::WebExtensionAccessRequested(request) => {
                 let request = *request;
                 (self.emit)(Projection::WebExtensionAccessRequest(
@@ -370,10 +415,7 @@ impl Shell {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
                     .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
-                if self
-                    .items
-                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
-                {
+                if self.replace_page_request(id, zephium_core::item::PageRequest::Popup { url }) {
                     self.project_tab(id);
                 }
             }
@@ -382,8 +424,29 @@ impl Shell {
                 url,
                 app,
                 user_gesture,
-            } => self.on_external_app_requested(id, url, app, user_gesture),
+                initiator,
+            } => self.on_external_app_requested(id, url, app, user_gesture, initiator),
+            EngineEvent::HttpAuthRequested { id, prompt } => {
+                self.on_http_auth_requested(id, prompt)
+            }
+            EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::DownloadPermissionRequested { id, prompt } => {
+                self.on_download_permission_requested(id, prompt)
+            }
+            EngineEvent::DownloadPermissionEnded { id, request } => {
+                self.on_download_permission_ended(id, request)
+            }
+            EngineEvent::InsecureAutofillRequested { id } => {
+                self.on_insecure_autofill_requested(id)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
+            EngineEvent::NavigationBlocked {
+                id,
+                url,
+                reason,
+                request,
+                can_continue,
+            } => self.on_navigation_blocked(id, url, reason, request, can_continue),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -402,11 +465,28 @@ impl Shell {
             EngineEvent::FaviconPixels { id, page_url, rgba } => {
                 self.favicon_pixels(id, &page_url, rgba);
             }
+            EngineEvent::FaviconRasterFailed { id, page_url, url } => {
+                self.favicon_raster_failed(id, &page_url, url);
+            }
+            EngineEvent::FaviconCandidates {
+                id,
+                page_url,
+                complete,
+                candidates,
+            } => self.favicon_candidates(id, &page_url, complete, candidates),
+            EngineEvent::FaviconImage { id, page_url, png } => {
+                self.favicon_image(id, &page_url, png);
+            }
             EngineEvent::DiscardSafety {
                 id,
                 probe,
                 can_discard,
             } => self.on_discard_safety(id, probe, can_discard),
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded,
+                stranded_filters,
+            } => self.on_content_protection_changed(id, degraded, stranded_filters),
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
@@ -432,21 +512,31 @@ impl Shell {
                             .get(&id)
                             .map(|(current, _)| *current)
                     });
+                let was_running = self.keeps_running(id);
                 if current_document == Some(navigation)
                     && self
                         .items
                         .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
                 {
                     self.project_tab(id);
+                    self.follow_running(id, was_running);
                 }
+            }
+            EngineEvent::AudioChanged { id, audible } => self.on_audio_changed(id, audible),
+            EngineEvent::MediaChanged { id, media } => {
+                self.on_media_changed(id, media.map(|media| *media))
+            }
+            EngineEvent::PageResponsiveness { id, responding } => {
+                self.on_page_responsiveness(id, responding)
             }
             EngineEvent::FullscreenChanged { id, active } => self.on_fullscreen_changed(id, active),
             EngineEvent::PermissionRequested {
                 id,
                 profile,
+                navigation,
                 request,
             } => {
-                self.on_page_permission_request(profile, id, request);
+                self.on_page_permission_request(profile, id, navigation, request);
             }
             EngineEvent::DownloadRequested { .. } => {}
             EngineEvent::PresentationPending {
@@ -467,8 +557,57 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
-            EngineEvent::NavigationFailureReported { id, reason } => {
-                if self.items.record_navigation_failure(id, reason) {
+            EngineEvent::NavigationFailureReported {
+                id,
+                reason,
+                url,
+                replaced_page,
+            } => {
+                // A certificate refusal names its own address, which is where
+                // the way past it, if any, leads; so does a failure whose
+                // error document replaced the page.
+                let certificate = matches!(
+                    reason,
+                    zephium_core::ports::engine::NavigationFailureReason::Certificate(_)
+                );
+                let failed = url
+                    .and_then(|url| url::Url::parse(&url).ok())
+                    .filter(|url| {
+                        if certificate {
+                            url.scheme() == "https"
+                        } else {
+                            replaced_page && navigation::is_browser_target(url)
+                        }
+                    });
+                // An https try that failed loads over http next; its error
+                // never shows.
+                match self.https_first_failed(id) {
+                    super::https_first::HttpsFallback::NotATry => {}
+                    super::https_first::HttpsFallback::LoadingOverHttp => return,
+                    super::https_first::HttpsFallback::Refused(asked) => {
+                        if self.items.record_failure_at(id, reason, asked) {
+                            let _ = self.relayout();
+                            self.project_tab(id);
+                        }
+                        return;
+                    }
+                }
+                let covered = self
+                    .items
+                    .tab(id)
+                    .is_some_and(TabState::failure_covers_page);
+                if self
+                    .items
+                    .record_navigation_failure(id, reason, failed, replaced_page)
+                {
+                    if covered
+                        || self
+                            .items
+                            .tab(id)
+                            .is_some_and(TabState::failure_covers_page)
+                    {
+                        let _ = self.relayout();
+                    }
                     self.project_tab(id);
                 }
             }
@@ -478,10 +617,12 @@ impl Shell {
                 applied_scale,
                 succeeded,
             } => self.on_zoom_settled(id, request, applied_scale, succeeded),
+            EngineEvent::ZoomGesture { id, scale } => self.on_zoom_gesture(id, scale),
             EngineEvent::NativeActionFailed { id, action } => {
                 if self.items.tab(id).is_some_and(TabState::has_view) {
                     let action = match action {
                         NativeAction::Reload => "reload",
+                        NativeAction::HardReload => "hard reload",
                         NativeAction::GoBack => "back",
                         NativeAction::GoForward => "forward",
                     };
@@ -499,7 +640,19 @@ impl Shell {
             }
             EngineEvent::Crashed { id } => self.on_crashed(id),
             EngineEvent::Captured { .. } => {}
-            EngineEvent::HtmlExtracted { .. } => {}
+            EngineEvent::HtmlExtracted {
+                id,
+                html,
+                truncated,
+            } => self.on_html_extracted(id, html, truncated),
+            EngineEvent::HistoryEntries {
+                id,
+                request,
+                entries,
+            } => self.on_history_entries(id, request, entries),
+            EngineEvent::StoreButtonClicked { id, extension } => {
+                self.store_button_clicked(id, extension);
+            }
             EngineEvent::FindResult {
                 id,
                 query,
@@ -549,7 +702,7 @@ impl Shell {
                     // asynchronous image decode. Poll immediately at load
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
-                    self.engine.warm_spare(self.partition_of(id));
+                    self.warm_spare_after_load(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -559,11 +712,20 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
+                self.https_first_settled(id, &committed_url);
                 if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                // Expected, not rejected: the view under a refused first page.
+                if self.items.is_refused_stand_in(id, &committed_url) {
+                    return;
+                }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
+                let uncovered = self
+                    .items
+                    .tab(id)
+                    .is_some_and(TabState::failure_covers_page);
                 let replace_stale_title = self
                     .items
                     .tab(id)
@@ -573,6 +735,11 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                if uncovered {
+                    // The view holds a real document again; lay it out before
+                    // its presentation is acknowledged.
+                    let _ = self.relayout();
+                }
                 if replace_stale_title {
                     // Browser chrome may be projected before the new document
                     // publishes a title. Never carry a prior origin's trusted
@@ -581,6 +748,7 @@ impl Shell {
                     self.items
                         .set_title(id, neutral_title_for_url(&committed_url));
                 }
+                self.reconcile_zoom(id);
                 self.maybe_discover_favicon(id);
                 // History is attributed to the profile that owns the item,
                 // not the focused window; incognito profiles never record.
@@ -595,7 +763,8 @@ impl Shell {
                         .tab(id)
                         .map(|t| t.title.clone())
                         .unwrap_or_default();
-                    self.store.record_visit(profile, url, title);
+                    self.store.record_visit(profile, url.clone(), title);
+                    self.extension_visit_recorded(profile, &url);
                 }
                 self.schedule_url_checkpoint(id);
                 if first_committed_url {
@@ -612,7 +781,7 @@ impl Shell {
         }
     }
 
-    fn sync_extension_browser_surface_metadata(&mut self, id: ItemId) {
+    pub(super) fn sync_extension_browser_surface_metadata(&mut self, id: ItemId) {
         let Some(profile) = self.profile_of_item(id) else {
             return;
         };
@@ -631,7 +800,8 @@ impl Shell {
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
-            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            | EngineEvent::ProfileProcessExited { profile, .. }
+            | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),
                 ..
@@ -652,6 +822,10 @@ impl Shell {
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
+            EngineEvent::WebExtensionAccessRemoved(removal) => Some(removal.profile),
+            // Answered even during retirement, so the extension hears why.
+            EngineEvent::WebExtensionDataRequested(_) => None,
+            EngineEvent::WebExtensionDataInterest { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
                 Some(runtime.profile())
             }
@@ -665,15 +839,26 @@ impl Shell {
             | EngineEvent::NavigationFailed { id, .. }
             | EngineEvent::NavigationFailureReported { id, .. }
             | EngineEvent::ZoomSettled { id, .. }
+            | EngineEvent::ZoomGesture { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }
+            | EngineEvent::ContentProtectionChanged { id, .. }
             | EngineEvent::FaviconPixels { id, .. }
+            | EngineEvent::FaviconRasterFailed { id, .. }
+            | EngineEvent::FaviconCandidates { id, .. }
+            | EngineEvent::FaviconImage { id, .. }
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
             | EngineEvent::PageOpenBlocked { id, .. }
             | EngineEvent::ExternalAppRequested { id, .. }
+            | EngineEvent::HttpAuthRequested { id, .. }
+            | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::DownloadPermissionRequested { id, .. }
+            | EngineEvent::DownloadPermissionEnded { id, .. }
+            | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
+            | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }
@@ -682,8 +867,13 @@ impl Shell {
             | EngineEvent::Crashed { id }
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. }
-            | EngineEvent::FindResult { id, .. } => self.profile_of_item(*id),
+            | EngineEvent::HistoryEntries { id, .. }
+            | EngineEvent::FindResult { id, .. }
+            | EngineEvent::StoreButtonClicked { id, .. } => self.profile_of_item(*id),
             EngineEvent::MediaCaptureChanged { id, .. }
+            | EngineEvent::AudioChanged { id, .. }
+            | EngineEvent::MediaChanged { id, .. }
+            | EngineEvent::PageResponsiveness { id, .. }
             | EngineEvent::FullscreenChanged { id, .. } => self.profile_of_item(*id),
             EngineEvent::PermissionRequested { profile, .. }
             | EngineEvent::WorkPageFavicon { profile, .. } => Some(*profile),

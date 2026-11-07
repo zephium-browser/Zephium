@@ -7,28 +7,29 @@
   import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
   import SpaceBar from "./SpaceBar.svelte";
-  import SpaceEmpty from "./SpaceEmpty.svelte";
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
 
   let {
     pinned,
     today,
     splitting,
     onSelect,
+    extras,
   }: {
     pinned: SidebarEntry[];
     today: SidebarEntry[];
     splitting: boolean;
     onSelect: (id: string) => void;
+    /** Set beside the way to open a tab: pinned extensions. */
+    extras?: Snippet;
   } = $props();
 
   // Private browsing keeps one space, so it has no switcher.
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
   const order = $derived(tabs.spaces().map((space) => space.id));
-  const empty = $derived(pinned.length === 0 && today.length === 0);
   let stage = $state<HTMLElement>();
   let sheet = $state<HTMLElement>();
   // The neighbours are drawn only while a swipe has them in view.
@@ -73,11 +74,12 @@
   the difference by having no close control.
 -->
 <!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
+{#if spaced}<SpaceBar {extras} />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
     </button>
+    {@render extras?.()}
   </div>{/if}
 
 <div
@@ -116,8 +118,6 @@
         {splitting}
         {onSelect}
       />
-
-      {#if empty && spaced}<SpaceEmpty space={tabs.activeSpace()!} onopen={tabs.open} />{/if}
     </div>
     {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
   </div>
@@ -157,7 +157,10 @@
   }
 
   .new-tab-slot {
+    display: flex;
     flex: none;
+    align-items: center;
+    gap: 2px;
     padding-inline: var(--sidebar-inset);
     padding-block: 2px calc(var(--sidebar-row-gap) + 2px);
   }

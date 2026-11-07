@@ -1,6 +1,6 @@
 //! The notes thread. It owns every open library, so file work never waits
 //! behind the store and the store never waits behind a disk flush.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -40,11 +40,19 @@ enum Command {
         done: NoteDone,
     },
     Touched(ProfileId),
-    Release {
-        profile: ProfileId,
-        done: Box<dyn FnOnce() + Send>,
-    },
+    Wake,
     Stop,
+}
+
+struct Release {
+    profile: ProfileId,
+    done: Box<dyn FnOnce() + Send>,
+}
+
+#[derive(Default)]
+struct Releases {
+    pending: VecDeque<Release>,
+    closed: bool,
 }
 
 /// File-system events collected between two turns of the notes thread.
@@ -64,7 +72,14 @@ struct Open {
 
 pub struct NoteService {
     sender: SyncSender<Command>,
+    releases: Arc<Mutex<Releases>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+fn complete_release(done: Box<dyn FnOnce() + Send>) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(done)).is_err() {
+        tracing::warn!("notes release completion panicked");
+    }
 }
 
 fn now() -> i64 {
@@ -77,12 +92,37 @@ impl NoteService {
     /// `base` is the application data directory.
     pub fn start(base: PathBuf, host: Arc<dyn Host>) -> std::io::Result<Self> {
         let (sender, receiver) = sync_channel(QUEUE);
+        // Lifecycle requests have reserved bounded admission even while a
+        // slow file operation has filled the ordinary call queue.
+        let releases = Arc::new(Mutex::new(Releases::default()));
+        let worker_releases = releases.clone();
         let own = sender.clone();
         let thread = std::thread::Builder::new()
             .name("zephium-notes".into())
-            .spawn(move || Worker::new(base, host, own).run(receiver))?;
+            .spawn(move || {
+                // Receiver disconnection can precede destruction of the
+                // libraries and watchers. Catch outside the owning frame so
+                // pending releases survive a panic and acknowledge only after
+                // every worker resource has finished dropping.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Worker::new(base, host, own).run(receiver, &worker_releases);
+                }));
+                let pending = {
+                    let mut releases = worker_releases.lock().unwrap_or_else(|e| e.into_inner());
+                    releases.closed = true;
+                    std::mem::take(&mut releases.pending)
+                };
+                for Release { done, .. } in pending {
+                    // Completion failures are independent of worker cleanup.
+                    complete_release(done);
+                }
+                if let Err(error) = result {
+                    std::panic::resume_unwind(error);
+                }
+            })?;
         Ok(Self {
             sender,
+            releases,
             thread: Some(thread),
         })
     }
@@ -113,12 +153,22 @@ impl NoteService {
 
     /// Closes a profile's notes for good in this process, before its data is
     /// erased. Later calls for it fail as unavailable.
-    pub fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) {
-        if let Err(error) = self.sender.send(Command::Release { profile, done }) {
-            if let Command::Release { done, .. } = error.0 {
-                done();
-            }
+    pub fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
+        let mut releases = self.releases.lock().unwrap_or_else(|e| e.into_inner());
+        if releases.closed {
+            drop(releases);
+            complete_release(done);
+            return true;
         }
+        if releases.pending.len() >= zephium_core::session::MAX_SESSION_PROFILES {
+            return false;
+        }
+        releases.pending.push_back(Release { profile, done });
+        drop(releases);
+        // A full call queue already guarantees a wake. The worker drains
+        // lifecycle requests before taking any more ordinary file work.
+        let _ = self.sender.try_send(Command::Wake);
+        true
     }
 }
 
@@ -127,8 +177,8 @@ impl zephium_core::ports::notes::Notes for NoteService {
         NoteService::call(self, profile, call, done);
     }
 
-    fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) {
-        NoteService::release(self, profile, done);
+    fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
+        NoteService::release(self, profile, done)
     }
 }
 
@@ -186,8 +236,29 @@ impl Worker {
         }
     }
 
-    fn run(mut self, receiver: Receiver<Command>) {
+    fn run(mut self, receiver: Receiver<Command>, releases: &Mutex<Releases>) {
         loop {
+            loop {
+                let profile = releases
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .front()
+                    .map(|release| release.profile);
+                let Some(profile) = profile else { break };
+                // Keep ownership of the completion in the shared queue until
+                // closing these resources succeeds, including their Drop work.
+                self.open.remove(&profile);
+                self.retired.insert(profile);
+                let release = releases
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending
+                    .pop_front();
+                if let Some(Release { done, .. }) = release {
+                    complete_release(done);
+                }
+            }
             let due = self.open.values().filter_map(|open| open.due).min();
             let command = match due {
                 Some(due) => receiver.recv_timeout(due.saturating_duration_since(Instant::now())),
@@ -205,11 +276,7 @@ impl Worker {
                         open.due.get_or_insert_with(|| Instant::now() + SETTLE);
                     }
                 }
-                Ok(Command::Release { profile, done }) => {
-                    self.open.remove(&profile);
-                    self.retired.insert(profile);
-                    done();
-                }
+                Ok(Command::Wake) => {}
                 Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => self.settle(),
             }
@@ -454,6 +521,302 @@ mod tests {
             NoteResponse::Page { items, .. } => items.into_iter().map(|note| note.title).collect(),
             other => panic!("expected a page, got {other:?}"),
         }
+    }
+
+    struct GatedWorkerDrop {
+        revealing: std::sync::mpsc::Sender<()>,
+        fail: Mutex<std::sync::mpsc::Receiver<()>>,
+        begun: std::sync::mpsc::Sender<()>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        marker: PathBuf,
+        armed: AtomicBool,
+    }
+    impl Host for GatedWorkerDrop {
+        fn changed(&self, _: NoteChanges) {}
+        fn reveal(&self, _: &Path) {
+            self.armed.store(true, Ordering::Release);
+            let _ = self.revealing.send(());
+            let _ = self
+                .fail
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .recv();
+            panic!("fixture worker failure");
+        }
+        fn legacy_notes(&self, _: ProfileId) -> Option<Vec<LegacyNote>> {
+            Some(Vec::new())
+        }
+        fn retire_legacy_notes(&self, _: ProfileId, _: Vec<String>) -> bool {
+            true
+        }
+    }
+    impl Drop for GatedWorkerDrop {
+        fn drop(&mut self) {
+            if self.armed.load(Ordering::Acquire) {
+                let _ = self.begun.send(());
+                let _ = self
+                    .resume
+                    .get_mut()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .recv();
+                let _ = std::fs::write(&self.marker, "worker cleanup completed");
+            }
+        }
+    }
+
+    #[test]
+    fn disconnected_release_waits_for_worker_destructors_before_acknowledging() {
+        let base = tempfile::tempdir().unwrap();
+        let marker = base.path().join("worker-cleanup");
+        let (begun, dropping) = std::sync::mpsc::channel();
+        let (resume, gate) = std::sync::mpsc::channel();
+        let (revealing, revealed) = std::sync::mpsc::channel();
+        let (fail, failure) = std::sync::mpsc::channel();
+        let mut notes = NoteService::start(
+            base.path().to_path_buf(),
+            Arc::new(GatedWorkerDrop {
+                revealing,
+                fail: Mutex::new(failure),
+                begun,
+                resume: Mutex::new(gate),
+                marker: marker.clone(),
+                armed: AtomicBool::new(false),
+            }),
+        )
+        .unwrap();
+        let profile = ProfileId::from(3);
+        assert!(matches!(
+            call(
+                &notes,
+                profile,
+                NoteCall::Create {
+                    request_id: "request-000000000001".into(),
+                    markdown: "# Before worker failure".into(),
+                }
+            ),
+            NoteResponse::Applied { .. }
+        ));
+        notes.call(profile, NoteCall::Reveal { id: None }, Box::new(|_| {}));
+        let started = revealed.recv_timeout(Duration::from_secs(5));
+        let _ = fail.send(());
+        let entered = dropping.recv_timeout(Duration::from_secs(5));
+        let disconnected = matches!(
+            notes.sender.try_send(Command::Wake),
+            Err(TrySendError::Disconnected(_))
+        );
+        let (done, proof) = std::sync::mpsc::channel();
+        let during_cleanup = notes.release(
+            profile,
+            Box::new(move || {
+                let _ = done.send(());
+            }),
+        );
+        let early_proof = proof.try_recv().is_ok();
+        let marker_before = marker.exists();
+        // Always release the fixture before asserting, even on a failed proof.
+        let _ = resume.send(());
+        assert!(notes.thread.take().unwrap().join().is_err());
+        assert!(started.is_ok());
+        assert!(entered.is_ok());
+        assert!(
+            disconnected,
+            "receiver drops before the worker's library owners"
+        );
+        assert!(!early_proof && !marker_before);
+        assert!(marker.exists());
+        if during_cleanup {
+            proof.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let (done, proof) = std::sync::mpsc::channel();
+        assert!(notes.release(
+            profile,
+            Box::new(move || {
+                let _ = done.send(());
+            })
+        ));
+        proof.recv_timeout(Duration::from_secs(5)).unwrap();
+        let folder = base.path().join("notes").join(profile.to_string());
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert!(matches!(
+            call(
+                &notes,
+                profile,
+                NoteCall::Create {
+                    request_id: "request-000000000002".into(),
+                    markdown: "# Must stay erased".into(),
+                }
+            ),
+            NoteResponse::Error {
+                error: NoteError::Unavailable
+            }
+        ));
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn accepted_releases_survive_worker_and_completion_panics_with_bounded_admission() {
+        let base = tempfile::tempdir().unwrap();
+        let marker = base.path().join("worker-cleanup");
+        let (begun, dropping) = std::sync::mpsc::channel();
+        let (resume, gate) = std::sync::mpsc::channel();
+        let (revealing, revealed) = std::sync::mpsc::channel();
+        let (fail, failure) = std::sync::mpsc::channel();
+        let mut notes = NoteService::start(
+            base.path().to_path_buf(),
+            Arc::new(GatedWorkerDrop {
+                revealing,
+                fail: Mutex::new(failure),
+                begun,
+                resume: Mutex::new(gate),
+                marker: marker.clone(),
+                armed: AtomicBool::new(false),
+            }),
+        )
+        .unwrap();
+        let profile = ProfileId::from(3);
+        assert!(matches!(
+            call(
+                &notes,
+                profile,
+                NoteCall::Create {
+                    request_id: "request-000000000001".into(),
+                    markdown: "# Before worker failure".into(),
+                }
+            ),
+            NoteResponse::Applied { .. }
+        ));
+        notes.call(profile, NoteCall::Reveal { id: None }, Box::new(|_| {}));
+        let started = revealed.recv_timeout(Duration::from_secs(5));
+        let (done, proof) = std::sync::mpsc::channel();
+        let mut admitted = 0;
+        for index in 0..zephium_core::session::MAX_SESSION_PROFILES {
+            let done = done.clone();
+            let marker = marker.clone();
+            admitted += usize::from(notes.release(
+                profile,
+                Box::new(move || {
+                    let _ = done.send(marker.exists());
+                    if index == 0 {
+                        panic!("fixture completion failure");
+                    }
+                }),
+            ));
+        }
+        drop(done);
+        let (overflow, overflow_proof) = std::sync::mpsc::channel();
+        let overflow_admitted = notes.release(
+            profile,
+            Box::new(move || {
+                let _ = overflow.send(());
+            }),
+        );
+        let before_panic = proof.try_recv().is_ok();
+        let _ = fail.send(());
+        let entered = dropping.recv_timeout(Duration::from_secs(5));
+        let during_cleanup = proof.try_recv().is_ok();
+        let marker_before = marker.exists();
+        // Release both fixture gates before assertions or service shutdown.
+        let _ = resume.send(());
+        let panicked = notes.thread.take().unwrap().join().is_err();
+        let completed: Vec<_> = proof.try_iter().collect();
+        assert!(started.is_ok() && entered.is_ok() && panicked);
+        assert_eq!(admitted, zephium_core::session::MAX_SESSION_PROFILES);
+        assert!(!overflow_admitted && overflow_proof.try_recv().is_err());
+        assert!(!before_panic && !during_cleanup && !marker_before);
+        assert_eq!(
+            completed,
+            vec![true; admitted],
+            "every accepted release completes only after worker cleanup"
+        );
+    }
+
+    struct GatedLegacy {
+        entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl Host for GatedLegacy {
+        fn changed(&self, _: NoteChanges) {}
+        fn reveal(&self, _: &Path) {}
+        fn legacy_notes(&self, _: ProfileId) -> Option<Vec<LegacyNote>> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                self.resume.lock().unwrap().recv().unwrap();
+            }
+            Some(Vec::new())
+        }
+        fn retire_legacy_notes(&self, _: ProfileId, _: Vec<String>) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn release_has_reserved_admission_and_queued_or_late_calls_cannot_recreate_erased_notes() {
+        let base = tempfile::tempdir().unwrap();
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (resume, gate) = std::sync::mpsc::channel();
+        let notes = NoteService::start(
+            base.path().to_path_buf(),
+            Arc::new(GatedLegacy {
+                entered: Mutex::new(Some(entered)),
+                resume: Mutex::new(gate),
+            }),
+        )
+        .unwrap();
+        let blocker = ProfileId::from(1);
+        let victim = ProfileId::from(2);
+        notes.call(blocker, NoteCall::Reveal { id: None }, Box::new(|_| {}));
+        blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (created, response) = std::sync::mpsc::channel();
+        notes.call(
+            victim,
+            NoteCall::Create {
+                request_id: "request-000000000001".into(),
+                markdown: "# Erased secret".into(),
+            },
+            Box::new(move |reply| {
+                let _ = created.send(reply);
+            }),
+        );
+        for _ in 1..QUEUE {
+            notes.call(blocker, NoteCall::Reveal { id: None }, Box::new(|_| {}));
+        }
+        let (released, proof) = std::sync::mpsc::channel();
+        assert!(notes.release(
+            victim,
+            Box::new(move || {
+                released.send(()).unwrap();
+            })
+        ));
+        assert!(
+            proof.try_recv().is_err(),
+            "an active writer must drain first"
+        );
+        resume.send(()).unwrap();
+        proof.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            response.recv_timeout(Duration::from_secs(5)).unwrap(),
+            NoteResponse::Error {
+                error: NoteError::Unavailable
+            }
+        ));
+        let folder = base.path().join("notes").join(victim.to_string());
+        if folder.exists() {
+            std::fs::remove_dir_all(&folder).unwrap();
+        }
+        assert!(matches!(
+            call(
+                &notes,
+                victim,
+                NoteCall::Create {
+                    request_id: "request-000000000002".into(),
+                    markdown: "# Late secret".into(),
+                }
+            ),
+            NoteResponse::Error {
+                error: NoteError::Unavailable
+            }
+        ));
+        assert!(!folder.exists());
     }
 
     #[test]

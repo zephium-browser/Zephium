@@ -21,10 +21,13 @@ enum CoalescedKey {
     Work,
     Bootstrap,
     FocusWake,
+    AudioWake,
     Title(ItemId),
     Url(ItemId),
     Loading(ItemId),
     Favicon(ItemId),
+    FaviconCandidates(ItemId),
+    FaviconImage(ItemId),
     PageMemory(ItemId),
     FaviconPoll(ItemId),
     Presentation(ItemId),
@@ -36,7 +39,9 @@ enum CoalescedKey {
     BlockerReady(ProfileId),
     BlockerStoreReady(ProfileId),
     BlockerPreferenceRetry(ProfileId),
+    BlockerStartupDeadline(ProfileId),
     BlockerCatalogPoll,
+    BlockerCatalogChanged,
     ContentRules(ProfileId, ContentPolicyGeneration),
     // Generations are monotonic and the newest settlement is authoritative;
     // scope-only coalescing prevents a rapid sequence from defeating the
@@ -49,6 +54,7 @@ enum CoalescedKey {
     StoreFaviconBatch,
     Navigation(ItemId),
     Zoom(ItemId),
+    ZoomGesture(ItemId),
     NativeAction(ItemId),
     ExtensionActions(ProfileId),
     ExtensionPageClosed(ItemId),
@@ -57,8 +63,13 @@ enum CoalescedKey {
     WindowSize,
     WindowVisible,
     MediaCapture(ItemId),
+    Audio(ItemId),
+    Media(ItemId),
+    Responsiveness(ItemId),
     MemoryPressure,
     SidebarWidth,
+    SidebarHidden,
+    SidebarPeek,
     SidebarGuide,
     SidebarGuideEnd,
     WorkPaneRect,
@@ -75,12 +86,17 @@ impl CoalescedKey {
             EngineEvent::TitleChanged { id, .. } => Self::Title(*id),
             EngineEvent::UrlChanged { id, .. } => Self::Url(*id),
             EngineEvent::LoadingChanged { id, .. } => Self::Loading(*id),
-            EngineEvent::FaviconPixels { id, .. } => Self::Favicon(*id),
+            EngineEvent::FaviconPixels { id, .. } | EngineEvent::FaviconRasterFailed { id, .. } => {
+                Self::Favicon(*id)
+            }
+            EngineEvent::FaviconCandidates { id, .. } => Self::FaviconCandidates(*id),
+            EngineEvent::FaviconImage { id, .. } => Self::FaviconImage(*id),
             EngineEvent::PageMemory { id, .. } => Self::PageMemory(*id),
             EngineEvent::PresentationPending { id, .. }
             | EngineEvent::PresentationReady { id, .. } => Self::Presentation(*id),
             EngineEvent::NavState { id, .. } => Self::Navigation(*id),
             EngineEvent::ZoomSettled { id, .. } => Self::Zoom(*id),
+            EngineEvent::ZoomGesture { id, .. } => Self::ZoomGesture(*id),
             EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::PageOpenBlocked { id, .. } => Self::NativeAction(*id),
             EngineEvent::ExtensionActionsInvalidated { profile } => {
@@ -89,6 +105,9 @@ impl CoalescedKey {
             EngineEvent::ExtensionPageClosed { id, .. } => Self::ExtensionPageClosed(*id),
             EngineEvent::ExtensionPageChanged { id, .. } => Self::ExtensionPageChanged(*id),
             EngineEvent::MediaCaptureChanged { id, .. } => Self::MediaCapture(*id),
+            EngineEvent::AudioChanged { id, .. } => Self::Audio(*id),
+            EngineEvent::MediaChanged { id, .. } => Self::Media(*id),
+            EngineEvent::PageResponsiveness { id, .. } => Self::Responsiveness(*id),
             EngineEvent::FullscreenChanged { id, .. } => Self::Fullscreen(*id),
             EngineEvent::SplitChanged { window, .. } => Self::Split(*window),
             EngineEvent::ContentRulesSettled {
@@ -107,14 +126,14 @@ impl CoalescedKey {
 // burst.
 const NORMAL_COMMAND_CAPACITY: usize = 960;
 // Each tracked tab can have one latest URL, presentation, navigation failure,
-// terminal view-state, zoom settlement, native-action failure, media-capture
-// and fullscreen fact. Each profile can independently have one process-exit
+// terminal view-state, zoom settlement, native-action failure, media-capture,
+// audio and fullscreen fact. Each profile can independently have one process-exit
 // fact, compiler-result wake, preference-store wake, native-policy settlement,
 // and durable-deletion callback wakeup. The current single-window shell can
 // have one native split fact, and the process can have one sticky
 // runtime-update fact. Reserve all of those independently of the
 // already-accepted user FIFO.
-const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 10
+const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_ITEMS * 11
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
@@ -145,12 +164,15 @@ pub(crate) struct TimerState {
     stopped: bool,
     pub(crate) persist_deadline: Option<std::time::Instant>,
     focus_deadline: Option<std::time::Instant>,
+    audio_deadline: Option<std::time::Instant>,
+    dormancy_deadline: Option<std::time::Instant>,
     favicon_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, u8)>,
     pub(crate) presentation_deadlines: std::collections::HashMap<ItemId, PresentationDeadline>,
     discard_deadlines: std::collections::HashMap<ItemId, (std::time::Instant, DiscardProbeId)>,
     capacity_deadlines: std::collections::HashMap<ItemId, std::time::Instant>,
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_preference_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
+    blocker_startup_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_catalog_deadline: Option<(std::time::Instant, u64, u8)>,
     page_permission_deadline: Option<(
         std::time::Instant,
@@ -173,6 +195,7 @@ pub(crate) enum TimerWake {
     Maintenance,
     Persist,
     Focus,
+    Audio,
     Favicon {
         id: ItemId,
         attempt: u8,
@@ -194,6 +217,10 @@ pub(crate) enum TimerWake {
         generation: u64,
     },
     BlockerPreference {
+        profile: ProfileId,
+        token: u64,
+    },
+    BlockerStartup {
         profile: ProfileId,
         token: u64,
     },
@@ -235,6 +262,7 @@ const _: () = assert!(std::mem::size_of::<TryPushError>() <= 160);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecoveryKey {
     MediaCapture(ItemId),
+    Audio(ItemId),
     Fullscreen(ItemId),
     RuntimeRestart,
     MemoryPressure,
@@ -260,6 +288,7 @@ fn recovery_key(command: &Command) -> Option<RecoveryKey> {
         Command::Engine(EngineEvent::MediaCaptureChanged { id, .. }) => {
             Some(RecoveryKey::MediaCapture(*id))
         }
+        Command::Engine(EngineEvent::AudioChanged { id, .. }) => Some(RecoveryKey::Audio(*id)),
         Command::Engine(EngineEvent::FullscreenChanged { id, .. }) => {
             Some(RecoveryKey::Fullscreen(*id))
         }
@@ -318,6 +347,13 @@ fn retain_post_barrier(commands: &mut VecDeque<Command>, command: Command) {
 }
 
 impl CommandQueue {
+    pub(crate) fn is_accepting_commands(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .is_ok_and(|state| !state.closed && !state.shutdown_enqueued)
+    }
+
     #[cfg(feature = "work-execution")]
     pub(crate) fn schedule_work(&self, deadline: Option<std::time::Instant>) {
         let mut timer = self
@@ -536,12 +572,15 @@ impl CommandQueue {
         timer.stopped = true;
         timer.persist_deadline = None;
         timer.focus_deadline = None;
+        timer.audio_deadline = None;
+        timer.dormancy_deadline = None;
         timer.favicon_deadlines.clear();
         timer.presentation_deadlines.clear();
         timer.discard_deadlines.clear();
         timer.capacity_deadlines.clear();
         timer.profile_deletion_deadlines.clear();
         timer.blocker_preference_deadlines.clear();
+        timer.blocker_startup_deadlines.clear();
         timer.blocker_catalog_deadline = None;
         timer.page_permission_deadline = None;
         self.inner.timer_ready.notify_all();
@@ -572,6 +611,45 @@ impl CommandQueue {
             return;
         }
         timer.focus_deadline = deadline;
+        self.inner.timer_ready.notify_one();
+    }
+
+    /// Wakes the shell when the earliest quiet tab's speaker is due to go.
+    /// A later deadline never postpones an earlier one.
+    pub(crate) fn schedule_audio(&self, deadline: std::time::Instant) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.audio_deadline = Some(
+            timer
+                .audio_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        self.inner.timer_ready.notify_one();
+    }
+
+    /// Wakes the shell for a maintenance pass when the next hidden page is
+    /// due to sleep, sooner than the regular tick. A later deadline never
+    /// postpones an earlier one.
+    pub(crate) fn schedule_dormancy(&self, deadline: std::time::Instant) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.dormancy_deadline = Some(
+            timer
+                .dormancy_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
         self.inner.timer_ready.notify_one();
     }
 
@@ -844,6 +922,35 @@ impl CommandQueue {
         self.inner.timer_ready.notify_one();
     }
 
+    pub(crate) fn schedule_blocker_startup_deadline(
+        &self,
+        profile: ProfileId,
+        token: u64,
+        deadline: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer
+            .blocker_startup_deadlines
+            .insert(profile, (deadline, token));
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_blocker_startup_deadline(&self, profile: ProfileId) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        timer.blocker_startup_deadlines.remove(&profile);
+    }
+
     pub(crate) fn cancel_blocker_preference_reconciliation(&self, profile: ProfileId) {
         let mut timer = self
             .inner
@@ -925,6 +1032,10 @@ impl CommandQueue {
                 timer.focus_deadline = None;
                 return TimerWake::Focus;
             }
+            if timer.audio_deadline.is_some_and(|deadline| now >= deadline) {
+                timer.audio_deadline = None;
+                return TimerWake::Audio;
+            }
             let next_favicon = timer
                 .favicon_deadlines
                 .iter()
@@ -998,6 +1109,17 @@ impl CommandQueue {
                     return TimerWake::BlockerPreference { profile, token };
                 }
             }
+            let next_blocker_startup = timer
+                .blocker_startup_deadlines
+                .iter()
+                .min_by_key(|(_, (deadline, _))| *deadline)
+                .map(|(profile, (deadline, token))| (*profile, *deadline, *token));
+            if let Some((profile, deadline, token)) = next_blocker_startup {
+                if now >= deadline {
+                    timer.blocker_startup_deadlines.remove(&profile);
+                    return TimerWake::BlockerStartup { profile, token };
+                }
+            }
             let next_blocker_catalog = timer.blocker_catalog_deadline;
             if let Some((deadline, operation, attempt)) = next_blocker_catalog {
                 if now >= deadline {
@@ -1016,7 +1138,12 @@ impl CommandQueue {
                     };
                 }
             }
-            if now >= maintenance_deadline {
+            if now >= maintenance_deadline
+                || timer
+                    .dormancy_deadline
+                    .is_some_and(|deadline| now >= deadline)
+            {
+                timer.dormancy_deadline = None;
                 return TimerWake::Maintenance;
             }
             let mut deadline = timer
@@ -1030,6 +1157,12 @@ impl CommandQueue {
             }
             if let Some(focus) = timer.focus_deadline {
                 deadline = deadline.min(focus);
+            }
+            if let Some(audio) = timer.audio_deadline {
+                deadline = deadline.min(audio);
+            }
+            if let Some(dormancy) = timer.dormancy_deadline {
+                deadline = deadline.min(dormancy);
             }
             if let Some((_, favicon, _)) = next_favicon {
                 deadline = deadline.min(favicon);
@@ -1048,6 +1181,9 @@ impl CommandQueue {
             }
             if let Some((_, blocker_preference, _)) = next_blocker_preference {
                 deadline = deadline.min(blocker_preference);
+            }
+            if let Some((_, blocker_startup, _)) = next_blocker_startup {
+                deadline = deadline.min(blocker_startup);
             }
             if let Some((blocker_catalog, _, _)) = next_blocker_catalog {
                 deadline = deadline.min(blocker_catalog);
@@ -1165,6 +1301,8 @@ fn command_is_critical(command: &Command) -> bool {
     matches!(
         command,
         Command::SetWindowFocused(false)
+            | Command::SetPagePermissionCardHost(false)
+            | Command::SetChromeModal(false)
             | Command::BlockerReady(_)
             | Command::SetMemoryPressure(_)
             | Command::SidebarResizeGuide(None)
@@ -1173,6 +1311,8 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::PagePermissionCatalogLoaded { .. }
             | Command::PagePermissionCatalogMutated { .. }
             | Command::PagePermissionTimeout { .. }
+            | Command::SitePermissionCatalogLoaded { .. }
+            | Command::SitePermissionSettled { .. }
             | Command::BrowserChromeRestored { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
@@ -1190,14 +1330,22 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionPageClosed { .. }
                     | EngineEvent::ExtensionPageChanged { .. }
                     | EngineEvent::PermissionRequested { .. }
+                    | EngineEvent::HttpAuthRequested { .. }
+                    | EngineEvent::HttpAuthEnded { .. }
+                    | EngineEvent::DownloadPermissionRequested { .. }
+                    | EngineEvent::DownloadPermissionEnded { .. }
+                    | EngineEvent::InsecureAutofillRequested { .. }
                     | EngineEvent::MediaCaptureChanged { .. }
+                    | EngineEvent::AudioChanged { .. }
                     | EngineEvent::FullscreenChanged { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
+                    | EngineEvent::NavigationFailureReported { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }
                     | EngineEvent::ProfileProcessExited { .. }
+                    | EngineEvent::ProfileRestartRequired { .. }
                     | EngineEvent::Crashed { .. }
                     | EngineEvent::ViewDiscarded { .. }
                     | EngineEvent::ViewDiscardRefused { .. }
@@ -1216,6 +1364,7 @@ fn command_is_observational_query(command: &Command) -> bool {
         Command::ContentPolicyStatus { .. }
             | Command::FocusedContentPolicyStatus { .. }
             | Command::BlockerStatistics { .. }
+            | Command::SitePermissions { .. }
     )
 }
 
@@ -1229,6 +1378,8 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::SetWindowVisible(_) => Some(CoalescedKey::WindowVisible),
         Command::SetMemoryPressure(_) => Some(CoalescedKey::MemoryPressure),
         Command::SetSidebarWidth(..) => Some(CoalescedKey::SidebarWidth),
+        Command::SetSidebarHidden(_) => Some(CoalescedKey::SidebarHidden),
+        Command::PeekSidebar { .. } => Some(CoalescedKey::SidebarPeek),
         Command::SidebarResizeGuide(Some(_)) => Some(CoalescedKey::SidebarGuide),
         Command::SidebarResizeGuide(None) => Some(CoalescedKey::SidebarGuideEnd),
         Command::WorkPaneSetRect { .. } => Some(CoalescedKey::WorkPaneRect),
@@ -1247,7 +1398,11 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::BlockerPreferenceRetry { profile, .. } => {
             Some(CoalescedKey::BlockerPreferenceRetry(*profile))
         }
+        Command::BlockerStartupDeadline { profile, .. } => {
+            Some(CoalescedKey::BlockerStartupDeadline(*profile))
+        }
         Command::BlockerCatalogPoll { .. } => Some(CoalescedKey::BlockerCatalogPoll),
+        Command::BlockerCatalogChanged => Some(CoalescedKey::BlockerCatalogChanged),
         Command::ProfileDeletionReady(profile) => {
             Some(CoalescedKey::ProfileDeletionReady(*profile))
         }
@@ -1263,6 +1418,7 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         }
         Command::Persist => Some(CoalescedKey::Persist),
         Command::FocusWake => Some(CoalescedKey::FocusWake),
+        Command::AudioWake => Some(CoalescedKey::AudioWake),
         Command::Tick => Some(CoalescedKey::Tick),
         _ => None,
     }

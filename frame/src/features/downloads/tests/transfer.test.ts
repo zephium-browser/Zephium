@@ -13,6 +13,7 @@ const entry = (received: number, total: number | null): DownloadView => ({
   received: String(received),
   total: total === null ? null : String(total),
   error: null,
+  insecure: false,
 });
 
 test("the rate settles across readings and starts over when a transfer restarts", () => {
@@ -24,6 +25,17 @@ test("the rate settles across readings and starts over when a transfer restarts"
   expect(rate.observe("d", 10, 3000)).toBeNull();
   rate.retain([]);
   expect(rate.observe("d", 500, 4000)).toBeNull();
+});
+
+test("a resumed transfer does not include the paused interval in its rate", () => {
+  const rate = new TransferRate();
+  rate.observe("d", 0, 0);
+  expect(rate.observe("d", 1000, 1000)).toBe(1000);
+  rate.retain([{ id: "d", state: "receiving" }]);
+  expect(rate.observe("d", 2000, 2000)).toBe(1000);
+  rate.retain([{ id: "d", state: "paused" }]);
+  expect(rate.observe("d", 2000, 601_000)).toBeNull();
+  expect(rate.observe("d", 3000, 602_000)).toBe(1000);
 });
 
 test("the line says how far along and how long is left once it knows", () => {

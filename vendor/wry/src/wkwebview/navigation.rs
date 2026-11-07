@@ -20,7 +20,7 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT},
+  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT},
   AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
   NavigationFailure, NavigationId, PageLoadEvent,
 };
@@ -657,6 +657,10 @@ fn navigation_error_phase(domain: Option<&str>, code: isize) -> NavigationEventP
 
 /// The category a person can be told; never the native error text.
 fn navigation_failure(domain: Option<&str>, code: isize) -> NavigationFailure {
+  // WebKitErrorFrameLoadBlockedByContentBlocker.
+  if (domain, code) == (Some("WebKitErrorDomain"), 104) {
+    return NavigationFailure::Blocked;
+  }
   if domain != Some("NSURLErrorDomain") {
     return NavigationFailure::Other;
   }
@@ -727,9 +731,41 @@ pub(crate) fn did_fail_navigation(
   // Failed event is emitted now or from a deferred flush.
   if phase == NavigationEventPhase::Failed {
     if let Some(handler) = &this.ivars().navigation_failure_handler {
+      #[allow(unused_mut)]
+      let mut failure = navigation_failure(domain.as_deref(), error.code());
+      #[cfg(target_os = "macos")]
+      if failure == NavigationFailure::Insecure {
+        if let Some(refused) =
+          crate::wkwebview::server_trust::certificate_failure(error, error.code())
+        {
+          failure = NavigationFailure::Certificate(refused.problem);
+          if let Some(report) = &this.ivars().certificate_failure_handler {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report(refused)));
+          }
+        }
+      }
+      // The view's current address is still the page before; only the
+      // error names the address the content rule refused.
+      let document = if failure == NavigationFailure::Blocked {
+        error
+          .userInfo()
+          .objectForKey(unsafe { NSURLErrorFailingURLErrorKey })
+          .and_then(|value| {
+            value
+              .downcast_ref::<NSURL>()
+              .and_then(|url| url.absoluteString())
+          })
+          .and_then(|value| bounded_nsstring(&value, PAGE_URL_LIMIT))
+          .map_or(crate::FailedDocument::Kept, |url| {
+            crate::FailedDocument::Refused { url }
+          })
+      } else {
+        crate::FailedDocument::Kept
+      };
       handler(
         NavigationId::from_raw(navigation_key(navigation) as u64),
-        navigation_failure(domain.as_deref(), error.code()),
+        failure,
+        document,
       );
     }
   }
@@ -906,12 +942,34 @@ pub(crate) fn navigation_policy(
         .HTTPMethod()
         .and_then(|method| bounded_nsstring(&method, CUSTOM_PROTOCOL_METHOD_LIMIT))
         .is_some_and(|method| method == "GET");
+      let source = action.sourceFrame().map(|frame| {
+        let origin = frame.securityOrigin();
+        // An origin that does not fit is left empty: the frame is still
+        // known, its site is not.
+        let (scheme, host, port) = u16::try_from(origin.port())
+          .ok()
+          .and_then(|port| {
+            Some((
+              bounded_nsstring(&origin.protocol(), ORIGIN_PART_LIMIT)?,
+              bounded_nsstring(&origin.host(), ORIGIN_PART_LIMIT)?,
+              port,
+            ))
+          })
+          .unwrap_or_default();
+        crate::AppleNavigationSource {
+          is_main_frame: frame.isMainFrame(),
+          scheme,
+          host,
+          port,
+        }
+      });
       let policy_allows = function(
         url.clone(),
         AppleNavigationAction {
           navigation_type,
           is_get,
           target_is_main_frame,
+          source,
         },
       );
       #[cfg(target_os = "macos")]
@@ -1470,6 +1528,10 @@ mod cancellation_tests {
     assert_eq!(
       navigation_failure(Some("WebKitErrorDomain"), -1009),
       NavigationFailure::Other
+    );
+    assert_eq!(
+      navigation_failure(Some("WebKitErrorDomain"), 104),
+      NavigationFailure::Blocked
     );
   }
   #[test]

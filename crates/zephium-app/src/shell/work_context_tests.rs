@@ -70,8 +70,9 @@ impl zephium_core::ports::notes::Notes for OneNote {
         });
     }
 
-    fn release(&self, _: zephium_core::ids::ProfileId, done: Box<dyn FnOnce() + Send>) {
+    fn release(&self, _: zephium_core::ids::ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
         done();
+        true
     }
 }
 

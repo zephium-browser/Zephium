@@ -232,6 +232,10 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
     ));
     assert_eq!(shell.retry_extension_actions(), NativeWork::default());
     assert_eq!(engine.extension_action_requests().len(), 3);
+    // Settled actions change only through native invalidations; the
+    // maintenance heartbeat reads nothing.
+    shell.handle(Command::Tick);
+    assert_eq!(engine.extension_action_requests().len(), 3);
 
     let click_only = ExtensionActionState::new(
         runtime,
@@ -319,6 +323,52 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
             zephium_core::extensions::ExtensionActionSettlement::PopupDismissed,
         ),
         ExtensionActionInvocationObservation::PopupDismissed
+    );
+
+    // A disabled action still opens its menu, and a menu that cannot open
+    // is not reported as a failed click.
+    let disabled = ExtensionActionState::new(
+        runtime,
+        ExtensionActionScope::Tab(tab),
+        rebound_revision,
+        "Bitwarden",
+        "",
+        None,
+        false,
+        true,
+        false,
+    )
+    .unwrap();
+    shell.handle(Command::Engine(
+        EngineEvent::ExtensionActionsSnapshotSettled {
+            profile,
+            tab,
+            surface_generation: generation,
+            settlement: ExtensionActionSnapshotSettlement::Applied(
+                ExtensionActionSnapshot::new(profile, tab, generation, vec![disabled]).unwrap(),
+            ),
+        },
+    ));
+    assert_eq!(
+        shell.invoke_extension_action(runtime, rebound_revision, anchor),
+        Err(zephium_core::extensions::ExtensionActionRejection::ActionDisabled)
+    );
+    let menu = shell
+        .dispatch_extension_action(runtime, rebound_revision, anchor, true)
+        .unwrap();
+    let native = engine.extension_action_invocations();
+    let request = native.last().unwrap();
+    assert_eq!(request.id(), menu);
+    assert!(request.is_menu());
+    assert_eq!(
+        shell.extension_actions.settle_invocation(
+            profile,
+            menu,
+            zephium_core::extensions::ExtensionActionSettlement::Rejected(
+                zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform,
+            ),
+        ),
+        ExtensionActionInvocationObservation::Dispatched
     );
 }
 

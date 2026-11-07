@@ -320,9 +320,9 @@ export class AssistSession {
     if (id) void quietly(commands.pageAssistFocus(id, reply, block, n), false);
   }
 
-  decide(reply: number, block: number, decision: PageAssistDecisionV1) {
+  async decide(reply: number, block: number, decision: PageAssistDecisionV1): Promise<boolean> {
     const id = this.conversation.id;
-    if (id) void quietly(commands.pageAssistDecide(id, reply, block, decision), false);
+    return id ? quietly(commands.pageAssistDecide(id, reply, block, decision), false) : false;
   }
 
   resume(reply: number) {

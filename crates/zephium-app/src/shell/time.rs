@@ -126,7 +126,7 @@ fn local_day(utc_ms: i64) -> i64 {
 /// A page's registrable domain, so `m.youtube.com` and `www.youtube.com`
 /// are one site. Hosts without a known suffix, such as `localhost`, stay
 /// whole.
-fn site_of(url: &url::Url) -> Option<String> {
+pub(super) fn site_of(url: &url::Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
