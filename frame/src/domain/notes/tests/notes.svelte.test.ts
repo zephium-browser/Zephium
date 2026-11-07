@@ -67,6 +67,38 @@ test("a new note has no file until it has something in it, then exactly one", as
   expect(session.saveState).toBe("saved");
 });
 
+test.each([false, true])(
+  "a slow open cannot replace or cancel the save of a newly created note (failed read: %s)",
+  async (failed) => {
+    const old = server.seed("# Old note\n");
+    const session = await started();
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => (resolve = done));
+    host.call = async (profile, call) => {
+      if (call.kind === "get" && call.id === old.id) {
+        await pending;
+        if (failed) return { profile, response: { kind: "error", error: "not_found" } };
+      }
+      return server.call(profile, call);
+    };
+    const opening = session.open(old.id);
+    await settle();
+    await session.create();
+    session.edit("# New note\n\nKeep these words");
+    const version = session.note?.version;
+    resolve();
+    expect(await opening).toBe(false);
+    expect(session.note?.version).toBe(version);
+    expect(session.markdown).toBe("# New note\n\nKeep these words");
+    expect(session.saveState).toBe("unsaved");
+    expect(session.openError).toBeNull();
+    await settle(1300);
+    expect(session.saveState).toBe("saved");
+    expect(session.note?.id).not.toBe(old.id);
+    expect(server.notes.get(session.note!.id!)?.markdown).toBe("# New note\n\nKeep these words");
+  },
+);
+
 test("typing saves after a pause, and at least every few seconds while it goes on", async () => {
   const session = await started();
   const note = server.seed("# Plans\n");
