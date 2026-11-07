@@ -118,3 +118,7 @@ paths = ["src/lib.rs", "src/wkwebview/mod.rs"]
 [[patch_sets]]
 name = "macOS navigation source frame and context-menu download marker"
 paths = ["src/lib.rs", "src/native_bounds.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
+
+[[patch_sets]]
+name = "opt-in macOS media return to inline callback"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]

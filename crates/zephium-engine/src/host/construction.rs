@@ -2797,7 +2797,7 @@ impl EngineHost {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             automatic_pip_sequence: Rc::new(Cell::new(0)),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            automatic_pip_after_fullscreen: Cell::new(false),
+            automatic_pip_after_fullscreen: std::cell::RefCell::new(None),
             favicon_watch: Cell::new(0),
             #[cfg(target_os = "macos")]
             insecure_autofill: Cell::new(None),
