@@ -294,8 +294,23 @@ pub(super) fn agent_lifecycle_with_clean(
 
 type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
+thread_local! {
+    static SUSPENDS_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with engines that suspend hidden views as WebView2 does, so a
+/// shared shell test pins the Windows path as well as the macOS one.
+pub(super) fn suspending(test: fn()) {
+    SUSPENDS_HIDDEN.set(true);
+    test();
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    /// Hidden views are really suspended: the desired set is kept, and a
+    /// suspended page cannot answer a discard probe.
+    suspends_hidden: std::sync::atomic::AtomicBool,
+    suspended: Mutex<std::collections::HashSet<ItemId>>,
     automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
@@ -942,6 +957,11 @@ impl Engine for FakeEngine {
             .load(std::sync::atomic::Ordering::Acquire)
     }
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        // A suspended WebView2 does not run the probe's script.
+        assert!(
+            !self.suspended.lock().unwrap().contains(&id),
+            "{id} was probed while still suspended"
+        );
         self.log(format!("probe-discard {id} {}", probe.0));
         true
     }
@@ -960,7 +980,13 @@ impl Engine for FakeEngine {
             item.map_or_else(|| "all".into(), |id| id.to_string())
         ));
     }
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, _request: u64) {
+        if self
+            .suspends_hidden
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.suspended.lock().unwrap() = ids.iter().copied().collect();
+        }
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
@@ -1097,6 +1123,11 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    /// What a site's history names; none refuses the scan.
+    /// The origin scan's answer and whether it finished; none answers an
+    /// empty, finished scan. `site_origins_refused` refuses the scan.
+    pub(crate) site_origins: Mutex<Option<(Vec<String>, bool)>>,
+    pub(crate) site_origins_refused: std::sync::atomic::AtomicBool,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1875,6 +1906,27 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        if self
+            .site_origins_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let (origins, complete) = self
+            .site_origins
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((Vec::new(), true));
+        done(origins, complete);
+        true
+    }
     fn discard_session_backup(
         &self,
         profile: ProfileId,
@@ -2217,6 +2269,9 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
 
 pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
+    engine
+        .suspends_hidden
+        .store(SUSPENDS_HIDDEN.get(), std::sync::atomic::Ordering::Release);
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,

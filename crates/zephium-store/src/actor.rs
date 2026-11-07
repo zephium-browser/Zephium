@@ -416,6 +416,7 @@ enum Cmd {
     ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     DiscardSessionBackup(ProfileId, Box<dyn FnOnce(bool) + Send>),
+    SiteOrigins(ProfileId, String, Box<dyn FnOnce(Vec<String>, bool) + Send>),
     Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
     Chat(ProfileId, String, Sender<Option<String>>),
     SaveChat {
@@ -1564,6 +1565,19 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn site_origins(
+        &self,
+        profile: ProfileId,
+        site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        zephium_core::browsing_data::is_site_name(&site)
+            && self
+                .tx
+                .try_send(Cmd::SiteOrigins(profile, site, done))
+                .is_ok()
+    }
+
     fn chats(&self, profile: ProfileId, limit: u32) -> Vec<ChatSummary> {
         let limit = limit.min(MAX_CHATS as u32);
         if limit == 0 {
@@ -2223,6 +2237,12 @@ fn actor(
                 }
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     done(result.is_ok());
+                }));
+            }
+            Some(Cmd::SiteOrigins(profile, site, done)) => {
+                let (origins, complete) = hub.site_origins(profile, &site);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    done(origins, complete)
                 }));
             }
             Some(Cmd::Chats(profile, limit, reply)) => {

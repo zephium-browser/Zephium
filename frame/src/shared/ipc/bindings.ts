@@ -1264,7 +1264,12 @@ export type BrowsingDataError = "invalid" | "unavailable" | "capacity" |
 /**  How far back a browsing data clear reaches. */
 export type BrowsingDataRange = "hour" | "day" | "week" | "four_weeks" | "everything";
 
-export type BrowsingDataResponse = { kind: "cleared" } | { kind: "sites"; sites: SiteDataView[];
+export type BrowsingDataResponse = { kind: "cleared" } |
+/**
+ *  Removed, but some of the site's data may remain: the engine would not
+ *  delete everything, or could not reach every place it is kept.
+ */
+{ kind: "partly_cleared" } | { kind: "sites"; sites: SiteDataView[];
 /**
  *  The engine can only name sites by some of what it holds: sites
  *  with only storage and no cookies are missing from the list.

@@ -14,7 +14,8 @@ use webview2_com::{
 };
 use windows_core::{w, Interface as _, HSTRING, PWSTR};
 use zephium_core::browsing_data::{
-    host_is_on_site, EngineDataCompletion, EngineDataFailure, EngineDataKinds, EngineDataReply,
+    host_is_on_site, page_origin_host, EngineDataCompletion, EngineDataFailure, EngineDataKinds,
+    EngineDataReply,
 };
 
 use crate::data_kinds::{merge_sites, webview2_kinds};
@@ -22,8 +23,9 @@ use crate::data_kinds::{merge_sites, webview2_kinds};
 /// Cookies one listing reads before the rest are left out.
 const MAX_COOKIES: u32 = 50_000;
 
-/// Most origins one site removal reaches into storage for.
-const MAX_ORIGINS: usize = 24;
+/// Most origins one site removal reaches into storage for; past it, the
+/// removal says some data may remain.
+const MAX_ORIGINS: usize = 128;
 
 /// What the storage of a single origin holds, except cookies, which the
 /// cookie manager owns.
@@ -165,20 +167,28 @@ pub(crate) fn sites(target: &DataTarget, done: EngineDataCompletion) {
     }
 }
 
-/// The origins to clear storage for: the site's own and every host a cookie
-/// of it names, over https and http, or the page's own origin when given.
-fn origins_of(site: &str, hosts: &[String], origin: Option<&str>) -> Vec<String> {
+/// The origins to clear storage for: those Zephium knows of on the site,
+/// with their ports, then the site's own and every host a cookie of it names,
+/// over https and http. True when some had to be left out.
+fn origins_of(site: &str, hosts: &[String], known: &[String]) -> (Vec<String>, bool) {
     let mut origins: Vec<String> = Vec::new();
+    let mut left_out = false;
     let mut add = |origin: String| {
-        if !origins.contains(&origin) && origins.len() < MAX_ORIGINS {
-            origins.push(origin);
+        if !origins.contains(&origin) {
+            if origins.len() < MAX_ORIGINS {
+                origins.push(origin);
+            } else {
+                left_out = true;
+            }
         }
     };
-    if let Some(origin) = origin {
-        add(origin.to_owned());
+    for origin in known {
+        if page_origin_host(origin).is_some_and(|host| host_is_on_site(&host, site)) {
+            add(origin.clone());
+        }
     }
     for host in std::iter::once(site).chain(hosts.iter().map(String::as_str)) {
-        let host = if host.contains(':') {
+        let host = if host.contains(':') && !host.starts_with('[') {
             format!("[{host}]")
         } else {
             host.to_owned()
@@ -186,14 +196,15 @@ fn origins_of(site: &str, hosts: &[String], origin: Option<&str>) -> Vec<String>
         add(format!("https://{host}"));
         add(format!("http://{host}"));
     }
-    origins
+    (origins, left_out)
 }
 
-/// Removes every cookie of `site`, then the storage of its origins.
+/// Removes every cookie of `site`, then the storage of its origins. Data the
+/// engine would not remove, or origins left out, make it a partial removal.
 pub(crate) fn forget_site(
     target: &DataTarget,
     site: String,
-    origin: Option<String>,
+    known: Vec<String>,
     done: EngineDataCompletion,
 ) {
     let Ok(manager) = target.cookies() else {
@@ -215,22 +226,24 @@ pub(crate) fn forget_site(
             return Ok(());
         }
         let mut hosts = Vec::new();
+        let mut partial = count > MAX_COOKIES;
         for index in 0..count.min(MAX_COOKIES) {
             // SAFETY: the index is inside this list.
             let Ok(cookie) = (unsafe { cookies.GetValueAtIndex(index) }) else {
+                partial = true;
                 continue;
             };
             let domain = domain_of(&cookie);
             if !domain.is_empty() && host_is_on_site(&domain, &site) {
                 // SAFETY: the manager and cookie are live objects of this profile.
-                let _ = unsafe { list_manager.DeleteCookie(&cookie) };
+                partial |= unsafe { list_manager.DeleteCookie(&cookie) }.is_err();
                 if !hosts.contains(&domain) {
                     hosts.push(domain);
                 }
             }
         }
-        let origins = origins_of(&site, &hosts, origin.as_deref());
-        clear_origins(core, origins, done);
+        let (origins, left_out) = origins_of(&site, &hosts, &known);
+        clear_origins(core, origins, partial || left_out, done);
         Ok(())
     });
     if started.is_err() {
@@ -240,9 +253,20 @@ pub(crate) fn forget_site(
     }
 }
 
-fn clear_origins(core: ICoreWebView2, mut origins: Vec<String>, done: EngineDataCompletion) {
+/// Clears each origin in turn; one the engine refuses is passed over and
+/// makes the removal partial.
+fn clear_origins(
+    core: ICoreWebView2,
+    mut origins: Vec<String>,
+    partial: bool,
+    done: EngineDataCompletion,
+) {
     if origins.is_empty() {
-        done.finish(EngineDataReply::Cleared);
+        done.finish(if partial {
+            EngineDataReply::PartlyCleared
+        } else {
+            EngineDataReply::Cleared
+        });
         return;
     }
     let origin = origins.remove(0);
@@ -252,11 +276,7 @@ fn clear_origins(core: ICoreWebView2, mut origins: Vec<String>, done: EngineData
     let next = core.clone();
     let handler =
         CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, _response| {
-            if result.is_ok() {
-                clear_origins(next, origins, done);
-            } else {
-                done.finish(failed());
-            }
+            clear_origins(next, origins, partial || result.is_err(), done);
             Ok(())
         }));
     // SAFETY: the exact STA-owned view; the strings outlive the call and the
@@ -313,10 +333,10 @@ mod tests {
 
     #[test]
     fn a_site_removal_reaches_its_own_hosts_over_both_schemes_and_nothing_else() {
-        let origins = origins_of(
+        let (origins, left_out) = origins_of(
             "example.com",
             &["www.example.com".to_owned()],
-            Some("https://app.example.com:8443"),
+            &["https://app.example.com:8443".to_owned()],
         );
         assert_eq!(
             origins,
@@ -328,12 +348,54 @@ mod tests {
                 "http://www.example.com",
             ]
         );
-        assert!(origins_of("example.com", &[], None).len() == 2);
+        assert!(!left_out);
+        assert_eq!(origins_of("example.com", &[], &[]).0.len(), 2);
     }
 
     #[test]
-    fn a_site_removal_is_bounded() {
+    fn a_site_removal_reaches_known_origins_with_their_ports_and_only_on_the_site() {
+        // Storage on www with every cookie on the parent domain.
+        let (origins, _) = origins_of(
+            "example.com",
+            &["example.com".to_owned()],
+            &[
+                "https://www.example.com".to_owned(),
+                "http://localhost:3000".to_owned(),
+                "https://example.com.evil.test".to_owned(),
+                "https://www.example.com/path".to_owned(),
+            ],
+        );
+        assert_eq!(
+            origins,
+            [
+                "https://www.example.com",
+                "https://example.com",
+                "http://example.com",
+            ]
+        );
+        let (local, _) = origins_of(
+            "localhost",
+            &[],
+            &[
+                "http://localhost:3000".to_owned(),
+                "http://localhost:8080".to_owned(),
+            ],
+        );
+        assert_eq!(
+            local[..2],
+            ["http://localhost:3000", "http://localhost:8080"]
+        );
+        let (v6, _) = origins_of("[::1]", &[], &["http://[::1]:5000".to_owned()]);
+        assert_eq!(v6, ["http://[::1]:5000", "https://[::1]", "http://[::1]"]);
+    }
+
+    #[test]
+    fn a_site_removal_is_bounded_and_says_so() {
         let hosts: Vec<String> = (0..100).map(|n| format!("h{n}.example.com")).collect();
-        assert_eq!(origins_of("example.com", &hosts, None).len(), MAX_ORIGINS);
+        let (origins, left_out) = origins_of("example.com", &hosts, &[]);
+        assert_eq!(origins.len(), MAX_ORIGINS);
+        assert!(left_out);
+        let (_, within) = origins_of("example.com", &hosts[..10], &[]);
+        assert!(!within);
     }
 }

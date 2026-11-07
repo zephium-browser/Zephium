@@ -23,7 +23,7 @@
   let view = $state.raw<View>({ state: "loading" });
   let query = $state("");
   let removing = $state<string | null>(null);
-  let failure = $state<{ site: string | null } | null>(null);
+  let failure = $state<{ site: string | null; partial?: boolean } | null>(null);
   let confirmingAll = $state(false);
   let clearingAll = $state(false);
   let opener: HTMLElement | null = null;
@@ -60,8 +60,9 @@
     failure = null;
     const outcome = await forgetSite(profile, site);
     removing = null;
+    // Partly removed, the site still holds data: its row stays.
     if (outcome !== "cleared") {
-      failure = { site };
+      failure = { site, partial: outcome === "partial" };
       return;
     }
     if (view.state === "ready")
@@ -150,7 +151,9 @@
         {#if failure}<p class="error" role="alert">
             {failure.site === null
               ? m.privacy_clear_failed()
-              : m.privacy_sites_remove_failed({ site: failure.site })}
+              : failure.partial
+                ? m.privacy_sites_remove_partial({ site: failure.site })
+                : m.privacy_sites_remove_failed({ site: failure.site })}
           </p>{/if}
         {#if confirmingAll}<p class="status">{m.privacy_sites_remove_all_confirm()}</p>{/if}
       </div>

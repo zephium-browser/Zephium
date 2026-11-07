@@ -720,6 +720,17 @@ pub(crate) struct EngineHost {
     dormant: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     desired_dormant: std::collections::HashSet<ItemId>,
+    /// The shell's number for the desired set above, echoed by a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_request: u64,
+    /// The request under which each desired page last entered that set: its
+    /// dormancy cycle. Only an attempt of the current cycle counts a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_cycles: std::collections::HashMap<ItemId, u64>,
+    /// The warm page `reach_durable_profile` opened for calls still running,
+    /// and how many of them use it.
+    #[cfg(target_os = "windows")]
+    temporary_page: Option<(ProfileId, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
