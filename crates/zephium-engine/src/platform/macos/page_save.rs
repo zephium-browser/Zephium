@@ -148,15 +148,33 @@ fn write_page(
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("missing page directory"))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    std::io::copy(&mut bytes, &mut file)?;
-    crate::host::download_files::quarantine(file.path(), origin)
-        .map_err(|_| std::io::Error::other("page quarantine failed"))?;
-    crate::host::download_files::verify_quarantine(file.as_file())
-        .map_err(|_| std::io::Error::other("page quarantine verification failed"))?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("missing page name"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let mut partial_name = std::ffi::OsString::from(".");
+    partial_name.push(name);
+    partial_name.push(format!(".{}-{stamp}.partial", std::process::id()));
+    let partial = parent.join(partial_name);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)?;
+        std::io::copy(&mut bytes, &mut file)?;
+        crate::host::download_files::quarantine(&partial, origin)
+            .map_err(|_| std::io::Error::other("page quarantine failed"))?;
+        crate::host::download_files::verify_quarantine(&file)
+            .map_err(|_| std::io::Error::other("page quarantine verification failed"))?;
+        file.sync_all()?;
+        std::fs::rename(&partial, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written
 }
 
 #[cfg(test)]
