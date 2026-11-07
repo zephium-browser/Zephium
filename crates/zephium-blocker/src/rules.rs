@@ -2,10 +2,29 @@ use std::fmt;
 use std::sync::Arc;
 
 use adblock::request::Request;
+#[cfg(feature = "runtime-exact")]
+use adblock::url_parser;
 use adblock::Engine;
 use thiserror::Error;
 
 use crate::{CompilationReport, CompileLimits, CompileTarget};
+
+/// A page no official list names, standing in for any site.
+#[cfg(feature = "runtime-exact")]
+const NEUTRAL_PAGE: &str = "https://example.com/";
+/// Requests and the official list whose rule blocks each; the last must stay
+/// allowed.
+const OFFICIAL_CANARY: [(&str, Option<&str>); 3] = [
+    (
+        "https://ad.doubleclick.com/activity;src=1",
+        Some("easylist"),
+    ),
+    (
+        "https://www.googletagmanager.com/zephium-blocker-smoke.js",
+        Some("easyprivacy"),
+    ),
+    ("https://example.com/app.js", None),
+];
 
 /// Stable SHA-256 identity of a canonical effective policy.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -184,6 +203,69 @@ impl CompiledRules {
         self.evaluate_inner(request, true)
     }
 
+    /// Whether a runtime policy still decides the known requests as its
+    /// official lists must, so a list update that silently stops blocking is
+    /// refused instead of used. Each blocked request is checked only when the
+    /// list that blocks it is part of the policy.
+    ///
+    /// Every request is judged with no page known, as a native callback without
+    /// the initiating document judges it, and where the matcher knows the page,
+    /// on a neutral page too. Site-scoped exceptions such as uBlock Origin's
+    /// `@@*$script,1p,domain=…` must lift neither.
+    pub fn verify_official_canary(&self) -> Result<(), String> {
+        if self.target() != CompileTarget::Runtime {
+            return Ok(());
+        }
+        let present = |list: &str| {
+            self.report()
+                .sources()
+                .iter()
+                .any(|source| source.id().as_str() == list)
+        };
+        for (url, list) in OFFICIAL_CANARY {
+            if list.is_some_and(|list| !present(list)) {
+                continue;
+            }
+            let expected = if list.is_some() {
+                NetworkAction::Block
+            } else {
+                NetworkAction::Allow
+            };
+            let decisions = [
+                // Exact attribution exists only where the matcher has it.
+                #[cfg(feature = "runtime-exact")]
+                (
+                    "on a neutral page",
+                    self.evaluate(NetworkRequest::new(
+                        url,
+                        NEUTRAL_PAGE,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                ),
+                (
+                    "with no page known",
+                    self.evaluate_source_independent(NetworkRequest::source_independent(
+                        url,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                ),
+            ];
+            for (mode, decision) in decisions {
+                let action = decision
+                    .map_err(|error| format!("official canary {url} {mode} failed: {error:?}"))?
+                    .action();
+                if action != expected {
+                    return Err(format!(
+                        "official canary {url} {mode} returned {action:?}, expected {expected:?}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn evaluate_inner(
         &self,
         request: NetworkRequest<'_>,
@@ -195,6 +277,55 @@ impl CompiledRules {
             .as_ref()
             .ok_or(MatchError::WrongArtifactTarget)?;
         evaluate_runtime_engine(engine, self.0.limits, request, source_independent_only)
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.0.limits)
+    }
+
+    /// Evaluates a request from a document parsed by [`Self::source_document`],
+    /// with the same result as [`Self::evaluate`] given that document's URL.
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
+        &self,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
+    ) -> Result<NetworkDecision, MatchError> {
+        let engine = self
+            .0
+            .engine
+            .as_ref()
+            .ok_or(MatchError::WrongArtifactTarget)?;
+        evaluate_runtime_engine_from(engine, self.0.limits, url, source, resource_type, method)
+    }
+}
+
+/// What matching reads from an initiating document: its hostname and
+/// registrable domain. Parsed once per document rather than once per request,
+/// which keeps a URL parse and a public-suffix lookup off every callback.
+#[cfg(feature = "runtime-exact")]
+pub(crate) struct SourceDocument {
+    hostname: Box<str>,
+    domain: Box<str>,
+}
+
+#[cfg(feature = "runtime-exact")]
+impl SourceDocument {
+    fn parse(url: &str, limits: CompileLimits) -> Result<Self, MatchError> {
+        if url.len() > limits.max_source_url_bytes() {
+            return Err(MatchError::SourceUrlTooLong {
+                actual: url.len(),
+                limit: limits.max_source_url_bytes(),
+            });
+        }
+        let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+        Ok(Self {
+            hostname: parsed.hostname().into(),
+            domain: parsed.domain().into(),
+        })
     }
 }
 
@@ -211,11 +342,26 @@ impl CachedRuntimeRules {
     }
 
     #[cfg(feature = "runtime-exact")]
-    pub(crate) fn evaluate(
+    pub(crate) fn source_document(&self, url: &str) -> Result<SourceDocument, MatchError> {
+        SourceDocument::parse(url, self.limits)
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    pub(crate) fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source: &SourceDocument,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<NetworkDecision, MatchError> {
-        evaluate_runtime_engine(&self.engine, self.limits, request, false)
+        evaluate_runtime_engine_from(
+            &self.engine,
+            self.limits,
+            url,
+            source,
+            resource_type,
+            method,
+        )
     }
 
     pub(crate) fn evaluate_source_independent(
@@ -270,10 +416,47 @@ fn evaluate_runtime_engine(
         }
     }
     .map_err(|_| MatchError::InvalidRequest)?;
+    match_native(engine, &native, source_independent_only)
+}
+
+#[cfg(feature = "runtime-exact")]
+fn evaluate_runtime_engine_from(
+    engine: &Engine,
+    limits: CompileLimits,
+    url: &str,
+    source: &SourceDocument,
+    resource_type: ResourceType,
+    method: RequestMethod,
+) -> Result<NetworkDecision, MatchError> {
+    if url.len() > limits.max_request_url_bytes() {
+        return Err(MatchError::RequestUrlTooLong {
+            actual: url.len(),
+            limit: limits.max_request_url_bytes(),
+        });
+    }
+    let parsed = url_parser::parse_url(url).ok_or(MatchError::InvalidRequest)?;
+    // Request::new with the source URL would derive the same hostname and
+    // party from a fresh parse of that URL.
+    let native = Request::preparsed(
+        &parsed.url,
+        parsed.hostname(),
+        &source.hostname,
+        resource_type.as_adblock_str(),
+        parsed.domain() != &*source.domain,
+        method.as_adblock_str(),
+    );
+    match_native(engine, &native, false)
+}
+
+fn match_native(
+    engine: &Engine,
+    native: &Request,
+    source_independent_only: bool,
+) -> Result<NetworkDecision, MatchError> {
     let result = if source_independent_only {
-        engine.try_check_prepared_source_independent_network_request(&native)
+        engine.try_check_prepared_source_independent_network_request(native)
     } else {
-        engine.try_check_prepared_network_request(&native)
+        engine.try_check_prepared_network_request(native)
     }
     .map_err(map_prepared_match_error)?;
 

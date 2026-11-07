@@ -188,6 +188,22 @@ export function dispose() {
   failure = null;
 }
 
+/** The button's context menu: the extension's items for its action. */
+export function menu(profileId: string, action: ExtensionActionView, anchor: DOMRect): void {
+  void commands
+    .extensionActionMenu(
+      profileId,
+      action.runtime.install_id,
+      action.runtime.generation,
+      action.revision,
+      anchor.left,
+      anchor.top,
+      anchor.width,
+      anchor.height,
+    )
+    .catch(() => {});
+}
+
 export async function invoke(
   profileId: string,
   tabId: string,

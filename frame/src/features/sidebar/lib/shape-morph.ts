@@ -1,17 +1,14 @@
 import { duration, easing, reducedMotion } from "$shared/lib/motion";
 
 /**
- * The column changing shape — the full list becoming the rail, or the rail
- * opening back into the list — as one continuous change rather than one
- * column vanishing and another appearing. Everything the two shapes have in
- * common is a site's mark: each one travels from where it was drawn to where
- * it is drawn now, on the same curve native slides the page with, so the
- * page and the column move as one surface. What only the old shape had fades
- * where it stands while the page slides over it; what only the new shape has
- * fades in around the marks.
+ * The column changing shape between the full list and the rail. Matching
+ * site marks travel between their old and new positions. Most follow the
+ * native page's emphasized curve; marks trailing a widening page use their
+ * own easing and duration and can wait until the view has room for them.
+ * The old column fades as an inert ghost while new contents fade in.
  *
- * Every step is a transform or an opacity, carried by the compositor; the
- * only measuring is once before the change and once after it.
+ * Motion uses transforms and opacity. Geometry is read in before-change
+ * capture and after-change playback phases, including per-mark bounds.
  */
 
 const KEY = "data-motion-key";

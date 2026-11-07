@@ -73,6 +73,12 @@ impl ViewPopupPolicy {
         )
     }
 
+    /// Whether the person clicked for the request, rather than an allowed
+    /// site's document opening it by itself.
+    pub(super) fn clicked(&self, user_initiated: bool) -> bool {
+        clicked(user_initiated, self.automatic())
+    }
+
     #[cfg(target_os = "macos")]
     fn automatic(&self) -> bool {
         // Unknown counts as open, so WebKit's word is not taken for a click.
@@ -95,7 +101,11 @@ impl ViewPopupPolicy {
 /// While WebKit's automatic gate is open it reports every request as a
 /// click, so only the allowed site's own document is believed then.
 fn admits(user_initiated: bool, site_allowed: bool, automatic: bool) -> bool {
-    site_allowed || (user_initiated && !automatic)
+    site_allowed || clicked(user_initiated, automatic)
+}
+
+fn clicked(user_initiated: bool, automatic: bool) -> bool {
+    user_initiated && !automatic
 }
 
 impl EngineHost {
@@ -188,6 +198,13 @@ mod tests {
         assert!(!admits(true, false, true));
         assert!(admits(true, false, false));
         assert!(!admits(false, false, false));
+    }
+
+    #[test]
+    fn a_tab_an_allowed_site_opens_by_itself_is_not_a_click() {
+        assert!(admits(false, true, false) && !clicked(false, false));
+        assert!(admits(true, true, true) && !clicked(true, true));
+        assert!(clicked(true, false));
     }
 
     #[test]

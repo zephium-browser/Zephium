@@ -6,6 +6,9 @@ mod agent_model_catalog_boundary;
 mod agent_runtime_boundary;
 mod agentic_evidence;
 mod agentic_probe_boundary;
+mod blocker_bench;
+mod blocker_bench_boundary;
+mod blocker_prune;
 mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_process_family;
@@ -72,6 +75,12 @@ fn main() {
             check_security_fork_locks()
         }
         Some("check-blocker-security-fork") => check_blocker_security_fork(),
+        Some("blocker-bench") => {
+            if let Err(error) = blocker_bench::run(&arguments[1..]) {
+                eprintln!("blocker bench: {error}");
+                exit(1);
+            }
+        }
         Some("webext-suite") => {
             if let Err(error) = webext_suite::run(&arguments[1..]) {
                 eprintln!("extension suite: {error}");
@@ -109,20 +118,14 @@ fn main() {
             }
         }
         Some("update-blocker-seed") => update_blocker_seed(&arguments[1..]),
-        #[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
-        Some("__compile-blocker-seed")
-            if arguments.len() == 4 || (arguments.len() == 6 && arguments[4] == "--artifact") =>
-        {
-            if let Err(error) = blocker_seed::compile_hidden(
-                &arguments[1],
-                std::path::Path::new(&arguments[2]),
-                std::path::Path::new(&arguments[3]),
-                arguments.get(5).map(std::path::Path::new),
-            ) {
-                eprintln!("bundled blocker seed compilation failed: {error}");
+        Some("blocker-prune") => {
+            if let Err(error) = blocker_prune::run(&arguments[1..]) {
+                eprintln!("blocker prune: {error}");
                 exit(1);
             }
         }
+        #[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
+        Some("__compile-blocker-seed") => compile_blocker_seed(&arguments[1..]),
         // Retain the old entrypoint for local automation while making it run
         // every engine-floor deadline, not only Windows.
         Some("check-webview2-floor") => {
@@ -130,32 +133,70 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
     }
 }
 
+const UPDATE_BLOCKER_SEED_USAGE: &str =
+    "update-blocker-seed --sources DIR --license PATH --gpl-license PATH";
+
 fn update_blocker_seed(arguments: &[String]) {
-    if arguments.len() != 6
-        || arguments[0] != "--easylist"
-        || arguments[2] != "--easyprivacy"
-        || arguments[4] != "--license"
-    {
-        eprintln!(
-            "usage: cargo xtask update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH"
-        );
+    const FLAGS: [&str; 3] = ["--sources", "--license", "--gpl-license"];
+    let mut paths = [None; FLAGS.len()];
+    let complete = arguments.len() == 2 * FLAGS.len()
+        && arguments.chunks_exact(2).all(|pair| {
+            FLAGS
+                .iter()
+                .position(|flag| *flag == pair[0])
+                .is_some_and(|index| {
+                    paths[index]
+                        .replace(std::path::Path::new(&pair[1]))
+                        .is_none()
+                })
+        });
+    let (true, [Some(sources), Some(license), Some(gpl_license)]) = (complete, paths) else {
+        eprintln!("usage: cargo xtask {UPDATE_BLOCKER_SEED_USAGE}");
+        exit(2);
+    };
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = blocker_seed::update(&repository, sources, [license, gpl_license]) {
+        eprintln!("bundled blocker seed update failed: {error}");
+        exit(1);
+    }
+}
+
+/// `<target> <source path>... [--artifact PATH [--unpruned]]`
+#[cfg(any(feature = "blocker-seed-runtime", feature = "blocker-seed-webkit"))]
+fn compile_blocker_seed(arguments: &[String]) {
+    let mut rest = arguments;
+    let unpruned = matches!(rest, [.., flag] if flag == "--unpruned");
+    if unpruned {
+        rest = &rest[..rest.len() - 1];
+    }
+    let artifact = match rest {
+        [head @ .., flag, output] if flag == "--artifact" => {
+            rest = head;
+            Some(std::path::Path::new(output))
+        }
+        _ => None,
+    };
+    let [target, sources @ ..] = rest else {
+        eprintln!("usage: __compile-blocker-seed TARGET PATH... [--artifact PATH [--unpruned]]");
+        exit(2);
+    };
+    if sources.is_empty() || (unpruned && artifact.is_none()) {
+        eprintln!("usage: __compile-blocker-seed TARGET PATH... [--artifact PATH [--unpruned]]");
         exit(2);
     }
-    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    if let Err(error) = blocker_seed::update(
-        &repository,
-        std::path::Path::new(&arguments[1]),
-        std::path::Path::new(&arguments[3]),
-        std::path::Path::new(&arguments[5]),
-    ) {
-        eprintln!("bundled blocker seed update failed: {error}");
+    let sources = sources
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    if let Err(error) = blocker_seed::compile_hidden(target, &sources, artifact, unpruned) {
+        eprintln!("bundled blocker seed compilation failed: {error}");
         exit(1);
     }
 }
@@ -823,6 +864,7 @@ fn check_agentic_probe_boundary() {
         .and_then(|()| work_persistence_boundary::check(&repository))
         .and_then(|()| work_resource_boundary::check(&repository))
         .and_then(|()| agent_runtime_boundary::check(&repository))
+        .and_then(|()| blocker_bench_boundary::check(&repository))
     {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);

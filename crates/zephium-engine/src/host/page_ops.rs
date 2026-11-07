@@ -185,7 +185,43 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        // A password filled into a page that is not encrypted crosses the
+        // network readable: the person is asked first. The page judged is the
+        // one on screen, which a provisional load has not replaced yet; one
+        // that can't be read counts as unencrypted.
+        let Some((epoch, resident)) = view.navigation.resident_document_snapshot() else {
+            return;
+        };
+        view.insecure_autofill.set(None);
+        if resident_unencrypted(&resident) {
+            view.insecure_autofill.set(Some(epoch));
+            view.event_permit
+                .emit(&self.sink, EngineEvent::InsecureAutofillRequested { id });
+            return;
+        }
         let page = crate::platform::imp::native_webview(view);
+        if !crate::platform::macos::autofill::show_passwords(&page) {
+            eprintln!("engine: AutoFill has no focused field here");
+        }
+    }
+
+    /// The person chose to fill a page that is not encrypted. Answering the
+    /// card took the keyboard; the page gets it back, with the field it had.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn autofill_insecure_password(&self, id: ItemId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        // Only the document the warning was shown for: by now the tab may
+        // have moved on to another page that was never asked about.
+        let asked = view.insecure_autofill.take();
+        if !fills_the_page_asked_about(asked, &view.navigation) {
+            return;
+        }
+        let page = crate::platform::imp::native_webview(view);
+        if let Some(window) = page.window() {
+            window.makeFirstResponder(Some(&page));
+        }
         if !crate::platform::macos::autofill::show_passwords(&page) {
             eprintln!("engine: AutoFill has no focused field here");
         }
@@ -269,5 +305,74 @@ mod tests {
     fn zoom_settlement_keeps_the_last_proven_native_scale_on_failure() {
         assert_eq!(settled_zoom_scale(1.0, 1.25, true), 1.25);
         assert_eq!(settled_zoom_scale(1.25, 1.5, false), 1.25);
+    }
+}
+
+/// An approved AutoFill warning fills only while the document it was shown
+/// for is still the one on screen.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fills_the_page_asked_about(
+    asked: Option<crate::navigation_epoch::NavigationEpoch>,
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> bool {
+    asked.is_some()
+        && navigation
+            .resident_document_snapshot()
+            .map(|(epoch, _)| epoch)
+            == asked
+}
+
+/// Whether the page at `url` crosses the network unencrypted; an address
+/// that can't be read is treated as if it did.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn resident_unencrypted(url: &str) -> bool {
+    url::Url::parse(url).map_or(true, |url| {
+        zephium_core::certificates::crosses_network_unencrypted(&url)
+    })
+}
+
+#[cfg(test)]
+mod autofill_tests {
+    use super::resident_unencrypted;
+
+    #[test]
+    fn an_approval_fills_only_the_document_it_was_asked_about() {
+        use crate::navigation_epoch::NavigationEpochTracker;
+        use wry::{NavigationEvent, NavigationEventPhase, NavigationId};
+        let event = |id: u64, phase, url: &str| NavigationEvent {
+            id: NavigationId::from_raw(id),
+            phase,
+            url: url.to_owned(),
+        };
+        let navigation = NavigationEpochTracker::new();
+        navigation.begin("http://shop.example/login").unwrap();
+        for phase in [
+            NavigationEventPhase::Started,
+            NavigationEventPhase::Committed,
+        ] {
+            navigation.observe_navigation(&event(1, phase, "http://shop.example/login"));
+        }
+        let asked = navigation
+            .resident_document_snapshot()
+            .map(|(epoch, _)| epoch);
+        assert!(super::fills_the_page_asked_about(asked, &navigation));
+        assert!(!super::fills_the_page_asked_about(None, &navigation));
+        // Another page commits before the approval lands.
+        navigation.begin("http://other.example/").unwrap();
+        for phase in [
+            NavigationEventPhase::Started,
+            NavigationEventPhase::Committed,
+        ] {
+            navigation.observe_navigation(&event(2, phase, "http://other.example/"));
+        }
+        assert!(!super::fills_the_page_asked_about(asked, &navigation));
+    }
+
+    #[test]
+    fn autofill_asks_first_on_plain_http_and_on_an_address_it_cannot_read() {
+        assert!(resident_unencrypted("http://shop.example/login"));
+        assert!(resident_unencrypted("not a url"));
+        assert!(!resident_unencrypted("https://shop.example/login"));
+        assert!(!resident_unencrypted("http://router.lan/"));
     }
 }

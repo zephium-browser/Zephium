@@ -11,7 +11,7 @@ private let identifierPrefix = "app.zephium.rules.v1."
 private let artifactDigestDomain = Data("zephium-webkit-content-rules".utf8)
 private let artifactFormatVersion: UInt32 = 4
 private let expectedReleaseArtifactDigest =
-    "93f6d4c6233b2e72fcf71cb554ed625fdaf25ac48e464f28c7b69a76f36b6ed5"
+    "91d9ded24a306a84106e5de2c4b6e19ac462560ef3735daa3c33bf37fd5e9b6b"
 
 private enum ProbeFailure: Error, CustomStringConvertible {
     case message(String)
@@ -434,7 +434,7 @@ private struct MacOSBlockerSeedProbe {
                 throw fail("usage: probe_macos_blocker_seed ARTIFACT.json")
             }
             try runNativeProbe(artifactPath: arguments[0])
-            print("exact bundled EasyList/EasyPrivacy artifact compiled and reloaded in WebKit")
+            print("exact bundled filter-list artifact compiled and reloaded in WebKit")
         } catch {
             FileHandle.standardError.write(Data("macOS blocker seed probe failed: \(error)\n".utf8))
             Darwin.exit(1)

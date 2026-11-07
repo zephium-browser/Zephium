@@ -13,7 +13,7 @@ tuf = ["zephium-blocker-update/tuf"]
 flate2 = "=1.1.9"
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "=0.10.9"
+ring.workspace = true
 thiserror.workspace = true
 zephium-blocker.workspace = true
 zephium-blocker-update.workspace = true

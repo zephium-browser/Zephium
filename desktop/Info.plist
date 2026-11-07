@@ -7,6 +7,15 @@
     <key>NSAllowsArbitraryLoadsInWebContent</key>
     <true/>
   </dict>
+  <!-- Malloc's large cache keeps freed buffers counted against the app
+       until the system runs short (72 MB after the blocker loads its rules
+       at launch); without it they go back to macOS at once, at no measured
+       CPU cost. -->
+  <key>LSEnvironment</key>
+  <dict>
+    <key>MallocLargeCache</key>
+    <string>0</string>
+  </dict>
   <key>NSCameraUsageDescription</key>
   <string>Zephium uses the camera only when you allow a website to access it.</string>
   <key>NSMicrophoneUsageDescription</key>

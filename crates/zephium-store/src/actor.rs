@@ -401,6 +401,19 @@ enum Cmd {
         zephium_core::bookmarks::BookmarkRequest,
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
+    BookmarksObserved(
+        ProfileId,
+        zephium_core::bookmarks::BookmarkRequest,
+        Sender<(
+            zephium_core::bookmarks::BookmarkReply,
+            Option<zephium_core::bookmarks::BookmarkChange>,
+        )>,
+    ),
+    ExtensionHistory(
+        ProfileId,
+        zephium_core::extension_data::HistoryRequest,
+        Sender<zephium_core::extension_data::HistoryReply>,
+    ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
     DiscardSessionBackup(ProfileId, Box<dyn FnOnce(bool) + Send>),
     Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
@@ -421,6 +434,27 @@ enum Cmd {
     PopupSites(
         ProfileId,
         Sender<Option<Vec<zephium_core::permissions::PageOrigin>>>,
+    ),
+    AppLinkSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, String)>>>,
+    ),
+    SetAppLinkSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        String,
+        bool,
+        Sender<bool>,
+    ),
+    DownloadSites(
+        ProfileId,
+        Sender<Option<Vec<(zephium_core::permissions::PageOrigin, bool)>>>,
+    ),
+    SetDownloadSite(
+        ProfileId,
+        zephium_core::permissions::PageOrigin,
+        Option<bool>,
+        Sender<bool>,
     ),
     SetPopupSite(
         ProfileId,
@@ -1459,6 +1493,50 @@ impl Store for SqliteStore {
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
+    fn bookmarks_observed(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::bookmarks::BookmarkRequest,
+    ) -> (
+        zephium_core::bookmarks::BookmarkReply,
+        Option<zephium_core::bookmarks::BookmarkChange>,
+    ) {
+        use zephium_core::bookmarks::{BookmarkFailure, BookmarkReply, BookmarkRequest};
+        let timeout = if matches!(request, BookmarkRequest::Import { .. }) {
+            IMPORT_RPC_TIMEOUT
+        } else {
+            STORE_RPC_TIMEOUT
+        };
+        let failed = (BookmarkReply::Failed(BookmarkFailure::Unavailable), None);
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::BookmarksObserved(profile, request, tx))
+            .is_err()
+        {
+            return failed;
+        }
+        rx.recv_timeout(timeout).unwrap_or(failed)
+    }
+
+    fn extension_history(
+        &self,
+        profile: ProfileId,
+        request: zephium_core::extension_data::HistoryRequest,
+    ) -> zephium_core::extension_data::HistoryReply {
+        use zephium_core::extension_data::HistoryReply;
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::ExtensionHistory(profile, request, tx))
+            .is_err()
+        {
+            return HistoryReply::Failed;
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT)
+            .unwrap_or(HistoryReply::Failed)
+    }
+
     fn clear_history(&self, profile: ProfileId, since: Option<i64>) -> u32 {
         self.clear_history_checked(profile, since)
             .unwrap_or_default()
@@ -1573,6 +1651,43 @@ impl Store for SqliteStore {
         allowed: bool,
     ) -> bool {
         self.ask(|reply| Cmd::SetPopupSite(profile, origin, allowed, reply))
+            .unwrap_or(false)
+    }
+
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.ask(|reply| Cmd::AppLinkSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply))
+            .unwrap_or(false)
+    }
+
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.ask(|reply| Cmd::DownloadSites(profile, reply))
+            .flatten()
+    }
+
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        self.ask(|reply| Cmd::SetDownloadSite(profile, origin, allowed, reply))
             .unwrap_or(false)
     }
 
@@ -2058,6 +2173,32 @@ fn actor(
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));
             }
+            Some(Cmd::BookmarksObserved(profile, request, reply)) => {
+                let _ = reply.send(hub.bookmarks_observed(profile, request));
+            }
+            Some(Cmd::ExtensionHistory(profile, request, reply)) => {
+                use zephium_core::extension_data::{HistoryReply, HistoryRequest};
+                // A removal must also take visits still waiting to be written.
+                let removes = matches!(
+                    request,
+                    HistoryRequest::RemoveUrl { .. }
+                        | HistoryRequest::RemoveRange { .. }
+                        | HistoryRequest::RemoveAll
+                );
+                let durable = !removes
+                    || ((hub.knows(profile) || flush(&mut hub, &mut pending))
+                        && flush_profile_visits(
+                            &mut hub,
+                            &pending_visits,
+                            &mut visit_retry,
+                            profile,
+                        ));
+                let _ = reply.send(if durable {
+                    hub.extension_history(profile, request)
+                } else {
+                    HistoryReply::Failed
+                });
+            }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
                 let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);
                 let visits_durable = session_durable
@@ -2119,6 +2260,22 @@ fn actor(
             }
             Some(Cmd::PopupSites(profile, reply)) => {
                 let _ = reply.send(hub.popup_sites(profile));
+            }
+            Some(Cmd::AppLinkSites(profile, reply)) => {
+                let _ = reply.send(hub.app_link_sites(profile));
+            }
+            Some(Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_app_link_site(profile, &origin, &scheme, allowed);
+                let _ = reply.send(stored);
+            }
+            Some(Cmd::DownloadSites(profile, reply)) => {
+                let _ = reply.send(hub.download_sites(profile));
+            }
+            Some(Cmd::SetDownloadSite(profile, origin, allowed, reply)) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.set_download_site(profile, &origin, allowed);
+                let _ = reply.send(stored);
             }
             Some(Cmd::SetPopupSite(profile, origin, allowed, reply)) => {
                 let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))

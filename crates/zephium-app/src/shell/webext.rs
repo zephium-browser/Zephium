@@ -202,7 +202,7 @@ impl Shell {
                     )
                 })
                 .count();
-            if active >= zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            if active >= zephium_core::extensions::WINDOWS_RUNNING_EXTENSIONS {
                 break;
             }
             self.web_extensions
@@ -367,6 +367,38 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Only the active tab of the focused window, in a profile that can
+    /// install extensions, showing that exact listing.
+    fn store_listing_in_front(&self, tab: ItemId, extension: &str) -> bool {
+        self.web_extension_target(Some(tab))
+            .and_then(|target| target.listing_url)
+            .and_then(|url| url::Url::parse(&url).ok())
+            .is_some_and(|url| super::extension_store::store_listing_id(&url) == Some(extension))
+    }
+
+    pub(super) fn show_store_button(
+        &mut self,
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
+    ) {
+        if self.store_listing_in_front(tab, &button.extension) {
+            self.engine.show_store_button(tab, button);
+        }
+    }
+
+    pub(super) fn store_button_clicked(&mut self, tab: ItemId, extension: String) {
+        if self.store_listing_in_front(tab, &extension) {
+            (self.emit)(Projection::WebExtensionStoreClick(
+                zephium_ipc::WebExtensionStoreClickView {
+                    tab_id: tab.to_string(),
+                    extension_id: extension,
+                },
+            ));
+        }
+    }
+}
+
 /// `start_background` asks for one background run after a package changed; a
 /// later apply that clears it changes nothing that is loaded.
 fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
@@ -375,6 +407,7 @@ fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
         && loaded.root == wanted.root
         && loaded.permissions == wanted.permissions
         && loaded.external_native_messaging == wanted.external_native_messaging
+        && loaded.native_messaging_grantable == wanted.native_messaging_grantable
         && loaded.match_patterns == wanted.match_patterns
 }
 
@@ -390,6 +423,7 @@ mod tests {
             root: "/packages/a/1.0-rev".into(),
             permissions: vec!["storage".into()],
             external_native_messaging: false,
+            native_messaging_grantable: false,
             match_patterns: vec!["<all_urls>".into()],
             start_background: true,
         };

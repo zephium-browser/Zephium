@@ -324,6 +324,7 @@ fn extension_action_is_a_tracked_operation() {
             zephium_core::geometry::Rect::new(8.0, 12.0, 28.0, 28.0),
         )
         .unwrap(),
+        menu: false,
     }));
 }
 

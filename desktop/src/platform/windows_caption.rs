@@ -22,13 +22,6 @@ const HIDE: usize = ID + 1;
 const FADE: usize = ID + 2;
 const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
-const WATCH: usize = ID + 5;
-// How often the pointer is read for the top of the window. A page's WebView2
-// belongs to another process, so no move over it reaches this thread.
-const WATCH_MS: u32 = 50;
-// With another window in front there is nothing to read, only a moment to
-// notice this one has come back.
-const WAITING_MS: u32 = 250;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
 const TOP_REACH: f64 = 20.0;
@@ -84,7 +77,6 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
-    watch_ms: u32,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -190,7 +182,6 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
-            watch_ms: WATCH_MS,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -208,7 +199,9 @@ pub fn install(window: &WebviewWindow) -> bool {
             return false;
         }
         layout(pointer);
-        SetTimer(Some(strip), WATCH, WATCH_MS, None);
+        // A page's WebView2 belongs to another process, so no move over it
+        // reaches this thread; the shared pointer watch reports them.
+        super::pointer::listen(owner, pointer_moved);
         true
     }
 }
@@ -226,20 +219,33 @@ unsafe fn installed_state(owner: HWND) -> Option<*mut State> {
         .then_some(data as *mut State)
 }
 
+/// The causes left after one holder sets or clears its own, and whether that
+/// cleared the last of them.
+fn apply_suppression(causes: u8, cause: u8, suppressed: bool) -> (u8, bool) {
+    let next = if suppressed {
+        causes | cause
+    } else {
+        causes & !cause
+    };
+    (next, causes != 0 && next == 0)
+}
+
 /// Hides the caption and its reveal edge while page content fills the
 /// screen. Runs on the window's UI thread.
 pub fn set_suppressed(window: &WebviewWindow, cause: Suppression, suppressed: bool) {
     // SAFETY: see `state_of`.
     unsafe {
         if let Some(state) = state_of(window) {
-            let causes = (*state).suppressions;
-            (*state).suppressions = if suppressed {
-                causes | cause as u8
-            } else {
-                causes & !(cause as u8)
-            };
-            (*state).suppressed = (*state).suppressions != 0;
+            let (causes, lifted) =
+                apply_suppression((*state).suppressions, cause as u8, suppressed);
+            (*state).suppressions = causes;
+            (*state).suppressed = causes != 0;
             layout(state);
+            // A pointer already resting at a page's top asks for the caption
+            // now, not at its next move.
+            if lifted {
+                pointer_moved((*state).owner);
+            }
         }
     }
 }
@@ -728,6 +734,33 @@ unsafe fn near_top(p: *mut State) -> bool {
     let reach = (TOP_REACH * scale).round() as i32;
     at.y >= 0 && at.y < reach && at.x >= (page_left * scale).round() as i32 && at.x < client.right
 }
+/// The pointer moved, or the window came to the front or left it: a page's
+/// top asks for the caption after a dwell, and leaving it lets the caption go.
+fn pointer_moved(owner: HWND) {
+    // SAFETY: UI-thread lookup and use of this module's own live state.
+    unsafe {
+        let Some(p) = installed_state(owner) else {
+            return;
+        };
+        let strip = (*p).strip;
+        let near = near_top(p);
+        if near && !(*p).expanded {
+            if !(*p).suppressed
+                && !(*p).changing_state
+                && !(*p).sizing
+                && !(*p).reveal_armed
+                && pointer_moved_on(p)
+            {
+                (*p).reveal_armed = true;
+                SetTimer(Some(strip), REVEAL, TOP_DWELL_MS, None);
+            }
+        } else if !near && (*p).near_top {
+            cancel_reveal(p);
+            SetTimer(Some(strip), HIDE, 450, None);
+        }
+        (*p).near_top = near;
+    }
+}
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
     let mut edge = RECT::default();
@@ -1140,6 +1173,7 @@ unsafe extern "system" fn owner_proc(
     let p = data as *mut State;
     if msg == WM_NCDESTROY {
         let _ = RemoveWindowSubclass(hwnd, Some(owner_proc), ID);
+        super::pointer::forget(hwnd, pointer_moved);
         zephium_engine::forget_window_caption_offset(hwnd.0 as isize);
         // Owned popups are explicitly torn down before freeing subclass state.
         if IsWindow(Some((*p).strip)).as_bool() {
@@ -1168,6 +1202,12 @@ unsafe extern "system" fn owner_proc(
         let mut origin = POINT::default();
         let _ = ClientToScreen(hwnd, &mut origin);
         show_system_menu(p, origin);
+        return LRESULT(0);
+    }
+    // Alt alone asks for keyboard menu mode. With no menu bar it shows
+    // nothing, yet holds the window until the next key, and a close asked
+    // for meanwhile timed out waiting for its drafts to save.
+    if msg == WM_SYSCOMMAND && w.0 as u32 & 0xfff0 == SC_KEYMENU && l.0 == 0 {
         return LRESULT(0);
     }
     if msg == WM_TIMER && w.0 == CLOSE_SETTLED {
@@ -1241,6 +1281,11 @@ unsafe extern "system" fn owner_proc(
     }
     if matches!(msg, WM_THEMECHANGED | WM_SETTINGCHANGE) {
         let _ = render(p);
+    }
+    // A window moved under a resting pointer, as by a snap, makes no input:
+    // read where the pointer now is over it.
+    if msg == WM_WINDOWPOSCHANGED {
+        pointer_moved(hwnd);
     }
     result
 }
@@ -1317,34 +1362,6 @@ unsafe extern "system" fn strip_proc(
                 && pointer_moved_on(p)
             {
                 reveal(p);
-            }
-            return LRESULT(0);
-        }
-        WM_TIMER if w.0 == WATCH => {
-            let near = near_top(p);
-            if near && !(*p).expanded {
-                if !(*p).suppressed
-                    && !(*p).changing_state
-                    && !(*p).sizing
-                    && !(*p).reveal_armed
-                    && pointer_moved_on(p)
-                {
-                    (*p).reveal_armed = true;
-                    SetTimer(Some(hwnd), REVEAL, TOP_DWELL_MS, None);
-                }
-            } else if !near && (*p).near_top {
-                cancel_reveal(p);
-                SetTimer(Some(hwnd), HIDE, 450, None);
-            }
-            (*p).near_top = near;
-            let interval = if in_front((*p).owner) {
-                WATCH_MS
-            } else {
-                WAITING_MS
-            };
-            if (*p).watch_ms != interval {
-                (*p).watch_ms = interval;
-                SetTimer(Some(hwnd), WATCH, interval, None);
             }
             return LRESULT(0);
         }
@@ -1740,6 +1757,23 @@ mod tests {
         assert!(!button_enabled(0, 0, false));
         assert!(!button_enabled(1, 0, false));
         assert!(button_enabled(1, 0, true));
+    }
+    #[test]
+    fn the_caption_is_suppressed_until_every_holder_lets_go() {
+        let (content, window) = (Suppression::Content as u8, Suppression::Window as u8);
+        assert_eq!(apply_suppression(0, content, true), (content, false));
+        assert_eq!(
+            apply_suppression(content, window, true),
+            (content | window, false)
+        );
+        // One holder letting go while the other still holds lifts nothing.
+        assert_eq!(
+            apply_suppression(content | window, content, false),
+            (window, false)
+        );
+        assert_eq!(apply_suppression(window, window, false), (0, true));
+        assert_eq!(apply_suppression(0, window, false), (0, false));
+        assert_eq!(apply_suppression(content, content, true), (content, false));
     }
     #[test]
     fn a_held_reveal_waits_for_the_pointer_to_leave_the_drag_rectangle() {

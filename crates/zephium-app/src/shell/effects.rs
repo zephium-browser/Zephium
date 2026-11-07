@@ -169,6 +169,7 @@ impl Shell {
                         continue;
                     }
                     self.clear_capacity_status(id);
+                    let url = self.https_first(id, &url).unwrap_or(url);
                     if !self
                         .engine
                         .create_view(id, self.partition_of(id), &url, bounds)
@@ -209,6 +210,7 @@ impl Shell {
                         // that this batch deliberately did not create.
                         continue;
                     }
+                    let url = self.https_first(id, &url).unwrap_or(url);
                     if !self.engine.navigate(id, &url, request) {
                         self.items.navigation_failed(id, request);
                         native.rejected = true;
@@ -217,6 +219,7 @@ impl Shell {
                     }
                 }
                 Effect::Close { id } => {
+                    self.https_first_forget(id);
                     self.record_view_retirement(id);
                     self.zoom.pending.remove(&id);
                     native.record(self.engine.close(id));
