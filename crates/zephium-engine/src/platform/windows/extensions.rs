@@ -37,6 +37,26 @@ fn wait<T>(rx: mpsc::Receiver<windows::core::Result<T>>) -> Result<T> {
 }
 
 fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration) -> Result<T> {
+    wait_using(rx, budget, |remaining| {
+        // SAFETY: waits on this thread's own queue with no handles.
+        unsafe {
+            MsgWaitForMultipleObjectsEx(
+                None,
+                remaining.as_millis().min(u128::from(u32::MAX)) as u32,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
+        }
+    })
+}
+
+/// Pumps this thread's messages until `rx` answers, sleeping in `wait`
+/// between batches; the pump itself may deliver the answer.
+fn wait_using<T>(
+    rx: mpsc::Receiver<windows::core::Result<T>>,
+    budget: Duration,
+    mut wait: impl FnMut(Duration),
+) -> Result<T> {
     let deadline = Instant::now() + budget;
     let settled = |rx: &mpsc::Receiver<windows::core::Result<T>>| match rx.try_recv() {
         Ok(result) => Some(result.map_err(|e| e.to_string())),
@@ -58,7 +78,10 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 if message.message == WM_QUIT {
                     PostQuitMessage(message.wParam.0 as i32);
-                    return Err("The browser is shutting down.".into());
+                    // A completion the pump already ran stands; shutdown
+                    // does not undo an operation that finished.
+                    return settled(&rx)
+                        .unwrap_or_else(|| Err("The browser is shutting down.".into()));
                 }
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
@@ -74,16 +97,7 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
         }
         // The completion arrives as a message to this thread: sleep until
         // one does instead of checking a thousand times a second.
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        // SAFETY: waits on this thread's own queue with no handles.
-        unsafe {
-            MsgWaitForMultipleObjectsEx(
-                None,
-                remaining.as_millis().min(u128::from(u32::MAX)) as u32,
-                QS_ALLINPUT,
-                MWMO_INPUTAVAILABLE,
-            );
-        }
+        wait(deadline.saturating_duration_since(Instant::now()));
     }
 }
 
@@ -256,12 +270,11 @@ mod tests {
         unsafe { DefWindowProcW(window, message, wparam, lparam) }
     }
 
-    #[test]
-    fn a_completion_the_pump_delivers_answers_at_once() {
-        let (sender, receiver) = mpsc::channel();
-        COMPLETION.set(Some(sender));
+    /// A message-only window whose `WM_APP` sends the completion, as
+    /// WebView2 delivers one through this thread's queue.
+    fn deliver_window() -> HWND {
         // SAFETY: a message-only window owned and destroyed by this thread.
-        let window = unsafe {
+        unsafe {
             let instance = GetModuleHandleW(None).unwrap();
             let class = WNDCLASSW {
                 lpfnWndProc: Some(deliver),
@@ -285,17 +298,47 @@ mod tests {
                 None,
             )
             .unwrap()
-        };
+        }
+    }
+
+    #[test]
+    fn a_completion_the_pump_delivers_answers_without_waiting() {
+        let (sender, receiver) = mpsc::channel();
+        COMPLETION.set(Some(sender));
+        let window = deliver_window();
         // SAFETY: the window is live on this thread.
         unsafe { PostMessageW(Some(window), WM_APP, WPARAM(0), LPARAM(0)).unwrap() };
 
-        let started = Instant::now();
-        let answer = wait_within(receiver, Duration::from_secs(5));
-        let waited = started.elapsed();
+        let mut waits = 0;
+        let answer = wait_using(receiver, Duration::from_secs(5), |_| waits += 1);
         // SAFETY: destroys the window this test created.
         unsafe { DestroyWindow(window).unwrap() };
 
         assert_eq!(answer, Ok(7));
-        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+        assert_eq!(waits, 0, "the loop slept after the answer had arrived");
+    }
+
+    #[test]
+    fn a_completion_delivered_before_shutdown_still_answers() {
+        let (sender, receiver) = mpsc::channel();
+        COMPLETION.set(Some(sender));
+        let window = deliver_window();
+        // SAFETY: the window is live on this thread; the quit message is
+        // taken back off the queue below.
+        unsafe {
+            PostMessageW(Some(window), WM_APP, WPARAM(0), LPARAM(0)).unwrap();
+            PostQuitMessage(0);
+        }
+
+        let answer = wait_using(receiver, Duration::from_secs(5), |_| {});
+        // SAFETY: drains the quit the loop posted again, then destroys the
+        // window this test created.
+        unsafe {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {}
+            DestroyWindow(window).unwrap();
+        }
+
+        assert_eq!(answer, Ok(7));
     }
 }
