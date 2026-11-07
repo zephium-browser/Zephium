@@ -418,9 +418,16 @@ for (const result of ["found", "empty", "failed"] as const) {
     await formed();
     await page.getByRole("button", { name: /Get started/u }).click();
     for (let step = 0; step < 4; step++) await next();
+    await expect.element(page.getByRole("status")).toHaveTextContent("Looking for local models…");
+    await expect.element(page.getByRole("status")).toBeVisible();
     await page.getByRole("radio", { name: /A local model/u }).click();
     await expect.element(page.getByRole("button", { name: /^Continue/u })).toBeDisabled();
     await expect.element(page.getByRole("button", { name: "Skip setup" })).toBeDisabled();
+    for (const name of [/^Continue/u, "Skip setup"]) {
+      await expect
+        .element(page.getByRole("button", { name }))
+        .toHaveAccessibleDescription("Looking for local models…");
+    }
     await userEvent.keyboard("{Enter}");
     expect(document.querySelector(".onboarding")?.getAttribute("data-step")).toBe("ai");
     expect(native.finished).toBe(0);
@@ -432,6 +439,12 @@ for (const result of ["found", "empty", "failed"] as const) {
           : [],
       );
     await expect.element(page.getByRole("button", { name: /^Continue/u })).toBeEnabled();
+    await expect.element(page.getByText("Looking for local models…")).not.toBeInTheDocument();
+    for (const name of [/^Continue/u, "Skip setup"]) {
+      await expect
+        .element(page.getByRole("button", { name }))
+        .not.toHaveAttribute("aria-describedby");
+    }
     await next();
     await page.getByRole("button", { name: /Start browsing/u }).click();
     if (result === "found") {

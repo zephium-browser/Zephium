@@ -1557,6 +1557,7 @@
   "onb_ai_local": "A local model",
   "onb_ai_local_body": "Private, on your computer with Ollama or LM Studio. Slower, with less context and no web search.",
   "onb_ai_found": "{server} is running",
+  "onb_ai_discovering": "Looking for local models…",
   "onb_ready_title": "Ready when you are.",
   "onb_ready_blocking": "Ads and trackers blocked",
   "onb_ready_extensions": "Your Chrome extensions",

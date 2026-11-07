@@ -297,6 +297,11 @@
           <Launcher />
         {:else if step === "ai"}
           <Models bind:mind bind:server bind:discovering onsubmit={advance} />
+          {#if discovering}
+            <p id="local-discovery-status" class="discovery" role="status">
+              {m.onb_ai_discovering()}
+            </p>
+          {/if}
         {/if}
       </div>
     {/key}
@@ -328,6 +333,7 @@
           shape="capsule"
           onclick={advance}
           pending={leaving}
+          aria-describedby={waitingForLocal ? "local-discovery-status" : undefined}
           disabled={waitingForLocal}>{primary}<KeyHint keys={["↵"]} /></Button
         >
       </span>
@@ -336,8 +342,12 @@
 
   <div class="top" data-tauri-drag-region data-native-caption={IS_WINDOWS || undefined}>
     {#if step !== "welcome" && step !== "ready"}
-      <button type="button" class="skip" disabled={waitingForLocal} onclick={() => void finish()}
-        >{m.onb_skip()}</button
+      <button
+        type="button"
+        class="skip"
+        disabled={waitingForLocal}
+        aria-describedby={waitingForLocal ? "local-discovery-status" : undefined}
+        onclick={() => void finish()}>{m.onb_skip()}</button
       >
     {/if}
     {#if !IS_MAC && windowControls}{@render windowControls()}{/if}
@@ -566,6 +576,12 @@
 
   .scene[data-scene="ai"] {
     inset-block-start: 236px;
+  }
+
+  .discovery {
+    margin: 16px 0 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   /* One quiet row for the whole journey, at the foot of the stage: nothing
