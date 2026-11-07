@@ -87,7 +87,7 @@ enum DecisionPhase {
 #[derive(Clone, Copy)]
 struct DecisionDeadline {
     phase: DecisionPhase,
-    expires: Instant,
+    expires: Option<Instant>,
 }
 impl DecisionDeadline {
     fn new(phase: DecisionPhase, now: Instant) -> Self {
@@ -101,17 +101,22 @@ impl DecisionDeadline {
                 Duration::from_secs(30)
             }
             DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
-            DecisionPhase::UserPaused => Duration::from_secs(30 * 60),
+            DecisionPhase::UserPaused => {
+                return Self {
+                    phase,
+                    expires: None,
+                };
+            }
             DecisionPhase::KeepDecision => Duration::from_secs(60 * 60),
             DecisionPhase::SitePermission => zephium_core::permissions::DOWNLOAD_PERMISSION_TIMEOUT,
         };
         Self {
             phase,
-            expires: now + duration,
+            expires: Some(now + duration),
         }
     }
     fn expired(self, now: Instant) -> bool {
-        now > self.expires
+        self.expires.is_some_and(|expires| now > expires)
     }
     fn prepared(
         self,
@@ -661,7 +666,8 @@ impl Downloads {
         let now = Instant::now();
         active
             .values()
-            .map(|transfer| transfer.deadline.expires.saturating_duration_since(now))
+            .filter_map(|transfer| transfer.deadline.expires)
+            .map(|expires| expires.saturating_duration_since(now))
             .min()
             .map_or(WAITING_TICK, |until| until.max(WAITING_TICK))
     }
@@ -1265,14 +1271,15 @@ mod state_tests {
     }
 
     #[test]
-    fn held_and_user_paused_transfers_have_their_own_bounds() {
+    fn held_transfers_expire_but_user_pauses_do_not() {
         let now = Instant::now();
         let held = DecisionDeadline::new(DecisionPhase::KeepDecision, now);
         assert!(!held.expired(now + Duration::from_secs(59 * 60)));
         assert!(held.expired(now + Duration::from_secs(61 * 60)));
         let paused = DecisionDeadline::new(DecisionPhase::UserPaused, now);
         assert!(!paused.expired(now + Duration::from_secs(29 * 60)));
-        assert!(paused.expired(now + Duration::from_secs(31 * 60)));
+        assert!(!paused.expired(now + Duration::from_secs(31 * 60)));
+        assert!(!paused.expired(now + Duration::from_secs(365 * 24 * 60 * 60)));
     }
 
     #[test]
