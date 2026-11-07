@@ -259,12 +259,16 @@
    *  panel, a drag, or a question or download that brought it out. */
   const needed = () => {
     if (!aside || sidebarResizeActive() || attention.wanted()) return !!aside;
-    const typing =
-      document.activeElement instanceof HTMLInputElement && aside.contains(document.activeElement);
+    const active = document.activeElement;
+    const focused =
+      document.hasFocus() &&
+      active instanceof HTMLElement &&
+      aside.contains(active) &&
+      (active instanceof HTMLInputElement || active.matches(":focus-visible"));
     const openPanel = !!aside.querySelector(
       '.ui-disclosure-panel[data-open="true"], .capture[data-open="true"]',
     );
-    return typing || openPanel;
+    return focused || openPanel;
   };
   function release() {
     clearTimeout(linger);
