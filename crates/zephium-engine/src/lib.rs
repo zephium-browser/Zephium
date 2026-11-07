@@ -1760,6 +1760,19 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
     platform::imp::enforce_runtime_security_floor()
 }
 
+/// Reports active downloads across all profiles. Call on the native main thread;
+/// false means the host could not admit the query and will not call `done`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn downloads_in_progress(done: impl FnOnce(bool) + 'static) -> bool {
+    host::try_with(move |host| {
+        done(
+            host.downloads
+                .as_ref()
+                .is_some_and(|downloads| downloads.in_progress()),
+        );
+    })
+}
+
 impl WebviewEngine {
     /// The browser window came back in front.
     #[cfg(target_os = "windows")]

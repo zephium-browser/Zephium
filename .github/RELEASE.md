@@ -106,10 +106,10 @@ existing install on its current version.
 
 6. **Review the draft** once the workflow finishes. For a stable version,
    review the final assets below and use **Publish stable draft**. For a prerelease,
-   install the DMG and Windows installer and review the notes before publication. Keep "Set as the
-   latest release" checked and leave "Set as a pre-release" unchecked, even for
-   betas: `releases/latest` skips pre-releases, and both the website and the
-   updater resolve through it.
+   install the DMG and Windows installer and review the notes before publication.
+   After a stable release exists, publish betas with "Set as a pre-release"
+   checked and "Set as the latest release" unchecked: both the website and the
+   updater resolve through `releases/latest`, which skips pre-releases.
 
 To rebuild a tag (for example after a flaky runner), select the same tag in
 both **Actions → Release → Run workflow → Use workflow from** and the `tag`
