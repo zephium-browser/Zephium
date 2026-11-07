@@ -571,6 +571,19 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::Keys,
     ),
     command(
+        "profile.next",
+        "Next Profile",
+        // Ctrl+P prints on Windows, so the other platform gets a function key.
+        split("Ctrl+Cmd+P", "F9"),
+        Group::Keys,
+    ),
+    command(
+        "profile.previous",
+        "Previous Profile",
+        split("Ctrl+Cmd+Shift+P", "Shift+F9"),
+        Group::Keys,
+    ),
+    command(
         "work.pane.close",
         "Close Pane",
         Keys::same("Escape"),
