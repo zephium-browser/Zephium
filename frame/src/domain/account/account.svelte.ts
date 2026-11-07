@@ -66,6 +66,7 @@ let users = 0;
 let stop: (() => void) | null = null;
 let generation = 0;
 let reads = 0;
+let identityEpoch = 0;
 
 export const account = () => current;
 export const unavailable = () => unreachable || (current !== null && !current.available);
@@ -77,6 +78,7 @@ function adopt(reply: AccountReplyV1 | undefined) {
   if (reply?.account?.version !== 1) {
     unreachable = true;
     deletionCodeSent = false;
+    identityEpoch += 1;
     return;
   }
   unreachable = false;
@@ -84,8 +86,10 @@ function adopt(reply: AccountReplyV1 | undefined) {
     !reply.account.signed_in ||
     current?.server !== reply.account.server ||
     current?.email !== reply.account.email
-  )
+  ) {
     deletionCodeSent = false;
+    identityEpoch += 1;
+  }
   current = reply.account;
   if (current.signed_in) moved = null;
 }
@@ -147,11 +151,13 @@ async function act(
   lastFault = null;
   reads += 1;
   const started = generation;
+  const identity = identityEpoch;
   const requestedIdentity =
     action === "deletion_code" && current ? { server: current.server, email: current.email } : null;
   const response = await observe(Promise.resolve().then(request), timeout);
   if (started !== generation) return false;
   busy = null;
+  if (action === "deletion_code" && identity !== identityEpoch) return false;
   if (response.state !== "received" || !response.value?.account) {
     lastFault = { action, fault: "offline", retryAfter: null };
     return false;
@@ -201,7 +207,16 @@ export const confirmPlanChange = () => act("plan_confirm", () => commands.accoun
 export const dismissPlanChange = () => act("plan_dismiss", () => commands.accountPlanDismiss());
 export const setServer = (server: string | null) =>
   act("server", () => commands.accountSetServer(server));
-export const sendDeletionCode = () => act("deletion_code", () => commands.accountDeletionCode());
+export async function sendDeletionCode() {
+  // Keep observing identity changes and the settled stage even if the last
+  // Account view leaves while the email request is in flight.
+  try {
+    await retain();
+    return await act("deletion_code", () => commands.accountDeletionCode());
+  } finally {
+    release();
+  }
+}
 export const deleteAccount = (code: string) => act("delete", () => commands.accountDelete(code));
 export const signOut = () => act("sign_out", () => commands.accountSignOut(), SIGN_OUT_TIMEOUT);
 export const signOutEverywhere = () =>

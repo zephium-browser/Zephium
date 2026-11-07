@@ -5,6 +5,7 @@ import "$styles/global.css";
 import { accountSession as session } from "$domain/account";
 import type { AccountV1 } from "$shared/ipc/bindings";
 import { accountFixture } from "$shared/testing/account";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import AccountDelete from "../components/account/AccountDelete.svelte";
 
 const native = vi.hoisted(() => ({
@@ -126,6 +127,54 @@ test("requesting a replacement code is explicit and clears the typed digits", as
   await page.getByRole("button", { name: "Send a new code", exact: true }).click();
   await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
   expect(native.send).toHaveBeenCalledTimes(2);
+});
+
+test.each(["signed_out", "email", "server", "version"])(
+  "an account %s event invalidates an in-flight deletion-code reply",
+  async (change) => {
+    const original = native.account!;
+    let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+    native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const sending = session.sendDeletionCode();
+    await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+    native.account = {
+      ...original,
+      ...(change === "signed_out"
+        ? { signed_in: false }
+        : change === "email"
+          ? { email: "grace@example.com" }
+          : change === "server"
+            ? { server: "https://accounts.example.com" }
+            : { version: 2 }),
+    };
+    emitNativeEvent("accountChanged", { version: 1 });
+    await vi.waitFor(() => {
+      if (change === "version") expect(session.unavailable()).toBe(true);
+      else expect(session.account()).toEqual(native.account);
+    });
+    finish({ account: original, fault: null, retry_after: null });
+    expect(await sending).toBe(false);
+    expect(session.awaitingDeletionCode()).toBe(false);
+    if (change !== "version") expect(session.account()).toEqual(native.account);
+    expect(session.pending()).toBeNull();
+  },
+);
+
+test("leaving Account during a code request retains its successful stage", async () => {
+  const original = native.account!;
+  let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+  native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  const sending = session.sendDeletionCode();
+  await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+  session.release();
+  try {
+    finish({ account: original, fault: null, retry_after: null });
+    expect(await sending).toBe(true);
+  } finally {
+    await session.retain();
+  }
+  expect(session.awaitingDeletionCode()).toBe(true);
+  expect(native.send).toHaveBeenCalledOnce();
 });
 
 test("typed deletion digits do not follow an account change", async () => {
