@@ -88,6 +88,7 @@ pub fn download(id: u64, filename: &str, state: DownloadState) -> DownloadItem {
             filename: filename.into(),
             source: "https://files.example".into(),
             source_is_context: false,
+            insecure: false,
             state,
             received: "4".into(),
             total: Some("4".into()),

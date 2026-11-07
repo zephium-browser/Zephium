@@ -156,6 +156,31 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
             return;
         }
+        // A first address the lists refuse is explained, not loaded: the view
+        // is built, or a spare adopted, on a blank page, so no navigation is
+        // cancelled while native construction is under way.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let url = {
+            let profile = partition.profile();
+            let (first, refused) = super::content_styles::first_navigation(
+                self.blocker_sites.entry(profile).or_default().clone(),
+                self.blocker_navigation.entry(profile).or_default().clone(),
+                url,
+            );
+            if let Some(reason) = refused {
+                self.sink.emit_for(
+                    event_token.clone(),
+                    EngineEvent::NavigationBlocked {
+                        id,
+                        url: url.to_owned(),
+                        reason,
+                        request: None,
+                        can_continue: true,
+                    },
+                );
+            }
+            first
+        };
         #[cfg(any(not(all(unix, not(target_os = "macos"))), test))]
         if let Some(mut spare) = self.spare.take_if(|s| s.partition == partition) {
             if let Err(error) = spare
@@ -213,6 +238,18 @@ impl EngineHost {
             spare.view.title_ready = None;
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                // The spare took the program current when it was built.
+                self.ensure_view_scriptlets(
+                    partition.profile(),
+                    &spare.view.view,
+                    &spare.view.scriptlet,
+                );
+                if !spare.view.event_permit.allows_navigation(url) {
+                    return;
+                }
             }
             #[cfg(target_os = "macos")]
             {
@@ -599,6 +636,14 @@ impl EngineHost {
         let initial_download_window = popup_opener
             .as_ref()
             .and_then(|opener| opener.webview.window());
+        // A download a new tab starts before showing anything is asked about
+        // on the tab that opened it.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let opener_download_ask = if native_popup {
+            self.native_tab_download_ask.take()
+        } else {
+            None
+        };
         if self.erasure_tombstones.contains(&partition.profile()) {
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
@@ -657,7 +702,13 @@ impl EngineHost {
             .entry(partition.profile())
             .or_default()
             .clone();
-        let site_scope = super::content_styles::ViewSiteScope::new(site_preferences, url);
+        let navigation = self
+            .blocker_navigation
+            .entry(partition.profile())
+            .or_default()
+            .clone();
+        let site_scope =
+            super::content_styles::ViewSiteScope::new(site_preferences, navigation, url);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
             self.popup_sites_for(partition.profile()),
@@ -668,6 +719,20 @@ impl EngineHost {
         ));
         if let Some(counter) = self.blocker_statistics.get(&partition.profile()) {
             site_scope.pause.set_statistics(counter.clone());
+        }
+        {
+            let (sink, permit, id) = (self.sink.clone(), event_permit.clone(), id.clone());
+            site_scope.protection.on_change(move |report| {
+                permit.emit(
+                    &sink,
+                    EngineEvent::ContentProtectionChanged {
+                        id: id.get(),
+                        degraded: report.degraded,
+                        stranded_filters: u32::try_from(report.stranded_filters)
+                            .unwrap_or(u32::MAX),
+                    },
+                );
+            });
         }
         let load_site_scope = site_scope.clone();
         #[cfg(target_os = "windows")]
@@ -745,42 +810,84 @@ impl EngineHost {
             let item = id.clone();
             let last = Cell::new(None::<std::time::Instant>);
             let page_asked = page_asked.clone();
-            Rc::new(move |target: &str, user_gesture: bool| -> bool {
-                use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
-                let Some(link) = zephium_core::navigation::external_app_link(target) else {
+            let app_link_navigation = navigation.clone();
+            Rc::new(
+                move |target: &str,
+                      user_gesture: bool,
+                      initiator: zephium_core::navigation::AppLinkSource|
+                      -> bool {
+                    use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
+                    let Some(link) = zephium_core::navigation::external_app_link(target) else {
+                        return false;
+                    };
+                    let committed = committed_origin(&app_link_navigation);
+                    let Some(initiator) =
+                        heard_app_link_source(initiator, committed.as_ref(), user_gesture)
+                    else {
+                        return true;
+                    };
+                    // A page acting alone is heard once per kind of link until
+                    // the person follows one themselves; checked before the app
+                    // lookup so a looping script costs nothing.
+                    if user_gesture {
+                        page_asked.borrow_mut().clear();
+                    } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
+                        return true;
+                    }
+                    let app = crate::platform::imp::external_app_name(target);
+                    if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
+                        return true;
+                    }
+                    let now = std::time::Instant::now();
+                    if last.get().is_none_or(|old| {
+                        now.duration_since(old) >= std::time::Duration::from_secs(1)
+                    }) {
+                        last.set(Some(now));
+                        permit.emit(
+                            &sink,
+                            EngineEvent::ExternalAppRequested {
+                                id: item.get(),
+                                url: target.to_owned(),
+                                app,
+                                user_gesture,
+                                initiator,
+                            },
+                        );
+                    }
+                    true
+                },
+            )
+        };
+        // A page the lists refuse is named for chrome to explain; a refused
+        // frame is only cancelled.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let navigation_refused: Rc<super::content_styles::NavigationJudge> = {
+            let scope = site_scope.clone();
+            let permit = event_permit.clone();
+            let sink = self.sink.clone();
+            let item = id.clone();
+            let refused_navigation = navigation.clone();
+            Rc::new(move |target: &str, frame: bool| {
+                let Some(reason) = scope.blocks_navigation(target, frame) else {
                     return false;
                 };
-                // A page acting alone is heard once per kind of link until
-                // the person follows one themselves; checked before the app
-                // lookup so a looping script costs nothing.
-                if user_gesture {
-                    page_asked.borrow_mut().clear();
-                } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
-                    return true;
-                }
-                let app = crate::platform::imp::external_app_name(target);
-                if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
-                    return true;
-                }
-                let now = std::time::Instant::now();
-                if last
-                    .get()
-                    .is_none_or(|old| now.duration_since(old) >= std::time::Duration::from_secs(1))
-                {
-                    last.set(Some(now));
+                if !frame {
                     permit.emit(
                         &sink,
-                        EngineEvent::ExternalAppRequested {
+                        EngineEvent::NavigationBlocked {
                             id: item.get(),
                             url: target.to_owned(),
-                            app,
-                            user_gesture,
+                            reason,
+                            request: refused_navigation.refused_request(target),
+                            can_continue: true,
                         },
                     );
                 }
                 true
             })
         };
+        #[cfg(target_os = "windows")]
+        let top_refused = navigation_refused.clone();
         let focus_shuts = {
             let gate = self.focus_gate.clone();
             let permit = event_permit.clone();
@@ -926,6 +1033,14 @@ impl EngineHost {
                     return None;
                 }
             };
+            if cached_environment.is_none()
+                && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+            {
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
             let builder = WebViewBuilder::new_with_web_context(
                 self.web_contexts
                     .entry(profile)
@@ -1003,6 +1118,8 @@ impl EngineHost {
                                 return None;
                             }
                         };
+                    self.scriptlets.attach_private(profile, &configuration);
+                    self.refresh_profile_scriptlets(profile);
                     use wry::WebViewBuilderExtMacos;
                     (
                         builder.with_webview_configuration(configuration),
@@ -1012,6 +1129,7 @@ impl EngineHost {
                 Partition::Default(profile) | Partition::Persistent(profile) => {
                     use wry::WebViewBuilderExtMacos;
                     let configuration = self.webext.configuration(profile, &self.sink);
+                    self.refresh_profile_scriptlets(profile);
                     if crate::platform::imp::proxy::apply(
                         &configuration,
                         crate::network::current().as_ref(),
@@ -1096,19 +1214,31 @@ impl EngineHost {
             // policy. Wry currently ignores this setting on WebKit platforms.
             .with_general_autofill_enabled(false)
             .with_navigation_handler(move |target| {
+                // WebKitGTK asks here for every frame, WebView2 only for the
+                // top (its frames count in FrameNavigationStarting); macOS
+                // asks the Apple handler below instead.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 may ask here before LaunchingExternalUriScheme; the
                 // shared one-per-second limit keeps that to one request.
                 #[cfg(target_os = "windows")]
                 if !admitted {
-                    navigation_app_link(&target, false);
+                    navigation_app_link(
+                        &target,
+                        false,
+                        zephium_core::navigation::AppLinkSource::Page,
+                    );
                 }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
                 // the main frame is known.
                 #[cfg(target_os = "windows")]
                 if admitted && focus_shuts(target.as_str()) {
+                    return false;
+                }
+                #[cfg(target_os = "windows")]
+                if admitted && top_refused(target.as_str(), false) {
                     return false;
                 }
                 #[cfg(target_os = "windows")]
@@ -1175,7 +1305,10 @@ impl EngineHost {
             let action_reader = Rc::downgrade(&page_reader);
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
+            let action_refused = navigation_refused.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
+                // Wry calls only this handler when it is set, for every frame.
+                zephium_core::blocker::PageActivity::shared().note_navigation();
                 // A page's own srcdoc, data: and blob: frames (challenge and
                 // payment widgets, editors) load under WebKit's origin rules;
                 // browser policy governs what a tab itself may show.
@@ -1191,8 +1324,16 @@ impl EngineHost {
                     action.navigation_type,
                     wry::AppleNavigationType::LinkActivated
                 );
-                if !admitted && action_app_link(&target, gesture) {
-                    return false;
+                if !admitted {
+                    let handled = match apple_app_link_source(action.source.as_ref()) {
+                        Some(initiator) => action_app_link(&target, gesture, initiator),
+                        // A frame whose site cannot be named never opens an
+                        // application, so no site's answer stands in for it.
+                        None => zephium_core::navigation::external_app_link(&target).is_some(),
+                    };
+                    if handled {
+                        return false;
+                    }
                 }
                 if admitted
                     && super::webext::intercept_auth_redirect(
@@ -1207,9 +1348,17 @@ impl EngineHost {
                     return false;
                 }
                 if admitted {
-                    super::webext::note_auth_native_navigation(&frame_navigation, action);
+                    super::webext::note_auth_native_navigation(&frame_navigation, action.clone());
                 }
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
+                    return false;
+                }
+                // A new-window action (no target frame) is judged by the tab it
+                // opens, which shows the explanation; the opener stays as it is.
+                if admitted
+                    && action.target_is_main_frame.is_some()
+                    && action_refused(&target, action.target_is_main_frame == Some(false))
+                {
                     return false;
                 }
                 #[cfg(feature = "agentic-browser")]
@@ -1220,7 +1369,7 @@ impl EngineHost {
                     );
                 }
                 if admitted {
-                    replay.observe(&target, action);
+                    replay.observe(&target, action.clone());
                     if action.navigation_type == wry::AppleNavigationType::BackForward
                         && action.target_is_main_frame == Some(true)
                         && frame_navigation.current_committed().is_some()
@@ -1270,6 +1419,7 @@ impl EngineHost {
             let popup_app_link = app_link.clone();
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
+                let clicked = popup_policy.clicked(features.user_initiated);
                 features.user_initiated = popup_policy.admits(
                     features.user_initiated,
                     tracker
@@ -1277,7 +1427,11 @@ impl EngineHost {
                         .as_ref()
                         .map(|(_, committed)| committed.as_str()),
                 );
-                if features.user_initiated && popup_app_link(&url, true) {
+                // A new window does not say which frame asked, so no kept
+                // answer opens it.
+                if features.user_initiated
+                    && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
+                {
                     return wry::NewWindowResponse::Deny;
                 }
                 // Bound script-triggered bursts without delaying ordinary rapid
@@ -1319,6 +1473,7 @@ impl EngineHost {
                     activity,
                     &url,
                     features,
+                    clicked,
                 );
                 if matches!(response, wry::NewWindowResponse::Deny) {
                     report_blocked();
@@ -1346,6 +1501,13 @@ impl EngineHost {
                 script.source.as_ref(),
                 !script.all_frames,
             );
+        }
+        #[cfg(all(
+            feature = "blocker-bench",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        for source in super::blocker_bench::preloads() {
+            builder = builder.with_initialization_script_for_main_only(source, true);
         }
         #[cfg(target_os = "macos")]
         {
@@ -1447,16 +1609,23 @@ impl EngineHost {
                                     )
                                 }) as Box<dyn FnOnce()>
                             });
+                            let menu = resource_save.take_download(&download_navigation);
+                            let ask = (!menu).then(|| {
+                                download_ask(
+                                    initial,
+                                    &opener_download_ask,
+                                    &download_item,
+                                    &download_permit,
+                                    &download_sink,
+                                    &download_navigation,
+                                )
+                            });
                             manager.admit(
                                 partition,
                                 download_permit.clone(),
                                 download_intent.clone(),
                                 download_navigation.clone(),
-                                (
-                                    controller,
-                                    event,
-                                    resource_save.take_download(&download_navigation),
-                                ),
+                                (controller, event, ask),
                                 started.map(|on_started| super::downloads::InitialDownload {
                                     on_started: Some(on_started),
                                 }),
@@ -1501,6 +1670,9 @@ impl EngineHost {
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                // Every top-level http page is tried over https first and
+                // loads over http only when that fails.
+                .with_https_upgrade(wry::AppleHttpsUpgrade::AutomaticFallback)
                 .with_drag_drop_handler(move |event| {
                     let permitted = drop_permit.active_token().is_some()
                         && drop_presentation.load(Ordering::Acquire);
@@ -1605,12 +1777,23 @@ impl EngineHost {
                                     )
                                 }) as Box<dyn FnOnce()>
                             });
+                            // The person chose WebKit's own menu item.
+                            let ask = (!wry::context_menu_download_in_progress()).then(|| {
+                                download_ask(
+                                    initial,
+                                    &opener_download_ask,
+                                    &download_item,
+                                    &download_permit,
+                                    &download_sink,
+                                    &download_navigation,
+                                )
+                            });
                             downloads.admit(
                                 partition,
                                 download_permit.clone(),
                                 download_intent.clone(),
                                 download_navigation.clone(),
-                                native,
+                                (native, ask),
                                 started.and_then(|on_started| {
                                     initial_download_window.clone().map(|window| {
                                         super::downloads::InitialDownload {
@@ -1658,12 +1841,43 @@ impl EngineHost {
             let failure_id = load_id.clone();
             let failure_certificates = Rc::downgrade(&certificates);
             let failure_replaced = replaced_navigation.clone();
+            let failure_navigation = navigation.clone();
             builder =
                 builder.with_navigation_failure_handler(move |navigation, reason, document| {
                     let reason = failure_reason(reason);
+                    // WebKit's content rules refused the page the view was
+                    // navigating to; chrome explains it as the lists' own
+                    // refusals are, under the refused address the error
+                    // names. The rule stays installed, so an allowance cannot
+                    // open it: there is no way past.
+                    if let (
+                        NavigationFailureReason::Blocked(block),
+                        wry::FailedDocument::Refused { url },
+                    ) = (reason, &document)
+                    {
+                        failure_permit.emit(
+                            &failure_sink,
+                            EngineEvent::NavigationBlocked {
+                                id: failure_id.get(),
+                                url: url.clone(),
+                                reason: block,
+                                // A redirect of the person's navigation is
+                                // still theirs, so the explanation shows.
+                                request: failure_navigation.request_in_flight(navigation),
+                                can_continue: false,
+                            },
+                        );
+                        return;
+                    }
+                    // A refusal that names no address is explained as any
+                    // other failure, never under the previous page's host.
+                    let reason = match reason {
+                        NavigationFailureReason::Blocked(_) => NavigationFailureReason::Other,
+                        reason => reason,
+                    };
                     let replaced = match document {
                         wry::FailedDocument::Replaced { url } => Some(url),
-                        wry::FailedDocument::Kept => None,
+                        wry::FailedDocument::Kept | wry::FailedDocument::Refused { .. } => None,
                     };
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();
@@ -1682,6 +1896,8 @@ impl EngineHost {
                     );
                 });
         }
+        // Held while this view's main frame loads; list updates wait for quiet.
+        let page_load = Cell::new(None::<zephium_core::blocker::ActivePageLoad>);
         builder = builder.with_navigation_event_handler(move |event| {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             if event.phase == wry::NavigationEventPhase::Committed && event.url != "about:blank" {
@@ -1721,6 +1937,9 @@ impl EngineHost {
                         &load_page_permission_pending,
                     );
                     if load_navigation.is_current(epoch) {
+                        page_load.set(Some(
+                            zephium_core::blocker::PageActivity::shared().begin_load(),
+                        ));
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
@@ -1748,6 +1967,8 @@ impl EngineHost {
                         watch.committed();
                     }
                     load_site_scope.navigating(&event.url);
+                    load_site_scope.committed(&event.url);
+                    load_site_scope.protection.retry();
                     // This identity-bearing native commit, not URL equality or
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
@@ -1766,6 +1987,7 @@ impl EngineHost {
                 }
                 NavigationTransition::Finished(epoch) => {
                     if load_navigation.is_current(epoch) {
+                        page_load.set(None);
                         load_permit
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
                         // Completion is a presentation signal, but it is not
@@ -1791,6 +2013,7 @@ impl EngineHost {
                     // The transition was current when accepted. End its
                     // loading state even when a provisional failure restored
                     // the still-visible previous committed document.
+                    page_load.set(None);
                     load_permit.emit(&on_load, EngineEvent::LoadingChanged { id, loading: false });
                     if let Some(request) = request {
                         load_permit.emit(&on_load, EngineEvent::NavigationFailed { id, request });
@@ -2041,10 +2264,22 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             let link = app_link.clone();
-            if let Err(error) = security_policy.route_external_uris(move |uri, user_gesture| {
-                link(uri, user_gesture);
-            }) {
+            if let Err(error) =
+                security_policy.route_external_uris(move |uri, user_gesture, initiator| {
+                    link(uri, user_gesture, webview2_app_link_source(initiator));
+                })
+            {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
+            let frame_site_scope = site_scope.clone();
+            if let Err(error) = security_policy.judge_frame_navigations(move |uri| {
+                frame_site_scope.blocks_navigation(uri, true).is_some()
+            }) {
+                eprintln!("content blocker: frame navigation check failed: {error}");
                 if report_failure {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }
@@ -2220,6 +2455,8 @@ impl EngineHost {
                 &view,
                 &content_policy,
                 &site_scope.pause,
+                &site_scope.protection,
+                &site_scope.top_document,
             ) {
                 Ok(registration) => registration,
                 Err(error) => {
@@ -2489,6 +2726,10 @@ impl EngineHost {
         // why an unstaged Linux warm spare remains disabled.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
+        #[cfg(target_os = "windows")]
+        let scriptlet = super::scriptlets::ViewScriptlet::default();
+        #[cfg(target_os = "windows")]
+        self.ensure_view_scriptlets(partition.profile(), &view, &scriptlet);
         if !event_permit.allows_navigation(url) {
             // WebView construction can pump WebView2 messages. Do not perform
             // the first content load after the outer generation was retired.
@@ -2545,6 +2786,8 @@ impl EngineHost {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             automatic_pip_sequence: Rc::new(Cell::new(0)),
             favicon_watch: Cell::new(0),
+            #[cfg(target_os = "macos")]
+            insecure_autofill: Cell::new(None),
             media_watch: Cell::new((0, false)),
             #[cfg(target_os = "windows")]
             _favicon_observer: favicon_observer,
@@ -2564,6 +2807,8 @@ impl EngineHost {
             discard_settle_timer: std::cell::RefCell::new(None),
             #[cfg(target_os = "windows")]
             request_witness,
+            #[cfg(target_os = "windows")]
+            scriptlet,
             #[cfg(target_os = "windows")]
             extension_window: Cell::new(None),
             #[cfg(target_os = "windows")]
@@ -2749,6 +2994,7 @@ impl EngineHost {
             None
         };
         let existing_environment = self.environments.get(&profile).cloned();
+        let mut browser_running = false;
         if let Some(environment) = &existing_environment {
             if extensions_enabled
                 && startup
@@ -2780,6 +3026,14 @@ impl EngineHost {
             if !current && !prior_exit_settled {
                 return Err(WindowsProfileEnvironmentFailure::Busy);
             }
+            browser_running = current;
+        }
+        if super::profiles::bootstrap_starts_browser(
+            existing_environment.is_some(),
+            browser_running,
+        ) && !super::profiles::expect_private_browser(&self.private_runtime, &path)
+        {
+            return Err(WindowsProfileEnvironmentFailure::Construction);
         }
         let mut construction_resource = Some(
             self.native_resources
@@ -2985,6 +3239,91 @@ fn to_wry(r: Rect) -> wry::Rect {
     }
 }
 
+/// Where a page's download is asked about: the tab itself, or, for a new tab
+/// whose first load is the download, the tab that opened it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn download_ask(
+    initial: bool,
+    opener: &Option<super::downloads::SiteAsk>,
+    item: &Rc<Cell<ItemId>>,
+    permit: &EventPermit,
+    sink: &super::permits::Sink,
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> super::downloads::SiteAsk {
+    if let Some(opener) = opener.as_ref().filter(|_| initial) {
+        return opener.clone();
+    }
+    super::downloads::SiteAsk {
+        item: item.clone(),
+        permit: permit.clone(),
+        sink: sink.clone(),
+        site: committed_origin(navigation),
+        opened_by_click: false,
+    }
+}
+
+/// What the shell hears about an app link's source, or None when it is not
+/// heard at all: a frame from another site, such as an ad, only when the
+/// person clicked in it. A frame of the tab's own site speaks for the tab.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn heard_app_link_source(
+    source: zephium_core::navigation::AppLinkSource,
+    committed: Option<&zephium_core::permissions::PageOrigin>,
+    user_gesture: bool,
+) -> Option<zephium_core::navigation::AppLinkSource> {
+    use zephium_core::navigation::AppLinkSource;
+    match source {
+        AppLinkSource::Frame(origin) if committed == Some(&origin) => Some(AppLinkSource::Page),
+        AppLinkSource::Frame(_) if !user_gesture => None,
+        source => Some(source),
+    }
+}
+
+/// Who asked, from WebKit's source frame. None for a frame other than the
+/// main one whose site cannot be named.
+#[cfg(target_os = "macos")]
+fn apple_app_link_source(
+    source: Option<&wry::AppleNavigationSource>,
+) -> Option<zephium_core::navigation::AppLinkSource> {
+    use zephium_core::navigation::AppLinkSource;
+    let Some(source) = source else {
+        return Some(AppLinkSource::Unknown);
+    };
+    match zephium_core::permissions::PageOrigin::from_native_components(
+        &source.scheme,
+        &source.host,
+        (source.port != 0).then_some(source.port),
+    ) {
+        Ok(origin) => Some(AppLinkSource::Frame(origin)),
+        Err(_) if source.is_main_frame => Some(AppLinkSource::Page),
+        Err(_) => None,
+    }
+}
+
+/// Who asked, from WebView2's `InitiatingOrigin`. It names the top document
+/// and frames alike, so an origin that is no site cannot be told apart from
+/// the tab's own and is treated as unknown; empty means the browser itself
+/// navigated.
+#[cfg(any(target_os = "windows", test))]
+fn webview2_app_link_source(origin: Option<&str>) -> zephium_core::navigation::AppLinkSource {
+    use zephium_core::navigation::AppLinkSource;
+    origin
+        .and_then(|origin| url::Url::parse(origin).ok())
+        .and_then(|origin| zephium_core::permissions::PageOrigin::from_url(&origin).ok())
+        .map_or(AppLinkSource::Unknown, AppLinkSource::Frame)
+}
+
+/// The origin of the document the view has committed, if any.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn committed_origin(
+    navigation: &crate::navigation_epoch::NavigationEpochTracker,
+) -> Option<zephium_core::permissions::PageOrigin> {
+    navigation
+        .committed_snapshot()
+        .and_then(|(_, url)| url::Url::parse(&url).ok())
+        .and_then(|url| zephium_core::permissions::PageOrigin::from_url(&url).ok())
+}
+
 pub(super) fn raw_content_permission(kind: wry::PermissionKind) -> wry::PermissionResponse {
     raw_content_permission_on(kind, cfg!(windows))
 }
@@ -3035,6 +3374,9 @@ fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
                 wry::CertificateProblem::Other => Problem::Other,
             })
         }
+        wry::NavigationFailure::Blocked => NavigationFailureReason::Blocked(
+            zephium_core::ports::engine::NavigationBlockReason::FilterLists,
+        ),
         wry::NavigationFailure::Other => NavigationFailureReason::Other,
     }
 }

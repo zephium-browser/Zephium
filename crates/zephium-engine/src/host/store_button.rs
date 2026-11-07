@@ -18,6 +18,10 @@ use super::EngineHost;
 const CLICK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "windows")]
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+// Behind another app the listing can only be clicked by first bringing its
+// window back, so it is asked far less often.
+#[cfg(target_os = "windows")]
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(super) struct StoreButtonSlot {
@@ -27,6 +31,10 @@ pub(super) struct StoreButtonSlot {
     native: Option<crate::platform::macos::store_button::StoreButton>,
     #[cfg(target_os = "windows")]
     poll: Option<crate::platform::imp::ContentPolicyTimeout>,
+    // The armed poll is the fast one, so the window coming back has nothing
+    // to bring forward.
+    #[cfg(target_os = "windows")]
+    poll_fast: bool,
     // Polling stopped because the listing went out of view, and starts again
     // when it comes back.
     #[cfg(target_os = "windows")]
@@ -42,6 +50,19 @@ impl StoreButtonSlot {
             native,
             ..Self::default()
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn in_front(view: &wry::WebView) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
+    use wry::WebViewExtWindows;
+    let mut parent = HWND::default();
+    // SAFETY: plain reads of the live controller's parent and the window in front.
+    unsafe {
+        view.controller().ParentWindow(&mut parent).is_ok()
+            && GetAncestor(parent, GA_ROOT) == GetForegroundWindow()
     }
 }
 
@@ -106,6 +127,21 @@ impl EngineHost {
                     view.store_button.paused = false;
                 }
             }
+            self.schedule_store_button_poll(id);
+        }
+    }
+
+    /// The window came back in front: a listing waiting out the slow
+    /// interval is asked again at the fast one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn store_buttons_foreground(&mut self) {
+        let polling = self
+            .views
+            .iter()
+            .filter(|(_, view)| view.store_button.poll.is_some() && !view.store_button.poll_fast)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in polling {
             self.schedule_store_button_poll(id);
         }
     }
@@ -182,8 +218,15 @@ impl EngineHost {
             view.store_button.poll = None;
             return;
         }
+        let fast = in_front(&view.view);
+        let interval = if fast {
+            POLL_INTERVAL
+        } else {
+            BACKGROUND_POLL_INTERVAL
+        };
+        view.store_button.poll_fast = fast;
         view.store_button.poll =
-            crate::platform::imp::schedule_browser_timeout(POLL_INTERVAL, move || {
+            crate::platform::imp::schedule_browser_timeout(interval, move || {
                 let _ = super::try_with(move |host| host.poll_store_button(id));
             });
     }

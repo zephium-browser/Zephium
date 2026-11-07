@@ -35,11 +35,12 @@ export function kindsInUse(capture: Capture | null | undefined): Set<SitePermiss
 /**
  * The kinds worth a row: ones the site has a decision for, ones it is using,
  * and ones just changed, so a row does not vanish under the pointer when it
- * is set back to Ask. Platform order.
+ * is set back to Ask. Platform order. Links to apps are granted per scheme,
+ * which one row cannot say, so they are left to Settings.
  */
 export function shownKinds(
   kinds: readonly SitePermissionKindView[],
   ...groups: ReadonlyArray<ReadonlySet<SitePermissionKindView>>
 ): SitePermissionKindView[] {
-  return kinds.filter((kind) => groups.some((group) => group.has(kind)));
+  return kinds.filter((kind) => kind !== "app_links" && groups.some((group) => group.has(kind)));
 }

@@ -132,7 +132,7 @@ na kanwę razem ze stroną.
   zużycie pamięci pozostaje niskie nawet przy wielu otwartych kartach.
 - Natywny bloker reklam i trackerów, domyślnie włączony, oparty na
   [adblock-rust](https://github.com/brave/adblock-rust) od Brave z listami
-  EasyList i EasyPrivacy. Żądania są zatrzymywane, zanim strona zdąży je
+  EasyList, EasyPrivacy i filtrami uBlock Origin. Żądania są zatrzymywane, zanim strona zdąży je
   wysłać, a cokolwiek jeszcze na stronie przeszkadza, możesz ukryć jednym
   kliknięciem.
 

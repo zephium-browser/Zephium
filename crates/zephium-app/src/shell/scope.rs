@@ -69,6 +69,10 @@ impl Shell {
                     .default_profile()
                     .unwrap_or(ProfileId::from(0))
             });
+        self.partition_of_profile(profile)
+    }
+
+    pub(super) fn partition_of_profile(&self, profile: ProfileId) -> Partition {
         match self.profiles.get(profile).map(|p| p.kind) {
             Some(ProfileKind::Named) => Partition::Persistent(profile),
             Some(ProfileKind::Incognito) => Partition::Ephemeral(profile),
