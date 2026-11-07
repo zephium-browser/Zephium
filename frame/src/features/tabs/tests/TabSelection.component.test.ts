@@ -87,8 +87,9 @@ async function list(
     split_group: options.split ? { members: options.split } : null,
   };
   flushSync(() => emitNativeEvent("itemsChanged", snapshot));
+  const tree = sidebarTree(nodes, all);
   const props = {
-    entries: sidebarTree(nodes, all)[section],
+    entries: tree[section],
     section,
     label: "Open tabs",
     splitting: options.splitting ?? false,
@@ -97,8 +98,8 @@ async function list(
   const screen = options.standalone
     ? await render(TabList, props)
     : await render(SidebarBody, {
-        pinned: section === "pinned" ? props.entries : [],
-        today: section === "today" ? props.entries : [],
+        pinned: tree.pinned,
+        today: tree.today,
         splitting: props.splitting,
         onSelect: props.onSelect,
       });
@@ -183,6 +184,41 @@ test("Escape clears selection even when the sidebar has lost focus", async () =>
   const { click, selected } = await list();
   click("b", { ctrlKey: true });
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  flushSync();
+  expect(selected()).toEqual([]);
+});
+
+test("Shift ranges span pinned and ordinary rows in both directions", async () => {
+  const nodes: SidebarNodeView[] = ["a", "b", "c", "d"].map((id, index) => ({
+    id,
+    parent_id: null,
+    section: index < 2 ? "pinned" : "today",
+    kind: { type: "tab", tab_id: id },
+  }));
+  const { click, selected } = await list({ nodes });
+  click("b");
+  click("d", { shiftKey: true });
+  expect(selected()).toEqual(["b", "c", "d"]);
+  click("c");
+  click("a", { shiftKey: true });
+  expect(selected()).toEqual(["a", "b", "c"]);
+});
+
+test("Escape dismisses the open space panel before clearing the tab selection", async () => {
+  const { click, selected, screen } = await list();
+  click("b", { ctrlKey: true });
+  const chip = screen.getByRole("button", { name: "Spaces — Home" });
+  await chip.click();
+  await expect.element(chip).toHaveAttribute("aria-expanded", "true");
+  window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+  );
+  flushSync();
+  await expect.element(chip).toHaveAttribute("aria-expanded", "false");
+  expect(selected()).toEqual(["a", "b"]);
+  window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+  );
   flushSync();
   expect(selected()).toEqual([]);
 });

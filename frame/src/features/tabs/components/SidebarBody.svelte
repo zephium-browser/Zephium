@@ -30,6 +30,10 @@
   } = $props();
 
   const selection = new TabSelection();
+  let pinnedOrder = $state.raw<string[]>([]);
+  let todayOrder = $state.raw<string[]>([]);
+  const rangeOrder = $derived([...pinnedOrder, ...todayOrder]);
+  let spacePanelOpen = $state(false);
 
   // Private browsing keeps one space, so it has no switcher.
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
@@ -78,7 +82,11 @@
   the difference by having no close control.
 -->
 <!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar {extras} />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
+{#if spaced}<SpaceBar {extras} onOpenChange={(open) => (spacePanelOpen = open)} />{:else}<div
+    class="new-tab-slot"
+    data-cascade
+    style:--cascade={0}
+  >
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
@@ -103,6 +111,9 @@
     >
       <TabList
         {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (pinnedOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={pinned}
         section="pinned"
         label={m.pinned_tabs()}
@@ -117,6 +128,9 @@
 
       <TabList
         {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (todayOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={today}
         section="today"
         label={m.open_tabs()}

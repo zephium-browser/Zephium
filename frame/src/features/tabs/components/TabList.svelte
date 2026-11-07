@@ -34,10 +34,16 @@
     columns,
     onSelect,
     selection,
+    rangeOrder,
+    onVisibleOrder,
+    selectionEscapeBlocked = false,
   }: {
     /** Lay the tiles out in rows of this many even columns, filling upwards. */
     columns?: number;
     selection?: TabSelection;
+    rangeOrder?: readonly string[];
+    onVisibleOrder?: (order: string[]) => void;
+    selectionEscapeBlocked?: boolean;
     /** Where this list's first row falls in the launch cascade. */
     cascadeFrom?: number;
     entries: SidebarEntry[];
@@ -62,6 +68,9 @@
     }),
   );
   $effect(() => {
+    onVisibleOrder?.(visibleOrder);
+  });
+  $effect(() => {
     const current = selection;
     if (!current) return;
     const scope = JSON.stringify([tabs.profile()?.id, tabs.activeSpaceId()]);
@@ -74,11 +83,21 @@
   });
 
   function escape(event: KeyboardEvent) {
-    if (!selection || event.key !== "Escape" || event.isComposing) return;
+    if (
+      !selection ||
+      selectionEscapeBlocked ||
+      event.defaultPrevented ||
+      event.key !== "Escape" ||
+      event.isComposing
+    )
+      return;
     const selected = selection.value.ids.length > 0;
     if (!selected && !list?.contains(document.activeElement)) return;
     selection.clear();
-    if (selected) event.stopPropagation();
+    if (selected) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   }
 
   const modified = (event: MouseEvent) => selectable && isSelectionModifier(event, IS_MAC);
@@ -164,7 +183,7 @@
   function select(id: string, event?: MouseEvent) {
     if (selection && event && modified(event)) {
       drag.swallowClick();
-      if (event.shiftKey) selection.range(id, tabs.activeId(), visibleOrder);
+      if (event.shiftKey) selection.range(id, tabs.activeId(), rangeOrder ?? visibleOrder);
       else selection.toggle(id, tabs.activeId());
       return;
     }

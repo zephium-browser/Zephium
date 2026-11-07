@@ -36,7 +36,7 @@ export function rangeSelection(
 ): TabSelectionState {
   const end = order.indexOf(id);
   if (end === -1) return state;
-  // A hidden anchor or one in another section cannot define this list's range.
+  // A hidden anchor cannot define the displayed range.
   const anchor = [state.anchor, active, id].find(
     (value) => value !== null && order.includes(value),
   )!;

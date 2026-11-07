@@ -55,7 +55,7 @@ describe("tab selection", () => {
     expect(plain).toEqual({ ids: [], anchor: "b" });
   });
 
-  test("hidden or cross-section anchors fall back to a visible active tab, then the target", () => {
+  test("hidden anchors fall back to a visible active tab, then the target", () => {
     const state = { ids: ["hidden"], anchor: "hidden" };
     expect(rangeSelection(state, "d", "b", ["b", "d"])).toEqual({ ids: ["b", "d"], anchor: "b" });
     expect(rangeSelection(state, "d", "elsewhere", ["b", "d"])).toEqual({
