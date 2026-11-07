@@ -70,7 +70,8 @@
     background: var(--color-field-hover);
   }
 
-  .ui-search:focus-within {
+  .ui-search:focus-within,
+  .ui-search:has(input[data-caret-parked]) {
     color: var(--color-muted);
     box-shadow: var(--shadow-field-focus);
   }

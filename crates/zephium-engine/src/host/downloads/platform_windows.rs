@@ -19,7 +19,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
-    GA_ROOT, SW_SHOWNORMAL,
+    GA_ROOT, GA_ROOTOWNER, SW_SHOWNORMAL,
 };
 
 #[derive(Clone)]
@@ -66,6 +66,12 @@ pub(super) struct Source {
     ask_destination: bool,
 }
 impl Source {
+    /// The page that started the download is still the one in the view,
+    /// whether or not the person is looking at it.
+    pub(super) fn current(&self) -> bool {
+        self.permit.active_token().is_some() && self.navigation.matches_activity(self.activity)
+    }
+
     pub(super) fn live(&self) -> bool {
         let mut parent = HWND::default();
         self.permit.active_token().is_some()
@@ -80,8 +86,16 @@ impl Source {
     }
     fn key(&self) -> bool {
         self.live()
-            && unsafe { GetForegroundWindow() == self.root && IsWindowEnabled(self.root).as_bool() }
+            && unsafe { IsWindowEnabled(self.root).as_bool() }
+            && fronts(self.root, unsafe { GetForegroundWindow() })
     }
+}
+
+/// The window is in front, or a popup it owns is: WebView2's own permission
+/// prompt takes the foreground while the page's downloads wait on it.
+fn fronts(root: HWND, foreground: HWND) -> bool {
+    !foreground.is_invalid()
+        && (foreground == root || unsafe { GetAncestor(foreground, GA_ROOTOWNER) } == root)
 }
 
 fn wide(path: &Path) -> Result<Vec<u16>, DownloadError> {
@@ -338,9 +352,15 @@ fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> b
 
 impl Downloads {
     pub(super) fn ensure_timer(self: &Rc<Self>) {
-        let (period, slow) = self.tick_period();
+        let (mut period, slow) = self.tick_period();
+        if slow {
+            period = self.waiting_period();
+        }
+        let due = std::time::Instant::now() + period;
         if self.timer.borrow().is_some() {
-            if self.timer_slow.get() == slow {
+            if self.timer_slow.get() == slow
+                && self.timer_due.get().is_some_and(|current| current <= due)
+            {
                 return;
             }
             if let Some(timer) = self.timer.borrow_mut().take() {
@@ -348,6 +368,7 @@ impl Downloads {
             }
         }
         self.timer_slow.set(slow);
+        self.timer_due.set(Some(due));
         let weak = Rc::downgrade(self);
         let timer = timer::schedule(period, move || {
             if let Some(manager) = weak.upgrade() {
@@ -370,11 +391,14 @@ impl Downloads {
         request: (
             &ICoreWebView2Controller,
             &ICoreWebView2DownloadStartingEventArgs,
-            bool,
+            Option<super::SiteAsk>,
         ),
         mut initial: Option<InitialDownload>,
     ) {
-        let (controller, args, ask_destination) = request;
+        // Only a download the person started from the browser's own menu
+        // comes without a site to ask; it asks where to save instead.
+        let (controller, args, ask) = request;
+        let ask_destination = ask.is_none();
         let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
@@ -420,6 +444,14 @@ impl Downloads {
         let Some(origin) = source_origin(&uri, controller) else {
             return;
         };
+        // DownloadStarting says neither who clicked nor which frame asked, so
+        // the site's own decision is what guards a download nobody started.
+        let site = match self.site_admission(partition.profile(), ask, &origin, true) {
+            super::site::SiteAdmission::Refuse => return,
+            super::site::SiteAdmission::Open => None,
+            super::site::SiteAdmission::Hold(hold) => Some(hold),
+        };
+        let insecure = url::Url::parse(&uri).is_ok_and(|url| is_insecure_source(&url));
         let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
             return;
         };
@@ -545,6 +577,7 @@ impl Downloads {
             identity: None,
             writer: Some(writer),
             writer_released: false,
+            insecure,
         };
         self.active.borrow_mut().insert(
             id,
@@ -569,16 +602,18 @@ impl Downloads {
                 persisting_terminal: false,
                 kept: false,
                 user_pausing: false,
+                site,
+                confirmed: false,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         self.ensure_recovery(partition);
         let cached = self.preferences.borrow().get(&partition.profile()).cloned();
         if let Some(preferences) = cached {
-            self.choose_destination(id, preferences);
+            self.decide(id, preferences);
         } else if matches!(partition, Partition::Ephemeral(_)) {
-            self.choose_destination(id, DownloadPreferences::default());
+            self.decide(id, DownloadPreferences::default());
         } else {
             self.work.set(self.work.get() + 1);
             let sender = self.sender.clone();
@@ -594,6 +629,14 @@ impl Downloads {
                     DownloadStoreReply::Error(DownloadError::Storage),
                 ));
             }
+        }
+        // The timer armed above saw neither this transfer nor the work it
+        // just started, so it may be the slow one; its replies wait on a tick.
+        // Without one, nothing would ever answer them: the transfer ends, as
+        // the gate above refuses one it could not time.
+        self.ensure_timer();
+        if self.timer.borrow().is_none() {
+            self.cancel(id, Some(DownloadError::Unavailable));
         }
     }
 
@@ -622,8 +665,8 @@ impl Downloads {
             .clone()
             .map(PathBuf::from)
             .or_else(dirs::download_dir);
-        // Admission pins the foreground document; WebView2's automatic-download
-        // permission remains denied, so a page cannot authorize a download flood.
+        // Admission pins the foreground document; a page's further automatic
+        // downloads ask through WebView2's own prompt first.
         if !ask_destination
             && !preferences.ask_destination
             && (preferences.directory.is_none() || preferences.directory_identity.is_some())
@@ -691,7 +734,7 @@ impl Downloads {
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
-            (self.notify)(transfer.partition.profile());
+            self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
                 transfer.destination_reply.take(),
@@ -789,7 +832,7 @@ impl Downloads {
             transfer.partition.profile()
         };
         self.persist(id);
-        (self.notify)(profile);
+        self.changed(profile);
         true
     }
 
@@ -851,7 +894,7 @@ impl Downloads {
             return Err(DownloadError::Unavailable);
         }
         self.ensure_timer();
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
         Ok(())
     }
 
@@ -1147,6 +1190,44 @@ mod tests {
             ),
         ] {
             assert_eq!(interrupt_error(reason), expected);
+        }
+    }
+
+    #[test]
+    fn only_the_window_or_a_popup_it_owns_holds_the_foreground_for_it() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WS_OVERLAPPEDWINDOW,
+            WS_POPUP,
+        };
+        let create = |owner: Option<HWND>, style: WINDOW_STYLE| unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!(""),
+                style,
+                0,
+                0,
+                10,
+                10,
+                owner,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let root = create(None, WS_OVERLAPPEDWINDOW);
+        let prompt = create(Some(root), WS_POPUP);
+        let other = create(None, WS_OVERLAPPEDWINDOW);
+        let other_prompt = create(Some(other), WS_POPUP);
+        assert!(fronts(root, root));
+        assert!(fronts(root, prompt));
+        assert!(!fronts(root, other));
+        assert!(!fronts(root, other_prompt));
+        assert!(!fronts(root, HWND::default()));
+        for window in [other_prompt, other, prompt, root] {
+            unsafe { DestroyWindow(window).unwrap() };
         }
     }
 

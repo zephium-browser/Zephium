@@ -23,22 +23,23 @@ pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_790_640_000;
 pub const REVIEWED_STABLE_RELEASE_LINE: [u32; 2] = [2, 54];
 pub const REVIEWED_STABLE_RELEASE_LINE_TEXT: &str = "2.54";
 
-pub const LATEST_REVIEWED: [u32; 3] = [2, 54, 1];
-pub const LATEST_REVIEWED_TEXT: &str = "2.54.1";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-02";
+pub const LATEST_REVIEWED: [u32; 3] = [2, 54, 2];
+pub const LATEST_REVIEWED_TEXT: &str = "2.54.2";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-23";
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
-    "https://webkitgtk.org/2026/10/02/webkitgtk2.54.1-released.html";
+    "https://webkitgtk.org/2026/10/23/webkitgtk2.54.2-released.html";
 
 /// Re-reviewed on 2026-10-04 against the official security-advisory index and
 /// release feed. WSA-2026-0006 lists fixes in 2.54.0, the first stable 2.54
 /// release, and no 2.52 release after 2.52.6 carries them, so 2.54.0 is the
 /// newest stable security boundary. 2.54.1 is a bug-fix release; 2.53.92 is an
-/// odd-minor development release.
+/// odd-minor development release. Re-reviewed on 2026-11-02: no advisory after
+/// WSA-2026-0006, and 2.54.2 (October 23) is another bug-fix release.
 ///
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-03";
-/// 2026-11-04T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_793_750_400;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
+/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
@@ -180,8 +181,9 @@ mod tests {
                 })
             );
         }
+        let [major, minor, patch] = LATEST_REVIEWED;
         assert_eq!(
-            assess_runtime(2, 54, 1, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
+            assess_runtime(major, minor, patch, SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS),
             Ok(RuntimeSecurityAdvisories::new())
         );
         assert_eq!(
@@ -200,9 +202,9 @@ mod tests {
         );
         assert_eq!(
             assess_runtime(
-                2,
-                54,
-                1,
+                major,
+                minor,
+                patch,
                 SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
                     + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS,
             ),

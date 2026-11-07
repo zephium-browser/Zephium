@@ -24,6 +24,7 @@ vi.mock("$domain/account/account-model", async (original) => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    chromeModal: async () => {},
     accountGet: native.get,
     accountRefresh: async () => native.get(),
     accountAvatarPick: native.pick,

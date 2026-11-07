@@ -15,6 +15,7 @@ const native = vi.hoisted(() => ({
   stored: {} as Record<string, string>,
   about: vi.fn(async () => ({ version: "1.0.1", os: "macOS 26.1.0", arch: "aarch64" })),
   relaunch: vi.fn(async () => true),
+  appRelaunch: vi.fn(async () => true),
   openUrl: vi.fn(async () => ({ accepted: true, operation_id: null })),
   softwareUpdate: vi.fn(async () => true),
   settingSet: vi.fn(async (_key: string, _value: string) => ({
@@ -28,6 +29,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     updateStatus: async () => native.status,
     updateRelaunch: native.relaunch,
+    appRelaunch: native.appRelaunch,
     aboutInfo: native.about,
     settingGet: async (key: string) => native.stored[key] ?? null,
     settingSet: native.settingSet,
@@ -39,6 +41,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 const clear: RuntimeStatus = {
   restart_required: false,
+  restart_reason: null,
   session_set_aside: false,
   user_content_degraded_scope_count: 0,
   security_advisories: [],
@@ -209,4 +212,18 @@ test("manual installation remains actionable in the sidebar and compact rail", a
   await rail.getByRole("button", { name: "Download and install manually" }).click();
   expect(native.openUrl).toHaveBeenCalledTimes(2);
   expect(native.relaunch).not.toHaveBeenCalled();
+});
+
+test("a profile only a restart can trust raises a pill that restarts Zephium", async () => {
+  await start({ state: "upToDate" }, { "notice.seen-version": "1.0.1" });
+  emitNativeEvent("runtimeStatusChanged", {
+    ...clear,
+    restart_required: true,
+    restart_reason: "profile",
+  });
+  const screen = await render(UpdateCards);
+  await screen.getByRole("button", { name: "Restart Zephium" }).click();
+  expect(native.appRelaunch).toHaveBeenCalledOnce();
+  expect(native.relaunch).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: /dismiss|close/i }).query()).toBeNull();
 });
