@@ -52,7 +52,7 @@ export function commandFor(event: KeyboardEvent, mac: boolean, pressed: string):
   if (event.isComposing || event.repeat) return null;
   let hit = entries.find(
     (entry) =>
-      entry.group !== "global" &&
+      entry.id !== "launcher.toggle" &&
       entry.group !== "work" &&
       entry.accelerator !== null &&
       sameAccelerator(entry.accelerator, pressed, mac),

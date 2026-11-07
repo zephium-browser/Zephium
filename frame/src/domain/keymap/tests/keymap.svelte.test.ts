@@ -51,6 +51,39 @@ beforeEach(() => {
 });
 
 describe("keymap", () => {
+  it.each([false, true])("exact themes outrank zoom aliases (mac: %s)", async (mac) => {
+    const keymap = await import("../keymap.svelte");
+    const modifier = mac ? "Cmd" : "Ctrl";
+    for (const id of ["theme.system", "theme.light", "theme.dark"]) {
+      native.entries.mockResolvedValue([
+        entry("zoom.in", "CmdOrCtrl+=", "view"),
+        { ...entry(id, "CmdOrCtrl+Shift+=", "global"), customizable: true },
+      ]);
+      await keymap.init();
+      expect(
+        keymap.commandFor(
+          press({ code: "Equal", key: "+", shiftKey: true }),
+          mac,
+          `${modifier}+Shift+Equal`,
+        ),
+      ).toBe(id);
+      native.entries.mockResolvedValue([
+        entry("zoom.in", "CmdOrCtrl+=", "view"),
+        { ...entry(id, null, "global"), customizable: true },
+      ]);
+      native.listener?.();
+      await vi.waitFor(() => expect(keymap.all()[1]?.accelerator).toBeNull());
+      expect(
+        keymap.commandFor(
+          press({ code: "Equal", key: "+", shiftKey: true }),
+          mac,
+          `${modifier}+Shift+Equal`,
+        ),
+      ).toBe("zoom.in");
+      keymap.dispose();
+    }
+  });
+
   it.each([false, true])("accepts zoom plus and keypad aliases (mac: %s)", async (mac) => {
     native.entries.mockResolvedValue([
       entry("zoom.in", "CmdOrCtrl+=", "view"),
