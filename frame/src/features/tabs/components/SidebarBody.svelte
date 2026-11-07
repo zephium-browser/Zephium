@@ -30,6 +30,10 @@
   } = $props();
 
   const selection = new TabSelection();
+  export function clearSelection() {
+    selection.clear();
+  }
+
   let pinnedOrder = $state.raw<string[]>([]);
   let todayOrder = $state.raw<string[]>([]);
   const rangeOrder = $derived([...pinnedOrder, ...todayOrder]);

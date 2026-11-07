@@ -74,7 +74,8 @@
     const current = selection;
     if (!current) return;
     const scope = JSON.stringify([tabs.profile()?.id, tabs.activeSpaceId()]);
-    const ids = tabs.tabs().map((tab) => tab.id);
+    const order = rangeOrder ?? visibleOrder;
+    const ids = tabs.tabs().flatMap((tab) => (order.includes(tab.id) ? [tab.id] : []));
     const split = splitting;
     untrack(() => {
       current.reconcile(scope, ids);
@@ -183,8 +184,10 @@
   function select(id: string, event?: MouseEvent) {
     if (selection && event && modified(event)) {
       drag.swallowClick();
-      if (event.shiftKey) selection.range(id, tabs.activeId(), rangeOrder ?? visibleOrder);
-      else selection.toggle(id, tabs.activeId());
+      const order = rangeOrder ?? visibleOrder;
+      const active = tabs.activeId();
+      if (event.shiftKey) selection.range(id, active, order);
+      else selection.toggle(id, active !== null && order.includes(active) ? active : null);
       return;
     }
     if (drag.swallowClick()) return;

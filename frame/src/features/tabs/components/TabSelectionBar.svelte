@@ -18,6 +18,16 @@
   let { selection }: { selection: TabSelection } = $props();
   let busy = $state(false);
   const selected = $derived(tabs.tabs().filter((tab) => selection.value.ids.includes(tab.id)));
+  const pinnedIds = $derived(
+    new Set(
+      tabs
+        .sidebarNodes()
+        .flatMap((node) =>
+          node.section === "pinned" && node.kind.type === "tab" ? [node.kind.tab_id] : [],
+        ),
+    ),
+  );
+  const closable = $derived(selected.filter((tab) => !pinnedIds.has(tab.id)));
   const essentialIds = $derived(
     new Set(
       tabs
@@ -80,9 +90,10 @@
         class="selection-action"
         title={m.tab_selection_close()}
         aria-label={m.tab_selection_close()}
+        disabled={closable.length === 0}
         onclick={() =>
           void run(
-            selected.map((tab) => tab.id),
+            closable.map((tab) => tab.id),
             (id) => settle(commands.tabsClose(id)),
           )}
       >

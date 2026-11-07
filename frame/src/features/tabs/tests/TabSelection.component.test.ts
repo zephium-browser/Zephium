@@ -156,6 +156,23 @@ test("Meta-click does not toggle on Windows", async () => {
   expect(native.activate).toHaveBeenCalledExactlyOnceWith("b");
 });
 
+test("Ctrl-click seeds the active tab only when it has a selectable row", async () => {
+  const nodes: SidebarNodeView[] = open.map((tab) => ({
+    id: tab.id,
+    parent_id: null,
+    section: tab.id === "a" ? "favorites" : "today",
+    kind: { type: "tab", tab_id: tab.id },
+  }));
+  const { click, selected, screen } = await list({ nodes });
+  click("b", { ctrlKey: true });
+  expect(selected()).toEqual(["b"]);
+  expect(screen.container.querySelector(".selection-bar")).toBeNull();
+  click("c", { ctrlKey: true });
+  expect(selected()).toEqual(["b", "c"]);
+  await screen.getByRole("button", { name: "Close selected tabs" }).click();
+  await expect.poll(() => native.close.mock.calls).toEqual([["b"], ["c"]]);
+});
+
 test("lists without selection retain activation for modifier clicks", async () => {
   const { click, selected, screen } = await list({ standalone: true });
   click("b", { ctrlKey: true });
@@ -229,6 +246,27 @@ test("Close settles a command for every selected ID", async () => {
   await screen.getByRole("button", { name: "Close selected tabs" }).click();
   await expect.poll(() => native.close.mock.calls).toEqual([["a"], ["b"], ["c"]]);
   expect(native.activate).not.toHaveBeenCalled();
+});
+
+test("Close skips pinned rows while Ctrl-click can seed across sections", async () => {
+  const nodes: SidebarNodeView[] = open.map((tab) => ({
+    id: tab.id,
+    parent_id: null,
+    section: tab.id === "a" ? "pinned" : "today",
+    kind: { type: "tab", tab_id: tab.id },
+  }));
+  const { click, selected, screen } = await list({ nodes });
+  click("b", { ctrlKey: true });
+  expect(selected()).toEqual(["a", "b"]);
+  await screen.getByRole("button", { name: "Close selected tabs" }).click();
+  await expect.poll(() => native.close.mock.calls).toEqual([["b"]]);
+});
+
+test("Close is disabled when every selected row is pinned", async () => {
+  const { click, screen } = await list({ section: "pinned" });
+  click("b", { ctrlKey: true });
+  await expect.element(screen.getByRole("button", { name: "Close selected tabs" })).toBeDisabled();
+  expect(native.close).not.toHaveBeenCalled();
 });
 
 test("Essentials and Mute use only eligible targets and Unmute follows the projection", async () => {
@@ -359,7 +397,7 @@ test("pinned rows and split members support selection in displayed order", async
   expect(native.activate).not.toHaveBeenCalled();
 });
 
-test("collapsed folder children are skipped by ranges", async () => {
+test("collapsing a folder prunes its children from selection and bulk actions", async () => {
   const nodes: SidebarNodeView[] = [
     { id: "a", parent_id: null, section: "today", kind: { type: "tab", tab_id: "a" } },
     { id: "folder", parent_id: null, section: "today", kind: { type: "folder", name: "Folder" } },
@@ -370,7 +408,13 @@ test("collapsed folder children are skipped by ranges", async () => {
   click("c", { shiftKey: true });
   expect(selected()).toEqual(["a", "b", "c"]);
   await screen.getByRole("button", { name: "Folder" }).click();
+  expect(selected()).toEqual(["a", "c"]);
+  expect(screen.container.textContent).toContain("2 tabs selected");
+  await screen.getByRole("button", { name: "Close selected tabs" }).click();
+  await expect.poll(() => native.close.mock.calls).toEqual([["a"], ["c"]]);
   click("c", { shiftKey: true });
+  expect(selected()).toEqual(["a", "c"]);
+  await screen.getByRole("button", { name: "Folder" }).click();
   expect(selected()).toEqual(["a", "c"]);
 });
 
