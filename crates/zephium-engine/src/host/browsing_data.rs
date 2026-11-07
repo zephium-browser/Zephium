@@ -80,7 +80,9 @@ impl EngineHost {
         done: EngineDataCompletion,
     ) {
         use crate::platform::imp::browsing_data as native;
-        let Some((target, temporary)) = self.windows_data_target(partition) else {
+        let reached =
+            self.reach_durable_profile(partition, |view| native::DataTarget::of(view).ok());
+        let Some((target, temporary)) = reached else {
             done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
             return;
         };
@@ -100,58 +102,6 @@ impl EngineHost {
                 native::forget_site(&target, site, origins, done)
             }
         }
-    }
-
-    /// A live view of the profile, which is how WebView2 reaches its data. A
-    /// profile with no page open gets a hidden one for the call, and the flag
-    /// says so.
-    fn windows_data_target(
-        &mut self,
-        partition: Partition,
-    ) -> Option<(crate::platform::imp::browsing_data::DataTarget, bool)> {
-        use crate::platform::imp::browsing_data::DataTarget;
-        let profile = partition.profile();
-        let open = self
-            .views
-            .iter()
-            .find(|(id, _)| {
-                self.partitions
-                    .get(id)
-                    .is_some_and(|owner| owner.profile() == profile)
-            })
-            .map(|(_, view)| view)
-            .or_else(|| {
-                self.spare
-                    .as_ref()
-                    .filter(|spare| spare.partition.profile() == profile)
-                    .map(|spare| &spare.view)
-            });
-        if let Some(view) = open {
-            return DataTarget::of(view).ok().map(|target| (target, false));
-        }
-        self.applied_content_policy(profile)?;
-        // One warm page exists at a time; another profile's is only a
-        // latency optimisation.
-        self.spare = None;
-        let id = std::rc::Rc::new(std::cell::Cell::new(zephium_core::ids::ItemId::generate()));
-        let view = self.build_view(
-            id.clone(),
-            partition,
-            "about:blank",
-            zephium_core::geometry::Rect::default(),
-            super::permits::EventPermit::inactive(),
-            super::construction::NativeViewPurpose::WarmSpare,
-        )?;
-        let target = DataTarget::of(&view).ok();
-        self.spare = Some(super::Spare {
-            partition,
-            view,
-            id,
-        });
-        if target.is_none() {
-            self.close_idle_spare(profile);
-        }
-        target.map(|target| (target, true))
     }
 }
 

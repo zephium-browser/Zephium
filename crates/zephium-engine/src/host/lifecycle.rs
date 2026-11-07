@@ -30,6 +30,13 @@ fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> Rende
     }
 }
 
+/// Whether a page of `owner` holds `profile`'s durable store.
+#[cfg(any(test, target_os = "windows"))]
+fn durable_partition_of(owner: zephium_core::ports::engine::Partition, profile: ProfileId) -> bool {
+    !matches!(owner, zephium_core::ports::engine::Partition::Ephemeral(_))
+        && owner.profile() == profile
+}
+
 impl EngineHost {
     pub(super) fn has_live_profile_view(&self, profile: ProfileId) -> bool {
         self.partitions
@@ -66,6 +73,61 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         drop(spare);
+    }
+
+    /// Reaches the durable store of `partition`'s profile through one of its
+    /// live pages, the only way WebView2 exposes it. With none open, a hidden
+    /// page is made for the call and the flag says so: the caller closes it
+    /// with `close_idle_spare` once answered. A private page never serves.
+    #[cfg(target_os = "windows")]
+    pub(super) fn reach_durable_profile<R>(
+        &mut self,
+        partition: zephium_core::ports::engine::Partition,
+        reach: impl Fn(&wry::WebView) -> Option<R>,
+    ) -> Option<(R, bool)> {
+        use zephium_core::ports::engine::Partition;
+        let profile = partition.profile();
+        if matches!(partition, Partition::Ephemeral(_)) {
+            return None;
+        }
+        let durable = |owner: &Partition| durable_partition_of(*owner, profile);
+        let open = self
+            .views
+            .iter()
+            .find(|(id, _)| self.partitions.get(id).is_some_and(durable))
+            .map(|(_, view)| view)
+            .or_else(|| {
+                self.spare
+                    .as_ref()
+                    .filter(|spare| durable(&spare.partition))
+                    .map(|spare| &spare.view)
+            });
+        if let Some(view) = open {
+            return reach(view).map(|reached| (reached, false));
+        }
+        self.applied_content_policy(profile)?;
+        // One warm page exists at a time; another profile's is only a
+        // latency optimisation.
+        self.spare = None;
+        let id = std::rc::Rc::new(std::cell::Cell::new(ItemId::generate()));
+        let view = self.build_view(
+            id.clone(),
+            partition,
+            "about:blank",
+            zephium_core::geometry::Rect::default(),
+            EventPermit::inactive(),
+            super::construction::NativeViewPurpose::WarmSpare,
+        )?;
+        let reached = reach(&view);
+        self.spare = Some(super::Spare {
+            partition,
+            view,
+            id,
+        });
+        if reached.is_none() {
+            self.close_idle_spare(profile);
+        }
+        reached.map(|reached| (reached, true))
     }
 
     pub(crate) fn close(&mut self, id: ItemId) {

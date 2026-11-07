@@ -48,3 +48,20 @@ fn shutdown_installs_completion_before_canceling_native_policy_work() {
         "a synchronous native cancellation callback must observe the retained completion"
     );
 }
+
+#[test]
+fn only_a_durable_page_of_the_same_profile_reaches_its_store() {
+    use zephium_core::ports::engine::Partition;
+    let profile = ProfileId::generate();
+    let other = ProfileId::generate();
+    assert!(durable_partition_of(Partition::Default(profile), profile));
+    assert!(durable_partition_of(
+        Partition::Persistent(profile),
+        profile
+    ));
+    assert!(!durable_partition_of(
+        Partition::Ephemeral(profile),
+        profile
+    ));
+    assert!(!durable_partition_of(Partition::Persistent(other), profile));
+}

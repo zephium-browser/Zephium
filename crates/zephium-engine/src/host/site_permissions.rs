@@ -115,42 +115,58 @@ fn listed(
 }
 
 impl EngineHost {
+    /// The WebView2 profile holding `profile`'s saved decisions, admitted as
+    /// a data call is, and whether a hidden page was opened to reach it.
     #[cfg(target_os = "windows")]
     fn human_profile(
-        &self,
+        &mut self,
         profile: ProfileId,
-    ) -> Option<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4> {
+    ) -> Option<(
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4,
+        bool,
+    )> {
         use windows::core::Interface;
         use wry::WebViewExtWindows;
-        use zephium_core::ports::engine::Partition;
-        let human = |partition: &Partition| {
-            !matches!(partition, Partition::Ephemeral(_)) && partition.profile() == profile
-        };
-        let view = self
-            .views
-            .iter()
-            .find(|(item, _)| self.partitions.get(item).is_some_and(human))
-            .map(|(_, view)| &view.view)
-            .or_else(|| {
-                self.spare
-                    .as_ref()
-                    .filter(|spare| human(&spare.partition))
-                    .map(|spare| &spare.view.view)
-            })?;
-        crate::platform::imp::extensions::profile(&view.webview())
-            .ok()?
-            .cast()
-            .ok()
+        let partition = zephium_core::ports::engine::Partition::Persistent(profile);
+        super::browsing_data::admitted_profile(
+            partition,
+            &mut self.profile_persistence_classes,
+            &self.erasure_tombstones,
+        )
+        .ok()?;
+        self.reach_durable_profile(partition, |view| {
+            crate::platform::imp::extensions::profile(&view.webview())
+                .ok()?
+                .cast()
+                .ok()
+        })
     }
 
-    pub(crate) fn site_permissions(&self, profile: ProfileId, done: SitePermissionsDone) {
+    /// Closes a page opened only for one call once that call has answered.
+    #[cfg(target_os = "windows")]
+    fn after_answer<T: 'static>(
+        profile: ProfileId,
+        temporary: bool,
+        done: Box<dyn FnOnce(T) + Send>,
+    ) -> Box<dyn FnOnce(T) + Send> {
+        if !temporary {
+            return done;
+        }
+        Box::new(move |answer| {
+            done(answer);
+            let _ = super::try_with(move |host| host.close_idle_spare(profile));
+        })
+    }
+
+    pub(crate) fn site_permissions(&mut self, profile: ProfileId, done: SitePermissionsDone) {
         #[cfg(target_os = "windows")]
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let Some(native) = self.human_profile(profile) else {
+            let Some((native, temporary)) = self.human_profile(profile) else {
                 return done(None);
             };
+            let done = Self::after_answer(profile, temporary, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler = webview2_com::GetNonDefaultPermissionSettingsCompletedHandler::create(
@@ -207,7 +223,7 @@ impl EngineHost {
     }
 
     pub(crate) fn set_site_permission(
-        &self,
+        &mut self,
         profile: ProfileId,
         origin: PageOrigin,
         kind: SitePermissionKind,
@@ -218,10 +234,13 @@ impl EngineHost {
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let (Some(native), Some(kind)) = (self.human_profile(profile), native_kind(kind))
-            else {
+            let Some(kind) = native_kind(kind) else {
                 return done(false);
             };
+            let Some((native, temporary)) = self.human_profile(profile) else {
+                return done(false);
+            };
+            let done = Self::after_answer(profile, temporary, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler =
