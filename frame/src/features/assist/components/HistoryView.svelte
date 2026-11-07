@@ -50,6 +50,9 @@
       {/each}
     </ul>
   {/if}
+  {#if past !== null}
+    <p class="retention">{m.assist_history_retention()}</p>
+  {/if}
 </section>
 
 <style>
@@ -104,6 +107,12 @@
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+
+  .retention {
+    margin: 12px 8px 0;
+    color: var(--color-muted);
+    font-size: 12px;
   }
 
   .row {

@@ -44,7 +44,7 @@ const MAX_LIVE: usize = 12;
 /// Addresses a conversation may open, from its reads and the person's words.
 const MAX_LINKS: usize = 4096;
 /// Conversations the history list shows.
-const HISTORY: u32 = 100;
+const HISTORY: u32 = zephium_core::ports::store::MAX_CHATS as u32;
 /// Picked elements one tab keeps attached.
 const MAX_PICKS: usize = 3;
 

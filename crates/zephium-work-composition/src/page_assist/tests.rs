@@ -479,7 +479,7 @@ impl StyleStore for Styles {
 #[derive(Default)]
 struct Store(Mutex<HashMap<String, (StoredConversation, String)>>);
 impl ConversationStore for Store {
-    fn list(&self, _profile: &ProfileId, _limit: u32) -> Vec<StoredConversation> {
+    fn list(&self, _profile: &ProfileId, limit: u32) -> Vec<StoredConversation> {
         let mut list: Vec<StoredConversation> = self
             .0
             .lock()
@@ -488,6 +488,7 @@ impl ConversationStore for Store {
             .map(|(entry, _)| entry.clone())
             .collect();
         list.sort_by_key(|entry| std::cmp::Reverse(entry.updated_ms));
+        list.truncate(limit as usize);
         list
     }
     fn load(&self, _profile: &ProfileId, id: &str) -> Option<String> {
@@ -1205,6 +1206,26 @@ async fn conversations_start_over_and_reopen_from_history() {
     assert!(h.service.delete(SPACE, &first));
     assert_ne!(h.conversation().await, first);
     assert_eq!(h.service.history(SPACE).conversations.len(), 1);
+}
+
+#[test]
+fn history_lists_every_kept_conversation() {
+    let h = harness(vec![]);
+    for index in 0..zephium_core::ports::store::MAX_CHATS {
+        let entry = StoredConversation {
+            id: format!("conversation-{index}"),
+            space: SPACE.into(),
+            title: format!("Conversation {index}"),
+            updated_ms: index as u64,
+        };
+        assert!(h.store.save(&profile(), &entry, String::new()));
+    }
+    let history = h.service.history(SPACE);
+    assert_eq!(
+        history.conversations.len(),
+        zephium_core::ports::store::MAX_CHATS
+    );
+    assert_eq!(history.conversations.last().unwrap().id, "conversation-0");
 }
 
 #[tokio::test]
