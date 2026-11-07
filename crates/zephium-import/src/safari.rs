@@ -204,10 +204,10 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
             // Metadata remains readable, but opening the contents would fail
             // with Permission rather than the size refusal below.
-            assert_eq!(
-                std::fs::File::open(&path).unwrap_err().kind(),
-                std::io::ErrorKind::PermissionDenied
-            );
+            // A privileged runner can still open it; the size check holds either way.
+            if let Err(error) = std::fs::File::open(&path) {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
         }
         assert!(matches!(
             bookmarks(&locations),
