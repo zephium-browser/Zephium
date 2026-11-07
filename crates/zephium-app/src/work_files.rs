@@ -905,7 +905,7 @@ thread_local! {
     static TEST_GRANT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 fn has_test_grant_home() -> bool {
     TEST_GRANT_HOME.with(|slot| slot.borrow().is_some())
 }
