@@ -296,22 +296,3 @@ impl NetworkMatchable for FlatNetworkFilter<'_> {
         )
     }
 }
-
-impl FlatNetworkFilter<'_> {
-    pub(crate) fn matches_without_attribution(
-        &self,
-        request: &Request,
-        regex_manager: &mut RegexManager,
-    ) -> bool {
-        use crate::filters::network_matchers::{check_options_without_attribution, check_pattern};
-        check_options_without_attribution(self.mask, request)
-            && check_pattern(
-                self.mask,
-                self.patterns().iter(),
-                self.hostname(),
-                self.key,
-                request,
-                regex_manager,
-            )
-    }
-}

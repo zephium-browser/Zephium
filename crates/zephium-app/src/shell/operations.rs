@@ -41,15 +41,19 @@ impl Shell {
             } => self.operation_set_profile_avatar(profile, avatar, photo),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
-            Command::AnswerPageRequest { id, decision } => {
-                self.operation_answer_page_request(id, decision)
-            }
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => self.operation_answer_page_request(id, request, decision),
             Command::AnswerHttpAuth {
                 id,
                 request,
                 credentials,
             } => self.operation_answer_http_auth(id, request, credentials),
             Command::ContinuePastCertificate(id) => self.operation_continue_past_certificate(id),
+            Command::ContinuePastBlock { id, url } => self.operation_continue_past_block(id, &url),
+            Command::LeaveBlockedPage(id) => self.operation_leave_blocked_page(id),
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
             Command::GoToHistoryEntry { id, offset, url } => {

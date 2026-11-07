@@ -72,11 +72,12 @@
     "category": "Productivity",
     "shortDescription": "A fast, private browser with a built-in place to get work done.",
     "homepage": "https://zephium.app",
-    "license": "MPL-2.0 AND CC-BY-SA-3.0",
+    "license": "MPL-2.0 AND CC-BY-SA-3.0 AND GPL-3.0-only",
     "resources": {
       "../LICENSE": "licenses/Zephium-MPL-2.0.txt",
       "../assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt": "licenses/blocker/CC-BY-SA-3.0.txt",
-      "../assets/blocker-seed/v1/NOTICE": "licenses/blocker/EasyList-EasyPrivacy-NOTICE.txt"
+      "../assets/blocker-seed/v1/LICENSE-GPL-3.0.txt": "licenses/blocker/GPL-3.0.txt",
+      "../assets/blocker-seed/v1/NOTICE": "licenses/blocker/NOTICE.txt"
     },
     "macOS": {
       "minimumSystemVersion": "14.0"

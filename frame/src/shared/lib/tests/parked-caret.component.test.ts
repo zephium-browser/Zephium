@@ -66,3 +66,8 @@ test("a field with text keeps its caret, and clicking elsewhere lets go", () => 
   expect(caret()).toBeNull();
   expect(document.activeElement).not.toBe(input);
 });
+
+test("on macOS the drawn caret blinks", () => {
+  vi.advanceTimersByTime(4100);
+  expect(caret()?.getAnimations()).toHaveLength(1);
+});

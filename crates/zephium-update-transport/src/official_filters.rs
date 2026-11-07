@@ -1,4 +1,4 @@
-//! Bounded requests to the two official EasyList publisher endpoints.
+//! Bounded requests to the official filter list publisher endpoints.
 //!
 //! HTTPS authenticates the server and transport. It does not provide a
 //! publisher signature or signed freshness. Callers validate and stage sources
@@ -13,19 +13,76 @@ use reqwest::{Client, StatusCode};
 use std::time::Duration;
 
 /// The entire allowlist of remotely maintained subscription sources.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OfficialFilter {
     /// Advertising filters published by EasyList.
     EasyList,
     /// Tracking filters published by EasyList.
     EasyPrivacy,
+    /// uBlock Origin's own filters.
+    UblockFilters,
+    /// uBlock Origin's quick fixes, updated several times a day.
+    UblockQuickFixes,
+    /// uBlock Origin's filters for link shorteners.
+    UblockLinkShorteners,
+    /// uBlock Origin's privacy filters.
+    UblockPrivacy,
+    /// uBlock Origin's filters against CPU and bandwidth abuse.
+    UblockResourceAbuse,
+    /// uBlock Origin's exceptions for pages the other lists break.
+    UblockUnbreak,
+    /// uBlock Origin's list of scam and malware sites.
+    UblockBadware,
 }
 impl OfficialFilter {
+    /// Every source, in catalog order.
+    pub const ALL: [Self; 9] = [
+        Self::EasyList,
+        Self::EasyPrivacy,
+        Self::UblockFilters,
+        Self::UblockQuickFixes,
+        Self::UblockLinkShorteners,
+        Self::UblockPrivacy,
+        Self::UblockResourceAbuse,
+        Self::UblockUnbreak,
+        Self::UblockBadware,
+    ];
+
     /// Fixed canonical HTTPS URL. No caller-controlled URL is accepted.
     pub const fn url(self) -> &'static str {
         match self {
             Self::EasyList => "https://easylist.to/easylist/easylist.txt",
             Self::EasyPrivacy => "https://easylist.to/easylist/easyprivacy.txt",
+            // uBlock Origin's own build of filters.txt with its includes:
+            // the general filters and one file per year.
+            Self::UblockFilters => "https://ublockorigin.github.io/uAssets/filters/filters.min.txt",
+            Self::UblockQuickFixes => {
+                "https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt"
+            }
+            Self::UblockLinkShorteners => {
+                "https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt"
+            }
+            Self::UblockPrivacy => "https://ublockorigin.github.io/uAssets/filters/privacy.min.txt",
+            Self::UblockResourceAbuse => {
+                "https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt"
+            }
+            Self::UblockUnbreak => "https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt",
+            Self::UblockBadware => "https://ublockorigin.github.io/uAssets/filters/badware.min.txt",
+        }
+    }
+
+    /// Stable source identifier, as compiled.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::EasyList => "easylist",
+            Self::EasyPrivacy => "easyprivacy",
+            Self::UblockFilters => "ublock-filters",
+            Self::UblockQuickFixes => "ublock-quick-fixes",
+            Self::UblockLinkShorteners => "ublock-link-shorteners",
+            Self::UblockPrivacy => "ublock-privacy",
+            Self::UblockResourceAbuse => "ublock-resource-abuse",
+            Self::UblockUnbreak => "ublock-unbreak",
+            Self::UblockBadware => "ublock-badware",
         }
     }
 }
@@ -161,6 +218,24 @@ impl OfficialFilterClient {
         Ok(FilterResponse::Modified { bytes, validators })
     }
 }
+/// A list's `Last modified` header date as a 12-digit UTC version
+/// (`YYYYMMDDHHMM`), for lists that publish no version number.
+pub fn version_from_date(value: &str) -> Option<String> {
+    let date =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc2822).ok()?;
+    let date = date.to_offset(time::UtcOffset::UTC);
+    (1970..=9999).contains(&date.year()).then(|| {
+        format!(
+            "{:04}{:02}{:02}{:02}{:02}",
+            date.year(),
+            u8::from(date.month()),
+            date.day(),
+            date.hour(),
+            date.minute()
+        )
+    })
+}
+
 fn valid_header(value: &str) -> bool {
     !value.is_empty() && value.len() <= 512 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
@@ -197,5 +272,18 @@ mod tests {
             Some(3600)
         );
         assert_eq!(retry_delay("invalid", std::time::UNIX_EPOCH), None);
+    }
+
+    #[test]
+    fn header_dates_become_utc_versions() {
+        assert_eq!(
+            version_from_date("Mon, 02 Nov 2026 12:27:09 +0000").as_deref(),
+            Some("202611021227")
+        );
+        assert_eq!(
+            version_from_date("Mon, 02 Nov 2026 23:30:00 -0100").as_deref(),
+            Some("202611030030")
+        );
+        assert_eq!(version_from_date("yesterday"), None);
     }
 }

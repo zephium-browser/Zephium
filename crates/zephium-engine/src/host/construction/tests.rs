@@ -226,3 +226,79 @@ fn only_tabs_a_person_reads_sign_in_or_get_certificate_exceptions() {
         );
     }
 }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn an_app_link_from_another_site_is_heard_only_after_a_click() {
+    use zephium_core::navigation::AppLinkSource;
+    let tab = zephium_core::permissions::PageOrigin::parse_exact("https://news.example").unwrap();
+    let ad = zephium_core::permissions::PageOrigin::parse_exact("https://ads.example").unwrap();
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(tab.clone()), Some(&tab), false),
+        Some(AppLinkSource::Page)
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(ad.clone()), Some(&tab), false),
+        None
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Frame(ad.clone()), Some(&tab), true),
+        Some(AppLinkSource::Frame(ad))
+    );
+    assert_eq!(
+        heard_app_link_source(AppLinkSource::Unknown, Some(&tab), false),
+        Some(AppLinkSource::Unknown)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_frame_whose_site_cannot_be_named_never_speaks_for_the_tab() {
+    use zephium_core::navigation::AppLinkSource;
+    let source = |is_main_frame, scheme: &str, host: &str| wry::AppleNavigationSource {
+        is_main_frame,
+        scheme: scheme.into(),
+        host: host.into(),
+        port: 0,
+    };
+    assert_eq!(apple_app_link_source(None), Some(AppLinkSource::Unknown));
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "", ""))),
+        None,
+        "an opaque or oversized frame origin is refused"
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "file", ""))),
+        None
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(true, "", ""))),
+        Some(AppLinkSource::Page)
+    );
+    assert_eq!(
+        apple_app_link_source(Some(&source(false, "https", "widget.example"))),
+        Some(AppLinkSource::Frame(
+            zephium_core::permissions::PageOrigin::parse_exact("https://widget.example").unwrap()
+        ))
+    );
+}
+
+#[test]
+fn a_webview2_origin_that_is_no_site_is_unknown_rather_than_the_tab() {
+    use zephium_core::navigation::AppLinkSource;
+    assert_eq!(webview2_app_link_source(None), AppLinkSource::Unknown);
+    assert_eq!(
+        webview2_app_link_source(Some("zoommtg://")),
+        AppLinkSource::Unknown
+    );
+    assert_eq!(
+        webview2_app_link_source(Some("not an origin")),
+        AppLinkSource::Unknown
+    );
+    assert_eq!(
+        webview2_app_link_source(Some("https://widget.example")),
+        AppLinkSource::Frame(
+            zephium_core::permissions::PageOrigin::parse_exact("https://widget.example").unwrap()
+        )
+    );
+}
