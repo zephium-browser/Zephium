@@ -257,6 +257,20 @@ impl Reply {
 
     // ----------------------------------------------------------------- reads
 
+    fn other_sites(&self, target: &str) -> Vec<String> {
+        self.with_data(|data| {
+            data.read_sites
+                .iter()
+                .map(|(_, site)| site)
+                .filter(|site| site.as_str() != target)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     async fn read_tab(&self, tab: &str) -> Result<usize, PageAssistFaultV1> {
         let ports = self.service.ports();
         let facts = ports
@@ -321,6 +335,7 @@ impl Reply {
             }
         }
         self.with_data(|data| {
+            data.read_sites.insert((tab.to_owned(), site));
             data.reads.push(ReadRecord {
                 tab: tab.to_owned(),
                 epoch: facts.epoch,
@@ -396,7 +411,8 @@ impl Reply {
                         parts.push(format!("(The page {host} could not be read just now.)"));
                     }
                 },
-                Admitted::Selection { tab, text } => {
+                Admitted::Selection { tab, site, text } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     let letters = self
                         .with_data(|data| data.reads.iter().position(|read| &read.tab == tab))
                         .flatten()
@@ -405,8 +421,13 @@ impl Reply {
                     parts.push(prompt::selection_block(&letters, text));
                 }
                 Admitted::Element {
-                    host, label, pick, ..
+                    tab,
+                    site,
+                    host,
+                    label,
+                    pick,
                 } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     parts.push(prompt::element_block(
                         host,
                         label,
@@ -732,6 +753,14 @@ fn list_tabs(reply: &Reply) -> String {
         .take(60)
         .map(|tab| {
             let host = tab.url.as_deref().map(host_of).unwrap_or_default();
+            let site = site_of(tab.url.as_deref()).unwrap_or_else(|| {
+                if host.is_empty() {
+                    "?".to_owned()
+                } else {
+                    host.clone()
+                }
+            });
+            reply.with_data(|data| data.read_sites.insert((tab.id.clone(), site)));
             let title = text::bounded(&text::clean(&tab.title), 90).replace('"', "'");
             format!(
                 "{} · {} · \"{}\"",
@@ -1332,9 +1361,17 @@ fn category(effect: StepEffect) -> Option<WorkConfirmCategoryV1> {
 }
 
 /// Refuses, from the step's own read, steps the engine must never run:
-/// protected fields and links away from the site are refused, anything a
+/// secrets, protected fields and links away from the site are refused, anything a
 /// verb cannot use is unsuitable.
 fn admissible(record: &ReadRecord, step: &StepRequest) -> Result<(), StepFailure> {
+    if step.verb == Verb::Fill
+        && step
+            .value
+            .as_deref()
+            .is_some_and(zephium_agentic::contains_recognized_secret)
+    {
+        return Err(StepFailure::Refused);
+    }
     let Some(target) = step.target else {
         return if step.verb == Verb::Scroll {
             Ok(())
@@ -1430,6 +1467,19 @@ impl Plan {
         if let Some(row) = self.rows.get_mut(index) {
             if !label.is_empty() {
                 row.label = text::bounded(&text::clean(label), 120);
+                let sites = reply.other_sites(&self.record.page.site);
+                if let Some(value) = self.requests.get(index).and_then(|step| {
+                    (step.verb == Verb::Fill && !sites.is_empty())
+                        .then_some(step.value.as_deref())
+                        .flatten()
+                }) {
+                    row.label = format!(
+                        "{value:?} → {}\n{} → {}",
+                        row.label,
+                        sites.join(", "),
+                        self.record.page.site
+                    );
+                }
             }
             if category(effect).is_some() {
                 row.category = category(effect);
@@ -1453,7 +1503,7 @@ impl Plan {
             .map(|row| {
                 let state = match (row.state, row.reason) {
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Refused)) => {
-                        "refused: a protected field or a link to another site"
+                        "refused: a secret, a protected field or a link to another site"
                     }
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Unsuitable)) => {
                         "failed: that passage is not a control this verb can use"
@@ -1645,13 +1695,16 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
         let step = plan.requests[index].clone();
         let resolved = admissible(&plan.record, &step)
             .and_then(|()| page.resolve(&plan.tab, plan.epoch, &step));
-        let resolved = match resolved {
+        let mut resolved = match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
                 plan.fail(reply, index, failure);
                 return Err(None);
             }
         };
+        if step.verb == Verb::Fill && !reply.other_sites(&plan.record.page.site).is_empty() {
+            resolved.effect = StepEffect::Commit(WorkConfirmCategoryV1::Type);
+        }
         if let StepEffect::Commit(_) = resolved.effect {
             plan.mark(
                 reply,
