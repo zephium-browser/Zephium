@@ -4,6 +4,7 @@
 //! account may keep that account's bookmarks apart, in `AccountBookmarks`, in
 //! the same shape.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -226,8 +227,15 @@ pub(crate) fn bookmarks(profile: &Path) -> Result<Vec<ImportNode>, ImportError> 
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         }
-        match std::fs::read(path) {
-            Ok(bytes) => files.push(bytes),
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > 32 * 1024 * 1024 {
+                    return Err(ImportError::Unreadable);
+                }
+                files.push(bytes);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -336,6 +344,33 @@ pub(crate) fn history(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn bookmark_stream_cannot_exceed_the_read_limit() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Bookmarks");
+        assert!(std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        // A pipe reports zero bytes of metadata but supplies more than the limit.
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let mut bytes = br#"{"roots":{}}"#.to_vec();
+            bytes.resize(32 * 1024 * 1024 + 1, b' ');
+            file.write_all(&bytes).unwrap();
+            // A bounded reader closes without consuming the rest of the stream.
+            bytes.fill(b' ');
+            file.write_all(&bytes)
+        });
+        let result = bookmarks(directory.path());
+        let tail = writer.join().unwrap();
+        assert!(matches!(result, Err(ImportError::Unreadable)));
+        assert_eq!(tail.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
     #[test]
     fn oversized_bookmarks_are_refused_before_parsing() {
         let directory = tempfile::tempdir().unwrap();
