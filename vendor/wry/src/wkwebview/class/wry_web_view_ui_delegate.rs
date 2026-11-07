@@ -170,6 +170,8 @@ pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   autofill_button_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
+  media_return_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
   script_dialogs: super::super::script_dialog::ScriptDialogs,
 }
 
@@ -189,6 +191,19 @@ define_class!(
   pub struct WryWebViewUIDelegate;
 
   unsafe impl NSObjectProtocol for WryWebViewUIDelegate {}
+
+  // WKUIDelegatePrivate. The picture-in-picture window's return button sends
+  // it, then WebKit waits for the page to become visible before it takes the
+  // video back.
+  #[cfg(target_os = "macos")]
+  impl WryWebViewUIDelegate {
+    #[unsafe(method(_webViewFullscreenMayReturnToInline:))]
+    fn media_may_return_to_inline(&self, _webview: &WryWebView) {
+      if let Some(handler) = &self.ivars().media_return_handler {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+      }
+    }
+  }
 
   unsafe impl WKUIDelegate for WryWebViewUIDelegate {
     #[cfg(target_os = "macos")]
@@ -706,6 +721,7 @@ impl WryWebViewUIDelegate {
       Box<crate::file_upload::FileUploadHandler>,
     >,
     #[cfg(target_os = "macos")] autofill_button_handler: Option<Box<dyn Fn()>>,
+    #[cfg(target_os = "macos")] media_return_handler: Option<Box<dyn Fn()>>,
   ) -> Retained<Self> {
     #[cfg(target_os = "ios")]
     let _new_window_req_handler = new_window_req_handler;
@@ -728,6 +744,8 @@ impl WryWebViewUIDelegate {
         file_upload_handler,
         #[cfg(target_os = "macos")]
         autofill_button_handler,
+        #[cfg(target_os = "macos")]
+        media_return_handler,
         #[cfg(target_os = "macos")]
         script_dialogs: Default::default(),
       });
