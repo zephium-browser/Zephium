@@ -341,9 +341,64 @@ fn forgetting_a_listed_site_asks_only_for_that_site() {
         calls[0].1,
         EngineDataCall::ForgetSite {
             site: "example.com".into(),
-            origin: None,
+            origins: Vec::new(),
         }
     );
+}
+
+#[test]
+fn forgetting_a_site_names_the_origins_its_history_and_open_pages_know() {
+    let store = Arc::new(FakeStore::default());
+    *store.site_origins.lock().unwrap() = Some(vec![
+        "https://www.example.com".into(),
+        "http://example.com:8080".into(),
+        "https://shop.example.com".into(),
+    ]);
+    let (mut shell, engine, screen, _queue) = browsed(store);
+    let profile = focused_profile(&shell);
+    let tab = active_id(&screen);
+    navigate_and_commit(&mut shell, tab, "https://shop.example.com/cart");
+
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        BrowsingDataCall::ForgetSite {
+            site: "example.com".into(),
+        },
+    );
+
+    assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
+    let (_, call) = engine.data_calls.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        call,
+        EngineDataCall::ForgetSite {
+            site: "example.com".into(),
+            origins: vec![
+                "https://shop.example.com".into(),
+                "https://www.example.com".into(),
+                "http://example.com:8080".into(),
+            ],
+        }
+    );
+}
+
+#[test]
+fn a_site_removal_the_engine_could_only_partly_do_says_so() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _screen, _queue) = browsed(store);
+    let profile = focused_profile(&shell);
+    *engine.data_reply.lock().unwrap() =
+        Some(zephium_core::browsing_data::EngineDataReply::PartlyCleared);
+
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        BrowsingDataCall::ForgetSite {
+            site: "example.com".into(),
+        },
+    );
+
+    assert_eq!(answered(&answer), BrowsingDataResponse::PartlyCleared);
 }
 
 #[test]
@@ -370,7 +425,7 @@ fn forgetting_a_page_reaches_its_whole_site_and_keeps_the_origin() {
             call,
             EngineDataCall::ForgetSite {
                 site: site.into(),
-                origin: Some(origin.into()),
+                origins: vec![origin.into()],
             }
         );
     }

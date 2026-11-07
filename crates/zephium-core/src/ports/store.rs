@@ -684,6 +684,19 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// The page origins on `site` that the profile's history and favicons
+    /// name, with their ports, newest visits first and at most
+    /// `browsing_data::MAX_SITE_ORIGINS`. The scan is bounded in rows and
+    /// time, so a long history may yield only its recent origins. False means
+    /// queue refusal, with no completion.
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        _done: Box<dyn FnOnce(Vec<String>) + Send>,
+    ) -> bool {
+        false
+    }
     /// Replaces the placeholder title on the newest recent visit to an address.
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool;
     /// Age in seconds of the cached icon for a favicon key, None when absent.

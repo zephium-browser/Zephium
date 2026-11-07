@@ -31,6 +31,12 @@ pub(crate) const MAX_HISTORY_FORGET_URLS: usize = 100;
 const MOST_VISITED_WINDOW_SECONDS: i64 = 90 * 24 * 60 * 60;
 /// A title arriving later than this belongs to a different visit.
 const TITLE_AMENDMENT_WINDOW_SECONDS: i64 = 60;
+/// Most recent visits read when listing one site's origins.
+const MAX_SITE_ORIGIN_ROWS: i64 = 20_000;
+/// Saved site icons read for the same.
+const MAX_SITE_ORIGIN_ICONS: i64 = 4096;
+/// Longest a site's origins are looked for; site data removal waits on it.
+const SITE_ORIGIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl Hub {
     #[cfg(test)]
@@ -632,7 +638,84 @@ fn fts_query(query: &str) -> Option<String> {
     }
 }
 
+/// Collects distinct page origins on `site` from `query`'s single text
+/// column, until the cap or the deadline.
+fn collect_site_origins(
+    conn: &Connection,
+    query: &str,
+    values: impl rusqlite::Params,
+    site: &str,
+    deadline: std::time::Instant,
+    origins: &mut Vec<String>,
+) {
+    use zephium_core::browsing_data::{site_origin, MAX_SITE_ORIGINS};
+    let Ok(mut stmt) = conn.prepare(query) else {
+        return;
+    };
+    let Ok(mut rows) = stmt.query(values) else {
+        return;
+    };
+    while origins.len() < MAX_SITE_ORIGINS && std::time::Instant::now() < deadline {
+        let Ok(Some(row)) = rows.next() else {
+            return;
+        };
+        let Ok(text) = row.get_ref(0).and_then(|value| Ok(value.as_str()?)) else {
+            continue;
+        };
+        if let Some(origin) = site_origin(text, site) {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+    }
+}
+
 impl Hub {
+    /// The page origins on `site` in the profile's history and saved icons,
+    /// newest visits first. Bounded by row counts and a time budget.
+    pub(crate) fn site_origins(&mut self, profile: ProfileId, site: &str) -> Vec<String> {
+        if !self.registry.contains(&profile)
+            || self.degraded_profiles.contains(&profile)
+            || self.recovery_required.is_some()
+            || !zephium_core::browsing_data::is_site_name(site)
+        {
+            return Vec::new();
+        }
+        // The index splits an address at punctuation, so every label of the
+        // site must appear; the parsed host then decides.
+        let labels: Vec<String> = site
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|label| !label.is_empty())
+            .map(|label| format!("\"{label}\""))
+            .collect();
+        let Ok(conn) = self.profile_conn(profile) else {
+            return Vec::new();
+        };
+        let deadline = std::time::Instant::now() + SITE_ORIGIN_BUDGET;
+        let mut origins = Vec::new();
+        if !labels.is_empty() {
+            collect_site_origins(
+                conn,
+                "SELECT h.url FROM history_fts f JOIN history h ON h.id = f.rowid
+                 WHERE history_fts MATCH ?1 AND length(CAST(h.url AS BLOB)) <= ?2
+                 ORDER BY h.id DESC LIMIT ?3",
+                params![labels.join(" "), MAX_URL_BYTES as i64, MAX_SITE_ORIGIN_ROWS],
+                site,
+                deadline,
+                &mut origins,
+            );
+        }
+        collect_site_origins(
+            conn,
+            "SELECT origin FROM favicons ORDER BY fetched_at DESC LIMIT ?1",
+            params![MAX_SITE_ORIGIN_ICONS],
+            site,
+            deadline,
+            &mut origins,
+        );
+        origins
+    }
+
     pub(crate) fn record_search(&mut self, profile: ProfileId, query: &str, url: &str) {
         if self.recovery_required.is_some()
             || self.degraded_profiles.contains(&profile)

@@ -996,6 +996,9 @@ pub struct SiteDataView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowsingDataResponse {
     Cleared,
+    /// Removed, but some of the site's data may remain: the engine would not
+    /// delete everything, or could not reach every place it is kept.
+    PartlyCleared,
     Sites {
         sites: Vec<SiteDataView>,
         /// The engine can only name sites by some of what it holds: sites

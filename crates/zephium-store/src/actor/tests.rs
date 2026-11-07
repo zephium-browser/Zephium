@@ -4868,3 +4868,62 @@ fn extension_cleanup_failure_keeps_the_deletion_retryable() {
     std::fs::remove_file(root.join("staging")).unwrap();
     assert!(hub.finalize_profile_deletion(profile).unwrap());
 }
+
+#[test]
+fn a_sites_origins_come_from_its_history_and_icons_with_their_ports() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    for url in [
+        "https://www.example.com/a",
+        "http://example.com:8080/b?c",
+        "https://www.example.com/again",
+        "https://notexample.com/",
+        "https://example.com.evil.test/",
+        "http://127.0.0.1:3000/",
+    ] {
+        hub.record_visit(profile, url, "Page");
+    }
+    hub.save_favicon(profile, "https://cdn.example.com", None, &rgba());
+
+    let origins = hub.site_origins(profile, "example.com");
+    assert_eq!(origins.len(), 3, "{origins:?}");
+    for origin in [
+        "https://www.example.com",
+        "http://example.com:8080",
+        "https://cdn.example.com",
+    ] {
+        assert!(origins.iter().any(|o| o == origin), "{origin}: {origins:?}");
+    }
+    assert_eq!(
+        hub.site_origins(profile, "127.0.0.1"),
+        vec!["http://127.0.0.1:3000".to_owned()]
+    );
+    assert!(hub.site_origins(profile, "https://example.com").is_empty());
+    assert!(hub
+        .site_origins(ProfileId::from(9), "example.com")
+        .is_empty());
+}
+
+#[test]
+fn a_sites_origins_stop_at_their_cap() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let visits: Vec<(String, String)> = (0..zephium_core::browsing_data::MAX_SITE_ORIGINS + 20)
+        .map(|n| (format!("https://s{n}.example.com/"), "Page".to_owned()))
+        .collect();
+    for (url, title) in &visits {
+        hub.record_visit(profile, url, title);
+    }
+    let origins = hub.site_origins(profile, "example.com");
+    assert_eq!(origins.len(), zephium_core::browsing_data::MAX_SITE_ORIGINS);
+    // Newest visits first.
+    assert_eq!(
+        origins[0],
+        format!(
+            "https://s{}.example.com",
+            zephium_core::browsing_data::MAX_SITE_ORIGINS + 19
+        )
+    );
+}

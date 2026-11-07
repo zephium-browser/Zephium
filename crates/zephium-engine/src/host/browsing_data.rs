@@ -96,8 +96,8 @@ impl EngineHost {
         match call {
             EngineDataCall::Clear { kinds, since } => native::clear(&target, kinds, since, done),
             EngineDataCall::Sites => native::sites(&target, done),
-            EngineDataCall::ForgetSite { site, origin } => {
-                native::forget_site(&target, site, origin, done)
+            EngineDataCall::ForgetSite { site, origins } => {
+                native::forget_site(&target, site, origins, done)
             }
         }
     }

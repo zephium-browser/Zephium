@@ -1123,6 +1123,8 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    /// What a site's history names; none refuses the scan.
+    pub(crate) site_origins: Mutex<Option<Vec<String>>>,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1901,6 +1903,18 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        done: Box<dyn FnOnce(Vec<String>) + Send>,
+    ) -> bool {
+        let Some(origins) = self.site_origins.lock().unwrap().clone() else {
+            return false;
+        };
+        done(origins);
+        true
+    }
     fn discard_session_backup(
         &self,
         profile: ProfileId,
