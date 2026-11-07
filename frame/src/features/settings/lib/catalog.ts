@@ -138,11 +138,41 @@ export const fields = {
     section: "general",
     label: m.pref_general_startup,
     description: m.pref_general_startup_help,
-    initial: "continue",
+    initial: "new-tab",
     options: [
       { value: "continue", label: m.pref_general_startup_option_0 },
       { value: "new-tab", label: m.pref_general_startup_option_1 },
+      { value: "pages", label: m.pref_general_startup_option_2 },
     ],
+  },
+  "general.startup-pages": {
+    section: "general",
+    label: m.pref_general_startup_pages,
+    description: m.pref_general_startup_pages_help,
+    initial: "",
+  },
+  "network.proxy": {
+    section: "general",
+    label: m.pref_network_proxy,
+    description: m.pref_network_proxy_help_mac,
+    initial: "system",
+    options: [
+      { value: "system", label: m.network_proxy_system },
+      { value: "http", label: m.network_proxy_http },
+      { value: "socks5", label: m.network_proxy_socks5 },
+    ],
+  },
+  "network.proxy-address": {
+    section: "general",
+    label: m.pref_network_proxy_address,
+    description: m.pref_network_proxy_address_help,
+    initial: "",
+  },
+  "general.home": {
+    section: "general",
+    label: m.pref_general_home,
+    description: m.pref_general_home_help,
+    initial: "",
   },
   "general.import": {
     section: "general",
@@ -151,10 +181,25 @@ export const fields = {
     initial: "",
   },
   "general.export": {
-    preview: true,
     section: "general",
     label: m.pref_general_export,
     description: m.pref_general_export_help,
+    initial: "",
+  },
+  "appearance.zoom": {
+    section: "appearance",
+    label: m.pref_zoom_default,
+    description: m.pref_zoom_default_help,
+    initial: "100",
+    options: [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200].map((percent) => ({
+      value: String(percent),
+      label: () => m.zoom_percent({ percent }),
+    })),
+  },
+  "appearance.zoom-levels": {
+    section: "appearance",
+    label: m.zoom_levels_title,
+    description: m.zoom_levels_help,
     initial: "",
   },
   "appearance.density": {
@@ -166,6 +211,35 @@ export const fields = {
       { value: "comfortable", label: m.pref_appearance_density_option_0 },
       { value: "compact", label: m.pref_appearance_density_option_1 },
     ],
+  },
+  "ntp.background": {
+    section: "newtab",
+    label: m.ntp_background,
+    description: m.ntp_background_help,
+    initial: "sky",
+    options: [
+      { value: "sky", label: m.ntp_sky },
+      { value: "image", label: m.ntp_own_image },
+    ],
+  },
+  "ntp.dim": { section: "newtab", label: m.ntp_dim, description: m.ntp_dim_help, initial: false },
+  "ntp.wordmark": {
+    section: "newtab",
+    label: m.ntp_wordmark,
+    description: m.ntp_wordmark_help,
+    initial: true,
+  },
+  "ntp.trackers": {
+    section: "newtab",
+    label: m.ntp_trackers_blocked,
+    description: m.ntp_figures,
+    initial: true,
+  },
+  "ntp.focus": {
+    section: "newtab",
+    label: m.ntp_focused,
+    description: m.ntp_figures,
+    initial: true,
   },
   "ntp.greeting": {
     section: "newtab",
@@ -298,6 +372,13 @@ export const fields = {
     description: m.pref_search_engines_help,
     initial: "",
   },
+  "privacy.smartscreen": {
+    section: "privacy",
+    windowsOnly: true,
+    label: m.privacy_smartscreen,
+    description: m.privacy_smartscreen_help,
+    initial: true,
+  },
   "privacy.blocking": {
     section: "privacy",
     label: m.pref_privacy_blocking,
@@ -359,6 +440,12 @@ export const fields = {
     section: "privacy",
     label: m.pref_privacy_clear,
     description: m.pref_privacy_clear_help,
+    initial: "",
+  },
+  "privacy.site-data": {
+    section: "privacy",
+    label: m.privacy_sites,
+    description: m.privacy_sites_help,
     initial: "",
   },
   "downloads.path": {

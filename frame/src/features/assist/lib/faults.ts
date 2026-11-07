@@ -95,6 +95,12 @@ function modelFault(fault: Extract<PageAssistFaultV1, { reason: "model" }>["faul
         fix: models(m.assist_fix_open_models()),
         retry: "no",
       };
+    case "plan_limit":
+      return {
+        message: m.work_fault_plan_limit(),
+        fix: models(m.assist_fix_open_models()),
+        retry: "no",
+      };
     case "rate_limited":
       return { message: m.assist_fault_rate_limited(), fix: null, retry: "wait" };
     case "provider_down":

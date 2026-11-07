@@ -1864,7 +1864,7 @@ where
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
         .with_page_close_policy(PageClosePolicy::Ignore)
-        .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
+        .with_additional_browser_args(crate::network::browser_arguments())
         .with_browser_accelerator_keys(false)
         .with_default_context_menus(false)
         .with_environment(environment.clone());
@@ -1882,6 +1882,9 @@ where
     if let AgentOwnedProfile::Automation { name } = &profile {
         builder = builder.with_profile_name(name.clone());
     }
+
+    builder =
+        builder.with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
 
     if extensions_enabled {
         if !matches!(&profile, AgentOwnedProfile::Automation { .. }) {

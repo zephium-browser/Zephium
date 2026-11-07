@@ -272,9 +272,31 @@ export const commands = {
 	onboardingFinish: () => __TAURI_INVOKE<boolean>("onboarding_finish"),
 	tabsNavigate: (id: string, input: string) => __TAURI_INVOKE<OperationAdmission>("tabs_navigate", { id, input }),
 	tabsReload: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_reload", { id }),
-	tabsAnswerPageRequest: (id: string, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, answer }),
+	tabsAnswerPageRequest: (id: string, request: number, answer: PageRequestAnswer) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_page_request", { id, request, answer }),
+	/**
+	 *  Answers the tab's sign-in prompt; no credentials cancels it. The typed
+	 *  values move into storage wiped on drop and are never logged.
+	 */
+	tabsAnswerSignIn: (id: string, request: number, credentials: {
+	username: string,
+	password: string,
+} | null) => __TAURI_INVOKE<OperationAdmission>("tabs_answer_sign_in", { id, request, credentials }),
+	/**
+	 *  Continues past the certificate the tab refused, on a host on the
+	 *  person's own network only, and loads the page again.
+	 */
+	tabsContinuePastCertificate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_certificate", { id }),
+	/**
+	 *  Opens the page the filter lists refused anyway; its host stays allowed
+	 *  until the app quits.
+	 */
+	tabsContinuePastBlock: (id: string, url: string) => __TAURI_INVOKE<OperationAdmission>("tabs_continue_past_block", { id, url }),
+	/**  Leaves the page the filter lists refused. */
+	tabsLeaveBlockedPage: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_leave_blocked_page", { id }),
 	/**  Shows the folder with Zephium's local log and crash report. */
 	diagnosticsShowLogs: () => __TAURI_INVOKE<boolean>("diagnostics_show_logs"),
+	/**  The text for a bug report: version, system and the redacted recent log. */
+	diagnosticsReport: () => __TAURI_INVOKE<string | null>("diagnostics_report"),
 	tabsBack: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_back", { id }),
 	tabsForward: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_forward", { id }),
 	/**
@@ -293,15 +315,26 @@ export const commands = {
 	 */
 	chromeMenuPopup: (x: number | null, y: number | null, page: boolean, canSplit: boolean) => __TAURI_INVOKE<boolean>("chrome_menu_popup", { x, y, page, canSplit }),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	/**  The context menu of an extension's toolbar button, under the button. */
+	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**
 	 *  Downloads and verifies the extension on the active store page, and
 	 *  returns what the user is asked to approve.
 	 */
 	webExtensionPrepare: (tabId: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_prepare", { tabId })),
-	webExtensionConfirm: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_confirm", { id })),
-	webExtensionCancel: () => __TAURI_INVOKE<void>("web_extension_cancel"),
+	/**
+	 *  What the install button on the Web Store listing in `tab_id` shows. A
+	 *  click on it arrives as `zephium:web-extension-store-click`.
+	 */
+	webExtensionStoreButton: (tabId: string, extensionId: string, state: WebExtensionStoreButtonState, label: string) => __TAURI_INVOKE<boolean>("web_extension_store_button", { tabId, extensionId, state, label }),
+	webExtensionConfirm: (id: string, reviewId: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_confirm", { id, reviewId })),
+	webExtensionCancel: (reviewId: string) => __TAURI_INVOKE<void>("web_extension_cancel", { reviewId }),
 	webExtensionList: () => typedError<WebExtensionView[], string>(__TAURI_INVOKE("web_extension_list")),
 	webExtensionSetEnabled: (id: string, enabled: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_enabled", { id, enabled })),
+	/**  Puts the extension's button in the address field, or back in the tray. */
+	webExtensionSetPinned: (id: string, pinned: boolean) => typedError<null, string>(__TAURI_INVOKE("web_extension_set_pinned", { id, pinned })),
+	/**  Retries only the exact installation displayed in the Extensions page. */
+	webExtensionRetry: (profileId: string, installId: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_retry", { profileId, installId })),
 	webExtensionUninstall: (id: string) => typedError<null, string>(__TAURI_INVOKE("web_extension_uninstall", { id })),
 	/**
 	 *  Answers an extension's run-time request for access; granted access is
@@ -320,11 +353,15 @@ export const commands = {
 	 *  cancel the picker.
 	 */
 	webExtensionChooseFile: (folder: boolean) => typedError<{
+	/**  Identifies the package/profile shown by this particular review. */
+	review_id: string,
 	id: string,
 	name: string,
 	version: string,
 	description: string,
 	warnings: string[],
+	/**  What this browser can't do for the extension, apart from its access. */
+	limitations: string[],
 	icon: string | null,
 	update: boolean,
 	/**  Installed from a file, so not checked against the Web Store. */
@@ -337,11 +374,6 @@ export const commands = {
 	 *  the user's approval.
 	 */
 	webExtensionReviewUpdate: (id: string) => typedError<WebExtensionReview, string>(__TAURI_INVOKE("web_extension_review_update", { id })),
-	/**
-	 *  A recommended extension's icon as a data URL, or `None` while the store
-	 *  can't be reached.
-	 */
-	webExtensionCatalogIcon: (token: string) => typedError<string | null, string>(__TAURI_INVOKE("web_extension_catalog_icon", { token })),
 	/**
 	 *  Reads only platform capability state. It never enumerates credentials,
 	 *  relying parties, or extension-owned vault data and never opens native UI.
@@ -359,7 +391,29 @@ export const commands = {
 	 *  but cannot mint or alter authority.
 	 */
 	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
-	captureStop: (itemId: string, navigationId: string) => __TAURI_INVOKE<OperationAdmission>("capture_stop", { itemId, navigationId }),
+	/**
+	 *  Whether the expanded sidebar's address field is on screen to hold the
+	 *  page-permission prompt. While it is not, the prompt is a window-modal
+	 *  sheet and the page leaves the screen.
+	 */
+	pagePermissionCardHost: (available: boolean) => __TAURI_INVOKE<void>("page_permission_card_host", { available }),
+	/**
+	 *  Whether one of the browser's own dialogs is open over the window. Pages
+	 *  are native views above chrome, so they leave the screen while it shows.
+	 */
+	chromeModal: (open: boolean) => __TAURI_INVOKE<void>("chrome_modal", { open }),
+	tabSetMuted: (id: string, muted: boolean) => __TAURI_INVOKE<OperationAdmission>("tab_set_muted", { id, muted }),
+	mediaPlayer: (id: string, action: MediaPlayerAction) => __TAURI_INVOKE<OperationAdmission>("media_player", { id, action }),
+	/**
+	 *  The focused profile's saved site decisions, of `origin` only when given.
+	 *  The actor picks the profile; chrome cannot name one.
+	 */
+	sitePermissions: (origin: string | null) => typedError<SitePermissionsView, null>(__TAURI_INVOKE("site_permissions", { origin })),
+	/**
+	 *  Changes one saved decision of the focused profile; no decision forgets it,
+	 *  so the site is asked again.
+	 */
+	sitePermissionSet: (origin: string, kind: SitePermissionKindView, decision: "allow" | "block" | null, scheme: string | null) => __TAURI_INVOKE<OperationAdmission>("site_permission_set", { origin, kind, decision, scheme }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerStats: (profile: string) => typedError<BlockerStatsView, null>(__TAURI_INVOKE("blocker_stats", { profile })),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
@@ -375,6 +429,11 @@ export const commands = {
 	profilesGet: () => typedError<{
 	current: string | null,
 	private: boolean,
+	/**
+	 *  The tabs of the private window while one exists, shown or set aside
+	 *  behind the regular tabs.
+	 */
+	private_tabs?: number | null,
 	profiles: ProfileEntryView[],
 } | null, null>(__TAURI_INVOKE("profiles_get")),
 	profilesCreate: (name: string, avatar: ProfileAvatarInputV1, andSwitch: boolean) => __TAURI_INVOKE<OperationAdmission>("profiles_create", { name, avatar, andSwitch }),
@@ -458,6 +517,9 @@ export const commands = {
 	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
+	windowsDiagnosticsSettings: () => __TAURI_INVOKE<boolean>("windows_diagnostics_settings"),
+	/**  None identifies a local launch-read fallback to ON, separate from Windows policy. */
+	windowsReputationManaged: () => __TAURI_INVOKE<boolean | null>("windows_reputation_managed"),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
 	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
 	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
@@ -465,7 +527,7 @@ export const commands = {
 	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
 	bookmarkMenuPopup: (x: number | null, y: number | null, folder: boolean) => __TAURI_INVOKE<boolean>("bookmark_menu_popup", { x, y, folder }),
 	profileMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("profile_menu_popup", { x, y }),
-	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean, extensions: SidebarMenuExtension[], manageExtensions: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide, extensions, manageExtensions }),
+	sidebarMenuPopup: (x: number | null, y: number | null, siteProtected: boolean | null, canHide: boolean, canClearData: boolean, extensions: SidebarMenuExtension[], manageExtensions: boolean) => __TAURI_INVOKE<boolean>("sidebar_menu_popup", { x, y, siteProtected, canHide, canClearData, extensions, manageExtensions }),
 	toolsMenuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("tools_menu_popup", { x, y }),
 	/**
 	 *  New Tab has its own main-only entry. The actor revalidates the bound blank
@@ -484,12 +546,27 @@ export const commands = {
 	launcherSearch: (query: string, requestId: string) => __TAURI_INVOKE<boolean>("launcher_search", { query, requestId }),
 	launcherRun: (action: SearchAction, context: SearchContext, background: boolean) => __TAURI_INVOKE<OperationAdmission>("launcher_run", { action, context, background }),
 	sidebarSetWidth: (width: number | null, animate: boolean, revision: number | null) => __TAURI_INVOKE<void>("sidebar_set_width", { width, animate, revision }),
+	/**  Puts the sidebar away, the page taking the window, or brings it back. */
+	sidebarSetHidden: (hidden: boolean) => __TAURI_INVOKE<void>("sidebar_set_hidden", { hidden }),
+	/**
+	 *  Brings a hidden sidebar over the page while the pointer wants it, or puts
+	 *  it back beneath. The window controls show with the card, and leave the
+	 *  moment it starts to go rather than once it has. `slide` has a platform that
+	 *  cuts the chrome to the card follow it in and out.
+	 */
+	sidebarPeek: (peek: boolean, lights: boolean, slide: boolean) => __TAURI_INVOKE<void>("sidebar_peek", { peek, lights, slide }),
 	sidebarResize: (width: number | null, enabled: boolean, revision: number | null) => __TAURI_INVOKE<boolean>("sidebar_resize", { width, enabled, revision }),
 	sidebarResizeGuide: (width: number | null) => __TAURI_INVOKE<boolean>("sidebar_resize_guide", { width }),
 	tabDragOver: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("tab_drag_over", { x, y }),
 	resourceCall: (expectedProfile: string, call: ResourceCall_Deserialize) => __TAURI_INVOKE<ResourceReply_Serialize>("resource_call", { expectedProfile, call }),
 	noteCall: (expectedProfile: string, call: NoteCall) => __TAURI_INVOKE<NoteReply>("note_call", { expectedProfile, call }),
 	historyCall: (expectedProfile: string, call: HistoryCall) => __TAURI_INVOKE<HistoryResponse>("history_call", { expectedProfile, call }),
+	/**
+	 *  Clears what the focused profile's pages stored, or lists and removes it
+	 *  site by site. Clearing can take a while on a large cache, so the wait is
+	 *  longer than a history read's.
+	 */
+	browsingDataCall: (expectedProfile: string, call: BrowsingDataCall) => __TAURI_INVOKE<BrowsingDataResponse>("browsing_data_call", { expectedProfile, call }),
 	/**
 	 *  Asks for the site icons of origins chrome shows outside a tab. Held icons
 	 *  arrive on the ordinary favicon event; missing ones are probed anonymously.
@@ -509,6 +586,11 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
+	/**
+	 *  `None` where the system has no such setting to read: the page then keeps
+	 *  its language's own hour cycle.
+	 */
+	systemClock24h: () => __TAURI_INVOKE<boolean | null>("system_clock_24h"),
 	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;
@@ -517,6 +599,8 @@ export const commands = {
 	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
+	/**  Closes Zephium as a quit does, then starts it again. */
+	appRelaunch: () => __TAURI_INVOKE<boolean>("app_relaunch"),
 	/**  What the release now running brought, when it arrived as an update. */
 	updateHighlights: () => __TAURI_INVOKE<{
 	version: string,
@@ -573,6 +657,7 @@ export const commands = {
 	/**  The Bookmarks panel's reads and writes, scoped to the focused profile. */
 	bookmarkCall: (expectedProfile: string, call: BookmarkCall) => __TAURI_INVOKE<BookmarkResponse>("bookmark_call", { expectedProfile, call }),
 	timeCall: (expectedProfile: string, call: TimeCall) => __TAURI_INVOKE<TimeResponse>("time_call", { expectedProfile, call }),
+	zoomCall: (expectedProfile: string, call: ZoomCall) => __TAURI_INVOKE<ZoomResponse>("zoom_call", { expectedProfile, call }),
 	focusControl: (control: FocusControl) => __TAURI_INVOKE<OperationAdmission>("focus_control", { control }),
 	/**
 	 *  Finds `query` in the page in front, stepping forward or back when it
@@ -588,6 +673,14 @@ export const commands = {
 	importCancel: () => __TAURI_INVOKE<boolean>("import_cancel"),
 	/**  Opens the system setting a source needs (Safari: Full Disk Access). */
 	importOpenPermission: (source: string) => __TAURI_INVOKE<boolean>("import_open_permission", { source }),
+	exportBrowserData: (kind: ExportKindView) => __TAURI_INVOKE<ExportOutcomeView>("export_browser_data", { kind }),
+	historyMenuPopup: (id: string, forward: boolean, x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("history_menu_popup", { id, forward, x, y }),
+	pageSource: (id: string) => __TAURI_INVOKE<{
+	url: string,
+	text: string,
+	/**  The page was longer than the engine reads. */
+	truncated: boolean,
+} | null>("page_source", { id }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -619,6 +712,7 @@ export const events = {
 	focusChanged: makeEvent<FocusChanged>("focus-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
+	mediaPlayerChanged: makeEvent<MediaPlayerChanged>("media-player-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
 	notesChanged: makeEvent<NotesChanged>("notes-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -629,6 +723,7 @@ export const events = {
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
 	uiCommand: makeEvent<UiCommand>("ui-command"),
 	webExtensionAccessRequested: makeEvent<WebExtensionAccessRequested>("web-extension-access-requested"),
+	webExtensionStoreClicked: makeEvent<WebExtensionStoreClicked>("web-extension-store-clicked"),
 	workChanged: makeEvent<WorkChanged>("work-changed"),
 	workEnvironmentChanged: makeEvent<WorkEnvironmentChanged>("work-environment-changed"),
 	zephiumAccountChanged: makeEvent<AccountChanged>("zephium:account-changed"),
@@ -877,6 +972,11 @@ export type AccountV1 = {
 	/**  The server asks for a newer Zephium than this one. */
 	update_required: boolean,
 	signed_in: boolean,
+	/**
+	 *  Signed in, but the Keychain or Credential Manager will not give up the
+	 *  session, so hosted calls cannot run until the person signs in again.
+	 */
+	vault_fault: boolean,
 	/**  The address a sign-in code was sent to, while waiting for it. */
 	pending_email: string | null,
 	resend_in: number | null,
@@ -1135,6 +1235,42 @@ export type BrowserCredentialCapabilityView = {
 
 export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
+/**
+ *  One request from the browsing data surfaces: clearing what a profile's
+ *  pages stored, and the sites it stored it for.
+ */
+export type BrowsingDataCall =
+/**
+ *  Removes the chosen kinds from `range` back. `cookies` is cookies and
+ *  site data; `downloads` is the download list, never the files.
+ */
+{ kind: "clear"; range: BrowsingDataRange; history: boolean; cookies: boolean; cache: boolean; downloads: boolean } |
+/**  The sites the profile holds cookies and site data for. */
+{ kind: "sites" } |
+/**  Everything stored for one site, named as `Sites` names it. */
+{ kind: "forget_site"; site: string } |
+/**
+ *  Everything stored for the site of one page, named by its origin
+ *  (`https://host[:port]`), for a command on the page in front.
+ */
+{ kind: "forget_page"; origin: string };
+
+export type BrowsingDataError = "invalid" | "unavailable" | "capacity" |
+/**  The engine took the request and did not complete it. */
+"failed" |
+/**  A private window keeps nothing to clear. */
+"private";
+
+/**  How far back a browsing data clear reaches. */
+export type BrowsingDataRange = "hour" | "day" | "week" | "four_weeks" | "everything";
+
+export type BrowsingDataResponse = { kind: "cleared" } | { kind: "sites"; sites: SiteDataView[];
+/**
+ *  The engine can only name sites by some of what it holds: sites
+ *  with only storage and no cookies are missing from the list.
+ */
+partial: boolean } | { kind: "error"; error: BrowsingDataError };
+
 export type CaptureDeviceStateView = "none" | "active" | "muted";
 
 /**
@@ -1144,6 +1280,14 @@ export type CaptureDeviceStateView = "none" | "active" | "muted";
 export type ChangedNote = {
 	id: string,
 	revision: string | null,
+};
+
+/**  A closed tab that can be reopened. */
+export type ClosedTabView = {
+	id: string,
+	url: string,
+	title: string,
+	icon: IconRef | null,
 };
 
 export type DefaultBrowserStatus = {
@@ -1239,7 +1383,13 @@ export type DocumentNode_Serialize = {
 
 export type DoubleTap = "off" | "command" | "option";
 
-export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } | { kind: "resume"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
+export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { kind: "list"; before: string | null; limit: number } | { kind: "cancel"; id: string } |
+/**  Stops receiving and keeps what was received for `Resume`. */
+{ kind: "pause"; id: string } | { kind: "resume"; id: string } |
+/**  Publishes a finished download that was held for its type. */
+{ kind: "keep"; id: string } |
+/**  Deletes a finished download that was held for its type. */
+{ kind: "discard"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
 export type DownloadCleanup = {
 	running: boolean,
@@ -1262,7 +1412,7 @@ export type DownloadPreferences = {
 
 export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; removed: string[]; cleanup: DownloadCleanup } | { kind: "page"; entries: DownloadView[]; next: string | null; supported: boolean; cleanup: DownloadCleanup } | { kind: "preferences"; preferences: DownloadPreferences; supported: boolean; site_downloads_require_confirmation: boolean } | { kind: "accepted" } | { kind: "applied" } | { kind: "error"; error: DownloadError };
 
-export type DownloadState = "pending" | "receiving" | "paused" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
+export type DownloadState = "pending" | "receiving" | "paused" | "held" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
 
 export type DownloadView = {
 	id: string,
@@ -1276,11 +1426,21 @@ export type DownloadView = {
 	received: string,
 	total: string | null,
 	error: DownloadError | null,
+	/**  The file came over a connection that is not encrypted. */
+	insecure: boolean,
 };
 
 export type DownloadsChanged = {
 	profile: string,
 };
+
+export type ExportKindView = "bookmarks" | "history";
+
+export type ExportOutcomeView = "saved" |
+/**  The person closed the save dialog. */
+"cancelled" |
+/**  A private window keeps no bookmarks or history. */
+"private" | "failed";
 
 export type ExtensionActionFailed = ExtensionActionFailedView;
 
@@ -1373,6 +1533,7 @@ export type ExtensionActionsView = {
  *  decodes a page-controlled image format.
  */
 export type FaviconEntry = {
+	/**  The key an `IconRef` names the raster by. */
 	origin: string,
 	revision: string,
 	rgba: string,
@@ -1456,7 +1617,11 @@ export type HistoryCall =
  *  How far back the list reaches. The same scope Clear operates on,
  *  so clearing removes exactly what the reader is looking at.
  */
-range: HistoryRange; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange };
+range: HistoryRange; before: string | null; limit: number } | { kind: "forget"; urls: string[] } | { kind: "clear"; range: HistoryRange } |
+/**  The tabs most recently closed in this profile, newest first. */
+{ kind: "closed_tabs" } |
+/**  Reopens one of them, named by the id `ClosedTabs` gave. */
+{ kind: "reopen_closed"; id: string };
 
 export type HistoryError = "invalid" | "unavailable" | "capacity";
 
@@ -1464,7 +1629,7 @@ export type HistoryRange = "hour" | "day" | "week" | "everything";
 
 export type HistoryResponse = { kind: "page"; visits: HistoryVisitView[];
 /**  Cursor for the following page, absent once the list is exhausted. */
-next: string | null } | { kind: "removed"; count: number } | { kind: "error"; error: HistoryError };
+next: string | null } | { kind: "removed"; count: number } | { kind: "closed_tabs"; tabs: ClosedTabView[] } | { kind: "reopened" } | { kind: "error"; error: HistoryError };
 
 /**
  *  One recorded visit. Visits are not deduplicated by address: a history list
@@ -1480,10 +1645,14 @@ export type HistoryVisitView = {
 
 /**
  *  Names a cached site icon without carrying its pixels. Chrome keeps rasters
- *  by origin and repaints only when `revision` changes, so a projection costs
+ *  by key and repaints only when `revision` changes, so a projection costs
  *  a short string per tab instead of a five-kilobyte raster.
  */
 export type IconRef = {
+	/**
+	 *  A site's origin, or one page of it (origin and path) that wears an icon
+	 *  of its own. Chrome treats it as an opaque key.
+	 */
 	origin: string,
 	revision: string,
 };
@@ -1673,6 +1842,41 @@ export type MediaOrigin =
 { kind: "imported" } |
 /**  Fetched by Rust from a public HTTPS URL without cookies. */
 { kind: "fetched"; url: string; observed_at: string };
+
+export type MediaPlayerAction = { kind: "play" } | { kind: "pause" } | { kind: "seek"; seconds: number | null } | { kind: "picture_in_picture" } |
+/**  Brings the tab to front, in its own space. */
+{ kind: "show" } |
+/**  Closes the player until the tab plays something else. */
+{ kind: "close" };
+
+export type MediaPlayerChanged = MediaPlayerView | null;
+
+/**
+ *  The sidebar's player: the media of the tab that most recently started
+ *  playing off screen.
+ */
+export type MediaPlayerView = {
+	tab_id: string,
+	/**  The page's own name for what plays, else the tab's title. */
+	title: string,
+	/**  The page's artist, else the site. */
+	artist: string,
+	icon: IconRef | null,
+	/**  Seconds; absent while unknown and for a live stream. */
+	duration: number | null,
+	/**
+	 *  Seconds, as of this projection; chrome advances it by `rate` while
+	 *  `playing` and not `waiting`.
+	 */
+	position: number | null,
+	rate: number | null,
+	playing: boolean,
+	waiting: boolean,
+	can_pip: boolean,
+	in_pip: boolean,
+	muted: boolean,
+	can_mute: boolean,
+};
 
 export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } |
 /**
@@ -1895,7 +2099,7 @@ export type PageAssistBlockV1 =
  */
 { kind: "text"; text: string; cites: PageAssistCiteV1[] } |
 /**  Item cards; `tab` is the page their marks are on. */
-{ kind: "items"; tab: string; items: PageAssistItemV1[] } | { kind: "opened"; tabs: PageAssistOpenedV1[] } | { kind: "steps"; steps: PageAssistStepV1[] } | { kind: "paused"; reason: PageAssistPauseV1 } | { kind: "style"; style: PageStyleProposalV1 } | { kind: "handoff"; handoff: PageAssistHandoffV1 };
+{ kind: "items"; tab: string; items: PageAssistItemV1[] } | { kind: "opened"; tabs: PageAssistOpenedV1[] } | { kind: "steps"; steps: PageAssistStepV1[] } | { kind: "search"; destination: string; query: string; state: PageAssistStepStateV1 } | { kind: "paused"; reason: PageAssistPauseV1 } | { kind: "style"; style: PageStyleProposalV1 } | { kind: "handoff"; handoff: PageAssistHandoffV1 };
 
 /**  What a Work handoff brings along. */
 export type PageAssistBringKindV1 = "task" | "note" | "tab" | "repository" | "folder" |
@@ -2234,11 +2438,11 @@ export type PageAssistSuggestionV1 = "summarize" | "key_points" | "key_numbers" 
  *  Closed page capability names rendered by browser-owned chrome. Native
  *  permission strings and page-controlled labels never cross this boundary.
  */
-export type PagePermissionKindView = "camera" | "microphone";
+export type PagePermissionKindView = "camera" | "microphone" | "geolocation";
 
 export type PagePermissionPromptChanged = PagePermissionPromptView;
 
-export type PagePermissionPromptDecisionInput = "allow_once" | "always_allow" | "deny_once" | "always_deny";
+export type PagePermissionPromptDecisionInput = "allow_once" | "always_allow" | "deny_once" | "always_deny" | "dismiss";
 
 /**
  *  One exact, foreground page-permission request. Every identity is an opaque
@@ -2254,6 +2458,17 @@ export type PagePermissionPromptEntryView = {
 	rememberable: boolean,
 	/**  True while an exact durable remember-decision transaction is pending. */
 	processing: boolean,
+	/**
+	 *  Shown as a card under the address field of the expanded sidebar, with
+	 *  the page still on screen. Otherwise a window-modal sheet, with the
+	 *  page taken off screen until it is answered.
+	 */
+	in_sidebar: boolean,
+	/**
+	 *  The operating system refuses Zephium this capability; chrome says
+	 *  where to turn it on.
+	 */
+	blocked_by_system: boolean,
 };
 
 /**  Exact replacement for the one process-wide page permission surface. */
@@ -2270,13 +2485,47 @@ export type PageRequestView =
  *  knows one; `scheme` names the kind of link otherwise.
  */
 { kind: "external_app"; site: string | null; scheme: string; app: string | null } |
-/**  A new tab the page tried to open; `host` is set when it can be opened. */
-{ kind: "popup"; host: string | null };
+/**
+ *  A new tab the page tried to open; `host` is set when it can be opened.
+ *  `site` is the host of the page asking, when its profile can always
+ *  allow that site's pop-ups.
+ */
+{ kind: "popup"; host: string | null; site: string | null } |
+/**
+ *  The site, or its proxy, asks to sign in. Never carries the server's
+ *  own text.
+ */
+{ kind: "http_auth"; request: number;
+/**  Host, with its port when not the scheme's default. */
+host: string;
+/**  Plain http: the password would cross the network readable. */
+insecure: boolean; proxy: boolean;
+/**  The last username or password was wrong. */
+retry: boolean } |
+/**
+ *  The site wants to save a file. `allowed` says the site may already
+ *  download and only this unclicked download is asked about.
+ */
+{ kind: "download"; request: number; site: string; filename: string; allowed: boolean; unclicked: boolean } |
+/**
+ *  AutoFill was asked for on a page that is not encrypted; `host` is the
+ *  page's host.
+ */
+{ kind: "insecure_autofill"; host: string } |
+/**  The page stopped responding: wait for it, or reload it. */
+{ kind: "unresponsive" };
 
 /**  One site's styles, for the Settings manager. */
 export type PageSiteStylesV1 = {
 	site: string,
 	styles: PageStyleV1[],
+};
+
+export type PageSourceView = {
+	url: string,
+	text: string,
+	/**  The page was longer than the engine reads. */
+	truncated: boolean,
 };
 
 /**  A page style the reply proposed. */
@@ -2429,6 +2678,11 @@ export type ProfileView = {
 export type ProfilesView = {
 	current: string | null,
 	private: boolean,
+	/**
+	 *  The tabs of the private window while one exists, shown or set aside
+	 *  behind the regular tabs.
+	 */
+	private_tabs?: number | null,
 	profiles: ProfileEntryView[],
 };
 
@@ -2688,6 +2942,12 @@ export type ResourceSummary = {
 	work: string | null,
 };
 
+export type RuntimeRestartReason =
+/**  A newer browser runtime is installed; only a restart adopts it. */
+"runtime_update" |
+/**  A profile's browser engine can be trusted again only after a restart. */
+"profile";
+
 /**  Sanitized advisory delivered only to privileged main chrome. */
 export type RuntimeSecurityAdvisory = {
 	kind: RuntimeSecurityAdvisoryKind,
@@ -2698,7 +2958,7 @@ export type RuntimeSecurityAdvisory = {
  *  Non-fatal, process-local classification produced before native WebView
  *  construction. Hard admission failures never reach privileged chrome.
  */
-export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime";
+export type RuntimeSecurityAdvisoryKind = "review_overdue" | "update_recommended" | "unreviewed_runtime" | "cleanup_overdue";
 
 /**
  *  Fixed destination of the recommended maintenance action. No page or
@@ -2713,6 +2973,8 @@ export type RuntimeSecurityUpdateTarget = "zephium" | "operating_system" | "brow
  */
 export type RuntimeStatus = {
 	restart_required: boolean,
+	/**  Why a restart is required; none while it is not. */
+	restart_reason: RuntimeRestartReason | null,
 	/**
 	 *  The saved session could not be restored this launch: its bytes were
 	 *  kept in a file and the browser started with fresh tabs.
@@ -2727,7 +2989,7 @@ export type RuntimeStatus = {
 	 */
 	user_content_degraded_scope_count: number,
 	/**
-	 *  Canonically ordered closed-vocabulary set. Rust emits at most five
+	 *  Canonically ordered closed-vocabulary set. Rust emits at most six
 	 *  entries and privileged chrome must replace, never append, projections.
 	 */
 	security_advisories: RuntimeSecurityAdvisory[],
@@ -2810,6 +3072,50 @@ export type SidebarNodeView = {
  */
 export type SidebarSectionView = "favorites" | "pinned" | "today";
 
+/**
+ *  What the person typed into a sign-in prompt. Deliberately not Debug or
+ *  Clone: it moves straight into wiped storage.
+ */
+export type SignInCredentials = {
+	username: string,
+	password: string,
+};
+
+/**  A site the profile holds data for. */
+export type SiteDataView = {
+	site: string,
+	cookies: boolean,
+	storage: boolean,
+};
+
+export type SitePermissionDecisionView = "allow" | "block";
+
+/**
+ *  A kind of decision Site settings lists. Which kinds a platform keeps is
+ *  in `SitePermissionsView::kinds`.
+ */
+export type SitePermissionKindView = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard_read" | "midi" | "sensors" | "local_fonts" | "automatic_downloads" | "popups" | "downloads" | "app_links";
+
+export type SitePermissionView = {
+	/**  Canonical origin, such as `https://meet.example`. */
+	origin: string,
+	kind: SitePermissionKindView,
+	decision: SitePermissionDecisionView,
+	/**  The kind of application link, for `app_links`. */
+	scheme: string | null,
+};
+
+/**  The focused profile's saved site decisions. */
+export type SitePermissionsView = {
+	/**  A private profile saves nothing; its list is always empty. */
+	private: boolean,
+	/**  False when some decisions could not be read right now. */
+	complete: boolean,
+	/**  The kinds this platform keeps, in display order. */
+	kinds: SitePermissionKindView[],
+	entries: SitePermissionView[],
+};
+
 export type SiteTimeView = {
 	site: string,
 	icon: IconRef | null,
@@ -2888,7 +3194,25 @@ export type SwipeScroll = {
 	time: number | null,
 };
 
+export type TabAudioView = {
+	muted: boolean,
+	/**  The engine can mute this tab; without it the speaker only informs. */
+	can_mute: boolean,
+};
+
 export type TabAvailability = { state: "sleeping" } | { state: "waiting_for_capacity"; url: string } | { state: "blocked_by_capacity"; url: string };
+
+export type TabBlockReason =
+/**  A known scam or malware site, from uBlock Origin's badware list. */
+"badware" |
+/**  A known ad or tracking redirect. */
+"filter_lists";
+
+export type TabCertificateProblem =
+/**  Expired, or not valid yet. */
+"expired" |
+/**  Self-signed, or from an issuer the system does not trust. */
+"untrusted" | "name_mismatch" | "revoked" | "other";
 
 export type TabChanged = TabView;
 
@@ -2896,14 +3220,37 @@ export type TabChanged = TabView;
  *  Browser chrome's bounded tab renderer choice. Future extension-owned
  *  documents can add a separate variant without treating them as page URLs.
  */
-export type TabContentView = "web" | "settings" | "extensions" | "extension_owned";
+export type TabContentView = "web" | "settings" | "extensions" | "extension_owned" | "source";
 
 export type TabFailure = {
 	url: string,
 	reason: TabFailureReason,
+	/**  For a refused certificate, what the engine could tell about it. */
+	certificate?: TabCertificateProblem | null,
+	/**
+	 *  The refused certificate is on a host on the person's own network, so
+	 *  they may continue past it. Never true for a public name.
+	 */
+	can_continue?: boolean,
+	/**  For a page the filter lists refused, why. */
+	blocked?: TabBlockReason | null,
+	/**
+	 *  The page that was showing is gone; the failure stands in its place
+	 *  until another page opens, even while one loads.
+	 */
+	covers_page?: boolean,
 };
 
-export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" | "other";
+export type TabFailureReason = "offline" | "host_not_found" | "unreachable" | "timed_out" | "insecure" |
+/**  The page's process ended and it could not be brought back on its own. */
+"crashed" |
+/**
+ *  The profile's browser engine can be trusted again only after Zephium
+ *  restarts; every tab in it says so.
+ */
+"restart_required" |
+/**  The filter lists refused the page; `blocked` says why. */
+"blocked" | "other";
 
 /**
  *  What the tab menu can offer for the tab it opens on, as the sidebar sees
@@ -2918,6 +3265,15 @@ export type TabMenuContext = {
 	others: boolean,
 	/**  Open tabs follow this one. */
 	below: boolean,
+	/**  The person muted this tab. */
+	muted: boolean,
+	/**  The document whose camera or microphone is in use. */
+	capture: string | null,
+	/**
+	 *  Only what acts on the page's camera, microphone and sound, for the
+	 *  in-use indicator.
+	 */
+	media_only: boolean,
 };
 
 export type TabView = {
@@ -2936,6 +3292,8 @@ export type TabView = {
 	loading: boolean,
 	/**  What the page asked for that waits on the person. */
 	page_request?: PageRequestView | null,
+	/**  Names the request shown, for its answer. */
+	page_request_serial?: number | null,
 	/**
 	 *  Transient native residency state. It never replaces the committed URL
 	 *  or title, and an explicit retry remains a fresh navigation intent.
@@ -2946,10 +3304,22 @@ export type TabView = {
 	 *  next attempt or commit. Never carries native error text.
 	 */
 	failure?: TabFailure | null,
+	/**
+	 *  The page is from an origin whose certificate the person chose to
+	 *  continue past; chrome must never show it as secure.
+	 */
+	certificate_exception?: boolean,
 	can_go_back: boolean,
 	can_go_forward: boolean,
 	icon: IconRef | null,
 	capture?: MediaCaptureView | null,
+	/**
+	 *  The page's zoom in whole percent, while the tab has a page to zoom. It
+	 *  is the level just asked for until the view reports it applied.
+	 */
+	zoom?: number | null,
+	/**  Present while the page plays sound, and for as long as it is muted. */
+	audio?: TabAudioView | null,
 };
 
 /**
@@ -3190,18 +3560,37 @@ export type WebExtensionAccessRequestView = {
 export type WebExtensionAccessRequested = WebExtensionAccessRequestView;
 
 export type WebExtensionReview = {
+	/**  Identifies the package/profile shown by this particular review. */
+	review_id: string,
 	id: string,
 	name: string,
 	version: string,
 	description: string,
 	warnings: string[],
+	/**  What this browser can't do for the extension, apart from its access. */
+	limitations: string[],
 	icon: string | null,
 	update: boolean,
 	/**  Installed from a file, so not checked against the Web Store. */
 	from_file: boolean,
 };
 
+export type WebExtensionStoreButtonState = "add" | "adding" | "remove";
+
+/**
+ *  A person clicked the install button the browser showed on the Web Store
+ *  listing in `tab_id`, which is still the active tab of the focused window.
+ */
+export type WebExtensionStoreClickView = {
+	tab_id: string,
+	extension_id: string,
+};
+
+export type WebExtensionStoreClicked = WebExtensionStoreClickView;
+
 export type WebExtensionView = {
+	profile_id: string,
+	install_id: string,
 	id: string,
 	name: string,
 	version: string,
@@ -3212,6 +3601,7 @@ export type WebExtensionView = {
 	state: string,
 	error: string | null,
 	warnings: string[],
+	limitations: string[],
 	/**  `all`, `click` or `sites`; meaningful only when `site_scoped`. */
 	access: string,
 	sites: string[],
@@ -3220,6 +3610,7 @@ export type WebExtensionView = {
 	has_options: boolean,
 	held_update: string | null,
 	sideloaded: boolean,
+	pinned: boolean,
 };
 
 /**
@@ -3355,6 +3746,11 @@ export type WorkActivityV1 = "planning" | "delegating" | "searching" | "reading"
 export type WorkAgentGrantV1 = WorkAgentGrantV1_Serialize | WorkAgentGrantV1_Deserialize;
 
 export type WorkAgentGrantV1_Deserialize = {
+	/**
+	 *  Trusted resolved pricing fact: all models are free and browser search
+	 *  has no paid fallback. This grants no capability or disclosure authority.
+	 */
+	no_usage_charge?: boolean,
 	provider: WorkSearchProvider,
 	model: string,
 	max_turns: number,
@@ -3392,6 +3788,11 @@ export type WorkAgentGrantV1_Deserialize = {
 };
 
 export type WorkAgentGrantV1_Serialize = {
+	/**
+	 *  Trusted resolved pricing fact: all models are free and browser search
+	 *  has no paid fallback. This grants no capability or disclosure authority.
+	 */
+	no_usage_charge?: boolean,
 	provider: WorkSearchProvider,
 	model: string,
 	max_turns: number,
@@ -3713,6 +4114,8 @@ export type WorkAttemptFact = {
 	/**
 	 *  Reservation is retained for unknown outcomes. Settled accounting names
 	 *  exact usage or a conservative ceiling; missing means unknown, never zero.
+	 *  A trusted no-charge agent may retain a known-zero monetary reservation
+	 *  while its token counts and native outcome remain uncertain.
 	 */
 	usage: WorkUsage | null,
 };
@@ -5400,6 +5803,8 @@ export type WorkModelFaultV1 =
 "key_refused" |
 /**  The person's own provider account is out of credit. */
 "provider_credit" |
+/**  The provider plan's per-minute limit is smaller than one request. */
+"plan_limit" |
 /**  The account's included Zephium AI usage, and any extra, is spent. */
 "hosted_usage" |
 /**  The chosen Zephium AI model needs another plan. */
@@ -7271,6 +7676,23 @@ export type WorkUsage = {
 export type WorkUsageAccounting = "exact" | "conservative_reservation";
 
 export type WorkUserEdit = { kind: "set_objective"; objective: string } | { kind: "open_question"; prompt: string; options: string[] } | { kind: "answer_question"; id: WorkQuestionId; answer: string } | { kind: "dismiss_question"; id: WorkQuestionId } | { kind: "replace_draft"; proposal: WorkPlanProposal } | { kind: "archive" } | { kind: "restore" } | { kind: "compact_history" };
+
+export type ZoomCall =
+/**  The sites the profile zoomed, by name. */
+{ kind: "levels" } |
+/**  Shows one site at the default zoom again. */
+{ kind: "forget"; site: string } | { kind: "forget_all" };
+
+export type ZoomError = "invalid" | "unavailable" | "capacity";
+
+export type ZoomLevelView = {
+	site: string,
+	percent: number,
+};
+
+export type ZoomResponse =
+/**  The profile's levels after the call, by site. */
+{ kind: "levels"; levels: ZoomLevelView[] } | { kind: "error"; error: ZoomError };
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

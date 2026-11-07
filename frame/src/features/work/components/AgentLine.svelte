@@ -314,6 +314,7 @@
     missing_key: m.work_fault_missing_key,
     key_refused: m.work_fault_key_refused,
     provider_credit: m.work_fault_provider_credit,
+    plan_limit: m.work_fault_plan_limit,
   };
   const faultFix = $derived.by(() => {
     switch (fault) {
@@ -333,6 +334,7 @@
       case "missing_key":
       case "key_refused":
       case "provider_credit":
+      case "plan_limit":
         return { label: m.work_model_manage(), command: "settings.ai" };
       default:
         return null;

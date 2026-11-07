@@ -68,13 +68,17 @@ impl AgentProviderModelClient {
             None => (&UNPRICED, FALLBACK_PRICE_REVISION),
         };
         let rate = |value: u64| value.max(1);
-        let rates = AgentProviderTokenRates::try_new(
-            rate(price.input),
-            rate(price.cached_input),
-            rate(price.input.saturating_mul(5).div_ceil(4)),
-            rate(price.output),
-        )
-        .map_err(|_| AgentProviderContractError::InputAccountingMode)?;
+        let rates = if entry.is_free_compatible() {
+            AgentProviderTokenRates::free()
+        } else {
+            AgentProviderTokenRates::try_new(
+                rate(price.input),
+                rate(price.cached_input),
+                rate(price.input.saturating_mul(5).div_ceil(4)),
+                rate(price.output),
+            )
+            .map_err(|_| AgentProviderContractError::InputAccountingMode)?
+        };
         let profile = AgentProviderPricingProfile::try_new(
             AgentProviderPricingRevision::new(revision)
                 .ok_or(AgentProviderContractError::InputAccountingMode)?,
@@ -325,7 +329,9 @@ const fn failure_for(error: WorkModelError) -> AgentProviderFailure {
         WorkModelError::Network => AgentProviderFailureClass::Transport,
         WorkModelError::Protocol => AgentProviderFailureClass::Protocol,
         WorkModelError::Cancelled => AgentProviderFailureClass::Cancelled,
-        WorkModelError::OverBudget => AgentProviderFailureClass::Provider,
+        WorkModelError::OverBudget | WorkModelError::PlanLimit => {
+            AgentProviderFailureClass::Provider
+        }
         WorkModelError::Hosted { refusal, .. } => match refusal {
             HostedRefusal::PlanRequired | HostedRefusal::BillingReview => {
                 AgentProviderFailureClass::Permission

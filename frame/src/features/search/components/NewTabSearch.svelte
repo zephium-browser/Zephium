@@ -8,6 +8,7 @@
   import IconButton from "$shared/ui/IconButton";
   import ResultList from "./ResultList.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
+  import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     tabId,
@@ -85,7 +86,8 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (surface.composing || event.isComposing) return;
+    // See LauncherPanel: WebKit's committing keydown arrives after compositionend.
+    if (surface.composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
@@ -102,8 +104,10 @@
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
+    const unpark = input ? parkCaret(input) : () => {};
     return () => {
       window.removeEventListener("resize", measure);
+      unpark();
       stop();
     };
   });
@@ -141,6 +145,7 @@
         maxlength: 2048,
         spellcheck: false,
         autocapitalize: "off",
+        autocorrect: "off",
         // Room for the clear control, which is placed over the field rather
         // than threaded through the shared primitive for one caller's sake.
         style: surface.query ? "padding-inline-end: 40px" : undefined,
@@ -254,17 +259,27 @@
      highlight that glides between them. */
   .sheet {
     --row-radius: calc(var(--radius-panel) - 6px);
+    --gap: 6px;
 
     position: absolute;
-    inset-block-start: calc(100% + 6px);
+    inset-block-start: calc(100% + var(--gap));
     inset-inline: 0;
     z-index: 1;
     max-block-size: var(--available);
     overflow: hidden;
     border-radius: var(--radius-panel);
-    background: var(--color-raised);
+
+    /* A sheet of frosted glass on the sky: the sky's own frost, laid where
+       the picture lies beneath it, under the glass's tint. Stretching a
+       small picture is the blur, so nothing is blurred as it opens. */
+    background:
+      linear-gradient(var(--sky-card), var(--sky-card)),
+      var(--sky-frost, none) var(--sky-frost-x, 0) calc(var(--sky-frost-y, 0px) - var(--gap)) /
+        var(--sky-frost-size, cover) no-repeat,
+      var(--color-raised);
     box-shadow:
-      inset 0 0 0 1px var(--color-border),
+      inset 0 0 0 0.5px var(--sky-card-edge, var(--color-border)),
+      inset 0 1px 0 var(--sky-card-rim, transparent),
       var(--shadow-float);
     transform-origin: 50% 0;
     animation: sheet-in 340ms var(--ease-emphasized) backwards;

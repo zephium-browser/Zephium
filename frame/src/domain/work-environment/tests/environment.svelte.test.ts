@@ -1,6 +1,9 @@
 import { beforeEach, expect, test, vi } from "vitest";
 import type { WorkCallV1, WorkEnvironmentSnapshot, WorkResponseV1 } from "$shared/ipc/bindings";
-const native = vi.hoisted(() => ({ call: vi.fn() }));
+const native = vi.hoisted(() => ({
+  call: vi.fn(),
+  close: null as null | (() => Promise<boolean>),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ workCall: native.call });
@@ -8,7 +11,14 @@ vi.mock("$shared/ipc/bindings", async () => {
 vi.mock("$shared/ipc/native-events", () => ({
   events: { workEnvironmentChanged: { listen: async () => () => {} } },
 }));
-vi.mock("$shared/lib/close", () => ({ registerCloseTask: () => () => {} }));
+vi.mock("$shared/lib/close", () => ({
+  registerCloseTask: (task: () => Promise<boolean>) => {
+    native.close = task;
+    return () => {
+      native.close = null;
+    };
+  },
+}));
 const profile = "00000000000000000000000001";
 const id = "00000000000000000000000002";
 const space = "00000000000000000000000003";
@@ -38,8 +48,25 @@ function page(selected: string | null = id) {
 }
 beforeEach(() => {
   vi.resetModules();
+  vi.useRealTimers();
   native.call.mockReset();
+  native.close = null;
+  vi.stubGlobal("localStorage", memory());
 });
+
+function memory(): Storage {
+  const held = new Map<string, string>();
+  return {
+    get length() {
+      return held.size;
+    },
+    key: (index) => [...held.keys()][index] ?? null,
+    getItem: (key) => held.get(key) ?? null,
+    setItem: (key, value) => void held.set(key, value),
+    removeItem: (key) => void held.delete(key),
+    clear: () => held.clear(),
+  };
+}
 
 test("reopens persisted selection without creating an objective or a second Work", async () => {
   const { WorkEnvironmentSession } = await import("../environment.svelte");
@@ -416,4 +443,74 @@ test("a busy refusal retries the arrangement save before releasing it", async ()
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("words in the ask bar never hold up a close and are back after a relaunch", async () => {
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
+    if (call.kind !== "environment") throw new Error("Unexpected call");
+    if (call.request.kind === "list") return page();
+    return response({ kind: "environment", reply: { kind: "snapshot", snapshot: snapshot() } });
+  });
+  const session = new WorkEnvironmentSession(profile, space);
+  await session.start("Untitled");
+  session.composer = "Compare the two plans";
+  session.objectiveToAttach = "00000000000000000000000007";
+
+  // A close does not wait for the pause in typing, and is not refused.
+  expect(await native.close?.()).toBe(true);
+  expect(localStorage.length).toBe(1);
+
+  const relaunched = new WorkEnvironmentSession(profile, space);
+  expect(relaunched.composer).toBe("Compare the two plans");
+  expect(relaunched.objectiveToAttach).toBeNull();
+  const elsewhere = new WorkEnvironmentSession(profile, "00000000000000000000000009");
+  expect(elsewhere.composer).toBe("");
+  session.dispose();
+  relaunched.dispose();
+  elsewhere.dispose();
+});
+
+test("typing is kept once it pauses, and sending or clearing lets the draft go at once", async () => {
+  vi.useFakeTimers();
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  const session = new WorkEnvironmentSession(profile, space);
+  session.composer = "Plan";
+  session.composer = "Plan a trip";
+  expect(localStorage.length).toBe(0);
+  vi.advanceTimersByTime(600);
+  expect(localStorage.length).toBe(1);
+  session.composer = "";
+  expect(localStorage.length).toBe(0);
+  session.dispose();
+});
+
+test("a close still waits for a Work save that has not landed", async () => {
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
+    if (call.kind !== "environment") throw new Error("Unexpected call");
+    if (call.request.kind === "list") return page();
+    if (call.request.kind !== "checkpoint")
+      return response({ kind: "environment", reply: { kind: "snapshot", snapshot: snapshot() } });
+    return response({ kind: "error", error: "conflict" });
+  });
+  const session = new WorkEnvironmentSession(profile, space);
+  await session.start("Untitled");
+  session.composer = "Words that are kept";
+  session.checkpoint({ ...snapshot().view, x: 42 });
+
+  expect(await native.close?.()).toBe(false);
+  session.dispose();
+});
+
+test("a deleted space takes the words in its ask bar with it", async () => {
+  const { environmentSession } = await import("../environment.svelte");
+  const { forgetDrafts, readDraft } = await import("$shared/lib/drafts");
+  const live = environmentSession(profile, space)!;
+  live.composer = "Words in a space about to go";
+
+  forgetDrafts(profile, space);
+
+  expect(live.composer).toBe("");
+  expect(readDraft("work-composer", [profile, space])).toBeNull();
 });

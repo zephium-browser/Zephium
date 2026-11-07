@@ -334,7 +334,9 @@ fn rejected_view_creation_rolls_back_the_live_view_synchronously() {
     assert!(!tab.has_view());
     assert!(tab.url.is_none());
     assert!(!tab.loading);
-    assert_eq!(tab.title, "Page failed to open");
+    assert_eq!(tab.title, "example.com");
+    let failure = tab.failure.as_deref().unwrap();
+    assert_eq!(failure.url.as_str(), "https://example.com/");
 }
 
 #[test]
@@ -352,12 +354,14 @@ fn failed_native_view_can_be_retried() {
     let tab = shell.items.tab(id).unwrap();
     assert!(!tab.has_view());
     assert!(!tab.loading);
-    assert_eq!(tab.title, "Page failed to open");
+    assert_eq!(tab.title, "example.com");
+    assert!(tab.failure.is_some());
 
     shell.handle(Command::Navigate {
         id,
         input: "example.com".into(),
     });
+    assert!(shell.items.tab(id).unwrap().failure.is_none());
     assert_eq!(
         engine
             .calls()
@@ -433,7 +437,10 @@ fn crashed_page_recreates_once_then_reports() {
         .into_iter()
         .find(|t| t.id == id.to_string())
         .unwrap();
-    assert_eq!(tab.title, "Page crashed");
+    assert_eq!(
+        tab.failure.map(|failure| failure.reason),
+        Some(zephium_ipc::TabFailureReason::Crashed)
+    );
     assert!(!tab.loading);
 }
 
@@ -459,7 +466,11 @@ fn crash_presentation_never_overwrites_the_durable_document_title() {
         .into_iter()
         .find(|tab| tab.id == id.to_string())
         .unwrap();
-    assert_eq!(projected.title, "Page crashed");
+    assert_eq!(projected.title, "Last real title");
+    assert_eq!(
+        projected.failure.map(|failure| failure.reason),
+        Some(zephium_ipc::TabFailureReason::Crashed)
+    );
 
     let saved = store.saved.lock().unwrap().clone().unwrap();
     let durable_title = saved.items.into_iter().find_map(|item| {
@@ -751,6 +762,73 @@ fn hidden_idle_views_go_dormant_and_wake_on_show() {
 }
 
 #[test]
+fn hidden_pages_with_sound_capture_or_picture_in_picture_stay_awake() {
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    let asleep = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .iter()
+            .rev()
+            .find(|c| c.starts_with("dormant"))
+            .is_some_and(|c| c == &format!("dormant {first}"))
+    };
+
+    shell.handle(Command::Engine(EngineEvent::AudioChanged {
+        id: first,
+        audible: true,
+    }));
+    shell.handle(Command::Tick);
+    assert!(!asleep(&engine), "audible");
+    shell.silence_tab_audio(first);
+    shell.handle(Command::Tick);
+    assert!(asleep(&engine));
+
+    let navigation = shell.presentation.presented_navigations[&first].0;
+    let capturing = MediaCaptureState {
+        camera: CaptureDeviceState::Active,
+        microphone: CaptureDeviceState::None,
+    };
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: first,
+        navigation,
+        state: capturing,
+    }));
+    assert!(!asleep(&engine), "capture wakes the page at once");
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: first,
+        navigation,
+        state: MediaCaptureState::default(),
+    }));
+    assert!(asleep(&engine), "it sleeps once capture stops");
+
+    shell.handle(Command::Engine(EngineEvent::MediaChanged {
+        id: first,
+        media: Some(Box::new(zephium_core::media::MediaSnapshot {
+            title: String::new(),
+            artist: String::new(),
+            duration: Some(60.0),
+            position: 0.0,
+            rate: 1.0,
+            playing: true,
+            waiting: false,
+            ended: false,
+            can_pip: true,
+            in_pip: true,
+            item: "1".into(),
+        })),
+    }));
+    assert!(!asleep(&engine), "picture in picture");
+}
+
+#[test]
 fn idle_hidden_pages_beyond_the_warm_set_sleep_only_after_acknowledgement() {
     let (mut shell, _engine, screen) = setup();
     shell.residency.warm_view_limit = 2;
@@ -821,6 +899,35 @@ fn unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down() {
             .count(),
         1
     );
+}
+
+#[test]
+fn a_hidden_page_that_keeps_running_is_not_probed_for_discard() {
+    let (mut shell, engine, screen) = setup();
+    shell.residency.warm_view_limit = 1;
+    shell.residency.live_view_pressure_limit = 1;
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
+    shell.handle(Command::Bootstrap);
+    let playing = active_id(&screen);
+    navigate_and_commit(&mut shell, playing, "music.example");
+    shell.handle(Command::Engine(EngineEvent::AudioChanged {
+        id: playing,
+        audible: true,
+    }));
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    shell.handle(Command::Tick);
+    assert!(shell.residency.discard_probes.is_empty());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("probe-discard {playing} "))));
+
+    // Once it is quiet it is an ordinary candidate again.
+    shell.silence_tab_audio(playing);
+    shell.handle(Command::Tick);
+    assert_eq!(first_probing_discard(&shell).0, playing);
 }
 
 #[test]
@@ -1122,7 +1229,7 @@ fn performance_preferences_load_durably_and_pressure_restores_preferred_targets(
     // Lossless suspension never waits longer than its own short grace.
     assert_eq!(
         shell.residency.dormant_min,
-        std::time::Duration::from_secs(5 * 60)
+        std::time::Duration::from_secs(30)
     );
     shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
     assert_eq!(shell.residency.warm_view_limit, 0);

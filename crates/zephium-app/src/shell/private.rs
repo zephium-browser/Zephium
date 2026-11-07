@@ -2,8 +2,9 @@
 //! Its pages run in an ephemeral partition (a non-persistent WebKit store on
 //! macOS, an InPrivate WebView2 profile in a private runtime folder on
 //! Windows), every store write already refuses incognito profiles, and the
-//! session snapshot leaves them out. Closing the last private tab, or the
-//! private window, erases the partition.
+//! session snapshot leaves them out. Going back to the regular tabs only sets
+//! the private window aside, its tabs intact and still out of every store;
+//! closing the last private tab, or the private window, erases the partition.
 
 use super::*;
 
@@ -58,10 +59,36 @@ impl Shell {
         }
     }
 
+    /// The tabs of the private window while one exists, shown or set aside.
+    pub(super) fn private_tab_count(&self) -> Option<u32> {
+        let session = self.private.as_ref()?;
+        let tabs = self.keyboard_tabs(session.space).len();
+        Some(u32::try_from(tabs).unwrap_or(u32::MAX))
+    }
+
+    /// Tells the roster when the private window appears, goes or changes
+    /// sides, or its tab count moves, so chrome can always offer the way back.
+    pub(super) fn project_private_if_changed(&mut self) {
+        let now = (self.private_shown(), self.private_tab_count());
+        if now != self.private_projected {
+            self.private_projected = now;
+            self.project_profiles();
+        }
+    }
+
+    /// A browser page in front hands the window back to Browse first, then
+    /// runs `id` there.
+    fn after_browser_return(&mut self, id: &str) -> Option<OperationDisposition> {
+        if self.active_browser_page().is_none() || self.browser_return_ready {
+            return None;
+        }
+        self.browser_after_return = Some(Box::new(Command::Run(id.into())));
+        Some(self.operation_show_browser_page(None))
+    }
+
     pub(super) fn operation_enter_private(&mut self) -> OperationDisposition {
-        if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::Run("window.newPrivate".into())));
-            return self.operation_show_browser_page(None);
+        if let Some(deferred) = self.after_browser_return("window.newPrivate") {
+            return deferred;
         }
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
@@ -83,6 +110,35 @@ impl Shell {
         }
         let effects = self.swap_private_scope();
         mutation_result(self.commit(effects))
+    }
+
+    /// Back to the regular tabs with the private window kept, unlike closing.
+    pub(super) fn operation_show_regular(&mut self) -> OperationDisposition {
+        if !self.private_shown() {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
+        if let Some(deferred) = self.after_browser_return("window.showRegular") {
+            return deferred;
+        }
+        self.operation_leave_private()
+    }
+
+    /// Brings back a private window that was set aside.
+    pub(super) fn operation_show_private(&mut self) -> OperationDisposition {
+        match self.private.as_ref().map(|session| session.shown) {
+            Some(false) => self.operation_enter_private(),
+            _ => operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
+        }
+    }
+
+    /// The side not shown: the private window, started if there is none, or
+    /// the regular tabs.
+    pub(super) fn operation_toggle_private(&mut self) -> OperationDisposition {
+        if self.private_shown() {
+            self.operation_show_regular()
+        } else {
+            self.operation_enter_private()
+        }
     }
 
     pub(super) fn operation_close_private(&mut self) -> OperationDisposition {
@@ -197,11 +253,7 @@ impl Shell {
     /// The last private tab closed: end the session once its space is empty.
     pub(super) fn end_private_session_if_empty(&mut self) -> Option<NativeWork> {
         let session = self.private.as_ref()?;
-        if !session.shown
-            || !self
-                .keyboard_tabs(session.profile, session.space)
-                .is_empty()
-        {
+        if !session.shown || !self.keyboard_tabs(session.space).is_empty() {
             return None;
         }
         Some(self.end_private_session())
@@ -226,6 +278,7 @@ impl Shell {
                 effects.extend(self.focus_tab(active));
             }
         }
+        self.cancel_page_permission_for_profile(session.profile);
         self.apply_profile_tombstone(session.profile);
         self.engine.erase_profile_data(
             session.profile,

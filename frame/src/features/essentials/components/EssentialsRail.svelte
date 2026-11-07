@@ -10,7 +10,7 @@
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
   import CaptureControl from "$shared/ui/CaptureControl";
-  import { stopCaptureFor } from "$domain/capture";
+  import AudioControl from "$shared/ui/AudioControl";
   import { favicons } from "$domain/favicons";
 
   let {
@@ -57,6 +57,7 @@
 <ul
   bind:this={list}
   class="rail-sites"
+  data-under-panel
   data-essentials-drop
   data-over={tabDrag.overEssentials()}
   role="list"
@@ -70,6 +71,7 @@
       data-zephium-tab-id={tab.id}
       data-zephium-tab-url={tab.url ?? ""}
       data-zephium-projection-revision={tab.projection_revision}
+      data-audio-host
     >
       <button
         type="button"
@@ -92,16 +94,23 @@
           size={16}
           lit
           fallback={Globe02Icon}
+          notched={!!tab.audio}
         />
         <span data-zephium-tab-label class="sr-only">{tab.title}</span>
       </button>
+      {#if tab.audio}<AudioControl
+          audio={tab.audio}
+          size={16}
+          onToggle={(muted) => void tabs.setMuted(tab.id, muted)}
+        />{/if}
       {#if tab.capture}
         <span class="capture-badge">
-          {#key tab.capture.navigation_id}<CaptureControl
-              onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
-              site={tab.url ?? tab.title}
-              capture={tab.capture}
-            />{/key}
+          <CaptureControl
+            badge
+            onOpen={(x, y) => tabs.openMediaMenu(tab.id, x, y)}
+            site={tab.url ?? tab.title}
+            capture={tab.capture}
+          />
         </span>
       {/if}
     </li>
@@ -126,10 +135,8 @@
 
   .capture-badge {
     position: absolute;
-    inset-inline-end: -6px;
-    inset-block-end: -4px;
-    background: var(--color-raised);
-    border-radius: var(--radius-capsule);
+    inset-inline-end: -4px;
+    inset-block-end: -3px;
   }
 
   .rail-sites {

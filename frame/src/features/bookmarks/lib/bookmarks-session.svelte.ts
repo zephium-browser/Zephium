@@ -88,6 +88,7 @@ export class BookmarksSession {
   }
 
   search(value: string) {
+    this.reads += 1;
     this.query = value.slice(0, 512);
     clearTimeout(this.searchTimer);
     if (!this.searching) {

@@ -104,6 +104,8 @@ fn new_owned_agent_configuration(
             if Retained::as_ptr(&actual_store) != Retained::as_ptr(&store) {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
+            super::proxy::apply(&configuration, crate::network::current().as_ref())
+                .map_err(|_| AgentOwnedViewConstructionError::Native)?;
             Ok(configuration)
         }
         // A durable class with its own store is Work's persistent store.
@@ -123,6 +125,8 @@ fn new_owned_agent_configuration(
             if Retained::as_ptr(&actual_store) != Retained::as_ptr(store) {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
+            super::proxy::apply(&configuration, crate::network::current().as_ref())
+                .map_err(|_| AgentOwnedViewConstructionError::Native)?;
             Ok(configuration)
         }
         (ContextProfileStorageClass::Ephemeral, None) => {
@@ -841,7 +845,7 @@ where
             });
             let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
-                |gate| gate.allows_apple_action(&target, action),
+                |gate| gate.allows_apple_action(&target, action.clone()),
             );
             // An action's own admitted load replaces the document: the old
             // document's reads end, and the runtime waits for the new one.

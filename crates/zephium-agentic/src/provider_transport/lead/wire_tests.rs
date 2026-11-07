@@ -647,9 +647,10 @@ fn groq_and_cerebras_take_effort_only_where_their_models_accept_it() {
     let groq = body(WorkModelProvider::Groq, "openai/gpt-oss-120b");
     assert_eq!(groq["reasoning_effort"], "medium");
     assert_eq!(groq["parallel_tool_calls"], false);
-    assert!(body(WorkModelProvider::Groq, "qwen/qwen3.8-27b")
-        .get("reasoning_effort")
-        .is_none());
+    let groq_qwen = body(WorkModelProvider::Groq, "qwen/qwen3.8-27b");
+    assert_eq!(groq_qwen["reasoning_effort"], "medium");
+    assert_eq!(groq_qwen["reasoning_format"], "hidden");
+    assert!(groq.get("reasoning_format").is_none());
     let cerebras = body(WorkModelProvider::Cerebras, "qwen-3.8-27b");
     assert_eq!(cerebras["reasoning_effort"], "medium");
     assert!(cerebras.get("parallel_tool_calls").is_none());

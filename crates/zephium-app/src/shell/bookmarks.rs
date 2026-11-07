@@ -4,7 +4,7 @@
 
 use super::*;
 
-use crate::api::{BookmarkCompletion, ImportCompletion};
+use crate::api::{BookmarkCompletion, ExportCompletion, ImportCompletion};
 use crate::store_reads::{BookmarkSurfaceReply, BookmarkWork, ImportWork};
 use zephium_core::bookmarks::{BookmarkFailure, BookmarkNode};
 use zephium_ipc::{
@@ -13,6 +13,8 @@ use zephium_ipc::{
 
 /// Completions outlive one actor turn; the read queue bounds how many exist.
 const MAX_PENDING_BOOKMARK_CALLS: usize = 8;
+/// An export reads a whole table, so only one runs at a time.
+const MAX_PENDING_EXPORTS: usize = 1;
 
 enum Pending {
     Surface(BookmarkCompletion),
@@ -24,6 +26,7 @@ enum Pending {
 pub(super) struct BookmarkState {
     pending: std::collections::HashMap<u64, Pending>,
     imports: std::collections::HashMap<u64, ImportCompletion>,
+    exports: std::collections::HashMap<u64, ExportCompletion>,
     /// Icon imports by token, with the profile whose sidebar reads them back.
     icon_imports: std::collections::HashMap<u64, ProfileId>,
     next_token: u64,
@@ -46,6 +49,7 @@ impl Shell {
             .get(profile)
             .is_some_and(|p| p.kind != zephium_core::profiles::ProfileKind::Incognito)
             && !self.degraded_storage_profiles.contains(&profile)
+            && !self.profile_deletion_quarantines(profile)
     }
 
     fn queue_bookmarks(
@@ -222,21 +226,43 @@ impl Shell {
         views
     }
 
-    pub(super) fn import_into_focused(&mut self, work: ImportWork, done: ImportCompletion) {
+    pub(super) fn import_destination(&mut self) -> Option<crate::ImportDestination> {
         if !self.bootstrapped {
             self.bootstrap();
         }
-        let Some(profile) = self
-            .windows
+        self.windows
             .focused()
-            .map(|window| window.profile)
-            .filter(|profile| self.bookmarks_writable(*profile))
-        else {
+            .map(|window| crate::ImportDestination {
+                profile: window.profile,
+                space: window.space,
+            })
+            .filter(|destination| {
+                self.bookmarks_writable(destination.profile)
+                    && self
+                        .spaces
+                        .get(destination.space)
+                        .is_some_and(|space| space.profile == destination.profile)
+            })
+    }
+
+    pub(super) fn import_into_profile(
+        &mut self,
+        destination: crate::ImportDestination,
+        work: ImportWork,
+        done: ImportCompletion,
+    ) {
+        let crate::ImportDestination { profile, space } = destination;
+        if !self.bookmarks_writable(profile)
+            || self
+                .spaces
+                .get(space)
+                .is_none_or(|space| space.profile != profile)
+        {
             done.finish(None);
             return;
-        };
+        }
         if let ImportWork::Essentials(sites) = work {
-            done.finish(Some(self.keep_imported_sites(profile, sites)));
+            done.finish(Some(self.keep_imported_sites(space, sites)));
             return;
         }
         if self.bookmarks.imports.len() >= MAX_PENDING_BOOKMARK_CALLS {
@@ -257,6 +283,50 @@ impl Shell {
             }
         } else {
             done.finish(None);
+        }
+    }
+
+    /// Reads the focused profile's bookmarks or history out as the text of a
+    /// file. A private profile keeps neither, so it has nothing to give.
+    pub(super) fn export_from_focused(
+        &mut self,
+        kind: zephium_core::export::ExportKind,
+        done: ExportCompletion,
+    ) {
+        use zephium_core::export::ExportRefusal;
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            done.finish(Err(ExportRefusal::Unavailable));
+            return;
+        };
+        if self
+            .profiles
+            .get(profile)
+            .is_some_and(|p| p.kind == zephium_core::profiles::ProfileKind::Incognito)
+        {
+            done.finish(Err(ExportRefusal::Private));
+            return;
+        }
+        if !self.bookmarks_writable(profile) || self.bookmarks.exports.len() >= MAX_PENDING_EXPORTS
+        {
+            done.finish(Err(ExportRefusal::Unavailable));
+            return;
+        }
+        let Some(reads) = &self.store_reads else {
+            done.finish(Err(ExportRefusal::Unavailable));
+            return;
+        };
+        self.bookmarks.next_token = self.bookmarks.next_token.wrapping_add(1);
+        let token = self.bookmarks.next_token;
+        if reads.request_export(token, profile, kind) {
+            self.bookmarks.exports.insert(token, done);
+        } else {
+            done.finish(Err(ExportRefusal::Unavailable));
+        }
+    }
+
+    pub(super) fn on_export_read(&mut self, token: u64, text: Option<String>) {
+        if let Some(done) = self.bookmarks.exports.remove(&token) {
+            done.finish(text.ok_or(zephium_core::export::ExportRefusal::Unavailable));
         }
     }
 
@@ -285,6 +355,9 @@ impl Shell {
         self.bookmarks.icon_imports.clear();
         for (_, done) in std::mem::take(&mut self.bookmarks.imports) {
             done.finish(None);
+        }
+        for (_, done) in std::mem::take(&mut self.bookmarks.exports) {
+            done.finish(Err(zephium_core::export::ExportRefusal::Unavailable));
         }
         for (_, pending) in std::mem::take(&mut self.bookmarks.pending) {
             if let Pending::Surface(done) = pending {

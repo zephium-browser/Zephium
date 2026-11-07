@@ -8,10 +8,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::session::{
-    PersistedItem, PersistedKind, PersistedSpace, SessionState, MAX_ITEM_TREE_DEPTH,
+    space_placements, PersistedItem, PersistedKind, PersistedSpace, SessionState,
+    MAX_ITEM_TREE_DEPTH,
 };
 
-use crate::{legacy, pane};
+use crate::{essentials, legacy, pane};
 
 use super::filesystem::{harden_registered_profile_files, regular_file_exists};
 use super::history::enforce_history_budget;
@@ -242,7 +243,13 @@ impl Hub {
                     None => None,
                 };
                 let placement = match (space, section.as_str()) {
-                    (None, "favorites") => Placement::Favorites { profile },
+                    // These files kept Essentials per profile; the first
+                    // space holds them until the loader spreads them.
+                    (None, "favorites") => Placement::Favorites {
+                        space: essentials::home_space(&spaces, profile, None).ok_or_else(|| {
+                            invalid_data("compatibility essentials have no space to belong to")
+                        })?,
+                    },
                     (Some(raw), "pinned" | "today") => {
                         let space = SpaceId::parse(&raw)
                             .filter(|id| id.to_string() == raw)
@@ -303,17 +310,10 @@ impl Hub {
         for list in roots.values_mut().chain(children.values_mut()) {
             list.sort_by_key(|index| rows[*index].position);
         }
-        let mut placements = vec![Placement::Favorites { profile }];
-        for sp in &spaces {
-            placements.push(Placement::Space {
-                space: sp.id,
-                section: SpaceSection::Pinned,
-            });
-            placements.push(Placement::Space {
-                space: sp.id,
-                section: SpaceSection::Today,
-            });
-        }
+        let placements: Vec<Placement> = spaces
+            .iter()
+            .flat_map(|space| space_placements(space.id))
+            .collect();
         let mut items = Vec::new();
         let mut emitted = HashSet::with_capacity(rows.len());
         'placements: for placement in placements {
@@ -547,13 +547,10 @@ pub(super) fn clear_legacy_session_rows_once(conn: &mut Connection) -> rusqlite:
 }
 
 fn owns_placement(profile: ProfileId, s: &SessionState, placement: Placement) -> bool {
-    match placement {
-        Placement::Favorites { profile: p } => p == profile,
-        Placement::Space { space, .. } => s
-            .spaces
-            .iter()
-            .any(|x| x.id == space && x.profile == profile),
-    }
+    let (Placement::Favorites { space } | Placement::Space { space, .. }) = placement;
+    s.spaces
+        .iter()
+        .any(|x| x.id == space && x.profile == profile)
 }
 
 fn section_to_str(section: SpaceSection) -> &'static str {

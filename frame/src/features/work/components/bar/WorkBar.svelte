@@ -59,15 +59,28 @@
       const open = opened(element);
       if (open === menu) return;
       menu = open;
-      // A menu closed on something outside the bar: the bar lets go with it.
-      if (!open)
-        requestAnimationFrame(() => {
-          if (!element.contains(document.activeElement)) focused = false;
-        });
+      // WebKit can leave focus on body while a portal closes. Only an
+      // actual outside press/focus transfer releases the composer's focus.
     });
     observer.observe(element, { subtree: true, attributeFilter: ["aria-expanded"] });
     return () => observer.disconnect();
   });
+  function owns(target: Node | null): boolean {
+    if (!target || !surface) return false;
+    if (surface.contains(target)) return true;
+    // Bits UI's non-modal popover content need not expose aria-controls.
+    // While this field's trigger is expanded, its active portal is part of the field.
+    if (
+      (menu || opened(surface)) &&
+      target instanceof Element &&
+      target.closest("[data-popover-content], [data-dropdown-menu-content]")
+    )
+      return true;
+    return [...surface.querySelectorAll(".field [aria-controls]")].some((trigger) => {
+      const controlled = document.getElementById(trigger.getAttribute("aria-controls") ?? "");
+      return controlled?.contains(target) ?? false;
+    });
+  }
   /** Dictating: the row is the live voice view until the words land. */
   let dictating = $state(false);
   let voice = $state<{ toggle(): void }>();
@@ -143,8 +156,11 @@
 <svelte:window
   onpointerdown={(event) => {
     const target = event.target instanceof Node ? event.target : null;
-    if (!focused || menu || !surface || (target && surface.contains(target))) return;
-    focused = false;
+    if (focused && !owns(target)) focused = false;
+  }}
+  onfocusin={(event) => {
+    const target = event.target instanceof Node ? event.target : null;
+    if (focused && !owns(target)) focused = false;
   }}
   onpointerup={() => requestAnimationFrame(() => (pressing = false))}
   onpointercancel={() => (pressing = false)}
@@ -169,7 +185,7 @@
       if (next instanceof Node && event.currentTarget.contains(next)) return;
       if (pressing && !next) return;
       // A menu the field's own control opened holds the bar open while it is open, portals included.
-      if (opened(event.currentTarget)) return;
+      if (menu || opened(event.currentTarget)) return;
       focused = false;
     }}
   >

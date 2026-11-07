@@ -135,6 +135,17 @@
               ? m.onb_import_storage()
               : m.onb_import_failed({ browser: jobBrowser })}</span
       >
+      {#if failure.problem === "permission"}
+        <Button
+          variant="primary"
+          size="compact"
+          shape="capsule"
+          onclick={() => void browserImport.openPermissionSettings(job.source)}
+          >{m.onb_import_allow()}</Button
+        >
+      {/if}
+    {:else if job?.finished && !job.cancelled && job.kinds.every((entry) => entry.total === 0)}
+      <span class="reading">{m.import_kind_none()}</span>
     {:else if job?.finished}
       <span class="done"
         ><Icon icon={Tick02Icon} size={14} />{m.onb_import_done({

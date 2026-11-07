@@ -221,6 +221,8 @@ pub async fn check_endpoint(
 
 /// One server for one run: connected on first use, asked about once.
 pub struct McpConnection {
+    profile: String,
+    generation: super::store::ConnectionGeneration,
     server: WorkServerV1,
     session: McpSession,
     tools: Vec<McpTool>,
@@ -228,6 +230,13 @@ pub struct McpConnection {
 
 impl McpConnection {
     pub async fn open(profile: &str, server: WorkServerV1) -> Result<Self, McpError> {
+        let store = super::store::shared().ok_or(McpError::Closed)?;
+        let generation = store
+            .generation(profile, &server.id)
+            .ok_or(McpError::Closed)?;
+        if !current(profile, &server, &generation) {
+            return Err(McpError::Closed);
+        }
         let endpoint = {
             let (profile, server) = (profile.to_owned(), server.clone());
             tokio::task::spawn_blocking(move || endpoint(&profile, &server))
@@ -236,11 +245,21 @@ impl McpConnection {
         };
         let session = McpSession::connect(&endpoint).await?;
         let tools = session.tools().await?;
+        if !current(profile, &server, &generation) {
+            session.close().await;
+            return Err(McpError::Closed);
+        }
         Ok(Self {
+            profile: profile.to_owned(),
+            generation,
             server,
             session,
             tools,
         })
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        current(&self.profile, &self.server, &self.generation)
     }
 
     pub fn server(&self) -> &WorkServerV1 {
@@ -282,6 +301,9 @@ impl McpConnection {
     }
 
     pub async fn call(&self, host: &dyn ConnectionHost, name: &str, args: &Value) -> ToolReply {
+        if !self.is_current() {
+            return revoked();
+        }
         let Some(tool) = self.find(name) else {
             return fault(&format!("There is no `{name}` tool."));
         };
@@ -290,6 +312,9 @@ impl McpConnection {
         };
         if let Err(reply) = self.allowed(host).await {
             return reply;
+        }
+        if !self.is_current() {
+            return revoked();
         }
         let fact = CallFact {
             service: self.server.id.clone(),
@@ -345,6 +370,11 @@ impl McpConnection {
                 _ => return fault("The run stopped."),
             }
         }
+        // Consent belongs to the configuration/account the person reviewed.
+        // Rejoin authoritative settings after every wait, immediately before dispatch.
+        if !self.is_current() {
+            return revoked();
+        }
         match self
             .session
             .call(&tool.name, arguments, zephium_mcp::CALL)
@@ -379,6 +409,26 @@ impl McpConnection {
             }
         }
     }
+}
+
+fn current(
+    profile: &str,
+    server: &WorkServerV1,
+    generation: &super::store::ConnectionGeneration,
+) -> bool {
+    let Some(store) = super::store::shared() else {
+        return false;
+    };
+    generation.is_current()
+        && store
+            .servers(profile)
+            .ok()
+            .is_some_and(|servers| servers.iter().any(|now| now.enabled && now == server))
+        && generation.is_current()
+}
+
+fn revoked() -> ToolReply {
+    fault("This connection changed or was removed. No call was sent. Ask again using its current settings.")
 }
 
 fn fault(text: &str) -> ToolReply {
@@ -454,3 +504,7 @@ mod tests {
         assert_eq!(category("create_issue"), WorkConfirmCategoryV1::Save);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "mcp_lifecycle_tests.rs"]
+mod lifecycle_tests;

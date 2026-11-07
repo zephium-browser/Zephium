@@ -225,14 +225,22 @@ pub(super) fn body(
     if upstream == WorkModelProvider::OpenRouter {
         body.insert("usage".into(), json!({"include": true}));
     }
+    // Groq's Qwen streams its thinking inline unless told otherwise, and
+    // refuses inline thinking beside tools.
+    if upstream == WorkModelProvider::Groq && request.model.model.starts_with("qwen/") {
+        body.insert("reasoning_format".into(), json!("hidden"));
+    }
     Ok(Value::Object(body))
 }
 
-/// Groq takes an effort only for GPT-OSS; Cerebras also for Qwen. Any other
-/// model there refuses the field.
+/// Groq and Cerebras take an effort for GPT-OSS and Qwen. Any other model
+/// there refuses the field.
 pub(super) fn takes_effort(upstream: WorkModelProvider, model: &str) -> bool {
     model.contains("gpt-oss")
-        || (upstream == WorkModelProvider::Cerebras && model.starts_with("qwen"))
+        || (matches!(
+            upstream,
+            WorkModelProvider::Groq | WorkModelProvider::Cerebras
+        ) && model.trim_start_matches("qwen/").starts_with("qwen"))
 }
 
 #[derive(Default)]

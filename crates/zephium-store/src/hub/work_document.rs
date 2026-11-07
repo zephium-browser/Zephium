@@ -157,13 +157,14 @@ impl Hub {
             {
                 let mut seen = std::collections::BTreeSet::new();
                 let hits = self
-                    .history_page(
+                    .history_page_checked(
                         profile,
                         "",
                         Some(*since),
                         None,
                         super::history::MAX_HISTORY_PAGE,
                     )
+                    .map_err(|_| WorkError::Unavailable)?
                     .into_iter()
                     .filter(|visit| visit.visited_at < *until && seen.insert(visit.url.clone()))
                     .take(usize::from(*limit))

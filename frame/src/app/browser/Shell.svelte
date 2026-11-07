@@ -10,15 +10,21 @@
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
+  import type { TabView } from "$shared/ipc/bindings";
+  import { newTabImage } from "$session/newtab-background.svelte";
+  import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
-  import { loadSettings } from "$features/settings";
+  import { loadClearSiteData, loadSettings } from "$features/settings";
   import { EssentialTile } from "$features/essentials";
-  import { AddressField, findInPage } from "$features/address";
+  import { AddressField, SiteDetails, SiteHead, findInPage } from "$features/address";
+  import { SidebarPagePermission } from "$features/permissions";
   import { Dock } from "$features/dock";
   import { DownloadPulse, DownloadStatus } from "$features/downloads";
+  import { loadMediaPlayer } from "$features/media";
+  import { mediaPlayer } from "$domain/media-player";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionActions, ManageExtensions } from "$features/extensions";
+  import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
@@ -30,8 +36,8 @@
   import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
-  import { untrack } from "svelte";
-  import { blocker } from "$domain/blocker";
+  import { untrack, type Component, type Snippet } from "svelte";
+  import { clearRequest } from "$domain/site-data";
   import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
   import { onMount } from "svelte";
@@ -45,6 +51,7 @@
   import { SettingsNavigation } from "$features/settings";
   import { loadLibraryPage } from "$features/library";
   import { loadHistoryPage } from "$features/history";
+  import { loadSourcePage } from "$features/source";
   import { bookmarkReveal } from "$features/bookmarks";
   import { loadTasksPage } from "$features/tasks";
   import { loadFocusCover, loadTimePage } from "$features/time";
@@ -54,6 +61,7 @@
   import {
     ModeTabs,
     PrivateBar,
+    PrivateReturn,
     Sidebar,
     SidebarSearch,
     SidebarNotice,
@@ -210,7 +218,14 @@
     if (copied) notices.show(m.notice_link_copied());
   }
 
-  let protectionMenuActivated = $state(0);
+  // Loaded when a command first asks to clear a site's data, then kept: the
+  // dialog closes itself, and a native modal must never be removed while open.
+  let ClearSiteData = $state.raw<Component | null>(null);
+  $effect(() => {
+    if (clearRequest.pending() && !untrack(() => ClearSiteData))
+      void loadClearSiteData().then((module) => (ClearSiteData = module.default));
+  });
+
   let handledCommand = 0;
   $effect(() => {
     const command = ui.uiCommand();
@@ -220,6 +235,8 @@
       if (command.id === "split.choose") splitting = true;
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
       if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
+      if (command.id === "tab.clearSiteData") clearRequest.ask(tabs.takeMenuTargetUrl());
+      if (command.id === "page.clearSiteData") clearRequest.ask(tabs.activeTab()?.url);
       if (command.id === "find.show") findInPage.show(tabs.activeId());
       if (command.id === "find.next") findInPage.step(true, tabs.activeId());
       if (command.id === "find.previous") findInPage.step(false, tabs.activeId());
@@ -246,8 +263,15 @@
   let newTabShown = $derived.by(() => {
     const tab = tabs.activeTab();
     if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    // A first load that failed stands in the pane instead, and the sky's
+    // glass over the window would wash it out.
+    if (failedPane(tab)) return false;
     return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
   });
+  // Beside a new tab the window, whatever it is made of, takes on the
+  // sky's light; it gives it back as a page arrives.
+  let skyShown = $derived(newTabShown && newTabImage() === null);
+
   $effect(() => {
     const tab = tabs.activeTab();
     const idle = !!tab && !tab.url && !tab.loading && (tab.content ?? "web") === "web";
@@ -256,13 +280,22 @@
       else if (!tab || tab.url || tab.id !== newTabLoad) newTabLoad = null;
     });
   });
+  // A tab with nothing to show (a first load that failed, a restored page
+  // that did not load, a crash it could not recover from, a page the engine
+  // replaced with an empty error document) says why in its pane.
+  function failedPane(tab: TabView): boolean {
+    if (!tab.failure) return false;
+    if (tab.failure.covers_page) return true;
+    return !tab.loading && (!tab.url || tab.availability?.state === "sleeping");
+  }
   // A load that failed over a page still showing leaves that page in place;
   // a notice says the new address did not open.
   let failureNoticed: string | null = null;
   $effect(() => {
     const tab = tabs.activeTab();
     const failure = tab?.failure;
-    const key = failure && tab.url ? `${tab.id} ${failure.url} ${failure.reason}` : null;
+    const key =
+      failure && tab.url && !failedPane(tab) ? `${tab.id} ${failure.url} ${failure.reason}` : null;
     untrack(() => {
       if (key === null || key === failureNoticed) return;
       failureNoticed = key;
@@ -294,6 +327,14 @@
   }
 </script>
 
+<!-- The player of a tab playing behind the page in front; its code loads the
+     first time there is one. -->
+{#snippet player(
+  compact: boolean,
+)}{#if mediaPlayer.view()}{#await loadMediaPlayer() then { default: MediaPlayer }}<MediaPlayer
+        {compact}
+      />{/await}{/if}{/snippet}
+
 <!-- The chrome view starts at the window's corner in every shape and draws
      the gutter itself, which stays a place to drag the window by. -->
 <div
@@ -305,6 +346,7 @@
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
   data-private={incognito || undefined}
 >
+  {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
     >{#snippet browserBody(compact)}
       {#if compact && (inWork || paneled)}
@@ -329,25 +371,36 @@
             because everything in it acts on the page the field names.
           -->
             <AddressField {compact}>
-              {#snippet trailing()}
+              {#snippet trailing(page)}
                 <UtilityTray
-                  onopen={() => {
-                    protectionMenuActivated += 1;
-                    void blocker.refresh();
-                  }}
+                  label={page === null
+                    ? m.utilities()
+                    : page.warning
+                      ? m.site_info_label_status({ status: page.warning })
+                      : m.site_info_label()}
+                  warning={page?.warning}
                 >
-                  <BlockerShield labelled activated={protectionMenuActivated} />
-                  <ExtensionActions />
-                  <ManageExtensions />
+                  {#snippet children(open)}
+                    {#snippet siteHead(name: string | null, control?: Snippet)}
+                      <SiteHead {page} label={name}>{@render control?.()}</SiteHead>
+                    {/snippet}
+                    <BlockerShield {open} head={page ? siteHead : undefined} />
+                    <ExtensionsSection />
+                    <SiteDetails {page} {open} />
+                  {/snippet}
                 </UtilityTray>
               {/snippet}
             </AddressField>
+            <!-- Work floats its page over the whole window, sidebar included. -->
+            {#if !inWork}<SidebarPagePermission />{/if}
 
             <HidingBar />
             {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
                 {m.choose_split()}
               </p>{/if}
-            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab}>
+              {#snippet extras()}<PinnedExtensions />{/snippet}
+            </SidebarBody>
             <!-- Brief notices and downloads sit at the foot of the column, by the dock. -->
             <SidebarNotice />
             {#if tabs.profile()?.id}<DownloadStatus
@@ -355,17 +408,19 @@
                 onopen={() => toolHost.open("downloads")}
               />{/if}
             <UpdateNotice view="cards" />
+            <PrivateReturn />
+            {@render player(false)}
           {/if}
         </div>{/key}
     {/snippet}{#snippet dock(
       compact,
     )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
             name={tabs.profile()?.name ?? ""}
-          />{/await}{/snippet}{#if compact && incognito}<PrivateBar
+          />{/await}{/snippet}{#if compact && incognito}{@render player(true)}<PrivateBar
           compact
-        />{:else if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
+        />{:else if compact}{@render player(true)}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
-          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock
+          />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
@@ -464,10 +519,10 @@
             >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
           >{/if}
       </main>
-    {:else if tabs.activeTab()?.failure && !tabs.activeTab()?.url && !tabs.activeTab()?.loading && browserPage.currentPage() === null}
+    {:else if tabs.activeTab() && failedPane(tabs.activeTab()!) && browserPage.currentPage() === null}
       {@const failedTab = tabs.activeTab()}
       {@const failure = failedTab?.failure}
-      <!-- A first load that failed: the pane says why instead of a blank new tab. -->
+      <!-- A page that could not be shown: the pane says why instead of staying blank. -->
       <main class="min-w-0 flex-1 ps-2">
         <div class="content-pane h-full w-full overflow-hidden">
           {#if failedTab && failure}<LazyView
@@ -582,6 +637,16 @@
                   retryLabel={m.surface_retry()}
                   >{#snippet children(View)}<View />{/snippet}</LazyView
                 >
+              {:else if browserPage.currentPage() === "source"}
+                {#key tabs.activeId()}<LazyView
+                    loader={loadSourcePage}
+                    loadingLabel={m.surface_loading()}
+                    failureLabel={m.surface_render_failed()}
+                    retryLabel={m.surface_retry()}
+                    >{#snippet children(View)}<View
+                        tab={tabs.activeId() ?? ""}
+                      />{/snippet}</LazyView
+                  >{/key}
               {:else}
                 <LazyView
                   loader={loadLibraryPage}
@@ -596,6 +661,7 @@
     {/if}
   </div>
 </div>
+{#if ClearSiteData}<ClearSiteData />{/if}
 
 <style>
   .stage-column {

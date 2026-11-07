@@ -12,6 +12,7 @@ export function accountFixture(overrides: Partial<AccountV1> = {}): AccountV1 {
     signup_open: true,
     update_required: false,
     signed_in: false,
+    vault_fault: false,
     pending_email: null,
     resend_in: null,
     email: null,

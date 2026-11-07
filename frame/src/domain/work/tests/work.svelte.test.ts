@@ -190,17 +190,27 @@ test("a read of the revision already shown keeps the projection it has", async (
   session.dispose();
 });
 
-test("a home session with unsent words in its composer cannot be evicted", async () => {
+test("a close waits only for a Work save that has not landed, never for an edit on its way", async () => {
   const { WorkSession } = await import("../work.svelte");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => reads(call));
   const session = new WorkSession(profile);
   await session.start();
   await session.open(work);
-  session.composer = "Keep these words";
-  session.back();
-  expect(session.canRelease).toBe(false);
-  session.composer = "";
-  expect(session.canRelease).toBe(true);
+  expect(await native.close?.()).toBe(true);
+  session.pending = {
+    kind: "author",
+    command: {
+      version: 1,
+      command: "00000000000000000000000008",
+      intent: { kind: "create", objective: "Unsaved objective" },
+    },
+  };
+  native.call.mockImplementation(() => ({
+    version: 1,
+    profile,
+    reply: { kind: "error", error: "outcome_unknown" },
+  }));
+  expect(await native.close?.()).toBe(false);
   session.dispose();
 });
 

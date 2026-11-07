@@ -47,3 +47,40 @@ test("altered patch bytes are rejected before package code executes", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test("new moderate advisories confined to development warn without breaking main", () => {
+  for (const id of ["GHSA-qxg6-89mg-rqv8", "GHSA-xp26-3454-mjgp", "GHSA-new-upstream"]) {
+    const audit = report({ severity: "moderate", github_advisory_id: id, module_name: "@vitest/mocker" });
+    audit.metadata.vulnerabilities = { high: 0, critical: 0, moderate: 1 };
+    const warnings = [];
+    assert.equal(inspect(audit, undefined, (message) => warnings.push(message)), 0);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], new RegExp(id));
+    assert.match(warnings[0], /moderate advisory.*review/i);
+  }
+});
+
+test("all moderate runtime, mixed or unclassified findings warn for review", () => {
+  for (const findings of [
+    [{ dev: false, paths: ["frame>runtime"] }],
+    [{ dev: true, paths: ["frame>tool"] }, { dev: false, paths: ["desktop>runtime"] }],
+    [{ paths: ["frame>unknown"] }], [], [{ dev: true, paths: [] }],
+  ]) {
+    const audit = report({ severity: "moderate", github_advisory_id: "GHSA-new", findings });
+    audit.metadata.vulnerabilities = { moderate: 1 };
+    const warnings = [];
+    assert.equal(inspect(audit, undefined, (message) => warnings.push(message)), 0);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /moderate advisory.*review/i);
+    assert.match(warnings[0], /GHSA-new/);
+  }
+});
+
+test("high and critical advisories remain blocking even for development tooling", () => {
+  for (const severity of ["high", "critical"]) {
+    const audit = report({ severity, github_advisory_id: "GHSA-new" });
+    audit.metadata.vulnerabilities = { [severity]: 1 };
+    assert.throws(() => inspect(audit), /Unresolved security advisories/);
+  }
+});

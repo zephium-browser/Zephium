@@ -590,6 +590,14 @@ pub struct CallbackHandle {
 }
 
 impl CallbackHandle {
+    /// A background producer may stop preparing work after shutdown seals ingress.
+    /// This observation does not reserve admission; dispatch remains authoritative.
+    pub fn is_accepting_commands(&self) -> bool {
+        self.queue
+            .upgrade()
+            .is_some_and(|inner| (CommandQueue { inner }).is_accepting_commands())
+    }
+
     /// Sticky retained state is polled after every Shell command. A full queue
     /// already owns that progress; a sealed queue owns the shutdown barrier,
     /// which waits on the original resource notification epoch instead. Only
@@ -960,6 +968,23 @@ impl Handle {
         }
         receiver
     }
+    pub fn site_permissions(
+        &self,
+        origin: Option<zephium_core::permissions::PageOrigin>,
+    ) -> std::sync::mpsc::Receiver<Option<zephium_ipc::SitePermissionsView>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::SitePermissions { origin, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
     pub fn focused_content_policy_status(&self) -> FocusedContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::FocusedContentPolicyStatus { reply };
@@ -1219,6 +1244,9 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::BlockerStatistics { reply, .. } => {
             let _ = reply.try_send(None);
         }
+        Command::SitePermissions { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
         }
@@ -1260,8 +1288,13 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::Navigate { .. }
             | Command::Reload(_)
             | Command::AnswerPageRequest { .. }
+            | Command::AnswerHttpAuth { .. }
+            | Command::ContinuePastCertificate(_)
+            | Command::ContinuePastBlock { .. }
+            | Command::LeaveBlockedPage(_)
             | Command::GoBack(_)
             | Command::GoForward(_)
+            | Command::GoToHistoryEntry { .. }
             | Command::SplitWith { .. }
             | Command::Unsplit
             | Command::LeaveSplit(_)
@@ -1273,7 +1306,10 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
             | Command::RespondToPagePermissionPrompt { .. }
+            | Command::SetSitePermission { .. }
             | Command::StopMediaCapture { .. }
+            | Command::SetTabMuted { .. }
+            | Command::MediaPlayer { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::Focus(_)
@@ -1612,6 +1648,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                     )),
                     Err(TryPushError::Closed(_)) => break,
                 },
+                TimerWake::Audio => match timer_queue.try_push(Command::AudioWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_audio(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    ),
+                    Err(TryPushError::Closed(_)) => break,
+                },
                 TimerWake::Persist => match timer_queue.try_push(Command::Persist) {
                     Ok(()) | Err(TryPushError::Sealed(_)) => {}
                     Err(TryPushError::Full(_)) => timer_queue.schedule_persist(
@@ -1691,6 +1734,18 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Ok(()) | Err(TryPushError::Sealed(_)) => {}
                         Err(TryPushError::Full(_)) => timer_queue
                             .schedule_blocker_preference_reconciliation(
+                                profile,
+                                token,
+                                std::time::Instant::now() + std::time::Duration::from_millis(25),
+                            ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
+                TimerWake::BlockerStartup { profile, token } => {
+                    match timer_queue.try_push(Command::BlockerStartupDeadline { profile, token }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue
+                            .schedule_blocker_startup_deadline(
                                 profile,
                                 token,
                                 std::time::Instant::now() + std::time::Duration::from_millis(25),

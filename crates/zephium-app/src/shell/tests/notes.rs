@@ -14,9 +14,10 @@ impl zephium_core::ports::notes::Notes for FakeNotes {
         done(NoteResponse::Done);
     }
 
-    fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) {
+    fn release(&self, profile: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
         self.released.lock().unwrap().push(profile);
         done();
+        true
     }
 }
 

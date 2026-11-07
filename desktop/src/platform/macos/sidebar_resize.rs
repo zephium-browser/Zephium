@@ -1,5 +1,6 @@
 //! Native pointer feedback for the Svelte sidebar. Only release changes layout.
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,10 +10,9 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidResignKeyNotification,
-    NSWindowDidResizeNotification, NSWindowOrderingMode, NSWindowWillCloseNotification,
-    NSWorkspace,
+    NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowDidResignKeyNotification, NSWindowDidResizeNotification,
+    NSWindowOrderingMode, NSWindowWillCloseNotification, NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSNotification, NSNotificationCenter, NSNumber, NSObjectProtocol,
@@ -38,6 +38,8 @@ const HOT_WIDTH: f64 = 8.0;
 /// edge is this far in from the chrome's own.
 const GUTTER: f64 = 8.0;
 const HOT_INSET: f64 = 2.0;
+/// The guide's width, a split guide's.
+const GUIDE_WIDTH: f64 = 4.0;
 const SNAP: f64 = 140.0;
 const MIN_EXPANDED: f64 = 180.0;
 
@@ -282,12 +284,14 @@ impl Control {
         } else {
             28.0_f64.min(frame.size.height)
         };
+        // Centred in the gap between the column and the page, as a split's
+        // guide is centred in the strip between its panes.
         let target = NSRect::new(
             NSPoint::new(
-                frame.origin.x + GUTTER + width - 2.0,
+                frame.origin.x + GUTTER + width + GUTTER / 2.0 - GUIDE_WIDTH / 2.0,
                 frame.origin.y + (frame.size.height - height) / 2.0,
             ),
-            NSSize::new(2.0, height),
+            NSSize::new(GUIDE_WIDTH, height),
         );
         let existing = self
             .ivars()
@@ -325,18 +329,19 @@ impl Control {
         CATransaction::setDisableActions(true);
         view.setFrame(target);
         if let Some(layer) = view.layer() {
-            let paint = block2::RcBlock::new(|| {
-                let color = if dragging {
-                    NSColor::labelColor()
-                } else {
-                    NSColor::secondaryLabelColor()
-                };
-                layer.setBackgroundColor(Some(&color.CGColor()));
-            });
-            self.effectiveAppearance()
-                .performAsCurrentDrawingAppearance(&paint);
-            layer.setCornerRadius(1.0);
-            layer.setOpacity(if dragging { 0.9 } else { 0.65 });
+            // A neutral grey with a fine dark edge and a soft shadow, as a
+            // split's guide is: it reads on a white page and a black one,
+            // which the label colour alone never did.
+            let tone = if dragging { 0.78 } else { 0.7 };
+            layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(tone, 1.0).CGColor()));
+            layer.setBorderColor(Some(&NSColor::colorWithWhite_alpha(0.0, 0.22).CGColor()));
+            layer.setBorderWidth(0.5);
+            layer.setShadowColor(Some(&NSColor::blackColor().CGColor()));
+            layer.setShadowOpacity(0.3);
+            layer.setShadowRadius(2.0);
+            layer.setShadowOffset(NSSize::new(0.0, 0.0));
+            layer.setCornerRadius(2.0);
+            layer.setOpacity(if dragging { 1.0 } else { 0.85 });
         }
         CATransaction::commit();
         if !self.guide_current(&view, generation) {
@@ -579,6 +584,7 @@ pub(super) fn configure(
     control.ivars().enabled.set(enabled);
     control.ivars().revision.set(revision);
     control.place();
+    keep_over_chrome(&control, chrome);
     let current =
         configuration_current(epoch, generation, revision) && registered(&control, generation);
     let installed = current && enabled && !control.isHidden() && control.window().is_some();
@@ -588,6 +594,54 @@ pub(super) fn configure(
         control.setHidden(true);
     }
     installed
+}
+/// Keeps `control` just over the chrome. Peeking a hidden sidebar stacks the
+/// chrome over the pages, and so over this control too, which then never saw
+/// a press while the frame's own handle stood aside for it.
+fn keep_over_chrome(control: &NSView, chrome: &NSView) {
+    // SAFETY: native parent access is confined to the main thread.
+    let Some(parent) = (unsafe { chrome.superview() }) else {
+        return;
+    };
+    let mut order: Vec<Retained<NSView>> = parent.subviews().to_vec();
+    let rank = |order: &[Retained<NSView>], view: &NSView| {
+        order
+            .iter()
+            .position(|candidate| std::ptr::eq(&**candidate, view))
+    };
+    let (Some(beneath), Some(at)) = (rank(&order, chrome), rank(&order, control)) else {
+        return;
+    };
+    if at > beneath {
+        return;
+    }
+    let moved = order.remove(at);
+    let beneath = rank(&order, chrome).unwrap_or(order.len());
+    order.insert(beneath + 1, moved);
+    let ranks: HashMap<usize, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(rank, view)| (std::ptr::from_ref(&**view).addr(), rank))
+        .collect();
+    unsafe extern "C-unwind" fn by_rank(
+        a: NonNull<NSView>,
+        b: NonNull<NSView>,
+        ranks: *mut std::ffi::c_void,
+    ) -> objc2_foundation::NSComparisonResult {
+        // SAFETY: `ranks` is the map below, alive for the whole sort.
+        let ranks = unsafe { &*(ranks as *const HashMap<usize, usize>) };
+        let rank = |view: NonNull<NSView>| ranks.get(&view.addr().get()).copied();
+        rank(a).cmp(&rank(b)).into()
+    }
+    // SAFETY: the comparator reads only `ranks`, which outlives the call;
+    // AppKit sorts the subviews array in place, without taking any view out
+    // of the window.
+    unsafe {
+        parent.sortSubviewsUsingFunction_context(
+            by_rank,
+            std::ptr::from_ref(&ranks) as *mut std::ffi::c_void,
+        );
+    }
 }
 fn disable() {
     let control = CONTROL.with(|slot| {

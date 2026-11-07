@@ -39,7 +39,7 @@
   <div class="dock-base">
     {#if tools && !compact}<ToolShelf />
       <span class="dock-rule" aria-hidden="true"></span>{/if}
-    {#if sites}<div class="dock-sites-slot" data-under-panel={compact || undefined}>
+    {#if sites}<div class="dock-sites-slot">
         {@render sites()}
       </div>{/if}
     {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
@@ -112,7 +112,10 @@
     height: 1px;
   }
 
+  /* The kept sites are a step of the rail themselves, so with none the rule
+     stands one gap below what is above the dock, as the profile stands one
+     below the rule. */
   .dock[data-compact="true"] .dock-sites-slot {
-    flex: none;
+    display: contents;
   }
 </style>

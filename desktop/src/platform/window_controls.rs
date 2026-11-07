@@ -34,7 +34,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSInsetRect, NSNotification, NSNotificationCenter,
-    NSNumber, NSObject, NSObjectProtocol, NSPoint, NSPointInRect, NSRect, NSUnionRect,
+    NSNumber, NSObject, NSObjectProtocol, NSPoint, NSPointInRect, NSProcessInfo, NSRect,
+    NSUnionRect,
 };
 use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CAMediaTimingFunction, CATransaction};
 use tauri::WebviewWindow;
@@ -51,6 +52,10 @@ const REST_SECONDS: f64 = 0.24;
 /// sixth over a dark ground. On a light ground the same step is taken in ink.
 const REST_DARK: (f64, f64) = (1.0, 0.17);
 const REST_LIGHT: (f64, f64) = (0.0, 0.13);
+
+/// Before macOS 26 a control's frame is 14 by 16 points with a 12 point disc
+/// centred in it; filling the frame would rest as a larger, taller oval.
+const LEGACY_DISC: f64 = 12.0;
 
 pub struct Ivars {
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
@@ -100,7 +105,7 @@ define_class!(
             let (white, alpha) = if self.is_dark() { REST_DARK } else { REST_LIGHT };
             NSColor::colorWithWhite_alpha(white, alpha).setFill();
             for rect in self.control_rects() {
-                NSBezierPath::bezierPathWithOvalInRect(rect).fill();
+                NSBezierPath::bezierPathWithOvalInRect(disc(rect)).fill();
             }
         }
 
@@ -344,6 +349,39 @@ impl WindowControls {
     }
 }
 
+/// Whether this is macOS 26 or later, whose titlebar lays the controls out
+/// differently from the releases before it.
+fn redesigned_titlebar() -> bool {
+    NSProcessInfo::processInfo()
+        .operatingSystemVersion()
+        .majorVersion
+        >= 26
+}
+
+/// How much lower than the configured position the controls are put. The
+/// configured one is measured on the releases before macOS 26; from 26 the
+/// same inset lays them out 3pt higher in the titlebar, above the head they
+/// line up with.
+pub fn inset_lift() -> f64 {
+    if redesigned_titlebar() {
+        3.0
+    } else {
+        0.0
+    }
+}
+
+/// The disc a control draws within its frame.
+fn disc(frame: NSRect) -> NSRect {
+    if redesigned_titlebar() {
+        return frame;
+    }
+    NSInsetRect(
+        frame,
+        (frame.size.width - LEGACY_DISC) / 2.0,
+        (frame.size.height - LEGACY_DISC) / 2.0,
+    )
+}
+
 /// Moves a view's layer to `opacity`, continuing from wherever an unfinished
 /// fade has got to so a pointer crossing back mid-fade never jumps.
 fn fade(view: &NSView, opacity: f32, duration: f64) {
@@ -417,5 +455,134 @@ pub fn install(window: &WebviewWindow) {
         controls.suspend(true);
     } else {
         controls.settle();
+    }
+}
+
+/// Puts the controls away while the sidebar is hidden, which leaves the page
+/// under the corner they rest in: invisible buttons there would still take
+/// its clicks. They come back, at their inset, with the sidebar.
+pub fn set_tucked(window: &WebviewWindow, tucked: bool) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(pointer) = window.ns_window() else {
+        return;
+    };
+    // SAFETY: Tao's live NSWindow, borrowed for this main-thread call only.
+    let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let Some(close) = ns_window.standardWindowButton(NSWindowButton::CloseButton) else {
+        return;
+    };
+    // SAFETY: a main-thread read of the live close button's parent.
+    let Some(parent) = (unsafe { close.superview() }) else {
+        return;
+    };
+    let Some(controls) = parent
+        .subviews()
+        .iter()
+        .find_map(|view| view.downcast_ref::<WindowControls>().map(|c| c.retain()))
+    else {
+        return;
+    };
+    if controls.isHidden() == tucked {
+        return;
+    }
+    for button in controls.buttons() {
+        button.setHidden(tucked);
+    }
+    controls.setHidden(tucked);
+    if !tucked && !controls.ivars().suspended.get() {
+        controls.reinset();
+        controls.resync(false);
+        // They come in with the card rather than ahead of it; they leave at
+        // once, so a pointer that has moved on is not left with them.
+        if let Some(layer) = controls.layer() {
+            if !NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion() {
+                let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+                // SAFETY: opacity animates between NSNumber values.
+                unsafe {
+                    fade.setFromValue(Some(&NSNumber::new_f64(0.0)));
+                    fade.setToValue(Some(&NSNumber::new_f64(1.0)));
+                }
+                fade.setDuration(TUCK_SECONDS);
+                fade.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(
+                    0.2, 0.0, 0.0, 1.0,
+                )));
+                layer.addAnimation_forKey(&fade, Some(ns_string!("zephium.controls.untuck")));
+            }
+        }
+    }
+}
+
+const TUCK_SECONDS: f64 = 0.22;
+
+/// How far a hidden sidebar's card stands in from the window's side, and so
+/// how far its controls move in with it to keep their place in its head. Its
+/// head keeps the window's own height, so they stay at theirs.
+const CARD_INSET: f64 = 8.0;
+
+/// Moves the controls into the hidden sidebar's card, or back to their own
+/// inset. Tao re-insets them from the content view's draw, which is how they
+/// go back; until it draws, they keep the card's place.
+pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Ok(pointer) = window.ns_window() else {
+        return;
+    };
+    // SAFETY: Tao's live NSWindow, borrowed for this main-thread call only.
+    let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let buttons: Vec<_> = [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ]
+    .into_iter()
+    .filter_map(|kind| ns_window.standardWindowButton(kind))
+    .collect();
+    let Some(close) = buttons.first() else {
+        return;
+    };
+    // SAFETY: main-thread reads of the live close button's ancestors.
+    let Some(parent) = (unsafe { close.superview() }) else {
+        return;
+    };
+    let Some(container) = (unsafe { parent.superview() }) else {
+        return;
+    };
+    let controls = parent
+        .subviews()
+        .iter()
+        .find_map(|view| view.downcast_ref::<WindowControls>().map(|c| c.retain()));
+    // From Tao's own inset each time, so asking twice moves them once.
+    if let Some(controls) = controls.as_ref() {
+        controls.reinset();
+        controls.setNeedsDisplay(true);
+    }
+    if !in_card {
+        return;
+    }
+    // Tao's inset puts the first button at its x and grows the titlebar to
+    // the button's height plus its y; the card's place is that, moved over.
+    let x = close.frame().origin.x + CARD_INSET;
+    let y = container.frame().size.height - close.frame().size.height;
+    let height = close.frame().size.height + y;
+    let mut bar = container.frame();
+    bar.size.height = height;
+    bar.origin.y = ns_window.frame().size.height - height;
+    container.setFrame(bar);
+    let space = buttons
+        .get(1)
+        .map_or(20.0, |next| next.frame().origin.x - close.frame().origin.x);
+    for (index, button) in buttons.iter().enumerate() {
+        let mut origin = button.frame().origin;
+        origin.x = x + index as f64 * space;
+        button.setFrameOrigin(origin);
+    }
+    if let Some(controls) = controls {
+        controls.setNeedsDisplay(true);
+        // SAFETY: the view re-reads its buttons' rects for its hover area.
+        let _: () = unsafe { msg_send![&*controls, updateTrackingAreas] };
     }
 }

@@ -166,7 +166,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     require(&read("crates/zephium-app/src/work.rs")?, &[
         "self.controller.profile_storage_binding()? != (binding.profile(), binding.storage_class())",
         "profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))",
-        "if !profile_valid { self.stopping = true; self.fail(AgentWorkFailure::Contract); self.abort_staged(); }",
+        "if !profile_valid { self.stopping = true; self.fail(crate::contract_failure!()); self.abort_staged(); }",
     ])?;
     require(&read("crates/zephium-app/src/shell/mod.rs")?, &[
         "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",

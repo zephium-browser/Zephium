@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
@@ -14,7 +14,10 @@ import Shell from "../Shell.svelte";
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -65,9 +68,8 @@ test("the column's document cannot scroll sideways in a column-wide view", async
   });
   render(Shell);
   await settle();
-  await userEvent.click(
-    document.querySelector<HTMLInputElement>("aside input[data-zephium-address]")!,
-  );
+  // Focused as the keyboard does: a click opens the launcher instead.
+  document.querySelector<HTMLInputElement>("aside input[data-zephium-address]")!.focus();
   await settle();
 
   const root = document.scrollingElement!;

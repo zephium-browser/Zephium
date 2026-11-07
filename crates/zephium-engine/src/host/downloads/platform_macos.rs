@@ -22,6 +22,23 @@ pub(super) type Timer = Retained<NSTimer>;
 pub(super) type SavePanel = Retained<NSSavePanel>;
 pub(super) type DirectoryPanel = Retained<NSOpenPanel>;
 pub(super) type DialogLease = PanelLease;
+/// What WebKit hands back to continue a stopped download.
+pub(super) type Resume = Retained<NSData>;
+/// Resume data is a small property list; anything bigger is not WebKit's.
+const MAX_RESUME_BYTES: usize = 64 * 1024;
+
+/// Failures a connection or a server can recover from. A refused
+/// credential, a bad certificate or a full disk would only fail again.
+fn resumable_cause(error: DownloadError) -> bool {
+    matches!(
+        error,
+        DownloadError::ConnectionLost
+            | DownloadError::Timeout
+            | DownloadError::Network
+            | DownloadError::Server
+            | DownloadError::Integrity
+    )
+}
 
 pub(super) fn progress(native: &Native) -> Option<(u64, Option<u64>)> {
     let progress = native.progress();
@@ -68,8 +85,21 @@ pub(super) struct Source {
     view: Retained<WKWebView>,
     window: Retained<NSWindow>,
     initial_open: bool,
+    /// An extension asked, from its popup if anywhere: the popup holds the
+    /// keyboard while the window it belongs to stays the main one.
+    extension: bool,
 }
 impl Source {
+    pub(super) fn in_front(&self) -> bool {
+        self.window.isKeyWindow() || (self.extension && self.window.isMainWindow())
+    }
+
+    /// The page that started the download is still the one in the view,
+    /// whether or not the person is looking at it.
+    pub(super) fn current(&self) -> bool {
+        self.permit.active_token().is_some() && self.navigation.matches_activity(self.activity)
+    }
+
     pub(super) fn live(&self) -> bool {
         self.permit.active_token().is_some()
             && (self.initial_open || self.surface_intent.load(Ordering::Acquire))
@@ -87,12 +117,170 @@ impl Source {
 }
 
 impl Downloads {
+    /// Continues a download WebKit stopped, from the data it gave back. The
+    /// continuing transfer is a new WKDownload on the same page; it is handed
+    /// the staging folder it was already writing in.
     pub(super) fn resume(
-        &self,
-        _partition: Partition,
-        _id: DownloadId,
+        self: &Rc<Self>,
+        partition: Partition,
+        id: DownloadId,
     ) -> Result<(), DownloadError> {
-        Err(DownloadError::Unsupported)
+        let (data, view) = {
+            let mut active = self.active.borrow_mut();
+            let transfer = active
+                .get_mut(&id)
+                .filter(|transfer| {
+                    transfer.partition == partition
+                        && transfer.record.state == DownloadState::Paused
+                        && !transfer.deadline.expired(Instant::now())
+                        && !transfer.cancelling
+                        && !transfer.resuming
+                        && transfer.destination.is_some()
+                })
+                .ok_or(DownloadError::Invalid)?;
+            let data = transfer.resume.clone().ok_or(DownloadError::Unavailable)?;
+            // The page the download started from is its only way back in;
+            // when it is gone, so is the chance to continue.
+            let view = unsafe { transfer.native.webView() }.ok_or(DownloadError::Unavailable)?;
+            transfer.resuming = true;
+            (data, view)
+        };
+        let weak = Rc::downgrade(self);
+        let started = RcBlock::new(move |download: std::ptr::NonNull<WKDownload>| {
+            let Some(manager) = weak.upgrade() else {
+                return;
+            };
+            // SAFETY: WebKit passes the new, retained WKDownload.
+            let download = unsafe { Retained::retain(download.as_ptr()) };
+            manager.resumed(id, download);
+        });
+        unsafe { view.resumeDownloadFromResumeData_completionHandler(&data, &started) };
+        Ok(())
+    }
+
+    /// The continuing WKDownload exists: it takes over the transfer.
+    fn resumed(self: &Rc<Self>, id: DownloadId, download: Option<Retained<WKDownload>>) {
+        let mtm = MainThreadMarker::new();
+        let profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active.get_mut(&id).filter(|transfer| transfer.resuming) else {
+                if let Some(download) = download {
+                    unsafe { download.cancel(None) };
+                }
+                return;
+            };
+            let (Some(download), Some(mtm)) = (download, mtm) else {
+                transfer.resuming = false;
+                return;
+            };
+            let delegate = DownloadDelegate::new(mtm, Rc::downgrade(self), id);
+            unsafe { download.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+            transfer.native = download;
+            transfer._delegate = delegate;
+            transfer.resume = None;
+            transfer.record.state = DownloadState::Receiving;
+            transfer.record.error = None;
+            transfer.record.revision += 1;
+            transfer.partition.profile()
+        };
+        self.ensure_timer();
+        self.changed(profile);
+    }
+
+    /// The person paused a download. WebKit has no pause: stopping it hands
+    /// back the data to continue from, which is what a pause keeps.
+    pub(super) fn user_pause(
+        self: &Rc<Self>,
+        partition: Partition,
+        id: DownloadId,
+    ) -> Result<(), DownloadError> {
+        let native = {
+            let mut active = self.active.borrow_mut();
+            let transfer = active
+                .get_mut(&id)
+                .filter(|transfer| {
+                    transfer.partition == partition
+                        && may_pause(
+                            transfer.record.state,
+                            transfer.cancelling,
+                            transfer.user_pausing,
+                            transfer.persisting_terminal,
+                            transfer.destination.is_some(),
+                        )
+                })
+                .ok_or(DownloadError::Invalid)?;
+            transfer.user_pausing = true;
+            transfer.native.clone()
+        };
+        let weak = Rc::downgrade(self);
+        let stopped = RcBlock::new(move |data: *mut NSData| {
+            if let Some(manager) = weak.upgrade() {
+                // SAFETY: WebKit passes an autoreleased NSData or null.
+                manager.paused(id, unsafe { Retained::retain(data) });
+            }
+        });
+        unsafe { native.cancel(Some(&stopped)) };
+        Ok(())
+    }
+
+    /// A pause the person asked for has stopped the transfer. Without data to
+    /// continue from there is nothing to keep, and it ends here.
+    fn paused(&self, id: DownloadId, data: Option<Retained<NSData>>) {
+        let data = data.filter(|data| data.len() <= MAX_RESUME_BYTES);
+        let profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active
+                .get_mut(&id)
+                .filter(|transfer| transfer.user_pausing && !transfer.persisting_terminal)
+            else {
+                return;
+            };
+            transfer.user_pausing = false;
+            let Some(data) = data.filter(|_| !transfer.cancelling) else {
+                drop(active);
+                self.terminal(id, DownloadState::Failed, Some(DownloadError::Unavailable));
+                return;
+            };
+            transfer.resume = Some(data);
+            transfer.record.state = DownloadState::Paused;
+            transfer.record.error = None;
+            transfer.deadline = DecisionDeadline::new(DecisionPhase::UserPaused, Instant::now());
+            transfer.record.revision += 1;
+            transfer.partition.profile()
+        };
+        self.persist(id);
+        self.changed(profile);
+    }
+
+    /// WebKit stopped a transfer and kept what it needs to continue. A
+    /// failure a connection can recover from becomes a pause the person can
+    /// resume, as on Windows; any other ends the transfer.
+    fn interrupted(&self, id: DownloadId, error: DownloadError, data: Retained<NSData>) -> bool {
+        if !resumable_cause(error) || data.len() > MAX_RESUME_BYTES {
+            return false;
+        }
+        let profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active.get_mut(&id).filter(|transfer| {
+                transfer.record.state == DownloadState::Receiving
+                    && !transfer.cancelling
+                    && !transfer.user_pausing
+                    && !transfer.persisting_terminal
+                    && transfer.destination.is_some()
+            }) else {
+                return false;
+            };
+            transfer.resume = Some(data);
+            transfer.record.state = DownloadState::Paused;
+            transfer.record.error = Some(error);
+            transfer.deadline =
+                DecisionDeadline::new(DecisionPhase::ResumableInterruption, Instant::now());
+            transfer.record.revision += 1;
+            transfer.partition.profile()
+        };
+        self.persist(id);
+        self.changed(profile);
+        true
     }
     pub(super) fn ensure_timer(self: &Rc<Self>) {
         let (period, slow) = self.tick_period();
@@ -129,9 +317,10 @@ impl Downloads {
         permit: EventPermit,
         surface_intent: Arc<AtomicBool>,
         navigation: NavigationEpochTracker,
-        native: &WKDownload,
+        request: (&WKDownload, Option<super::SiteAsk>),
         mut initial: Option<InitialDownload>,
-    ) {
+    ) -> Option<DownloadId> {
+        let (native, ask) = request;
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
             || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
@@ -141,7 +330,7 @@ impl Downloads {
             || (initial.is_none() && !surface_intent.load(Ordering::Acquire))
         {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
         let request_url = unsafe { native.originalRequest().and_then(|request| request.URL()) };
         let scheme = request_url
@@ -160,11 +349,11 @@ impl Downloads {
         };
         if network_url.is_none() && !matches!(scheme.as_deref(), Some("blob" | "data")) {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
         let Some(view) = (unsafe { native.webView() }) else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let initial_open = initial.is_some();
         let Some(window) = initial
@@ -173,11 +362,11 @@ impl Downloads {
             .or_else(|| view.window())
         else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let Some(activity) = navigation.activity_snapshot() else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let source = Source {
             navigation,
@@ -187,11 +376,24 @@ impl Downloads {
             view,
             window,
             initial_open,
+            extension: self.extension_admission.get(),
         };
-        if !source.live() || !source.window.isKeyWindow() {
+        if !source.live() || !source.in_front() {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         }
+        // WebKit's word that nobody clicked. A new tab a click opened counts
+        // as that click; one an allowed site opened by itself does not.
+        // Before macOS 15.2 WebKit cannot say, and the save sheet below still
+        // asks about every such download.
+        let clicked = (initial_open && ask.as_ref().is_some_and(|ask| ask.opened_by_click))
+            || unsafe {
+                !native.respondsToSelector(objc2::sel!(isUserInitiated)) || native.isUserInitiated()
+            };
+        let subframe = unsafe {
+            native.respondsToSelector(objc2::sel!(originatingFrame))
+                && !native.originatingFrame().isMainFrame()
+        };
         let origin = unsafe {
             if native.respondsToSelector(objc2::sel!(originatingFrame)) {
                 let native_origin = native.originatingFrame().securityOrigin();
@@ -226,11 +428,30 @@ impl Downloads {
         });
         let Some(origin) = origin else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
+        };
+        // A frame from another site that nobody clicked in, such as an ad,
+        // may not download at all.
+        if subframe
+            && !clicked
+            && ask
+                .as_ref()
+                .is_some_and(|ask| ask.site.as_ref().is_none_or(|site| *site != origin))
+        {
+            unsafe { native.cancel(None) };
+            return None;
+        }
+        let site = match self.site_admission(partition.profile(), ask, &origin, clicked) {
+            super::site::SiteAdmission::Refuse => {
+                unsafe { native.cancel(None) };
+                return None;
+            }
+            super::site::SiteAdmission::Open => None,
+            super::site::SiteAdmission::Hold(hold) => Some(hold),
         };
         let Some(mtm) = MainThreadMarker::new() else {
             unsafe { native.cancel(None) };
-            return;
+            return None;
         };
         let id = DownloadId::generate();
         let delegate = DownloadDelegate::new(mtm, Rc::downgrade(self), id);
@@ -254,6 +475,7 @@ impl Downloads {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         self.active.borrow_mut().insert(
             id,
@@ -273,13 +495,61 @@ impl Downloads {
                 authorized: false,
                 cancelling: false,
                 persisting_terminal: false,
+                kept: false,
+                user_pausing: false,
+                name: None,
+                resume: None,
+                resuming: false,
+                site,
+                confirmed: false,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
         unsafe { native.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         self.ensure_recovery(partition);
         self.ensure_timer();
-        (self.notify)(partition.profile());
+        self.changed(partition.profile());
+        Some(id)
+    }
+
+    /// [`Self::admit`] for a download an extension asked for.
+    pub(in crate::host) fn admit_for_extension(
+        self: &Rc<Self>,
+        partition: Partition,
+        permit: EventPermit,
+        surface_intent: Arc<AtomicBool>,
+        navigation: NavigationEpochTracker,
+        native: &WKDownload,
+    ) -> Option<DownloadId> {
+        self.extension_admission.set(true);
+        let id = self.admit(
+            partition,
+            permit,
+            surface_intent,
+            navigation,
+            (native, None),
+            None,
+        );
+        self.extension_admission.set(false);
+        id
+    }
+
+    /// A download an extension started: named as it asked, and shown as
+    /// coming from the address it named rather than the page it ran in.
+    /// Generated data keeps the page as its context, as a page's would.
+    pub(in crate::host) fn extension_started(
+        &self,
+        id: DownloadId,
+        name: Option<String>,
+        origin: Option<PageOrigin>,
+    ) {
+        if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
+            transfer.name = name;
+            match origin {
+                Some(origin) => transfer.record.source = origin.as_str().into(),
+                None => transfer.record.source_is_context = true,
+            }
+        }
     }
     pub(super) fn destination(
         self: &Rc<Self>,
@@ -288,7 +558,35 @@ impl Downloads {
         suggested: &NSString,
         completion: &Block<dyn Fn(*mut NSURL)>,
     ) {
-        let name = bounded(suggested, 4096)
+        // A continuing download asks again where its file goes: back into the
+        // staging folder it was already writing in.
+        let continuing = self.active.borrow_mut().get_mut(&id).and_then(|transfer| {
+            if !transfer.resuming {
+                return None;
+            }
+            transfer.resuming = false;
+            transfer
+                .destination
+                .as_ref()
+                .filter(|_| !transfer.cancelling)
+                .map(|destination| destination.payload())
+        });
+        if let Some(path) = continuing {
+            let url = path
+                .to_str()
+                .map(|path| NSURL::fileURLWithPath(&NSString::from_str(path)));
+            completion.call((url
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |url| Retained::as_ptr(url).cast_mut()),));
+            return;
+        }
+        let asked = self
+            .active
+            .borrow()
+            .get(&id)
+            .and_then(|transfer| transfer.name.clone());
+        let name = asked
+            .or_else(|| bounded(suggested, 4096))
             .map(|value| safe_filename(&value))
             .unwrap_or_else(|| "download".into());
         let accepts = self.active.borrow().get(&id).is_some_and(|transfer| {
@@ -308,6 +606,15 @@ impl Downloads {
             };
             transfer.record.filename = name;
             transfer.record.total = u64::try_from(response.expectedContentLength()).ok();
+            // The response's own address, after every redirect. One that is
+            // missing, too long or unreadable is held as insecure.
+            transfer.record.insecure = is_insecure_response(
+                response
+                    .URL()
+                    .and_then(|url| url.absoluteString())
+                    .and_then(|url| bounded(&url, 8192))
+                    .as_deref(),
+            );
             let completion = completion.copy();
             transfer.destination_reply = Some(DestinationReply::new(move |path| {
                 let url = path.and_then(|path| {
@@ -320,10 +627,11 @@ impl Downloads {
             }));
             transfer.partition
         };
-        if let Some(preferences) = self.preferences.borrow().get(&partition.profile()).cloned() {
-            self.choose_destination(id, preferences);
+        let cached = self.preferences.borrow().get(&partition.profile()).cloned();
+        if let Some(preferences) = cached {
+            self.decide(id, preferences);
         } else if matches!(partition, Partition::Ephemeral(_)) {
-            self.choose_destination(id, DownloadPreferences::default());
+            self.decide(id, DownloadPreferences::default());
         } else {
             self.work.set(self.work.get() + 1);
             let sender = self.sender.clone();
@@ -352,20 +660,22 @@ impl Downloads {
                 transfer.source.as_ref().map(|source| {
                     (
                         source.live(),
+                        source.in_front(),
                         source.window.clone(),
                         transfer.record.filename.clone(),
                         transfer.record.source.clone(),
-                        unsafe {
-                            transfer
-                                .native
-                                .respondsToSelector(objc2::sel!(isUserInitiated))
-                                && transfer.native.isUserInitiated()
-                        },
+                        transfer.confirmed
+                            || unsafe {
+                                transfer
+                                    .native
+                                    .respondsToSelector(objc2::sel!(isUserInitiated))
+                                    && transfer.native.isUserInitiated()
+                            },
                     )
                 })
             })
         };
-        let Some((true, window, filename, source, user_initiated)) = context else {
+        let Some((true, in_front, window, filename, source, user_initiated)) = context else {
             self.cancel(id, None);
             return;
         };
@@ -389,7 +699,7 @@ impl Downloads {
             );
             return;
         }
-        if window.attachedSheet().is_some() || !window.isKeyWindow() {
+        if window.attachedSheet().is_some() || !in_front {
             self.cancel(id, Some(DownloadError::Capacity));
             return;
         }
@@ -410,9 +720,13 @@ impl Downloads {
             panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(&path))));
         }
         let live = self.active.borrow().get(&id).is_some_and(|transfer| {
-            !transfer.cancelling && transfer.source.as_ref().is_some_and(Source::live)
+            !transfer.cancelling
+                && transfer
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.live() && source.in_front())
         });
-        if !live || !window.isKeyWindow() || window.attachedSheet().is_some() {
+        if !live || window.attachedSheet().is_some() {
             self.cancel(id, Some(DownloadError::Unavailable));
             return;
         }
@@ -459,11 +773,21 @@ impl Downloads {
             {
                 return;
             }
+            // A held file is complete and a paused one has stopped: neither
+            // has a native operation left to answer a cancellation.
+            if matches!(
+                transfer.record.state,
+                DownloadState::Held | DownloadState::Paused
+            ) {
+                drop(active);
+                self.terminal(id, DownloadState::Cancelled, error);
+                return;
+            }
             transfer.cancelling = true;
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
-            (self.notify)(transfer.partition.profile());
+            self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
                 transfer.destination_reply.take(),
@@ -781,7 +1105,7 @@ define_class!(
             }
         }
         #[unsafe(method(download:didFailWithError:resumeData:))]
-        unsafe fn failed(&self, _download: &WKDownload, error: &NSError, _resume: Option<&NSData>) {
+        unsafe fn failed(&self, _download: &WKDownload, error: &NSError, resume: Option<&NSData>) {
             if let Some(manager) = self.ivars().manager.upgrade() {
                 let cause = download_error(error);
                 // Static domain classes and numeric codes only; never descriptions,
@@ -790,6 +1114,12 @@ define_class!(
                     "downloads: native failure cause={cause:?} codes={:?}",
                     native_error_codes(error)
                 );
+                // A failure WebKit can continue from waits to be resumed.
+                if resume.is_some_and(|data| {
+                    manager.interrupted(*self.ivars().id, cause, Retained::from(data))
+                }) {
+                    return;
+                }
                 manager.native_failed_with_error(*self.ivars().id, cause);
             }
         }
@@ -847,6 +1177,31 @@ impl DownloadDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_failures_a_retry_can_cure_are_kept_to_resume() {
+        for error in [
+            DownloadError::ConnectionLost,
+            DownloadError::Timeout,
+            DownloadError::Network,
+            DownloadError::Server,
+            DownloadError::Integrity,
+        ] {
+            assert!(resumable_cause(error), "{error:?}");
+        }
+        for error in [
+            DownloadError::Authentication,
+            DownloadError::Certificate,
+            DownloadError::DiskFull,
+            DownloadError::Permission,
+            DownloadError::Destination,
+            DownloadError::Cancelled,
+            DownloadError::Runtime,
+            DownloadError::Source,
+        ] {
+            assert!(!resumable_cause(error), "{error:?}");
+        }
+    }
+
     #[test]
     fn objc_delegate_ivars_fit_the_native_alignment_limit() {
         assert!(std::mem::align_of::<DelegateIvars>() <= std::mem::align_of::<usize>());

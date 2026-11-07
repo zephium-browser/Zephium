@@ -37,9 +37,12 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsForward: vi.fn(),
     tabsSplit: vi.fn(),
     tabsUnsplit: vi.fn(),
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: vi.fn(),
     tabDragOver: vi.fn(),
     tabDrop: vi.fn(),
+    tabMenuPopup: vi.fn(),
   });
 });
 vi.mock("$shared/ipc/native-events", () => ({
@@ -142,6 +145,30 @@ describe("Svelte tab state lifecycle", () => {
     expect(state.loneNewTab("fresh")).toBe(false);
     harness.listeners.items?.({ payload: snapshot(4, [empty, tab("page", 4)]) });
     expect(state.loneNewTab("fresh")).toBe(false);
+    state.dispose();
+  });
+
+  it("hands the address of the tab a menu was opened on to its command once", async () => {
+    const state = await import("../tabs.svelte");
+    await state.init();
+    expect(state.takeMenuTargetUrl()).toBeNull();
+
+    harness.listeners.items?.({
+      payload: {
+        projection_revision: revision(2),
+        profile: { id: "profile-a", name: "Personal", kind: "default" },
+        spaces: [spaceFixture("space-a", "Main")],
+        active_space_id: "space-a",
+        nodes: [],
+        tabs: [tab("a", 2), tab("b", 2)],
+        active: "a",
+        split_group: null,
+      },
+    });
+    state.openTabMenu("b", 10, 20);
+
+    expect(state.takeMenuTargetUrl()).toBe("https://b.example/");
+    expect(state.takeMenuTargetUrl()).toBeNull();
     state.dispose();
   });
 

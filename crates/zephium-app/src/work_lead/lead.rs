@@ -354,13 +354,14 @@ where
                         WorkModelError::MissingKey
                             | WorkModelError::Unauthorized
                             | WorkModelError::OverBudget
+                            | WorkModelError::PlanLimit
                             | WorkModelError::Hosted { .. }
                     );
                     if fatal {
                         return Ok(WorkAttemptStatus::Failed);
                     }
                     if failed_calls >= MAX_FAILED_CALLS {
-                        return self.close(Stall::Model).await;
+                        return self.close(Stall::Model(error)).await;
                     }
                     continue;
                 }
@@ -1523,7 +1524,9 @@ where
     /// the same budget again. `Some` ends the run.
     async fn budget(&self) -> Result<Option<WorkAttemptStatus>, WorkError> {
         let left = self.run.remaining();
-        if left.cost_micro_usd >= FLOOR_COST && left.model_tokens >= FLOOR_TOKENS {
+        if (self.run.grant.no_usage_charge || left.cost_micro_usd >= FLOOR_COST)
+            && left.model_tokens >= FLOOR_TOKENS
+        {
             return Ok(None);
         }
         let limits = self.run.limits();
@@ -1542,10 +1545,11 @@ where
                 .min(1024),
             ..limits
         };
-        let room = grown
-            .cost_micro_usd
-            .saturating_sub(self.run.used().cost_micro_usd)
-            >= FLOOR_COST
+        let room = (self.run.grant.no_usage_charge
+            || grown
+                .cost_micro_usd
+                .saturating_sub(self.run.used().cost_micro_usd)
+                >= FLOOR_COST)
             && grown
                 .model_tokens
                 .saturating_sub(self.run.used().model_tokens)
@@ -1559,7 +1563,11 @@ where
             .run
             .ask(
                 WorkAskPurposeV1::Budget,
-                format!("Used ${spent:.2}. Keep going?"),
+                if self.run.grant.no_usage_charge {
+                    "This run reached its token limit. Keep going?".into()
+                } else {
+                    format!("Used ${spent:.2}. Keep going?")
+                },
                 vec![KEEP_GOING.into(), "Stop".into()],
                 None,
             )
@@ -1659,6 +1667,12 @@ where
                 CallFailure::Refused(WorkModelError::Network) => "The model could not be reached",
                 CallFailure::Refused(WorkModelError::OverBudget) => {
                     "The model provider's account is out of credit; add credit there or choose another model in Settings → AI"
+                }
+                CallFailure::Refused(WorkModelError::PlanLimit) => {
+                    "One request is larger than the model provider's plan allows per minute; upgrade the plan there or choose another model in Settings → AI"
+                }
+                CallFailure::Refused(WorkModelError::BadRequest) => {
+                    "The model provider refused the request"
                 }
                 _ => "The model's turn could not be used",
             }
@@ -1805,8 +1819,8 @@ pub enum Stall {
     Budget,
     /// It took every turn one run holds.
     Turns,
-    /// The model stopped answering.
-    Model,
+    /// The model stopped answering, with its last refusal.
+    Model(WorkModelError),
     /// The compact recovery could not finish within one further call.
     OutputLimit,
 }
@@ -1848,7 +1862,7 @@ fn closing(
     sentences.push(
         match stall {
             Stall::Budget => "I reached this run's budget before I could finish.",
-            Stall::Model => "The model stopped answering before I could finish.",
+            Stall::Model(error) => model_stop(error),
             Stall::OutputLimit => {
                 "I could not finish the remaining details within the result's size limit."
             }
@@ -2077,6 +2091,25 @@ const STUB: &str = "[Used; dropped to keep the conversation small.";
 /// turn: large tool results the model has moved past are replaced together
 /// by a stub with their source keys, and past the hard budget the older
 /// results are shortened too. The canvas keeps everything.
+/// Why the model stopped, as the closing reply says it.
+fn model_stop(error: WorkModelError) -> &'static str {
+    match error {
+        WorkModelError::RateLimited { .. } => {
+            "The model provider kept limiting requests, so I stopped."
+        }
+        WorkModelError::Overloaded => "The model provider was overloaded and did not answer.",
+        WorkModelError::Network => "The model could not be reached.",
+        WorkModelError::ContextTooLong => {
+            "The work grew too large for the model to take in one turn."
+        }
+        WorkModelError::BadRequest => "The model provider refused the requests I sent it.",
+        WorkModelError::PlanLimit => {
+            "Each request is larger than the model provider's plan allows per minute."
+        }
+        _ => "The model stopped answering before I could finish.",
+    }
+}
+
 /// A refused model call in the words the person acts on.
 fn model_fault(error: WorkModelError, hosted: bool) -> Option<WorkModelFaultV1> {
     Some(match error {
@@ -2086,6 +2119,7 @@ fn model_fault(error: WorkModelError, hosted: bool) -> Option<WorkModelFaultV1> 
         WorkModelError::Unauthorized => WorkModelFaultV1::KeyRefused,
         WorkModelError::OverBudget if hosted => WorkModelFaultV1::HostedUsage,
         WorkModelError::OverBudget => WorkModelFaultV1::ProviderCredit,
+        WorkModelError::PlanLimit => WorkModelFaultV1::PlanLimit,
         WorkModelError::Hosted { refusal, .. } => match refusal {
             HostedRefusal::PlanRequired => WorkModelFaultV1::PlanRequired,
             HostedRefusal::BillingReview => WorkModelFaultV1::BillingReview,
@@ -2264,6 +2298,18 @@ mod compact_tests {
                 is_error: false,
             }]),
         ]
+    }
+
+    #[test]
+    fn a_model_stall_says_why_the_provider_refused() {
+        let (_, text) = closing(&[], &[], Stall::Model(WorkModelError::ContextTooLong));
+        assert!(text.contains("too large"), "{text}");
+        let (_, text) = closing(&[], &[], Stall::Model(WorkModelError::BadRequest));
+        assert!(text.contains("refused"), "{text}");
+        assert_eq!(
+            model_fault(WorkModelError::PlanLimit, false),
+            Some(WorkModelFaultV1::PlanLimit)
+        );
     }
 
     #[test]

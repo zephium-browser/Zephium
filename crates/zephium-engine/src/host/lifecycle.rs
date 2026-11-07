@@ -37,7 +37,7 @@ impl EngineHost {
             .any(|(id, partition)| partition.profile() == profile && self.views.contains_key(id))
     }
 
-    fn close_idle_spare(&mut self, profile: ProfileId) {
+    pub(super) fn close_idle_spare(&mut self, profile: ProfileId) {
         if self.has_live_profile_view(profile) {
             return;
         }
@@ -109,6 +109,7 @@ impl EngineHost {
             self.desired_dormant.remove(&id);
             self.suspending.remove(&id);
             self.suspend_failed.remove(&id);
+            self.suspend_retries.remove(&id);
             self.suspend_uncertain.remove(&id);
             self.styles_missed.remove(&id);
         }
@@ -277,6 +278,7 @@ impl EngineHost {
         self.desired_dormant.clear();
         self.suspending.clear();
         self.suspend_failed.clear();
+        self.suspend_retries.clear();
         self.suspend_uncertain.clear();
         (obligations, provenance_valid)
     }
@@ -341,6 +343,8 @@ impl EngineHost {
         self.stages.clear();
         #[cfg(target_os = "macos")]
         self.macos_ephemeral_data_stores.clear();
+        #[cfg(target_os = "macos")]
+        self.scriptlets.end_private();
         #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
         self.anonymous_work_stores.clear();
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
@@ -390,6 +394,23 @@ impl EngineHost {
             // the resulting state transition, so a retired id is a no-op.
             RendererCrashTarget::Retired => {}
         }
+    }
+
+    /// The person chose to reload a page that stopped responding. Closing
+    /// the controller is the documented way to release what powers one
+    /// WebView; a renderer still busy in a script never handles a reload.
+    /// The page then comes back through the crash path, in a fresh view.
+    pub(crate) fn end_unresponsive_page(&mut self, id: ItemId) {
+        let Some(token) = self
+            .views
+            .get(&id)
+            .and_then(|view| view.event_permit.active_token())
+        else {
+            return;
+        };
+        eprintln!("engine: ending a page that stopped responding");
+        self.close(id);
+        self.sink.emit_for(token, EngineEvent::Crashed { id });
     }
 
     #[cfg(target_os = "windows")]

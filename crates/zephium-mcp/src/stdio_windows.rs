@@ -115,64 +115,22 @@ fn suspended_thread(pid: u32) -> Result<OwnedHandle, McpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::StdioServer;
+    use super::super::tests::orphaned_descendant;
     use super::*;
     use ::windows::Win32::Foundation::WAIT_OBJECT_0;
     use ::windows::Win32::System::JobObjects::IsProcessInJob;
-    use ::windows::Win32::System::SystemInformation::GetSystemDirectoryW;
     use ::windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
-    use std::os::windows::ffi::OsStringExt;
-    use std::path::PathBuf;
-    use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[tokio::test]
     async fn dropping_server_ends_a_descendant_even_after_parent_exits() {
-        let mut system = vec![0; 32768];
-        let length = unsafe { GetSystemDirectoryW(Some(&mut system)) } as usize;
-        assert!(length > 0 && length < system.len());
-        let system = PathBuf::from(std::ffi::OsString::from_wide(&system[..length]));
-        let shell = system.join("WindowsPowerShell/v1.0/powershell.exe");
-        let script = format!(
-            "$p = [Diagnostics.ProcessStartInfo]::new('{}'); $p.UseShellExecute = $false; $p.CreateNoWindow = $true; $p.Arguments = '-NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 60\"'; $child = [Diagnostics.Process]::Start($p); [Console]::WriteLine($child.Id)",
-            shell.to_string_lossy().replace('\'', "''")
-        );
-        let server = StdioServer {
-            program: shell,
-            args: vec![
-                "-NoLogo".into(),
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-InputFormat".into(),
-                "Text".into(),
-                "-OutputFormat".into(),
-                "Text".into(),
-                "-Command".into(),
-                script,
-            ],
-            env: vec![
-                ("PATH".into(), system.to_string_lossy().into_owned()),
-                (
-                    "SystemRoot".into(),
-                    system.parent().unwrap().to_string_lossy().into_owned(),
-                ),
-            ],
-            cwd: None,
-        };
-        let (mut process, stdout, stdin) = server.spawn().unwrap();
-        let mut output = BufReader::new(stdout);
-        let mut pid = String::new();
-        tokio::time::timeout(Duration::from_secs(10), output.read_line(&mut pid))
-            .await
-            .unwrap()
-            .unwrap();
+        let (process, pid, _stdout) = orphaned_descendant().await;
         let descendant = unsafe {
             OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
                 false,
-                pid.trim().parse().unwrap(),
+                pid,
             )
         }
         .unwrap();
@@ -187,15 +145,10 @@ mod tests {
         }
         .unwrap();
         assert!(assigned.as_bool());
-        tokio::time::timeout(Duration::from_secs(10), process.child.wait())
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
             unsafe { WaitForSingleObject(handle(&descendant), 0) },
             WAIT_TIMEOUT
         );
-        drop(stdin);
         drop(process);
         assert_eq!(
             unsafe { WaitForSingleObject(handle(&descendant), 5000) },

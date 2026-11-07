@@ -3,7 +3,7 @@
 
 use url::Url;
 
-use crate::ids::{ItemId, ProfileId, SpaceId};
+use crate::ids::{ItemId, SpaceId};
 
 pub const MAX_PAGE_TITLE_CHARS: usize = 512;
 
@@ -68,6 +68,9 @@ pub enum Lifecycle {
 pub enum BrowserOwnedTab {
     Settings,
     Extensions,
+    /// The source of a page, shown read-only. Transient: it holds a document
+    /// the shell keeps in memory, so it is never saved with the session.
+    Source,
 }
 
 impl BrowserOwnedTab {
@@ -75,6 +78,7 @@ impl BrowserOwnedTab {
         match self {
             Self::Settings => "Settings",
             Self::Extensions => "Extensions",
+            Self::Source => "Page Source",
         }
     }
 }
@@ -95,12 +99,12 @@ pub enum SpaceSection {
     Today,
 }
 
-/// Where an item lives: the profile-wide favorites grid, or a section of a
+/// Where an item lives: a space's Essentials (`Favorites`), or a section of a
 /// space. Children of a folder share the folder's placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Placement {
     Favorites {
-        profile: ProfileId,
+        space: SpaceId,
     },
     Space {
         space: SpaceId,
@@ -117,6 +121,9 @@ pub struct TabState {
     /// Something the page asked for that waits on the person. Runtime only,
     /// and cleared when the tab commits another document.
     pub page_request: Option<Box<PageRequest>>,
+    /// Counts the requests set on this tab, so an answer names the one it
+    /// was shown.
+    pub page_request_serial: u32,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub zoom: f64,
@@ -132,6 +139,8 @@ pub struct TabState {
         crate::ports::engine::NavigationPresentationId,
         crate::ports::engine::MediaCaptureState,
     )>,
+    /// Sound and mute. Process-local: never restored or persisted.
+    pub audio: crate::audio::TabAudio,
     // Distinct from `url`: a restored/hibernated tab has a url but no live view.
     pub(crate) view: bool,
 }
@@ -140,16 +149,37 @@ pub struct TabState {
 pub enum PageRequest {
     /// A link for an application on this computer, and that application's
     /// name when the system knows one.
-    ExternalApp { url: Url, app: Option<String> },
+    ExternalApp {
+        url: Url,
+        app: Option<String>,
+        /// The site that asked, kept for an "always" answer and named on the
+        /// card.
+        site: Option<crate::permissions::PageOrigin>,
+    },
     /// A new tab the page tried to open that was not let through, with its
     /// address when it was an ordinary web page.
     Popup { url: Option<Url> },
+    /// The site or its proxy asks to sign in; the engine holds the request.
+    HttpAuth(crate::http_auth::HttpAuthPrompt),
+    /// The site wants to save a file; the engine holds the download.
+    Download(crate::permissions::DownloadPermissionPrompt),
+    /// AutoFill was asked for on a page that is not encrypted.
+    InsecureAutofill,
+    /// The page stopped responding; the person may wait or end it.
+    Unresponsive,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NavigationFailure {
     pub url: Url,
     pub reason: crate::ports::engine::NavigationFailureReason,
+    /// The engine replaced the page with an empty error document. The view
+    /// stays out of the layout, history intact, until another document
+    /// commits in it.
+    pub covers_page: bool,
+    /// A refused page the person may open anyway: only where the refusal is
+    /// Zephium's own check, which an allowance lifts.
+    pub can_continue: bool,
 }
 
 impl TabState {
@@ -160,6 +190,7 @@ impl TabState {
             url: None,
             loading: false,
             page_request: None,
+            page_request_serial: 0,
             can_go_back: false,
             can_go_forward: false,
             zoom: 1.0,
@@ -167,6 +198,7 @@ impl TabState {
             last_active_ms: None,
             failure: None,
             capture: None,
+            audio: crate::audio::TabAudio::default(),
             view: false,
         }
     }
@@ -189,6 +221,18 @@ impl TabState {
 
     pub fn has_view(&self) -> bool {
         self.view
+    }
+
+    /// Whether the native view is laid out: it lives and no failure covers
+    /// it.
+    pub fn shows_page(&self) -> bool {
+        self.view && !self.failure_covers_page()
+    }
+
+    pub fn failure_covers_page(&self) -> bool {
+        self.failure
+            .as_ref()
+            .is_some_and(|failure| failure.covers_page)
     }
 }
 

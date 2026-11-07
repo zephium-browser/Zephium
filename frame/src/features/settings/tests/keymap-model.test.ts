@@ -54,4 +54,40 @@ describe("keymap model", () => {
       ).map((section) => section.id),
     ).toEqual(["browser"]);
   });
+  it("files the new browser keys with their commands and hides keys a platform lacks", () => {
+    const keyed = (id: string, group: KeymapEntry["group"], accelerator: string | null) => ({
+      ...entry(id, group),
+      accelerator,
+      default_accelerator: accelerator,
+    });
+    const sections = keymapSections([
+      keyed("settings.clearData", "keys", "Ctrl+Shift+Delete"),
+      keyed("nav.reload", "view", "Ctrl+R"),
+      keyed("nav.reload.alt", "keys", "F5"),
+      keyed("nav.hardReload", "view", "Ctrl+Shift+R"),
+      keyed("window.fullscreen", "keys", "F11"),
+      keyed("nav.back", "history", "Ctrl+["),
+      keyed("nav.back.alt", "keys", "Alt+Left"),
+      keyed("tab.next.alt", "keys", "Ctrl+PageDown"),
+    ]);
+    const ids = (id: string) => sections.find((s) => s.id === id)?.entries.map((e) => e.id);
+    expect(ids("browser")).toEqual(["settings.clearData"]);
+    expect(ids("view")).toEqual([
+      "nav.reload",
+      "nav.reload.alt",
+      "nav.hardReload",
+      "window.fullscreen",
+    ]);
+    expect(ids("history")).toEqual(["nav.back", "nav.back.alt"]);
+    expect(ids("tabs")).toEqual(["tab.next.alt"]);
+    expect(commandTitle(sections.find((s) => s.id === "view")!.entries[1]!)).toBe(
+      "Reload page (alternate)",
+    );
+
+    const mac = keymapSections([
+      entry("nav.reload.alt", "keys"),
+      entry("window.fullscreen", "keys"),
+    ]);
+    expect(mac).toEqual([]);
+  });
 });

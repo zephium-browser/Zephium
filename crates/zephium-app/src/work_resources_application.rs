@@ -478,7 +478,7 @@ impl RetainedWork {
         work.phase = AdmissionPhase::Constructing;
         work.construction = Some(pending);
         if !exact {
-            work.fail(AgentWorkFailure::Contract);
+            work.fail(crate::contract_failure!());
         }
         work
     }
@@ -691,7 +691,7 @@ impl RetainedWork {
                     self.inventory = records;
                     #[cfg(feature = "work-execution-probe")]
                     self.public_claim_refusal_diagnostic();
-                    self.fail(AgentWorkFailure::Contract);
+                    self.fail(crate::contract_failure!());
                     return Ok(());
                 }
                 self.incarnation = Some(owner);
@@ -822,7 +822,7 @@ impl RetainedWork {
 
     fn activate(&mut self) {
         let Some(staged) = self.staged.take() else {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             return;
         };
         if self.stopping || staged.deadline <= Instant::now() {
@@ -850,7 +850,7 @@ impl RetainedWork {
             Ok(pending) => pending,
             Err(_) => {
                 self.unstarted = handle.take_outcome();
-                self.fail(AgentWorkFailure::Contract);
+                self.fail(crate::contract_failure!());
                 return;
             }
         };
@@ -870,7 +870,7 @@ impl RetainedWork {
         });
         self.phase = AdmissionPhase::Running;
         if !started {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
         }
     }
 
@@ -987,7 +987,7 @@ impl RetainedWork {
                         self.last_review = Some(Err(error));
                     }
                     self.persistence_failure.get_or_insert(error);
-                    self.fail(AgentWorkFailure::Contract);
+                    self.fail(crate::contract_failure!());
                     flight.uncertain = true;
                     flight.deadline =
                         Instant::now() + reconciliation_backoff(flight.reconciliations);
@@ -1038,7 +1038,7 @@ impl RetainedWork {
                             {
                                 let admission = self
                                     .incarnation
-                                    .ok_or(AgentWorkFailure::Contract)
+                                    .ok_or_else(|| crate::contract_failure!())
                                     .and_then(|owner| staged.controller.journal_admission(owner))
                                     .and_then(|admission| {
                                         if let Some(group) = &self.runtime_group {
@@ -1047,7 +1047,7 @@ impl RetainedWork {
                                                     self.resource.identity().context(),
                                                     admission.next(),
                                                 )
-                                                .map_err(|_| AgentWorkFailure::Contract)?;
+                                                .map_err(|_| crate::contract_failure!())?;
                                         }
                                         Ok(admission)
                                     });
@@ -1064,7 +1064,7 @@ impl RetainedWork {
                             }
                             Ok(staged) => {
                                 self.staged = Some(staged);
-                                self.fail(AgentWorkFailure::Contract);
+                                self.fail(crate::contract_failure!());
                             }
                             Err(error) => self.fail(error),
                         }
@@ -1095,7 +1095,7 @@ impl RetainedWork {
                         AgentRuntimeScopedDrain::Drained(drained) => active.drained = Some(drained),
                         AgentRuntimeScopedDrain::Unproven => {
                             crate::diagnostic!("work: phase=page event=terminal_refused stage=scoped_drain; content=redacted");
-                            failure = Some(AgentWorkFailure::Contract)
+                            failure = Some(crate::contract_failure!())
                         }
                     }
                 }
@@ -1240,7 +1240,7 @@ impl RetainedWork {
                         }
                         Err(error) => {
                             crate::diagnostic!("work: phase=page event=terminal_refused stage=journal_terminal error={error:?}; content=redacted");
-                            self.fail(AgentWorkFailure::Contract)
+                            self.fail(crate::contract_failure!())
                         }
                     }
                 }
@@ -1791,7 +1791,7 @@ impl RetainedWork {
                 return false;
             };
             let Ok(now) = clock.now() else {
-                self.fail(AgentWorkFailure::Contract);
+                self.fail(crate::contract_failure!());
                 return false;
             };
             if Instant::now() >= deadline {

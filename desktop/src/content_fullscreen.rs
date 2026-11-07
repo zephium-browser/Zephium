@@ -10,6 +10,13 @@ use tauri::{AppHandle, Manager};
 /// page holds it.
 static TAKEN: Mutex<Option<bool>> = Mutex::new(None);
 
+pub(crate) fn held() -> bool {
+    TAKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
 pub(crate) fn follow(app: &AppHandle, active: bool) {
     let Some(window) = app.get_webview_window(crate::MAIN_LABEL) else {
         return;

@@ -9,23 +9,45 @@ pub use agent_context_port::{
     any(target_os = "macos", target_os = "windows")
 ))]
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
+#[cfg(any(target_os = "windows", test))]
+mod caption_keys;
+#[cfg(any(target_os = "windows", test))]
+mod card_geometry;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod haptics;
+#[cfg(any(target_os = "windows", test))]
+mod history_list;
 mod host;
 mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
 mod motion_curve;
 mod navigation_epoch;
+mod network;
+#[cfg(any(target_os = "windows", test))]
+mod reputation;
+#[cfg(target_os = "windows")]
+pub use reputation::{
+    configure as configure_windows_reputation_checking,
+    initialize as initialize_windows_reputation_checking, managed as windows_reputation_managed,
+    on_managed as on_windows_reputation_managed,
+};
+
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(target_os = "macos", feature = "blocker-bench"))]
+pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
-pub use platform::windows::{forget_window_caption_offset, set_window_caption_offset};
+pub use platform::windows::{
+    bridge_caption_keys, forget_window_caption_offset, set_window_caption_offset,
+};
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod work_site_session;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -38,6 +60,14 @@ pub use platform::windows::{install_work_rendering_backing, remove_work_renderin
 
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
+
+#[cfg(all(
+    feature = "blocker-bench",
+    not(any(debug_assertions, zephium_protection_qa_profile))
+))]
+compile_error!(
+    "the blocker benchmark driver is forbidden in optimized builds outside protection-qa"
+);
 
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
@@ -142,6 +172,20 @@ compile_error!("the native agentic input probe is forbidden in optimized builds"
 #[cfg(all(feature = "native-agentic-semantic-probe", not(debug_assertions)))]
 compile_error!("the native agentic semantic probe is forbidden in optimized builds");
 
+#[cfg(target_os = "macos")]
+pub use platform::macos::private_api::missing as missing_private_webkit_api;
+
+/// Runs the extension command a key press in the browser window is the
+/// shortcut of; true when one took it. Call it for keys no browser shortcut
+/// claimed, before the page sees them. Unmodified keys return at once.
+#[cfg(target_os = "macos")]
+pub fn perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    use objc2_app_kit::NSEventModifierFlags as Flags;
+    event
+        .modifierFlags()
+        .intersects(Flags::Command | Flags::Control | Flags::Option)
+        && host::try_perform_extension_command(event)
+}
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     passkey_authorization_state as macos_passkey_authorization_state,
@@ -507,8 +551,9 @@ pub fn run_windows_agentic_semantic_probe(
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
-    detach_privileged_environment_update, finalize_privileged_environment_registrations,
-    install_privileged_environment_registration,
+    browser_process_record, detach_privileged_environment_update,
+    finalize_privileged_environment_registrations, generation_report_lines,
+    install_privileged_environment_registration, WindowsLeftoverProcesses,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -563,9 +608,9 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::permissions::{PagePermissionRequestId, PagePermissionRequestSettlement};
 use zephium_core::ports::engine::{
-    ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
-    NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, StageMotion, UserContent,
-    UserContentGeneration, ZoomRequestId,
+    ContentScope, DiscardProbeId, Engine, EngineEvent, HistoryRequestId, NativeDispatch,
+    NavigationPresentationId, NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut,
+    StageMotion, UserContent, UserContentGeneration, ZoomRequestId,
 };
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
@@ -1056,6 +1101,7 @@ impl RetirementGate {
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
             }
+            event @ EngineEvent::ProfileRestartRequired { .. } => Some(event),
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1086,7 +1132,12 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionBrowserRequested { .. }
             | event @ EngineEvent::ExtensionPageClosed { .. }
             | event @ EngineEvent::PermissionRequested { .. }
-            | event @ EngineEvent::WebExtensionAccessRequested(_) => Some(event),
+            | event @ EngineEvent::WebExtensionAccessRequested(_)
+            | event @ EngineEvent::WebExtensionAccessRemoved(_)
+            | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
+            event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
+                self.profile_is_active(profile).then_some(event)
+            }
             EngineEvent::WebExtensionSettled {
                 profile,
                 install,
@@ -1122,17 +1173,32 @@ impl RetirementGate {
             | event @ EngineEvent::NavigationFailed { id, .. }
             | event @ EngineEvent::NavigationFailureReported { id, .. }
             | event @ EngineEvent::ZoomSettled { id, .. }
+            | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::ContentProtectionChanged { id, .. }
             | event @ EngineEvent::MediaCaptureChanged { id, .. }
+            | event @ EngineEvent::AudioChanged { id, .. }
+            | event @ EngineEvent::MediaChanged { id, .. }
+            | event @ EngineEvent::PageResponsiveness { id, .. }
             | event @ EngineEvent::FullscreenChanged { id, .. }
             | event @ EngineEvent::FaviconPixels { id, .. }
+            | event @ EngineEvent::FaviconRasterFailed { id, .. }
+            | event @ EngineEvent::FaviconCandidates { id, .. }
+            | event @ EngineEvent::FaviconImage { id, .. }
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
+            | event @ EngineEvent::HistoryEntries { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
             | event @ EngineEvent::PageOpenBlocked { id, .. }
             | event @ EngineEvent::ExternalAppRequested { id, .. }
+            | event @ EngineEvent::HttpAuthRequested { id, .. }
+            | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::DownloadPermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadPermissionEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
+            | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -1140,6 +1206,7 @@ impl RetirementGate {
             | event @ EngineEvent::Captured { id, .. }
             | event @ EngineEvent::HtmlExtracted { id, .. }
             | event @ EngineEvent::FindResult { id, .. }
+            | event @ EngineEvent::StoreButtonClicked { id, .. }
             | event @ EngineEvent::ShortcutPressed { item: id, .. } => item_token
                 .as_ref()
                 .is_some_and(|active| self.allows_item_token(id, active))
@@ -1636,7 +1703,7 @@ pub fn install(
         dispatch.clone(),
         fatal_security_failure.clone(),
     );
-    host::install(
+    let cleanup_advisory = host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
@@ -1658,7 +1725,7 @@ pub fn install(
         retirement,
         event_delivery,
         fatal_security_failure,
-        runtime_security_advisories,
+        runtime_security_advisories: runtime_security_advisories.with_optional(cleanup_advisory),
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
@@ -1682,6 +1749,14 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// The browser window came back in front.
+    #[cfg(target_os = "windows")]
+    pub fn window_foreground(&self) {
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.store_buttons_foreground());
+        });
+    }
+
     /// Installs the profile-scoped download service before raw views are made.
     pub fn initialize_downloads(
         &self,
@@ -1696,6 +1771,8 @@ impl WebviewEngine {
                         host.downloads =
                             Some(host::downloads::Downloads::new(store, Arc::new(notify)));
                     }
+                    #[cfg(target_os = "macos")]
+                    host.watch_extension_downloads();
                 });
             })
         }
@@ -2061,6 +2138,57 @@ impl WebviewEngine {
         answer
     }
 
+    /// QA only: runs script in the page's main world and yields its string
+    /// result, or `None` when the page gave none within the engine's limits.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_evaluate(
+        &self,
+        id: ItemId,
+        script: String,
+    ) -> std::sync::mpsc::Receiver<Option<String>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.blocker_bench_evaluate(id, &script, reply));
+        });
+        answer
+    }
+
+    /// Keeps the compiled rule lists with these digests through the native
+    /// cache's collection, as the blocker's cache still names them.
+    pub fn retain_content_rule_cache_digests(&self, digests: Vec<[u8; 32]>) {
+        #[cfg(not(target_os = "windows"))]
+        self.run(move || {
+            let _ = host::try_with(move |engine| engine.retain_content_rule_cache_digests(digests));
+        });
+        #[cfg(target_os = "windows")]
+        let _ = digests;
+    }
+
+    /// QA only: runs script at document start, in the main world of the main
+    /// frame of every page loaded from now on; yields whether every open page
+    /// took it.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            let sent = reply.clone();
+            if !host::try_with(move |engine| {
+                let _ = sent.send(engine.blocker_bench_preload(&script));
+            }) {
+                let _ = reply.send(false);
+            }
+        });
+        answer
+    }
+
     /// Finished page loads in the profile's ordinary tabs on a site: a count
     /// that grows when the person loads a page there, such as after signing in.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2080,6 +2208,37 @@ impl WebviewEngine {
 
     fn run(&self, f: impl FnOnce() + Send + 'static) -> bool {
         (self.dispatch)(Box::new(f))
+    }
+
+    /// Runs `f` on the host with `done`, or answers with `refused` when the
+    /// host cannot take it, so a caller is never left waiting.
+    fn answer_on_host<D: Send + 'static>(
+        &self,
+        done: D,
+        refused: fn(D),
+        f: impl FnOnce(&mut host::EngineHost, D) + Send + 'static,
+    ) {
+        let slot = Arc::new(Mutex::new(Some(done)));
+        let take = |slot: &Arc<Mutex<Option<D>>>| slot.lock().ok().and_then(|mut done| done.take());
+        let queued_slot = slot.clone();
+        let queued = self.run(move || {
+            let inner = queued_slot.clone();
+            let admitted = host::try_with(move |host| {
+                if let Some(done) = take(&inner) {
+                    f(host, done);
+                }
+            });
+            if !admitted {
+                if let Some(done) = take(&queued_slot) {
+                    refused(done);
+                }
+            }
+        });
+        if !queued {
+            if let Some(done) = take(&slot) {
+                refused(done);
+            }
+        }
     }
 
     fn run_for_active_item(
@@ -2113,6 +2272,23 @@ impl WebviewEngine {
                 }
             }
         }))
+    }
+}
+
+/// Whether a tab can be muted on this system: WebView2 always, WebKit when
+/// it has the page-mute SPI.
+pub fn page_mute_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::audio::mute_supported()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        false
     }
 }
 
@@ -2183,14 +2359,101 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| {
-                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+                let applied = host.set_blocker_site_preferences(profile, preferences);
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if applied {
+                    return host.finish_site_change(profile, completion);
+                }
+                completion.finish(applied)
             });
         });
+    }
+    #[cfg(target_os = "macos")]
+    fn prepare_profile(&self, partition: Partition) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.prepare_profile(partition));
+        });
+    }
+    fn set_popup_sites(
+        &self,
+        profile: ProfileId,
+        origins: Vec<zephium_core::permissions::PageOrigin>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
+        });
+    }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_download_sites(profile, sites));
+        });
+    }
+    fn site_permissions(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.answer_on_host(
+            done,
+            |done| done(None),
+            move |host, done| host.site_permissions(profile, done),
+        );
+    }
+    fn set_site_permission(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        kind: zephium_core::permissions::SitePermissionKind,
+        decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        done: zephium_core::permissions::SitePermissionSetDone,
+    ) {
+        self.answer_on_host(
+            done,
+            |done| done(false),
+            move |host, done| host.set_site_permission(profile, origin, kind, decision, done),
+        );
     }
     fn set_page_style(&self, profile: ProfileId, site: String, css: Arc<str>) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| host.set_page_style(profile, site, css));
         });
+    }
+    fn browsing_data_call(
+        &self,
+        partition: Partition,
+        call: zephium_core::browsing_data::EngineDataCall,
+        completion: zephium_core::browsing_data::EngineDataCompletion,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if !lock_retirement_gate(&self.retirement).profile_is_active(partition.profile()) {
+                completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
+                    zephium_core::browsing_data::EngineDataFailure::Unavailable,
+                ));
+                return;
+            }
+            // A refused or torn-down dispatch drops the completion, which
+            // answers `Unavailable` instead of leaving the caller waiting.
+            let _ = self.run(move || {
+                let _ = host::try_with(move |host| {
+                    host.browsing_data_call(partition, call, completion)
+                });
+            });
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (partition, call);
+            completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
+                zephium_core::browsing_data::EngineDataFailure::Unsupported,
+            ));
+        }
     }
     fn download_call(
         &self,
@@ -2307,11 +2570,11 @@ impl Engine for WebviewEngine {
     }
 
     fn sample_page_memory(&self, ids: Vec<ItemId>) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.run(move || {
             host::best_effort_with(move |host| host.sample_page_memory(ids));
         });
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = ids;
     }
 
@@ -2319,6 +2582,10 @@ impl Engine for WebviewEngine {
         self.run(move || {
             host::best_effort_with(move |host| host.set_memory_pressure(pressure));
         });
+    }
+
+    fn release_spare(&self) {
+        self.run(|| host::best_effort_with(|host| host.release_spare()));
     }
 
     fn suspends_hidden_views(&self) -> bool {
@@ -2443,6 +2710,31 @@ impl Engine for WebviewEngine {
             host::best_effort_with(move |host| {
                 host.answer_web_extension_access(profile, request, allowed)
             });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn answer_web_extension_data(
+        &self,
+        profile: ProfileId,
+        request: u64,
+        reply: zephium_core::extension_data::ExtensionDataReply,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| {
+                host.answer_web_extension_data(profile, request, reply)
+            });
+        }))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn web_extension_data_changed(
+        &self,
+        profile: ProfileId,
+        change: zephium_core::extension_data::ExtensionDataChange,
+    ) -> NativeDispatch {
+        NativeDispatch::from_scheduled(self.run(move || {
+            host::best_effort_with(move |host| host.web_extension_data_changed(profile, change));
         }))
     }
 
@@ -2650,6 +2942,67 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.allow_blocked_navigation(item, &url))
+    }
+
+    fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.allow_certificate_exception(item, &url)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, url);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn end_unresponsive_page(&self, item: ItemId) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.end_unresponsive_page(item))
+    }
+
+    fn answer_http_auth(
+        &self,
+        item: ItemId,
+        request: u32,
+        credentials: Option<zephium_core::http_auth::HttpCredentials>,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            // A retiring view cancels its own native request as it drops.
+            self.run_for_active_item(item, move |host| {
+                host.answer_http_auth(item, request, credentials)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, credentials);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.answer_download_permission(item, request, allow)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, allow);
+            NativeDispatch::Unsupported
+        }
+    }
+
     fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
         if cfg!(target_os = "windows") {
             zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
@@ -2709,6 +3062,10 @@ impl Engine for WebviewEngine {
         self.run_for_active_item(id, move |h| h.reload(id))
     }
 
+    fn hard_reload(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.hard_reload(id))
+    }
+
     fn stop(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.stop(id))
     }
@@ -2719,6 +3076,15 @@ impl Engine for WebviewEngine {
 
     fn go_forward(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.go_forward(id))
+    }
+
+    fn history_entries(&self, id: ItemId, request: HistoryRequestId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.history_entries(id, request))
+    }
+
+    fn go_to_history_entry(&self, id: ItemId, offset: i32, url: &str) -> NativeDispatch {
+        let url = url.to_owned();
+        self.run_for_active_item(id, move |h| h.go_to_history_entry(id, offset, &url))
     }
 
     fn close(&self, id: ItemId) -> NativeDispatch {
@@ -2896,6 +3262,36 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn raise_chrome(
+        &self,
+        window: WindowId,
+        raised: bool,
+        card: Rect,
+        slide: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let queued_retirement = self.retirement.clone();
+            let queued_delivery = self.event_delivery.clone();
+            let queued_fatal = self.fatal_security_failure.clone();
+            NativeDispatch::from_scheduled(self.run(move || {
+                if !host::try_with(move |host| host.raise_chrome(window, raised, card, slide)) {
+                    fail_native_host_admission(
+                        &queued_delivery,
+                        &queued_retirement,
+                        &queued_fatal,
+                        "chrome stacking was not admitted by the engine host",
+                    );
+                }
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (window, raised, card, slide);
+            NativeDispatch::Unsupported
+        }
+    }
+
     fn zoom(&self, id: ItemId, scale: f64, request: ZoomRequestId) -> NativeDispatch {
         if !valid_page_zoom(scale) {
             return NativeDispatch::Rejected;
@@ -2903,8 +3299,55 @@ impl Engine for WebviewEngine {
         self.run_for_active_item(id, move |h| h.zoom(id, scale, request))
     }
 
-    fn set_muted(&self, _id: ItemId, _muted: bool) -> NativeDispatch {
-        NativeDispatch::Unsupported
+    fn set_muted(&self, id: ItemId, muted: bool) -> NativeDispatch {
+        if !page_mute_supported() {
+            return NativeDispatch::Unsupported;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |h| h.set_muted(id, muted))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (id, muted);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn can_mute(&self) -> bool {
+        page_mute_supported()
+    }
+
+    fn watch_media(&self, id: ItemId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |h| h.watch_media(id))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn media_action(
+        &self,
+        id: ItemId,
+        action: zephium_core::ports::engine::MediaAction,
+    ) -> NativeDispatch {
+        if matches!(action, zephium_core::ports::engine::MediaAction::Seek(seconds) if !seconds.is_finite() || seconds < 0.0)
+        {
+            return NativeDispatch::Rejected;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |h| h.media_action(id, action))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
     }
 
     fn find(
@@ -2925,12 +3368,58 @@ impl Engine for WebviewEngine {
         NativeDispatch::Unsupported
     }
 
+    fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run_for_active_item(id, move |h| h.show_store_button(id, button));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (id, button);
+    }
+
     fn extract_html(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.extract_html(id))
     }
 
+    fn save_page(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.save_page(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_password(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn upgrades_https_natively(&self) -> bool {
+        // WebKit names the policy human tabs set from macOS 15.2.
+        static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NATIVE.get_or_init(|| {
+            objc2::runtime::AnyClass::get(c"WKWebpagePreferences").is_some_and(|class| {
+                class
+                    .instance_method(objc2::sel!(setPreferredHTTPSNavigationPolicy:))
+                    .is_some()
+            })
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
+    }
+
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.discover_favicon(id))
+    }
+
+    fn rasterize_favicon(&self, id: ItemId, url: &str) -> NativeDispatch {
+        if url.len() > zephium_core::icon::MAX_CANDIDATE_URL_BYTES {
+            return NativeDispatch::Rejected;
+        }
+        let url = url.to_owned();
+        self.run_for_active_item(id, move |h| h.rasterize_favicon(id, url))
+    }
+
+    fn native_favicons(&self) -> bool {
+        cfg!(target_os = "windows")
     }
 
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
@@ -3146,6 +3635,10 @@ impl Engine for WebviewEngine {
         // dropped. No logical/native state changed, and this synchronous
         // return is therefore authoritative rather than a fatal split.
         NativeDispatch::from_scheduled(dispatched)
+    }
+
+    fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {
+        network::set(proxy);
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {
@@ -3893,7 +4386,14 @@ mod tests {
             engine.zoom(id, 1.25, ZoomRequestId(1)),
             NativeDispatch::Rejected
         );
-        assert_eq!(engine.set_muted(id, true), NativeDispatch::Unsupported);
+        assert_eq!(
+            engine.set_muted(id, true),
+            if page_mute_supported() {
+                NativeDispatch::Rejected
+            } else {
+                NativeDispatch::Unsupported
+            }
+        );
         assert_eq!(
             engine.find(
                 id,
@@ -3907,6 +4407,10 @@ mod tests {
         assert_eq!(engine.capture(id), NativeDispatch::Unsupported);
         assert_eq!(engine.extract_html(id), NativeDispatch::Rejected);
         assert_eq!(engine.discover_favicon(id), NativeDispatch::Rejected);
+        assert_eq!(
+            engine.rasterize_favicon(id, "https://late.invalid/i.png"),
+            NativeDispatch::Rejected
+        );
         assert_eq!(engine.print(id), NativeDispatch::Rejected);
         assert_eq!(
             engine.set_content(1, None, None),
@@ -4257,10 +4761,31 @@ mod tests {
                 action: zephium_core::ports::engine::NativeAction::GoBack,
             },
             EngineEvent::LoadingChanged { id, loading: true },
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded: true,
+                stranded_filters: 0,
+            },
             EngineEvent::FaviconPixels {
                 id,
                 page_url: "https://late.invalid".into(),
                 rgba: vec![0; zephium_core::icon::RGBA32_BYTES],
+            },
+            EngineEvent::FaviconRasterFailed {
+                id,
+                page_url: "https://late.invalid".into(),
+                url: "https://late.invalid/i.png".into(),
+            },
+            EngineEvent::FaviconCandidates {
+                id,
+                page_url: "https://late.invalid".into(),
+                complete: true,
+                candidates: Vec::new(),
+            },
+            EngineEvent::FaviconImage {
+                id,
+                page_url: "https://late.invalid".into(),
+                png: vec![0; 8],
             },
             EngineEvent::DiscardSafety {
                 id,
@@ -4289,6 +4814,7 @@ mod tests {
             EngineEvent::PermissionRequested {
                 id,
                 profile,
+                navigation: zephium_core::ports::engine::NavigationPresentationId::from_raw(1),
                 request: zephium_core::permissions::PagePermissionRequest {
                     id: zephium_core::permissions::PagePermissionRequestId::new(1).unwrap(),
                     origin: zephium_core::permissions::PageOrigin::parse_exact(
@@ -4298,6 +4824,7 @@ mod tests {
                     kind: zephium_core::permissions::PagePermissionRequestKind::Single(
                         zephium_core::ports::engine::PermissionKind::Camera,
                     ),
+                    blocked_by_system: false,
                 },
             },
             EngineEvent::DownloadRequested {
@@ -4352,6 +4879,7 @@ mod tests {
                 id: delivered,
                 profile: delivered_profile,
                 request,
+                ..
             } if *delivered == id
                 && *delivered_profile == profile
                 && request.id.get() == 1

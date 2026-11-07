@@ -2,12 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Malloc's large cache keeps freed buffers counted against the app
+       until the system runs short (72 MB after the blocker loads its rules
+       at launch); without it they go back to macOS at once, at no measured
+       CPU cost. -->
+  <key>LSEnvironment</key>
+  <dict>
+    <key>MallocLargeCache</key>
+    <string>0</string>
+  </dict>
   <key>NSCameraUsageDescription</key>
   <string>Zephium uses the camera only when you allow a website to access it.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Zephium uses the microphone while you dictate in Work, and for a website only when you allow it.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>Zephium shares your location with a website only when you allow it.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Zephium shares your location with a website only when you allow it.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Zephium turns what you dictate in Work into text on this Mac.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Websites you open can reach devices on your network, such as your router, printer or a video call.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Zephium saves the files you download to your Downloads folder.</string>
   <key>NSDesktopFolderUsageDescription</key>

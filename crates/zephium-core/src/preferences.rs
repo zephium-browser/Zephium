@@ -13,6 +13,12 @@ pub const KEYS: &[&str] = &[
     "ui.newtab-clock",
     "ui.newtab-clock-format",
     "ui.newtab-tasks",
+    "ui.newtab-background",
+    "ui.newtab-image",
+    "ui.newtab-dim",
+    "ui.newtab-wordmark",
+    "ui.newtab-trackers",
+    "ui.newtab-focus",
     "ui.tab-layout",
     "onboarding",
     "ai.enabled",
@@ -28,6 +34,10 @@ pub const KEYS: &[&str] = &[
     "tabs.switch-to-open",
     "tabs.automatic-pip",
     "tabs.startup",
+    "tabs.startup-pages",
+    "tabs.home",
+    "network.proxy",
+    "network.proxy-address",
     "time.track",
     "time.retention",
     "focus.minutes",
@@ -55,7 +65,41 @@ pub const KEYS: &[&str] = &[
     "tasks.enabled",
     "time.enabled",
     "work.favourite-models",
+    "zoom.default",
+    "privacy.smartscreen",
 ];
+
+/// SmartScreen ships on. Only an explicit persisted false disables the
+/// Windows controller requirement; malformed or missing settings keep it on.
+pub fn smartscreen_required(value: Option<&str>) -> bool {
+    value != Some("false")
+}
+
+/// Pages "Open specific pages" may hold.
+pub const MAX_STARTUP_PAGES: usize = 10;
+
+/// The addresses of a stored startup list, as web pages and without
+/// repeats. Text that is not an address is dropped, so a hand-edited store
+/// can only shorten the list.
+pub fn startup_pages(value: &str) -> Vec<String> {
+    let mut pages = Vec::new();
+    for line in value.lines() {
+        let Some(page) = crate::navigation::web_address(line) else {
+            continue;
+        };
+        let page = page.to_string();
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
+    }
+    pages.truncate(MAX_STARTUP_PAGES);
+    pages
+}
+
+/// The home page a stored value names, if it is a web address.
+pub fn home_page(value: &str) -> Option<String> {
+    crate::navigation::web_address(value).map(|page| page.to_string())
+}
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
 /// translation yet shows English; a translation lands by adding its locale to
@@ -145,17 +189,27 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
-        "sidebar.mode" => matches!(value, "default" | "compact"),
+        "sidebar.mode" => matches!(value, "default" | "compact" | "hidden"),
         "ui.accent" => matches!(
             value,
             "graphite" | "sky" | "sage" | "rose" | "amber" | "teal" | "lavender" | "orchid"
         ),
-        // What the window is made of. `auto` takes the best the system offers;
-        // a material the system cannot install falls back on its own.
+        // What the window is made of. `auto` is the system's best glass; a
+        // system material the system cannot install falls back on its own.
         "ui.material" => matches!(
             value,
-            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "none"
+            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "none"
         ),
+        "ui.newtab-background" => matches!(value, "sky" | "image"),
+        // An admitted local blob, never a URL or a filesystem path. The media
+        // protocol resolves it only inside the current profile's store.
+        "ui.newtab-image" => {
+            value.is_empty()
+                || (value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        }
         "ui.newtab-clock-format" => matches!(value, "system" | "12h" | "24h"),
         "ui.tab-layout" => matches!(value, "vertical" | "horizontal"),
         "ui.language" => LANGUAGES.contains(&value),
@@ -179,7 +233,24 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "tabs.close-button" => matches!(value, "hover" | "always"),
         "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
         // A new tab in front at launch; everything restored stays in the sidebar.
-        "tabs.startup" => matches!(value, "continue" | "new-tab"),
+        "tabs.startup" => matches!(value, "continue" | "new-tab" | "pages"),
+        // One web address per line, at most ten, none repeated.
+        "tabs.startup-pages" => {
+            let lines: Vec<&str> = value.lines().collect();
+            lines.len() <= MAX_STARTUP_PAGES
+                && !value.ends_with('\n')
+                && lines.iter().enumerate().all(|(index, line)| {
+                    crate::navigation::web_address(line).is_some_and(|page| {
+                        !lines[..index].iter().any(|earlier| {
+                            crate::navigation::web_address(earlier).as_ref() == Some(&page)
+                        })
+                    })
+                })
+        }
+        // The system's proxy, or one proxy of a kind at one address.
+        "network.proxy" => matches!(value, "system" | "http" | "socks5"),
+        "network.proxy-address" => value.is_empty() || crate::proxy::parse_address(value).is_some(),
+        "tabs.home" => value.is_empty() || home_page(value).is_some(),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
@@ -214,6 +285,10 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
                         && !ids[..index].contains(id)
                 })
         }
+        // The page zoom a site shows at until it has a level of its own.
+        "zoom.default" => value.parse::<u16>().is_ok_and(|percent| {
+            value == percent.to_string() && crate::zoom::DEFAULTS.contains(&percent)
+        }),
         // The Zephium version a notice was last acknowledged at.
         "notice.seen-version" | "notice.security-dismissed" => {
             !value.is_empty()
@@ -228,6 +303,10 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "ui.newtab-name"
         | "ui.newtab-clock"
         | "ui.newtab-tasks"
+        | "ui.newtab-dim"
+        | "ui.newtab-wordmark"
+        | "ui.newtab-trackers"
+        | "ui.newtab-focus"
         | "ai.enabled"
         | "work.enabled"
         | "notes.enabled"
@@ -241,6 +320,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "time.track"
         | "performance.sleep"
         | "updates.auto-check"
+        | "privacy.smartscreen"
         | "focus.breaks" => {
             matches!(value, "true" | "false")
         }
@@ -251,6 +331,53 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn newtab_customization_accepts_only_local_images_and_closed_choices() {
+        for key in [
+            "ui.newtab-dim",
+            "ui.newtab-wordmark",
+            "ui.newtab-trackers",
+            "ui.newtab-focus",
+        ] {
+            assert!(KEYS.contains(&key));
+            assert!(value_allowed(key, "true"));
+            assert!(value_allowed(key, "false"));
+            assert!(!value_allowed(key, "1"));
+        }
+        for value in ["sky", "image"] {
+            assert!(value_allowed("ui.newtab-background", value));
+        }
+        assert!(!value_allowed("ui.newtab-background", "gradient"));
+        assert!(KEYS.contains(&"ui.newtab-background"));
+        assert!(KEYS.contains(&"ui.newtab-image"));
+        assert!(value_allowed("ui.newtab-image", ""));
+        assert!(value_allowed("ui.newtab-image", &"ab01".repeat(16)));
+        for value in [
+            "https://example.com/image.jpg",
+            "../image",
+            "/tmp/image",
+            "zephium-media://localhost/image",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+        ] {
+            assert!(!value_allowed("ui.newtab-image", value));
+        }
+    }
+
+    #[test]
+    fn smartscreen_defaults_on_and_accepts_only_explicit_boolean_choices() {
+        assert!(KEYS.contains(&"privacy.smartscreen"));
+        for value in [None, Some("true"), Some("off"), Some("")] {
+            assert!(smartscreen_required(value));
+        }
+        assert!(!smartscreen_required(Some("false")));
+        assert!(value_allowed("privacy.smartscreen", "true"));
+        assert!(value_allowed("privacy.smartscreen", "false"));
+        assert!(!value_allowed("privacy.smartscreen", "off"));
+    }
+
     #[test]
     fn performance_preferences_validate_modes_timing_and_normalized_exceptions() {
         for minutes in ["5", "15", "30", "60"] {
@@ -308,6 +435,19 @@ mod tests {
     }
 
     #[test]
+    fn the_default_zoom_is_one_of_the_offered_levels() {
+        assert!(KEYS.contains(&"zoom.default"));
+        for percent in crate::zoom::DEFAULTS {
+            assert!(value_allowed("zoom.default", &percent.to_string()));
+        }
+        for value in [
+            "", "0", "30", "100%", "1.25", "0100", "125 ", "250", "300", "49",
+        ] {
+            assert!(!value_allowed("zoom.default", value), "{value:?}");
+        }
+    }
+
+    #[test]
     fn update_preferences_hold_a_switch_and_bounded_versions() {
         assert!(value_allowed("updates.auto-check", "false"));
         assert!(!value_allowed("updates.auto-check", "off"));
@@ -330,13 +470,15 @@ mod tests {
         assert!(value_allowed("ui.accent", "orchid"));
         assert!(!value_allowed("ui.accent", "purple"));
         assert!(value_allowed("ui.material", "vibrancy"));
-        assert!(!value_allowed("ui.material", "mica"));
+        assert!(value_allowed("ui.material", "mica"));
+        assert!(!value_allowed("ui.material", "sky"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
         assert!(value_allowed("ui.language", "en"));
         assert!(value_allowed("tabs.after-close", "recent"));
         assert!(value_allowed("tabs.startup", "new-tab"));
-        assert!(!value_allowed("tabs.startup", "pages"));
+        assert!(value_allowed("tabs.startup", "pages"));
+        assert!(!value_allowed("tabs.startup", "pagez"));
         assert!(value_allowed("ui.text-size", "large"));
         assert!(value_allowed("ui.tab-layout", "horizontal"));
         assert!(value_allowed("onboarding", "done"));
@@ -537,5 +679,94 @@ mod tests {
             }
         }
         assert!(carried(&[("work.enabled", "false"), ("ai.enabled", "false")]).is_empty());
+    }
+
+    #[test]
+    fn startup_pages_are_a_short_list_of_distinct_web_addresses() {
+        assert!(value_allowed("tabs.startup-pages", ""));
+        assert!(value_allowed(
+            "tabs.startup-pages",
+            "example.com\nhttps://docs.example.org/a?b=1"
+        ));
+        let full: Vec<String> = (0..MAX_STARTUP_PAGES)
+            .map(|n| format!("https://example.com/{n}"))
+            .collect();
+        assert!(value_allowed("tabs.startup-pages", &full.join("\n")));
+        let over = [full.as_slice(), &["https://example.com/x".to_owned()]].concat();
+        assert!(!value_allowed("tabs.startup-pages", &over.join("\n")));
+        for refused in [
+            "two words",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "/Users/me/page.html",
+            "https://user:pass@example.com",
+            "https://example.com\n\nhttps://example.org",
+            "https://example.com\n",
+            "example.com\nhttps://example.com/",
+            "about:blank",
+        ] {
+            assert!(!value_allowed("tabs.startup-pages", refused), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_stored_startup_list_yields_only_pages_it_can_open() {
+        assert_eq!(
+            startup_pages("example.com\nnot a page\nhttps://example.com/\nfile:///x"),
+            ["https://example.com/"]
+        );
+        let many = (0..30)
+            .map(|n| format!("https://example.com/{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(startup_pages(&many).len(), MAX_STARTUP_PAGES);
+        assert!(startup_pages("").is_empty());
+    }
+
+    #[test]
+    fn the_home_page_is_empty_or_a_web_address() {
+        assert!(value_allowed("tabs.home", ""));
+        assert!(value_allowed("tabs.home", "example.com"));
+        assert!(value_allowed("tabs.home", "https://example.com/start"));
+        for refused in [
+            "two words",
+            "javascript:alert(1)",
+            "file:///etc/hosts",
+            "about:blank",
+        ] {
+            assert!(!value_allowed("tabs.home", refused), "{refused:?}");
+        }
+        assert_eq!(
+            home_page("example.com").as_deref(),
+            Some("https://example.com/")
+        );
+        assert_eq!(home_page(""), None);
+    }
+
+    #[test]
+    fn the_proxy_is_the_systems_or_one_validated_address() {
+        for mode in ["system", "http", "socks5"] {
+            assert!(value_allowed("network.proxy", mode));
+        }
+        for mode in ["", "manual", "SOCKS5", "https"] {
+            assert!(!value_allowed("network.proxy", mode));
+        }
+        assert!(value_allowed("network.proxy-address", ""));
+        assert!(value_allowed(
+            "network.proxy-address",
+            "Proxy.Example.com:3128"
+        ));
+        assert!(value_allowed("network.proxy-address", "[::1]:1080"));
+        for refused in [
+            "proxy.example.com",
+            "http://proxy.example.com:80",
+            "user@proxy.example.com:80",
+            "proxy.example.com:80 --disable-web-security",
+        ] {
+            assert!(
+                !value_allowed("network.proxy-address", refused),
+                "{refused:?}"
+            );
+        }
     }
 }

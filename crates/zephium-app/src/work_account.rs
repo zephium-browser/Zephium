@@ -188,7 +188,7 @@ impl AgentWorkEnrolledAccount {
 impl AgentWorkAccountSource for AgentWorkEnrolledAccount {
     fn sample(&self, context: ContextJoin) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
         self.sample_account(context)
-            .map_err(|_| AgentWorkFailure::Contract)
+            .map_err(|_| crate::contract_failure!())
     }
 }
 

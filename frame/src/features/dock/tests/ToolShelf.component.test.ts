@@ -38,6 +38,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     profilesGet: native.profiles,
     profilesSwitch: native.switchTo,
     settingGet: async () => null,
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: vi.fn(async () => undefined),
   });
 });
@@ -125,6 +127,23 @@ test("with one profile the head is you alone, and a private window beside you", 
     .toBe("Personal");
   const chips = [...screen.container.querySelectorAll(".shelf-chip")];
   expect(chips.map((chip) => chip.getAttribute("aria-label"))).toEqual(["New Incognito Window"]);
+});
+
+test("the private chip becomes the way back while the private window is set aside", async () => {
+  native.profiles.mockResolvedValueOnce({
+    status: "ok" as const,
+    data: { ...ROSTER, private_tabs: 2 },
+  });
+  const screen = await render(ToolShelf);
+  screen.container.style.paddingBlockStart = "480px";
+  await expect
+    .poll(() => screen.container.querySelector(".shelf-private")?.getAttribute("aria-label"))
+    .toBe("Back to private window");
+  await screen.getByRole("button", { name: /^Tools/ }).click();
+  const chip = screen.getByRole("menuitem", { name: "Back to private window" });
+  await expect.element(chip).toHaveAttribute("data-aside", "true");
+  await chip.click();
+  expect(native.run).toHaveBeenLastCalledWith("window.newPrivate");
 });
 
 test("a feature switched off takes its tool out, and an empty group its rule", async () => {

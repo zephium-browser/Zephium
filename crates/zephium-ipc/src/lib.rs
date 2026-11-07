@@ -8,8 +8,10 @@ use specta::Type;
 pub mod page_assist;
 mod time;
 pub mod work;
+mod zoom;
 
 pub use time::*;
+pub use zoom::*;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct TabView {
@@ -29,6 +31,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
@@ -39,12 +45,71 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub failure: Option<TabFailure>,
+    /// The page is from an origin whose certificate the person chose to
+    /// continue past; chrome must never show it as secure.
+    #[serde(default)]
+    pub certificate_exception: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub icon: Option<IconRef>,
     #[serde(default)]
     #[specta(optional)]
     pub capture: Option<MediaCaptureView>,
+    /// The page's zoom in whole percent, while the tab has a page to zoom. It
+    /// is the level just asked for until the view reports it applied.
+    #[serde(default)]
+    #[specta(optional)]
+    pub zoom: Option<u16>,
+    /// Present while the page plays sound, and for as long as it is muted.
+    #[serde(default)]
+    #[specta(optional)]
+    pub audio: Option<TabAudioView>,
+}
+
+/// The sidebar's player: the media of the tab that most recently started
+/// playing off screen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MediaPlayerView {
+    pub tab_id: String,
+    /// The page's own name for what plays, else the tab's title.
+    pub title: String,
+    /// The page's artist, else the site.
+    pub artist: String,
+    pub icon: Option<IconRef>,
+    /// Seconds; absent while unknown and for a live stream.
+    pub duration: Option<f64>,
+    /// Seconds, as of this projection; chrome advances it by `rate` while
+    /// `playing` and not `waiting`.
+    pub position: f64,
+    pub rate: f64,
+    pub playing: bool,
+    pub waiting: bool,
+    pub can_pip: bool,
+    pub in_pip: bool,
+    pub muted: bool,
+    pub can_mute: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MediaPlayerAction {
+    Play,
+    Pause,
+    Seek {
+        seconds: f64,
+    },
+    PictureInPicture,
+    /// Brings the tab to front, in its own space.
+    Show,
+    /// Closes the player until the tab plays something else.
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabAudioView {
+    pub muted: bool,
+    /// The engine can mute this tab; without it the speaker only informs.
+    pub can_mute: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -58,7 +123,46 @@ pub enum PageRequestView {
         app: Option<String>,
     },
     /// A new tab the page tried to open; `host` is set when it can be opened.
-    Popup { host: Option<String> },
+    /// `site` is the host of the page asking, when its profile can always
+    /// allow that site's pop-ups.
+    Popup {
+        host: Option<String>,
+        site: Option<String>,
+    },
+    /// The site, or its proxy, asks to sign in. Never carries the server's
+    /// own text.
+    HttpAuth {
+        request: u32,
+        /// Host, with its port when not the scheme's default.
+        host: String,
+        /// Plain http: the password would cross the network readable.
+        insecure: bool,
+        proxy: bool,
+        /// The last username or password was wrong.
+        retry: bool,
+    },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; `host` is the
+    /// page's host.
+    InsecureAutofill { host: String },
+    /// The page stopped responding: wait for it, or reload it.
+    Unresponsive,
+}
+
+/// What the person typed into a sign-in prompt. Deliberately not Debug or
+/// Clone: it moves straight into wiped storage.
+#[derive(Deserialize, Type)]
+pub struct SignInCredentials {
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -88,6 +192,34 @@ pub struct MediaCaptureView {
 pub struct TabFailure {
     pub url: String,
     pub reason: TabFailureReason,
+    /// For a refused certificate, what the engine could tell about it.
+    #[serde(default)]
+    #[specta(optional)]
+    pub certificate: Option<TabCertificateProblem>,
+    /// The refused certificate is on a host on the person's own network, so
+    /// they may continue past it. Never true for a public name.
+    #[serde(default)]
+    pub can_continue: bool,
+    /// For a page the filter lists refused, why.
+    #[serde(default)]
+    #[specta(optional)]
+    pub blocked: Option<TabBlockReason>,
+    /// The page that was showing is gone; the failure stands in its place
+    /// until another page opens, even while one loads.
+    #[serde(default)]
+    pub covers_page: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabCertificateProblem {
+    /// Expired, or not valid yet.
+    Expired,
+    /// Self-signed, or from an issuer the system does not trust.
+    Untrusted,
+    NameMismatch,
+    Revoked,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -98,7 +230,23 @@ pub enum TabFailureReason {
     Unreachable,
     TimedOut,
     Insecure,
+    /// The page's process ended and it could not be brought back on its own.
+    Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
+    /// The filter lists refused the page; `blocked` says why.
+    Blocked,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -119,13 +267,16 @@ pub enum TabContentView {
     Settings,
     Extensions,
     ExtensionOwned,
+    Source,
 }
 
 /// Names a cached site icon without carrying its pixels. Chrome keeps rasters
-/// by origin and repaints only when `revision` changes, so a projection costs
+/// by key and repaints only when `revision` changes, so a projection costs
 /// a short string per tab instead of a five-kilobyte raster.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct IconRef {
+    /// A site's origin, or one page of it (origin and path) that wears an icon
+    /// of its own. Chrome treats it as an opaque key.
     pub origin: String,
     pub revision: String,
 }
@@ -134,6 +285,7 @@ pub struct IconRef {
 /// decodes a page-controlled image format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct FaviconEntry {
+    /// The key an `IconRef` names the raster by.
     pub origin: String,
     pub revision: String,
     pub rgba: String,
@@ -249,6 +401,7 @@ pub struct ExtensionActionShortcutView {
 pub enum PagePermissionKindView {
     Camera,
     Microphone,
+    Geolocation,
 }
 
 /// One exact, foreground page-permission request. Every identity is an opaque
@@ -264,6 +417,13 @@ pub struct PagePermissionPromptEntryView {
     pub rememberable: bool,
     /// True while an exact durable remember-decision transaction is pending.
     pub processing: bool,
+    /// Shown as a card under the address field of the expanded sidebar, with
+    /// the page still on screen. Otherwise a window-modal sheet, with the
+    /// page taken off screen until it is answered.
+    pub in_sidebar: bool,
+    /// The operating system refuses Zephium this capability; chrome says
+    /// where to turn it on.
+    pub blocked_by_system: bool,
 }
 
 /// Exact replacement for the one process-wide page permission surface.
@@ -273,6 +433,54 @@ pub struct PagePermissionPromptView {
     pub prompt: Option<PagePermissionPromptEntryView>,
 }
 
+/// A kind of decision Site settings lists. Which kinds a platform keeps is
+/// in `SitePermissionsView::kinds`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SitePermissionKindView {
+    Camera,
+    Microphone,
+    Geolocation,
+    Notifications,
+    ClipboardRead,
+    Midi,
+    Sensors,
+    LocalFonts,
+    AutomaticDownloads,
+    Popups,
+    Downloads,
+    AppLinks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SitePermissionDecisionView {
+    Allow,
+    Block,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SitePermissionView {
+    /// Canonical origin, such as `https://meet.example`.
+    pub origin: String,
+    pub kind: SitePermissionKindView,
+    pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
+}
+
+/// The focused profile's saved site decisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SitePermissionsView {
+    /// A private profile saves nothing; its list is always empty.
+    pub private: bool,
+    /// False when some decisions could not be read right now.
+    pub complete: bool,
+    /// The kinds this platform keeps, in display order.
+    pub kinds: Vec<SitePermissionKindView>,
+    pub entries: Vec<SitePermissionView>,
+}
+
 /// An extension's run-time request for access, awaiting the user's answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct WebExtensionAccessRequestView {
@@ -280,6 +488,22 @@ pub struct WebExtensionAccessRequestView {
     pub request: String,
     pub extension_id: String,
     pub warnings: Vec<String>,
+    pub permissions: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+/// A person clicked the install button the browser showed on the Web Store
+/// listing in `tab_id`, which is still the active tab of the focused window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionStoreClickView {
+    pub tab_id: String,
+    pub extension_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExtensionAccessRemovalView {
+    pub profile_id: String,
+    pub extension_id: String,
     pub permissions: Vec<String>,
     pub patterns: Vec<String>,
 }
@@ -341,6 +565,10 @@ pub struct ProfileEntryView {
 pub struct ProfilesView {
     pub current: Option<String>,
     pub private: bool,
+    /// The tabs of the private window while one exists, shown or set aside
+    /// behind the regular tabs.
+    #[serde(default)]
+    pub private_tabs: Option<u32>,
     pub profiles: Vec<ProfileEntryView>,
 }
 
@@ -573,6 +801,18 @@ pub enum HistoryCall {
     Clear {
         range: HistoryRange,
     },
+    /// Clears the visits at or after `since` (unix seconds). Only the shell
+    /// sends it, for a range the history surfaces do not offer.
+    #[serde(skip)]
+    ClearSince {
+        since: i64,
+    },
+    /// The tabs most recently closed in this profile, newest first.
+    ClosedTabs,
+    /// Reopens one of them, named by the id `ClosedTabs` gave.
+    ReopenClosed {
+        id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -623,7 +863,10 @@ impl HistoryCall {
                         .iter()
                         .all(|url| zephium_core::navigation::is_allowed_str(url))
             }
-            Self::Clear { .. } => true,
+            Self::Clear { .. } | Self::ClosedTabs => true,
+            Self::ClearSince { since } => *since > 0,
+            Self::ReopenClosed { id } => zephium_core::ids::ClosedSessionId::parse(id)
+                .is_some_and(|parsed| parsed.to_string() == *id),
         }
     }
 }
@@ -639,6 +882,15 @@ pub struct HistoryVisitView {
     pub icon: Option<IconRef>,
 }
 
+/// A closed tab that can be reopened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ClosedTabView {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub icon: Option<IconRef>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryResponse {
@@ -650,6 +902,10 @@ pub enum HistoryResponse {
     Removed {
         count: u32,
     },
+    ClosedTabs {
+        tabs: Vec<ClosedTabView>,
+    },
+    Reopened,
     Error {
         error: HistoryError,
     },
@@ -661,6 +917,106 @@ pub enum HistoryError {
     Invalid,
     Unavailable,
     Capacity,
+}
+
+/// How far back a browsing data clear reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowsingDataRange {
+    Hour,
+    Day,
+    Week,
+    FourWeeks,
+    Everything,
+}
+
+impl BrowsingDataRange {
+    /// Seconds the range covers, or None for all of time.
+    pub fn window_seconds(self) -> Option<i64> {
+        match self {
+            Self::Hour => Some(3600),
+            Self::Day => Some(24 * 3600),
+            Self::Week => Some(7 * 24 * 3600),
+            Self::FourWeeks => Some(28 * 24 * 3600),
+            Self::Everything => None,
+        }
+    }
+}
+
+/// One request from the browsing data surfaces: clearing what a profile's
+/// pages stored, and the sites it stored it for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowsingDataCall {
+    /// Removes the chosen kinds from `range` back. `cookies` is cookies and
+    /// site data; `downloads` is the download list, never the files.
+    Clear {
+        range: BrowsingDataRange,
+        history: bool,
+        cookies: bool,
+        cache: bool,
+        downloads: bool,
+    },
+    /// The sites the profile holds cookies and site data for.
+    Sites,
+    /// Everything stored for one site, named as `Sites` names it.
+    ForgetSite { site: String },
+    /// Everything stored for the site of one page, named by its origin
+    /// (`https://host[:port]`), for a command on the page in front.
+    ForgetPage { origin: String },
+}
+
+impl BrowsingDataCall {
+    pub fn validate(&self) -> bool {
+        match self {
+            Self::Clear {
+                history,
+                cookies,
+                cache,
+                downloads,
+                ..
+            } => *history || *cookies || *cache || *downloads,
+            Self::Sites => true,
+            Self::ForgetSite { site } => zephium_core::browsing_data::is_site_name(site),
+            Self::ForgetPage { origin } => zephium_core::browsing_data::page_origin_host(origin)
+                .is_some_and(|host| zephium_core::browsing_data::is_site_name(&host)),
+        }
+    }
+}
+
+/// A site the profile holds data for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SiteDataView {
+    pub site: String,
+    pub cookies: bool,
+    pub storage: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowsingDataResponse {
+    Cleared,
+    Sites {
+        sites: Vec<SiteDataView>,
+        /// The engine can only name sites by some of what it holds: sites
+        /// with only storage and no cookies are missing from the list.
+        partial: bool,
+    },
+    Error {
+        error: BrowsingDataError,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowsingDataError {
+    Invalid,
+    Unavailable,
+    Capacity,
+    /// The engine took the request and did not complete it.
+    Failed,
+    /// A private window keeps nothing to clear.
+    Private,
 }
 
 /// Where a find in the page in front landed.
@@ -997,6 +1353,8 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Why a restart is required; none while it is not.
+    pub restart_reason: Option<RuntimeRestartReason>,
     /// The saved session could not be restored this launch: its bytes were
     /// kept in a file and the browser started with fresh tabs.
     pub session_set_aside: bool,
@@ -1006,9 +1364,18 @@ pub struct RuntimeStatus {
     /// extension, profile, or native failure identity crosses this privileged
     /// projection.
     pub user_content_degraded_scope_count: u16,
-    /// Canonically ordered closed-vocabulary set. Rust emits at most five
+    /// Canonically ordered closed-vocabulary set. Rust emits at most six
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRestartReason {
+    /// A newer browser runtime is installed; only a restart adopts it.
+    RuntimeUpdate,
+    /// A profile's browser engine can be trusted again only after a restart.
+    Profile,
 }
 
 /// Non-fatal, process-local classification produced before native WebView
@@ -1019,6 +1386,7 @@ pub enum RuntimeSecurityAdvisoryKind {
     ReviewOverdue,
     UpdateRecommended,
     UnreviewedRuntime,
+    CleanupOverdue,
 }
 
 /// Fixed destination of the recommended maintenance action. No page or
@@ -1362,6 +1730,8 @@ pub enum Projection {
     ExtensionActionShortcut(ExtensionActionShortcutView),
     PagePermissionPrompt(PagePermissionPromptView),
     WebExtensionAccessRequest(WebExtensionAccessRequestView),
+    WebExtensionAccessRemoved(WebExtensionAccessRemovalView),
+    WebExtensionStoreClick(WebExtensionStoreClickView),
     UiCommand(String),
     FindResult(FindResultView),
     Search(SearchResults),
@@ -1379,6 +1749,11 @@ pub enum Projection {
     Focus(FocusStatus),
     OperationProcessed(OperationDisposition),
     Profiles(ProfilesView),
+    /// The newest tabs the focused profile can reopen by name, for the menus.
+    /// Sent only when that list changes; icons are not part of it.
+    RecentlyClosed(Vec<ClosedTabView>),
+    /// The sidebar's player, sent when it changes; `None` hides it.
+    MediaPlayer(Option<MediaPlayerView>),
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.
@@ -1414,6 +1789,103 @@ mod blocker_status_tests {
         assert!(!status.source_repair_retry_pending);
         assert!(!status.retryable);
         assert_eq!(status.retries_remaining, 0);
+    }
+}
+
+#[cfg(test)]
+mod browsing_data_tests {
+    use super::*;
+
+    #[test]
+    fn ranges_cover_the_windows_a_person_picks_and_all_time_has_none() {
+        let hour = 3600;
+        assert_eq!(BrowsingDataRange::Hour.window_seconds(), Some(hour));
+        assert_eq!(BrowsingDataRange::Day.window_seconds(), Some(24 * hour));
+        assert_eq!(
+            BrowsingDataRange::Week.window_seconds(),
+            Some(7 * 24 * hour)
+        );
+        assert_eq!(
+            BrowsingDataRange::FourWeeks.window_seconds(),
+            Some(28 * 24 * hour)
+        );
+        assert_eq!(BrowsingDataRange::Everything.window_seconds(), None);
+    }
+
+    #[test]
+    fn a_clear_needs_a_kind_and_a_forget_needs_one_bare_site() {
+        let clear = |history, cookies, cache, downloads| BrowsingDataCall::Clear {
+            range: BrowsingDataRange::Hour,
+            history,
+            cookies,
+            cache,
+            downloads,
+        };
+        assert!(!clear(false, false, false, false).validate());
+        for call in [
+            clear(true, false, false, false),
+            clear(false, true, false, false),
+            clear(false, false, true, false),
+            clear(false, false, false, true),
+            BrowsingDataCall::Sites,
+            BrowsingDataCall::ForgetSite {
+                site: "example.com".into(),
+            },
+            BrowsingDataCall::ForgetPage {
+                origin: "https://www.example.com:8443".into(),
+            },
+        ] {
+            assert!(call.validate(), "{call:?}");
+        }
+        for site in [
+            "",
+            "https://example.com",
+            "example.com/a",
+            "*.example.com",
+            " ",
+        ] {
+            assert!(
+                !BrowsingDataCall::ForgetSite { site: site.into() }.validate(),
+                "{site:?}"
+            );
+        }
+        for origin in [
+            "",
+            "example.com",
+            "https://example.com/a",
+            "file:///tmp",
+            "about:blank",
+        ] {
+            assert!(
+                !BrowsingDataCall::ForgetPage {
+                    origin: origin.into()
+                }
+                .validate(),
+                "{origin:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_cannot_send_a_dated_history_or_download_clear() {
+        assert!(
+            serde_json::from_str::<HistoryCall>(r#"{"kind":"clear_since","since":1}"#).is_err()
+        );
+        assert!(serde_json::from_str::<HistoryCall>(r#"{"kind":"clear","range":"hour"}"#).is_ok());
+        assert!(serde_json::from_str::<BrowsingDataCall>(
+            r#"{"kind":"clear","range":"four_weeks","history":true,"cookies":false,"cache":false,"downloads":false}"#
+        )
+        .is_ok());
+        assert!(serde_json::from_str::<BrowsingDataCall>(
+            r#"{"kind":"clear","range":"forever","history":true,"cookies":false,"cache":false,"downloads":false}"#
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<zephium_core::downloads::DownloadCall>(
+                r#"{"kind":"clear_since","since":1}"#
+            )
+            .is_err()
+        );
     }
 }
 

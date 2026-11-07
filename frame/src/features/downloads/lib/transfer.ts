@@ -22,9 +22,11 @@ export class TransferRate {
     return rate;
   }
 
-  /** Keeps only the downloads still in view. */
-  retain(ids: Iterable<string>) {
-    const keep = new Set(ids);
+  /** Pauses and interruptions end a sample window; their idle time is not transfer time. */
+  retain(entries: Iterable<Pick<DownloadView, "id" | "state">>) {
+    const keep = new Set(
+      [...entries].filter((entry) => entry.state === "receiving").map((entry) => entry.id),
+    );
     for (const id of this.#samples.keys()) if (!keep.has(id)) this.#samples.delete(id);
   }
 }

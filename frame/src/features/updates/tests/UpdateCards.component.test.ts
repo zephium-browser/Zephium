@@ -15,6 +15,7 @@ const native = vi.hoisted(() => ({
   stored: {} as Record<string, string>,
   about: vi.fn(async () => ({ version: "1.0.1", os: "macOS 26.1.0", arch: "aarch64" })),
   relaunch: vi.fn(async () => true),
+  appRelaunch: vi.fn(async () => true),
   openUrl: vi.fn(async () => ({ accepted: true, operation_id: null })),
   softwareUpdate: vi.fn(async () => true),
   settingSet: vi.fn(async (_key: string, _value: string) => ({
@@ -28,6 +29,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     updateStatus: async () => native.status,
     updateRelaunch: native.relaunch,
+    appRelaunch: native.appRelaunch,
     aboutInfo: native.about,
     settingGet: async (key: string) => native.stored[key] ?? null,
     settingSet: native.settingSet,
@@ -39,6 +41,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 const clear: RuntimeStatus = {
   restart_required: false,
+  restart_reason: null,
   session_set_aside: false,
   user_content_degraded_scope_count: 0,
   security_advisories: [],
@@ -79,12 +82,19 @@ test("after an update, the card links its release notes and goes once read", asy
   await expect.element(screen.getByText("Zephium updated to 1.0.1")).toBeVisible();
 
   await screen.getByRole("button", { name: "See what's new" }).click();
-  expect(native.openUrl).toHaveBeenCalledWith(
-    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.1",
-    true,
-  );
+  expect(native.openUrl).toHaveBeenCalledWith("https://zephium.app/changelog#v1-0-1", true);
   await expect.poll(() => screen.container.querySelector(".update-stack")).toBeNull();
   expect(native.settingSet).toHaveBeenCalledWith("notice.seen-version", "1.0.1");
+});
+
+test("the cards sit flush with the column's edges, which the window already insets", async () => {
+  await start({ state: "upToDate" }, { "notice.seen-version": "1.0.0" });
+  const screen = await render(UpdateCards);
+  await expect.element(screen.getByText("Zephium updated to 1.0.1")).toBeVisible();
+  const stack = screen.container.querySelector(".update-stack")!.getBoundingClientRect();
+  const column = screen.container.getBoundingClientRect();
+  expect(stack.left).toBe(column.left);
+  expect(stack.right).toBe(column.right);
 });
 
 test("the close button acknowledges the new version without opening anything", async () => {
@@ -196,13 +206,24 @@ test("manual installation remains actionable in the sidebar and compact rail", a
   await start({ state: "manualInstall", version: "1.0.2" }, { "notice.seen-version": "1.0.1" });
   const screen = await render(UpdateCards);
   await screen.getByRole("button", { name: "Download and install manually" }).click();
-  expect(native.openUrl).toHaveBeenCalledWith(
-    "https://github.com/zephium-browser/Zephium/releases/tag/v1.0.2",
-    true,
-  );
+  expect(native.openUrl).toHaveBeenCalledWith("https://zephium.app/changelog#v1-0-2", true);
   await screen.unmount();
   const rail = await render(UpdateGlyph, { props: { onabout: vi.fn() } });
   await rail.getByRole("button", { name: "Download and install manually" }).click();
   expect(native.openUrl).toHaveBeenCalledTimes(2);
   expect(native.relaunch).not.toHaveBeenCalled();
+});
+
+test("a profile only a restart can trust raises a pill that restarts Zephium", async () => {
+  await start({ state: "upToDate" }, { "notice.seen-version": "1.0.1" });
+  emitNativeEvent("runtimeStatusChanged", {
+    ...clear,
+    restart_required: true,
+    restart_reason: "profile",
+  });
+  const screen = await render(UpdateCards);
+  await screen.getByRole("button", { name: "Restart Zephium" }).click();
+  expect(native.appRelaunch).toHaveBeenCalledOnce();
+  expect(native.relaunch).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: /dismiss|close/i }).query()).toBeNull();
 });

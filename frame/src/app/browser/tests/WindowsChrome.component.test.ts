@@ -9,7 +9,13 @@ import Shell from "../Shell.svelte";
 vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ tabsBootstrap: async () => {}, sidebarSetWidth: async () => {} });
+  return mockBindings({
+    pagePermissionCardHost: async () => {},
+    tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
+    sidebarSetWidth: async () => {},
+  });
 });
 
 afterEach(() => {
@@ -25,6 +31,8 @@ test("acrylic retains its color wash through the transparent material reset", ()
   const acrylic = getComputedStyle(document.body).backgroundColor;
   expect(acrylic).not.toBe("rgba(0, 0, 0, 0)");
   expect(acrylic).toMatch(/(?:0\.28|28%)/);
+  root.setAttribute("data-material", "mica");
+  expect(getComputedStyle(document.body).backgroundColor).toMatch(/(?:0\.2\b|20%)/);
   root.setAttribute("data-material", "vibrancy");
   expect(getComputedStyle(document.body).backgroundColor).toBe("rgba(0, 0, 0, 0)");
   root.setAttribute("data-material", "none");

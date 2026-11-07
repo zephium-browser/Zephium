@@ -86,7 +86,7 @@ impl RetainedWork {
             return;
         };
         let Some(generation) = self.human_generation.checked_add(1) else {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             return;
         };
         let sampled = Instant::now();

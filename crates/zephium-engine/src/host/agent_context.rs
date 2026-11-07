@@ -233,7 +233,7 @@ pub(super) struct AgentOwnedContext {
     rendering_probe: Option<foreground_probe::AgentForegroundRendering>,
     #[cfg(feature = "native-agentic-foreground-probe")]
     rendering_probe_attempted: bool,
-    favicon: Option<favicon::AgentFaviconPoll>,
+    favicon: Option<favicon::AgentFaviconWatch>,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
 }

@@ -627,6 +627,54 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
 }
 
 #[test]
+fn webview2_save_as_passes_only_while_the_browser_has_asked_for_one() {
+    let webview2 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../vendor/wry/src/webview2/mod.rs"
+    ));
+    let mut handlers = webview2.split("add_SaveAsUIShowing(").skip(1);
+    // One gate handles all views; a second registration must not override it.
+    let handler = handlers
+        .next()
+        .expect("a SaveAsUIShowing registration")
+        .split("token,")
+        .next()
+        .expect("a bounded SaveAsUIShowing handler");
+    assert!(handler.contains("gate.as_ref().is_some_and(|gate| gate.get())"));
+    let denied = handler.find("args.SetCancel(true)?").expect("deny first");
+    let suppressed = handler
+        .find("args.SetSuppressDefaultDialog(!document)?")
+        .expect("dialog policy is configured");
+    let admitted = handler
+        .find("if allowed {\n              args.SetCancel(false)?;")
+        .expect("only an admitted save can clear cancellation");
+    assert!(denied < suppressed && suppressed < admitted);
+    assert!(handlers.next().is_none());
+    // A view built without the gate (an agent view, a raw view) cannot open
+    // one, and the gate is closed again when the dialog's call completes.
+    let show = webview2
+        .split("pub fn show_save_as(&self)")
+        .nth(1)
+        .expect("the browser's Save As entry")
+        .split("pub fn set_memory_usage_level")
+        .next()
+        .expect("a bounded Save As entry");
+    assert!(show.contains("let Some(gate) = self.save_as.clone() else"));
+    assert!(show.contains("E_ACCESSDENIED"));
+    assert!(show.contains("closing.set(false)"));
+    let gate = webview2
+        .split("let save_as = pl_attrs")
+        .nth(1)
+        .expect("the gate's construction")
+        .split(';')
+        .next()
+        .expect("a bounded gate construction");
+    assert!(gate.contains("native_context_menu_handler"));
+    assert!(gate.contains(".is_some()"));
+    assert!(gate.contains(".then("));
+}
+
+#[test]
 fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
     let mac = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -849,24 +897,71 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
     assert!(source.contains("with_permission_request_handler(move |request|"));
     assert!(source.contains("page_permissions::admit_native_request("));
 
-    use super::construction::raw_content_permission;
+    use super::construction::{raw_content_permission, raw_content_permission_on};
     use wry::{PermissionKind, PermissionResponse};
-    let media = if cfg!(windows) {
-        PermissionResponse::Prompt
-    } else {
-        PermissionResponse::Deny
-    };
-    assert_eq!(raw_content_permission(PermissionKind::Camera), media);
-    assert_eq!(raw_content_permission(PermissionKind::Microphone), media);
-    for kind in [
-        PermissionKind::DisplayCapture,
+    let asked = [
+        PermissionKind::Camera,
+        PermissionKind::Microphone,
         PermissionKind::Geolocation,
         PermissionKind::Notifications,
         PermissionKind::ClipboardRead,
+        PermissionKind::Midi,
         PermissionKind::Sensors,
+        PermissionKind::LocalFonts,
+        PermissionKind::AutomaticDownloads,
+    ];
+    let never = [
+        PermissionKind::DisplayCapture,
+        PermissionKind::MediaKeySystemAccess,
+        PermissionKind::WindowManagement,
+        PermissionKind::PointerLock,
+        PermissionKind::FileSystemAccess,
+        PermissionKind::Autoplay,
         PermissionKind::Other,
-    ] {
+    ];
+    for kind in asked {
+        assert_eq!(
+            raw_content_permission_on(kind, true),
+            PermissionResponse::Prompt
+        );
+        assert_eq!(
+            raw_content_permission_on(kind, false),
+            PermissionResponse::Deny
+        );
+        assert_eq!(
+            raw_content_permission(kind),
+            raw_content_permission_on(kind, cfg!(windows))
+        );
+    }
+    for kind in never {
+        assert_eq!(
+            raw_content_permission_on(kind, true),
+            PermissionResponse::Deny
+        );
         assert_eq!(raw_content_permission(kind), PermissionResponse::Deny);
+    }
+    assert!(source.contains(
+        ".with_permission_decisions_saved(!matches!(partition, Partition::Ephemeral(_)))"
+    ));
+    // Agent, Work and extension views are built elsewhere and keep denying
+    // every request without ever saving an answer.
+    for other in [
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/windows/agent_context.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/platform/macos/agent_context.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/host/webext_windows.rs"
+        )),
+    ] {
+        assert!(other.contains(".with_permission_handler(|_| wry::PermissionResponse::Deny)"));
+        assert!(!other.contains("with_permission_decisions_saved"));
+        assert!(!other.contains("PermissionResponse::Prompt"));
     }
 }
 

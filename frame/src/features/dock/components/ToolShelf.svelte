@@ -26,6 +26,9 @@
   const name = $derived(tabs.profile()?.name ?? profiles.current()?.name ?? "");
   const others = $derived(profiles.inPrivate() ? [] : profiles.others());
   const privately = $derived(profiles.inPrivate() || tabs.profile()?.kind === "incognito");
+  /** The private window is open behind the regular tabs, and this brings it back. */
+  const aside = $derived(profiles.privateAside());
+  const privateLabel = $derived(aside ? m.private_return() : m.browse_incognito_window());
   /** The avatar the profile chose; a private window shows none. */
   const foot = accountFoot({ private: () => privately });
   // A tool whose feature is off is not offered here either.
@@ -147,8 +150,9 @@
               role="menuitem"
               class="shelf-chip shelf-private"
               data-after-others={others.length > 0 || undefined}
-              title={named(m.browse_incognito_window(), keysFor("window.newPrivate"))}
-              aria-label={m.browse_incognito_window()}
+              data-aside={aside || undefined}
+              title={named(privateLabel, keysFor("window.newPrivate"))}
+              aria-label={privateLabel}
               onclick={() => run("window.newPrivate")}
               ><Icon icon={IncognitoIcon} size={16} strokeWidth={1.7} /></button
             >{/if}
@@ -326,6 +330,12 @@
   .shelf-chip:active {
     scale: 0.92;
     background: var(--row-pressed);
+  }
+
+  /* Open and set aside: lit, so the way back reads as a way back. */
+  .shelf-private[data-aside] {
+    background: var(--row-active);
+    color: var(--color-accent);
   }
 
   /* A private window is not another of your profiles: a hairline keeps it

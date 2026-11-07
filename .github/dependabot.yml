@@ -38,6 +38,8 @@ updates:
       # Vendored forks, and Tauri crates that must match the forked version.
       - dependency-name: adblock
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: tao
+        update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
       - dependency-name: tauri
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
       - dependency-name: tauri-build

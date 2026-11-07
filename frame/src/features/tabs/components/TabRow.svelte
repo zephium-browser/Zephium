@@ -6,13 +6,15 @@
 
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { Cancel01Icon } from "@hugeicons/core-free-icons";
+  import { tabFallbackIcon } from "../lib/tab-icon";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
   import Icon from "$shared/ui/Icon";
   import CaptureControl from "$shared/ui/CaptureControl";
-  import { stopCaptureFor } from "$domain/capture";
+  import AudioControl from "$shared/ui/AudioControl";
+  import { tabs } from "$domain/tabs";
   import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
@@ -57,9 +59,8 @@
 
   // A tab with no page yet is a different thing from a page whose site simply
   // supplies no icon, and the row should say which.
-  let fallback = $derived(
-    tab.content === "extensions" || tab.content === "extension_owned" ? PuzzleIcon : Globe02Icon,
-  );
+  let fallback = $derived(tabFallbackIcon(tab.content));
+  let indent = $derived(grouped ? 8 : 8 + Math.min(depth, 8) * 13);
 </script>
 
 <li
@@ -68,6 +69,7 @@
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
+  data-audio-host
   class={["browse-tab", grouped && "browse-tab-grouped", className]}
   data-selected={active}
   data-split-candidate={splitCandidate}
@@ -77,7 +79,7 @@
   <button
     type="button"
     class="tab-open"
-    style:padding-inline-start={`${grouped ? 8 : 8 + Math.min(depth, 8) * 13}px`}
+    style:padding-inline-start={`${indent}px`}
     aria-current={active ? "page" : undefined}
     aria-label={tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
@@ -95,18 +97,25 @@
       size={16}
       lit={active}
       {fallback}
+      notched={!!tab.audio}
     />
     <span data-zephium-tab-label class="tab-label">{tab.title}</span>
   </button>
+  {#if tab.audio}
+    <AudioControl
+      audio={tab.audio}
+      size={16}
+      offset={indent}
+      onToggle={(muted) => void tabs.setMuted(tab.id, muted)}
+    />
+  {/if}
   {#if tab.capture}
-    <span style:margin-inline-end={closable ? "28px" : "4px"}>
-      {#key tab.capture.navigation_id}
-        <CaptureControl
-          site={tab.url ?? tab.title}
-          capture={tab.capture}
-          onStop={stopCaptureFor(tab.id, tab.capture.navigation_id)}
-        />
-      {/key}
+    <span class="tab-status" style:margin-inline-end={closable ? "28px" : "4px"}>
+      <CaptureControl
+        site={tab.url ?? tab.title}
+        capture={tab.capture}
+        onOpen={(x, y) => tabs.openMediaMenu(tab.id, x, y)}
+      />
     </span>
   {/if}
   {#if closable}
@@ -217,6 +226,13 @@
   .browse-tab:is(:hover, :focus-within) .tab-label,
   :global([data-close-buttons="always"]) .browse-tab:has(.tab-close) .tab-label {
     margin-inline-end: 22px;
+  }
+
+  .tab-status {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
   }
 
   .tab-close {

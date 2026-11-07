@@ -615,3 +615,25 @@ async fn malformed_actions_have_one_repair_and_keep_failure_counts_when_terminal
     settlement.settle(&mut policy).unwrap();
     assert_eq!(policy.pending_model_calls(), 0);
 }
+
+#[test]
+fn local_page_models_reserve_and_settle_zero_cost() {
+    let mut entry = entry("compatible/local");
+    entry.model.provider = WorkModelProvider::Compatible;
+    entry.price = Some(WorkModelPrice {
+        input: 0,
+        cached_input: 0,
+        output: 0,
+    });
+    let model = AgentProviderModelClient::try_new(&entry, Scripted::stalled()).unwrap();
+    assert_eq!(model.reservation_cost_micro_usd(100_000, 10_000), Some(0));
+    assert_eq!(
+        model.usage_cost_micro_usd(&WorkModelUsage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cost_micros: Some(9000),
+            ..Default::default()
+        }),
+        Some(0)
+    );
+}

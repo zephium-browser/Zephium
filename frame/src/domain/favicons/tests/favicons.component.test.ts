@@ -90,6 +90,21 @@ describe("a stored page's site", () => {
   });
 });
 
+describe("a page's own icon", () => {
+  it("is painted for its reference and does not replace the site's", async () => {
+    await favicons.init();
+    const page = { origin: "https://example.com/sheets/d/1", revision: "p" };
+    deliver([
+      { origin: "https://example.com", revision: "a", rgba: raster(5) },
+      { origin: page.origin, revision: page.revision, rgba: raster(9) },
+    ]);
+
+    expect(favicons.image(page)?.data[0]).toBe(9);
+    expect(favicons.image({ origin: "https://example.com", revision: "a" })?.data[0]).toBe(5);
+    expect(favicons.forPage("https://example.com/sheets/d/1")?.image.data[0]).toBe(5);
+  });
+});
+
 describe("icon tone", () => {
   // Measured from real cached favicons: GitHub's mark averages luminance 22 at
   // chroma 2, while YouTube's averages luminance 69 at chroma 240. Only the

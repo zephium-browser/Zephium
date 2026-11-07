@@ -39,7 +39,7 @@ fn scoped(query: &str, limit: u16, range: HistoryRange) -> HistoryCall {
 }
 
 /// Drives the reader thread the way the actor does and hands its reply back.
-fn drain_reads(
+pub(super) fn drain_reads(
     shell: &mut Shell,
     store: Arc<FakeStore>,
     queue: crate::store_reads::StoreReadQueue,
@@ -60,14 +60,16 @@ fn drain_reads(
 
 /// Visits are deduplicated per tab within a second, so each address gets its
 /// own tab rather than racing that rule.
-fn visit(shell: &mut Shell, screen: &Screen, host: &str) -> ItemId {
+pub(super) fn visit(shell: &mut Shell, screen: &Screen, host: &str) -> ItemId {
     shell.handle(Command::Open);
     let id = active_id(screen);
     navigate_and_commit(shell, id, host);
     id
 }
 
-fn browsed(store: Arc<FakeStore>) -> (Shell, Screen, crate::store_reads::StoreReadQueue) {
+pub(super) fn browsed(
+    store: Arc<FakeStore>,
+) -> (Shell, Screen, crate::store_reads::StoreReadQueue) {
     let (mut shell, _engine, screen) = setup_with(store);
     shell.handle(Command::Bootstrap);
     let queue = crate::store_reads::StoreReadQueue::new();
@@ -127,14 +129,23 @@ fn history_never_answers_a_profile_other_than_the_focused_one() {
     let (mut shell, screen, _queue) = browsed(store);
     visit(&mut shell, &screen, "private.example");
 
-    let answer = dispatch(&mut shell, ProfileId::from(9_999), page("", 50));
-
-    assert!(matches!(
-        taken(&answer),
-        HistoryResponse::Error {
-            error: HistoryError::Invalid
-        }
-    ));
+    for call in [
+        page("", 50),
+        HistoryCall::Forget {
+            urls: vec!["https://private.example/".into()],
+        },
+        HistoryCall::Clear {
+            range: HistoryRange::Everything,
+        },
+    ] {
+        let answer = dispatch(&mut shell, ProfileId::from(9_999), call);
+        assert!(matches!(
+            taken(&answer),
+            HistoryResponse::Error {
+                error: HistoryError::Invalid
+            }
+        ));
+    }
 }
 
 #[test]
@@ -419,4 +430,357 @@ fn a_refused_time_clear_preserves_blocker_counters_and_skips_the_reader() {
         writes
     );
     assert_eq!(queue.pending_surface_calls_for_test(), 0);
+}
+
+fn current_space(shell: &Shell) -> SpaceId {
+    shell.windows.focused().unwrap().space
+}
+
+fn new_space(shell: &mut Shell, name: &str) -> SpaceId {
+    shell.handle(Command::Space(Box::new(crate::SpaceCommand::Create {
+        name: name.into(),
+        look: Default::default(),
+    })));
+    current_space(shell)
+}
+
+fn today(shell: &Shell, space: SpaceId) -> Vec<ItemId> {
+    shell
+        .items
+        .roots(Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        })
+        .to_vec()
+}
+
+fn url_of(shell: &Shell, id: ItemId) -> String {
+    shell
+        .items
+        .tab(id)
+        .unwrap()
+        .url
+        .as_ref()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn reopening_returns_a_tab_to_the_space_it_was_closed_in() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    let blank = active_id(&screen);
+    let kept = visit(&mut shell, &screen, "kept.example");
+    let closed = visit(&mut shell, &screen, "closed.example");
+    shell.handle(Command::Close(closed));
+    let studio = new_space(&mut shell, "Studio");
+    visit(&mut shell, &screen, "studio.example");
+    assert_ne!(studio, home);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    assert_eq!(current_space(&shell), home);
+    let restored = active_id(&screen);
+    assert_eq!(url_of(&shell, restored), "https://closed.example/");
+    assert_eq!(today(&shell, home), vec![blank, kept, restored]);
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn reopening_into_an_empty_space_leaves_no_stray_new_tab() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    let only = active_id(&screen);
+    navigate_and_commit(&mut shell, only, "only.example");
+    shell.handle(Command::Close(only));
+    let stand_in = active_id(&screen);
+    assert!(shell.items.tab(stand_in).unwrap().url.is_none());
+    // Leaving an untouched new tab behind closes it: home is empty now.
+    let studio = new_space(&mut shell, "Studio");
+    assert_eq!(current_space(&shell), studio);
+    assert!(today(&shell, home).is_empty());
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    assert_eq!(current_space(&shell), home);
+    let restored = active_id(&screen);
+    assert_eq!(today(&shell, home), vec![restored]);
+    assert_eq!(url_of(&shell, restored), "https://only.example/");
+    assert!(
+        today(&shell, studio).is_empty(),
+        "the untouched new tab left behind is not kept"
+    );
+}
+
+#[test]
+fn a_tab_comes_back_to_its_old_place_among_the_open_tabs() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    let first = visit(&mut shell, &screen, "first.example");
+    let middle = visit(&mut shell, &screen, "middle.example");
+    let last = visit(&mut shell, &screen, "last.example");
+    shell.handle(Command::Close(middle));
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    let restored = active_id(&screen);
+    let open = today(&shell, home);
+    let at = |id| open.iter().position(|tab| *tab == id).unwrap();
+    assert_eq!(url_of(&shell, restored), "https://middle.example/");
+    assert!(at(first) < at(restored) && at(restored) < at(last));
+}
+
+#[test]
+fn a_place_that_is_gone_puts_the_tab_at_the_end() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    visit(&mut shell, &screen, "first.example");
+    let second = visit(&mut shell, &screen, "second.example");
+    let third = visit(&mut shell, &screen, "third.example");
+    shell.handle(Command::Close(third));
+    shell.handle(Command::Close(second));
+    let at_end = today(&shell, home).len();
+    shell
+        .recently_closed
+        .iter_mut()
+        .for_each(|entry| entry.position = Some(40));
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    let open = today(&shell, home);
+    assert_eq!(open.len(), at_end + 2);
+    assert_eq!(
+        url_of(&shell, open[open.len() - 1]),
+        "https://third.example/"
+    );
+}
+
+#[test]
+fn a_space_that_is_gone_reopens_in_the_current_one() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    visit(&mut shell, &screen, "first.example");
+    let closed = visit(&mut shell, &screen, "closed.example");
+    shell.handle(Command::Close(closed));
+    shell.recently_closed[0].space = SpaceId::from(9_999);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    assert_eq!(current_space(&shell), home);
+    assert_eq!(
+        url_of(&shell, active_id(&screen)),
+        "https://closed.example/"
+    );
+}
+
+#[test]
+fn a_closed_tab_can_be_reopened_by_name_out_of_order() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    visit(&mut shell, &screen, "keep.example");
+    let older = visit(&mut shell, &screen, "older.example");
+    let newer = visit(&mut shell, &screen, "newer.example");
+    shell.handle(Command::Close(older));
+    shell.handle(Command::Close(newer));
+    let name = shell.recently_closed[0].session_id.unwrap();
+
+    let disposition = shell.operation_run_command(&format!("tab.reopen={name}"));
+
+    assert_ne!(disposition.outcome, OperationOutcome::NoOp);
+    assert_eq!(url_of(&shell, active_id(&screen)), "https://older.example/");
+    assert_eq!(shell.recently_closed.len(), 1);
+    assert_eq!(
+        shell.operation_run_command("tab.reopen=not-an-id").outcome,
+        OperationOutcome::Rejected
+    );
+}
+
+#[test]
+fn closing_the_only_tab_and_reopening_leaves_just_that_tab() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let home = current_space(&shell);
+    let only = active_id(&screen);
+    navigate_and_commit(&mut shell, only, "only.example");
+    shell.handle(Command::Close(only));
+    assert_eq!(today(&shell, home).len(), 1);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    let open = today(&shell, home);
+    assert_eq!(open.len(), 1);
+    assert_eq!(url_of(&shell, open[0]), "https://only.example/");
+    assert_eq!(active_id(&screen), open[0]);
+}
+
+#[test]
+fn tabs_closed_in_the_private_window_are_never_recorded_or_listed() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    visit(&mut shell, &screen, "regular.example");
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let private_profile = shell.windows.focused().unwrap().profile;
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "secret.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "hidden.example");
+
+    shell.handle(Command::Close(second));
+
+    assert!(shell.recently_closed.is_empty());
+    let answer = dispatch(&mut shell, private_profile, HistoryCall::ClosedTabs);
+    let HistoryResponse::ClosedTabs { tabs } = taken(&answer) else {
+        panic!("closed tabs answer with their list")
+    };
+    assert!(tabs.is_empty());
+    assert_eq!(
+        shell.operation_run_command("tab.reopen").outcome,
+        OperationOutcome::NoOp
+    );
+}
+
+#[test]
+fn the_closed_tabs_list_is_newest_first_per_profile_and_reopens_by_id() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let profile = shell.windows.focused().unwrap().profile;
+    visit(&mut shell, &screen, "keep.example");
+    let older = visit(&mut shell, &screen, "older.example");
+    let newer = visit(&mut shell, &screen, "newer.example");
+    shell.handle(Command::Close(older));
+    shell.handle(Command::Close(newer));
+    let mut foreign = shell.recently_closed[0].clone();
+    foreign.profile = ProfileId::from(9_001);
+    foreign.session_id = Some(zephium_core::ids::ClosedSessionId::generate());
+    shell.recently_closed.push(foreign);
+
+    let answer = dispatch(&mut shell, profile, HistoryCall::ClosedTabs);
+    let HistoryResponse::ClosedTabs { tabs } = taken(&answer) else {
+        panic!("closed tabs answer with their list")
+    };
+    let urls: Vec<_> = tabs.iter().map(|tab| tab.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        vec!["https://newer.example/", "https://older.example/"]
+    );
+
+    let reopened = dispatch(
+        &mut shell,
+        profile,
+        HistoryCall::ReopenClosed {
+            id: tabs[1].id.clone(),
+        },
+    );
+    assert_eq!(taken(&reopened), HistoryResponse::Reopened);
+    assert_eq!(url_of(&shell, active_id(&screen)), "https://older.example/");
+
+    let stale = dispatch(
+        &mut shell,
+        profile,
+        HistoryCall::ReopenClosed {
+            id: tabs[1].id.clone(),
+        },
+    );
+    assert!(matches!(taken(&stale), HistoryResponse::Error { .. }));
+    let foreign_id = shell
+        .recently_closed
+        .last()
+        .unwrap()
+        .session_id
+        .unwrap()
+        .to_string();
+    let foreign_reopen = dispatch(
+        &mut shell,
+        profile,
+        HistoryCall::ReopenClosed { id: foreign_id },
+    );
+    assert!(matches!(
+        taken(&foreign_reopen),
+        HistoryResponse::Error { .. }
+    ));
+    assert!(!HistoryCall::ReopenClosed { id: "x".into() }.validate());
+}
+
+#[test]
+fn closed_tab_list_answers_even_when_storage_is_degraded() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store);
+    let profile = shell.windows.focused().unwrap().profile;
+    visit(&mut shell, &screen, "keep.example");
+    let closed = visit(&mut shell, &screen, "closed.example");
+    shell.handle(Command::Close(closed));
+    shell.degraded_storage_profiles.insert(profile);
+
+    let answer = dispatch(&mut shell, profile, HistoryCall::ClosedTabs);
+
+    assert!(matches!(
+        taken(&answer),
+        HistoryResponse::ClosedTabs { tabs } if tabs.len() == 1
+    ));
+}
+
+#[test]
+fn the_menus_hear_of_closed_tabs_only_when_the_list_changes() {
+    let log: Arc<Mutex<Vec<Vec<zephium_ipc::ClosedTabView>>>> = Arc::default();
+    let sink = log.clone();
+    let screen: Screen = Arc::new(Mutex::new(empty_items()));
+    let items = screen.clone();
+    let mut shell = Shell::new_with_failure(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            if let Projection::RecentlyClosed(tabs) = &projection {
+                sink.lock().unwrap().push(tabs.clone());
+            }
+            apply_projection(&mut items.lock().unwrap(), projection);
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    visit(&mut shell, &screen, "keep.example");
+    assert!(log.lock().unwrap().is_empty());
+
+    let first = visit(&mut shell, &screen, "first.example");
+    shell.handle(Command::Close(first));
+    let second = visit(&mut shell, &screen, "second.example");
+    shell.handle(Command::Close(second));
+    shell.handle(Command::Open);
+    shell.handle(Command::Open);
+
+    let sent = log.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2, "unrelated changes say nothing");
+    let titles: Vec<_> = sent[1].iter().map(|tab| tab.url.as_str()).collect();
+    assert_eq!(
+        titles,
+        vec!["https://second.example/", "https://first.example/"]
+    );
+    assert!(sent[1].iter().all(|tab| tab.icon.is_none()));
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    let sent = log.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[2].len(), 1);
+}
+
+fn empty_items() -> ItemsState {
+    ItemsState {
+        projection_revision: String::new(),
+        profile: None,
+        spaces: Vec::new(),
+        active_space_id: None,
+        nodes: Vec::new(),
+        tabs: Vec::new(),
+        active: None,
+        split_group: None,
+    }
 }

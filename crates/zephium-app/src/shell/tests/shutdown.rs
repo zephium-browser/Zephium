@@ -242,7 +242,12 @@ fn store_read_quiescence_failure_keeps_shutdown_retryable() {
         let callback = callback_owner.callback_handle();
         std::thread::spawn(move || crate::store_reads::run(store, reads, callback))
     };
-    assert!(reads.request_history(1, ProfileId::from(7), "blocked real reader".into()));
+    assert!(reads.request_history(
+        1,
+        ProfileId::from(7),
+        "blocked real reader".into(),
+        crate::store_reads::Sources::HISTORY
+    ));
     let started_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !store
         .history_started
