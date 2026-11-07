@@ -66,7 +66,10 @@ impl EngineHost {
             }
         }
         #[cfg(target_os = "windows")]
-        self.windows_browsing_data(partition, profile, call, done);
+        {
+            let _ = profile;
+            self.windows_browsing_data(partition, call, done);
+        }
     }
 }
 
@@ -75,25 +78,23 @@ impl EngineHost {
     fn windows_browsing_data(
         &mut self,
         partition: Partition,
-        profile: ProfileId,
         call: EngineDataCall,
         done: EngineDataCompletion,
     ) {
         use crate::platform::imp::browsing_data as native;
         let reached =
             self.reach_durable_profile(partition, |view| native::DataTarget::of(view).ok());
-        let Some((target, temporary)) = reached else {
+        let Some((target, page)) = reached else {
             done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
             return;
         };
         // A page opened only to reach the profile goes again once it answers.
-        let done = if temporary {
-            EngineDataCompletion::new(move |reply| {
+        let done = match page {
+            Some(page) => EngineDataCompletion::new(move |reply| {
                 done.finish(reply);
-                super::lifecycle::release_temporary_spare(profile);
-            })
-        } else {
-            done
+                drop(page);
+            }),
+            None => done,
         };
         match call {
             EngineDataCall::Clear { kinds, since } => native::clear(&target, kinds, since, done),

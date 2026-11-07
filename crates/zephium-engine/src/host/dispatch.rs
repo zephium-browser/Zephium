@@ -537,6 +537,8 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             dormant_cycles: std::collections::HashMap::new(),
             #[cfg(target_os = "windows")]
+            temporary_page: None,
+            #[cfg(target_os = "windows")]
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),

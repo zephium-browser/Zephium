@@ -123,7 +123,7 @@ impl EngineHost {
         profile: ProfileId,
     ) -> Option<(
         webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4,
-        bool,
+        Option<super::lifecycle::TemporaryPage>,
     )> {
         use windows::core::Interface;
         use wry::WebViewExtWindows;
@@ -145,16 +145,15 @@ impl EngineHost {
     /// Closes a page opened only for one call once that call has answered.
     #[cfg(target_os = "windows")]
     fn after_answer<T: 'static>(
-        profile: ProfileId,
-        temporary: bool,
+        page: Option<super::lifecycle::TemporaryPage>,
         done: Box<dyn FnOnce(T) + Send>,
     ) -> Box<dyn FnOnce(T) + Send> {
-        if !temporary {
+        let Some(page) = page else {
             return done;
-        }
+        };
         Box::new(move |answer| {
             done(answer);
-            super::lifecycle::release_temporary_spare(profile);
+            drop(page);
         })
     }
 
@@ -163,10 +162,10 @@ impl EngineHost {
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let Some((native, temporary)) = self.human_profile(profile) else {
+            let Some((native, page)) = self.human_profile(profile) else {
                 return done(None);
             };
-            let done = Self::after_answer(profile, temporary, done);
+            let done = Self::after_answer(page, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler = webview2_com::GetNonDefaultPermissionSettingsCompletedHandler::create(
@@ -237,10 +236,10 @@ impl EngineHost {
             let Some(kind) = native_kind(kind) else {
                 return done(false);
             };
-            let Some((native, temporary)) = self.human_profile(profile) else {
+            let Some((native, page)) = self.human_profile(profile) else {
                 return done(false);
             };
-            let done = Self::after_answer(profile, temporary, done);
+            let done = Self::after_answer(page, done);
             let slot = Rc::new(Cell::new(Some(done)));
             let callback = slot.clone();
             let handler =

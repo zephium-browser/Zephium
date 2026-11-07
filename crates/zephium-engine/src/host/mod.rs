@@ -727,6 +727,10 @@ pub(crate) struct EngineHost {
     /// dormancy cycle. Only an attempt of the current cycle counts a refusal.
     #[cfg(target_os = "windows")]
     dormant_cycles: std::collections::HashMap<ItemId, u64>,
+    /// The warm page `reach_durable_profile` opened for calls still running,
+    /// and how many of them use it.
+    #[cfg(target_os = "windows")]
+    temporary_page: Option<(ProfileId, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]

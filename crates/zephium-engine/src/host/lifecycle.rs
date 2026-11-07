@@ -30,13 +30,25 @@ fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> Rende
     }
 }
 
-/// Closes the page `reach_durable_profile` opened for one call, once that
-/// call has answered, unless a page of the profile is open by then.
+/// One call's use of a page `reach_durable_profile` opened to reach a
+/// profile. Dropped once the call has answered; the last use closes the page,
+/// unless a page of the profile is open by then.
 #[cfg(target_os = "windows")]
-pub(super) fn release_temporary_spare(profile: ProfileId) {
-    let _ = super::dispatch::with_temporary_spare_release(profile, move |host| {
-        host.close_idle_spare(profile)
-    });
+pub(super) struct TemporaryPage {
+    profile: ProfileId,
+    users: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TemporaryPage {
+    fn drop(&mut self) {
+        if self.users.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            let profile = self.profile;
+            let _ = super::dispatch::with_temporary_spare_release(profile, move |host| {
+                host.release_temporary_page(profile)
+            });
+        }
+    }
 }
 
 /// Whether a page of `owner` holds `profile`'s durable store.
@@ -93,7 +105,7 @@ impl EngineHost {
         &mut self,
         partition: zephium_core::ports::engine::Partition,
         reach: impl Fn(&wry::WebView) -> Option<R>,
-    ) -> Option<(R, bool)> {
+    ) -> Option<(R, Option<TemporaryPage>)> {
         use zephium_core::ports::engine::Partition;
         let profile = partition.profile();
         if matches!(partition, Partition::Ephemeral(_)) {
@@ -112,7 +124,31 @@ impl EngineHost {
                     .map(|spare| &spare.view)
             });
         if let Some(view) = open {
-            return reach(view).map(|reached| (reached, false));
+            let reached = reach(view)?;
+            // A call joining a temporary page keeps it open until it answers.
+            let page = self
+                .temporary_page
+                .as_ref()
+                .filter(|(owner, _)| *owner == profile)
+                .filter(|_| {
+                    self.spare
+                        .as_ref()
+                        .is_some_and(|spare| std::ptr::eq(&spare.view, view))
+                })
+                .map(|(_, users)| {
+                    users.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    TemporaryPage {
+                        profile,
+                        users: users.clone(),
+                    }
+                });
+            return Some((reached, page));
+        }
+        // Another profile's page still serving a call is not taken from it.
+        if self.temporary_page.as_ref().is_some_and(|(owner, users)| {
+            *owner != profile && users.load(std::sync::atomic::Ordering::Acquire) > 0
+        }) {
+            return None;
         }
         self.applied_content_policy(profile)?;
         // One warm page exists at a time; another profile's is only a
@@ -133,10 +169,28 @@ impl EngineHost {
             view,
             id,
         });
-        if reached.is_none() {
+        let Some(reached) = reached else {
             self.close_idle_spare(profile);
+            return None;
+        };
+        let users = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        self.temporary_page = Some((profile, users.clone()));
+        Some((reached, Some(TemporaryPage { profile, users })))
+    }
+
+    /// Closes the temporary page once no call uses it any longer.
+    #[cfg(target_os = "windows")]
+    fn release_temporary_page(&mut self, profile: ProfileId) {
+        match &self.temporary_page {
+            Some((owner, users)) if *owner == profile => {
+                if users.load(std::sync::atomic::Ordering::Acquire) > 0 {
+                    return;
+                }
+                self.temporary_page = None;
+            }
+            _ => {}
         }
-        reached.map(|reached| (reached, true))
+        self.close_idle_spare(profile);
     }
 
     pub(crate) fn close(&mut self, id: ItemId) {
