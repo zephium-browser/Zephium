@@ -91,15 +91,17 @@ mod windows {
 
     use windows::core::HSTRING;
     use windows::Data::Xml::Dom::XmlDocument;
-    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    use windows::Win32::UI::Shell::{
+        FOLDERID_AppsFolder, IShellItem, SHCreateItemInKnownFolder,
+        SetCurrentProcessExplicitAppUserModelID, KF_FLAG_DEFAULT,
+    };
     use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 
     static APP_ID: OnceLock<HSTRING> = OnceLock::new();
 
     /// Takes the identity the installer gives Zephium's shortcuts, so the
     /// taskbar groups with a pinned one and a toast is shown under its name.
-    /// A build no installer placed, as in development, has no such shortcut
-    /// and Windows shows none of its toasts.
     pub fn claim(identifier: &str) {
         let id = HSTRING::from(identifier);
         // SAFETY: a process-wide setting, made before any window exists.
@@ -108,19 +110,50 @@ mod windows {
         }
     }
 
+    /// Windows shows a toast for any app ID, even one nothing installed
+    /// carries. Only an ID an installed shortcut gives Start is used, so a
+    /// development or performance build posts none.
+    fn installed(app: &HSTRING) -> bool {
+        // SAFETY: a lookup by name in the Apps folder on this thread's own
+        // apartment; the item is released when dropped.
+        unsafe {
+            SHCreateItemInKnownFolder::<_, IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, app)
+        }
+        .is_ok()
+    }
+
     pub fn post(identifier: &str, title: &str, body: &str) {
         let Some(app) = APP_ID.get() else {
             return;
         };
-        let show = || -> windows::core::Result<()> {
+        let (tag, xml) = (super::toast_tag(identifier), super::toast_xml(title, body));
+        let show = move || -> windows::core::Result<()> {
+            if !installed(app) {
+                return Ok(());
+            }
             let document = XmlDocument::new()?;
-            document.LoadXml(&HSTRING::from(super::toast_xml(title, body)))?;
+            document.LoadXml(&HSTRING::from(xml))?;
             let toast = ToastNotification::CreateToastNotification(&document)?;
-            toast.SetTag(&HSTRING::from(super::toast_tag(identifier)))?;
+            toast.SetTag(&HSTRING::from(tag))?;
             ToastNotificationManager::CreateToastNotifierWithId(app)?.Show(&toast)
         };
-        if let Err(error) = show() {
-            eprintln!("notifications: the toast was not shown: {error}");
+        // The Apps folder lookup needs COM, which the caller's thread may not
+        // have; a short-lived thread owns its own apartment.
+        let spawned = std::thread::Builder::new()
+            .name("toast".into())
+            .spawn(move || {
+                // SAFETY: balanced below on this same thread.
+                let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+                if let Err(error) = show() {
+                    eprintln!("notifications: the toast was not shown: {error}");
+                }
+                if joined {
+                    // SAFETY: pairs the successful CoInitializeEx above.
+                    unsafe { CoUninitialize() };
+                }
+            });
+        if spawned.is_err() {
+            eprintln!("notifications: the toast was not shown");
         }
     }
 }
