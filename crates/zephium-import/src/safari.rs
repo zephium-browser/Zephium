@@ -39,7 +39,11 @@ pub(crate) fn source(locations: &Locations) -> Option<Source> {
 /// The favorites bar opens at the top of the import; the menu and the
 /// reading list keep their own folder.
 pub(crate) fn bookmarks(locations: &Locations) -> Result<Vec<ImportNode>, ImportError> {
-    let bytes = std::fs::read(root(locations).join("Bookmarks.plist"))?;
+    let path = root(locations).join("Bookmarks.plist");
+    if std::fs::metadata(&path)?.len() > 32 * 1024 * 1024 {
+        return Err(ImportError::Unreadable);
+    }
+    let bytes = std::fs::read(path)?;
     parse_bookmarks(&bytes)
 }
 
@@ -148,6 +152,32 @@ pub(crate) fn history(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn oversized_bookmarks_are_refused_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let locations = Locations::scratch(Os::Mac, directory.path());
+        std::fs::create_dir_all(root(&locations)).unwrap();
+        let path = root(&locations).join("Bookmarks.plist");
+        let mut bytes = br#"<?xml version="1.0"?><plist version="1.0"><dict/></plist>"#.to_vec();
+        bytes.resize(32 * 1024 * 1024 + 1, b' ');
+        std::fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Metadata remains readable, but opening the contents would fail
+            // with Permission rather than the size refusal below.
+            assert_eq!(
+                std::fs::File::open(&path).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+        assert!(matches!(
+            bookmarks(&locations),
+            Err(ImportError::Unreadable)
+        ));
+    }
+
     use super::*;
 
     #[test]

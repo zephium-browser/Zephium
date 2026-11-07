@@ -217,7 +217,16 @@ pub(crate) fn profile_dir(
 pub(crate) fn bookmarks(profile: &Path) -> Result<Vec<ImportNode>, ImportError> {
     let mut files = Vec::new();
     for name in BOOKMARK_FILES {
-        match std::fs::read(profile.join(name)) {
+        let path = profile.join(name);
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.len() > 32 * 1024 * 1024 => {
+                return Err(ImportError::Unreadable)
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::read(path) {
             Ok(bytes) => files.push(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -327,6 +336,30 @@ pub(crate) fn history(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn oversized_bookmarks_are_refused_before_parsing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("Bookmarks");
+        let mut bytes = br#"{"roots":{}}"#.to_vec();
+        bytes.resize(32 * 1024 * 1024 + 1, b' ');
+        std::fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Metadata remains readable, but opening the contents would fail
+            // with Permission rather than the size refusal below.
+            assert_eq!(
+                std::fs::File::open(&path).unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+        assert!(matches!(
+            bookmarks(directory.path()),
+            Err(ImportError::Unreadable)
+        ));
+    }
+
     use super::*;
 
     #[test]
