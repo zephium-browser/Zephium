@@ -124,7 +124,10 @@ mod tests {
 
     fn commit(navigation: &NavigationEpochTracker, id: u64, url: &str) {
         navigation.begin(url).unwrap();
-        for phase in [NavigationEventPhase::Started, NavigationEventPhase::Committed] {
+        for phase in [
+            NavigationEventPhase::Started,
+            NavigationEventPhase::Committed,
+        ] {
             navigation.observe_navigation(&NavigationEvent {
                 id: NavigationId::from_raw(id),
                 phase,
@@ -160,7 +163,10 @@ mod tests {
             url: "https://video.example/c".into(),
         });
         assert!(navigation.current_committed().is_some());
-        assert!(!pending(), "failed navigation must not revive a deferred request");
+        assert!(
+            !pending(),
+            "failed navigation must not revive a deferred request"
+        );
         let pending = request_guard(permit.clone(), navigation.clone(), sequence.clone()).unwrap();
         sequence.set(2);
         assert!(!pending());
