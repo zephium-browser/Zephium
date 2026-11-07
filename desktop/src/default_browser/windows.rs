@@ -36,21 +36,25 @@ impl Registration {
             "" => "Zephium".to_owned(),
             name => name.to_owned(),
         };
-        // A ProgID holds no spaces or punctuation, and at most 39 characters.
-        let stem: String = client
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .take(36)
-            .collect();
-        let stem = if stem.is_empty() {
-            "Zephium".into()
+        // A ProgID holds letters, digits and dots, at most 39 of them. A name
+        // that fits as it is (Stable's) is used whole; any other is shortened
+        // and told apart by a hash of the full name, so "Zephium Dev" and
+        // "ZephiumDev" never share a class.
+        let plain = client.len() <= 36 && client.chars().all(|c| c.is_ascii_alphanumeric());
+        let prog_id = if plain {
+            format!("{client}URL")
         } else {
-            stem
+            let stem: String = client
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(26)
+                .collect();
+            let hash = client.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+                (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+            });
+            format!("{stem}.{hash:08x}URL")
         };
-        Self {
-            client,
-            prog_id: format!("{stem}URL"),
-        }
+        Self { client, prog_id }
     }
 
     fn client_key(&self) -> String {
@@ -161,7 +165,7 @@ pub(crate) fn register() -> bool {
 /// Opens Default apps at Zephium's own page (Windows 11), or the list on
 /// Windows 10, which ignores the parameter.
 pub(crate) fn open_settings() -> bool {
-    let client = registration().client.replace(' ', "%20");
+    let client = uri_component(&registration().client);
     let target = HSTRING::from(format!(
         "ms-settings:defaultapps?registeredAppUser={client}"
     ));
@@ -178,6 +182,18 @@ pub(crate) fn open_settings() -> bool {
     };
     // ShellExecute reports success as any value above 32.
     result.0 as usize > 32
+}
+
+/// Percent-encodes all but the unreserved URI characters.
+fn uri_component(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(byte).to_string()
+            }
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -259,10 +275,13 @@ mod tests {
         );
         let dev = Registration::for_product("Zephium Dev");
         assert_eq!(dev.client, "Zephium Dev");
-        assert_eq!(dev.prog_id, "ZephiumDevURL");
+        let joined = Registration::for_product("ZephiumDev");
+        assert_eq!(joined.prog_id, "ZephiumDevURL");
+        assert_ne!(dev.prog_id, joined.prog_id);
+        assert!(dev.prog_id.starts_with("ZephiumDev.") && dev.prog_id.ends_with("URL"));
         let qa = Registration::for_product("Zephium Protection QA");
-        assert_eq!(qa.prog_id, "ZephiumProtectionQAURL");
         assert_ne!(qa.client_key(), stable.client_key());
+        assert_ne!(qa.prog_id, stable.prog_id);
     }
 
     #[test]
@@ -270,6 +289,21 @@ mod tests {
         let odd = Registration::for_product("Zephium\\..\\Classes\u{7}");
         assert_eq!(odd.client, "Zephium..Classes");
         assert_eq!(Registration::for_product("  ").client, "Zephium");
-        assert!(Registration::for_product(&"Z".repeat(80)).prog_id.len() <= 39);
+        for name in ["Z".repeat(80), "Zephium Nightly ".repeat(5)] {
+            let prog_id = Registration::for_product(&name).prog_id;
+            assert!(prog_id.len() <= 39, "{prog_id}");
+            assert!(prog_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.'));
+        }
+    }
+
+    #[test]
+    fn the_settings_link_carries_the_name_as_one_uri_component() {
+        assert_eq!(uri_component("Zephium"), "Zephium");
+        assert_eq!(
+            uri_component("Zephium Dev #2 & 100%"),
+            "Zephium%20Dev%20%232%20%26%20100%25"
+        );
     }
 }

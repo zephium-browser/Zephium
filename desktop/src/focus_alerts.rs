@@ -156,6 +156,23 @@ mod windows {
             eprintln!("notifications: the toast was not shown");
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_an_app_id_start_knows_may_post() {
+            // SAFETY: balanced below on this test's thread.
+            let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+            assert!(installed(&HSTRING::from("Microsoft.Windows.Explorer")));
+            assert!(!installed(&HSTRING::from("app.zephium.never-installed")));
+            if joined {
+                // SAFETY: pairs the CoInitializeEx above.
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
 }
 
 /// Text only, escaped, with no image or link a toast could fetch.
