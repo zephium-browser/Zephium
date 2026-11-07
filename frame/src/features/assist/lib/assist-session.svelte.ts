@@ -275,6 +275,13 @@ export class AssistSession {
   ): Promise<boolean> {
     this.sending = true;
     this.notice = null;
+    // What was attached as it was sent; anything chosen meanwhile stays.
+    const sent = {
+      picks: this.picks,
+      others: this.others,
+      pageOff: this.pageOff,
+      selectionOn: this.selectionOn,
+    };
     try {
       const response = await commands.pageAssistAsk({
         space,
@@ -289,10 +296,10 @@ export class AssistSession {
         return false;
       }
       if (composed) {
-        this.picks = [];
-        this.others = [];
-        this.pageOff = false;
-        this.selectionOn = false;
+        this.picks = this.picks.filter((pick) => !sent.picks.includes(pick));
+        this.others = this.others.filter((tab) => !sent.others.includes(tab));
+        if (this.pageOff === sent.pageOff) this.pageOff = false;
+        if (this.selectionOn === sent.selectionOn) this.selectionOn = false;
       }
       return true;
     } catch {
