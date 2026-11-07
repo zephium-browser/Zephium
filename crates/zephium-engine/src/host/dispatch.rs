@@ -1696,7 +1696,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                     }
                     let (process_exit_proven, process_exit_clean) = crate::platform::imp::wait_for_browser_process_shutdown(
                             browser_processes,
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(20),
                         );
                     #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
                     {

@@ -399,6 +399,13 @@ impl ClaimedTerminalStartupResources {
     }
 }
 
+/// Outlasts the shell's end-to-end shutdown budget on each platform.
+const HARD_EXIT_TIMEOUT: std::time::Duration = if cfg!(target_os = "windows") {
+    std::time::Duration::from_secs(30)
+} else {
+    std::time::Duration::from_secs(12)
+};
+
 #[derive(Default)]
 struct HardExitWatchdog {
     prepared: AtomicBool,
@@ -956,7 +963,7 @@ impl HardExitWatchdog {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if deadline.is_none() {
-            *deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(12));
+            *deadline = Some(std::time::Instant::now() + HARD_EXIT_TIMEOUT);
             self.changed.notify_one();
         }
         true
@@ -1040,6 +1047,7 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
+        hide_windows_for_shutdown(&app);
         let deadline = shell.shutdown_deadline();
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         let deadline = tao::event_loop::system_termination_deadline()
@@ -1224,6 +1232,19 @@ impl ShutdownCoordinator {
 
     fn arm_hard_exit_watchdog(&self) -> bool {
         self.watchdog.arm()
+    }
+}
+
+/// A closed browser leaves the screen at once; the windows themselves stay
+/// alive until native teardown destroys them in order.
+fn hide_windows_for_shutdown(app: &tauri::AppHandle) {
+    for window in app.webview_windows().into_values() {
+        if let Err(error) = window.hide() {
+            write_diagnostic(format_args!(
+                "shutdown: window {} could not be hidden: {error}",
+                window.label()
+            ));
+        }
     }
 }
 

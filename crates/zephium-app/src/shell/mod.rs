@@ -168,10 +168,14 @@ fn browsing_activity(cmd: &Command) -> bool {
         _ => false,
     }
 }
-#[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume
-// this one caller-owned deadline.
+// this one caller-owned deadline. Under CPU load a WebView2 browser took up
+// to 13 s to exit, so Windows gets room for its 20 s process wait.
+#[cfg(all(not(test), target_os = "windows"))]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24);
+#[cfg(all(not(test), not(target_os = "windows")))]
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 // A clean shutdown joins the shell, timer and storage-reader threads, which
