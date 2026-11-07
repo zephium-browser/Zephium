@@ -15,9 +15,11 @@ Protection defaults on for new profiles. META migration 23 enables existing
 profiles once, preserving site pauses and personal hides; subsequent explicit
 opt-outs remain durable. Both enabled and disabled profiles receive a locally prepared,
 explicit empty policy at startup without joining the compiler queue. Enabled
-profiles prepare real protection in the background. Browsing is available as
-soon as the empty native policy is acknowledged; the UI never describes that
-policy as active protection. Updates retain the installed policy throughout.
+profiles prepare real protection in the background. Pages they open at
+startup wait behind the empty policy until real protection is in place, for at
+most one second; past that they load unprotected and are counted. The UI never
+describes the empty policy as active protection. Updates retain the installed
+policy throughout.
 Already issued requests cannot be blocked retroactively.
 
 Procedural cosmetics, resource replacement, response-CSP mutation and
@@ -234,6 +236,14 @@ It is found by the SHA-256 of the presented bytes, computed on the spot. The
 policy keeps its canonical encoding (about 2.9 MB for the shipped lists) only
 until the compiled cache has written it, or, for a policy read from the cache,
 not past loading.
+
+A policy read from the cache is validated in full and its scriptlet program
+built before it is delivered, but its selector matcher and generic index are
+built by the compiler worker just after, so a page restored at startup waits
+for neither. A page that asks first builds them itself. If they cannot be
+built, the policy stays without cosmetics and the worker compiles it again
+from source, which replaces the cached record for the next generation and the
+next launch.
 
 A bounded worker handles document lookup, hashing and script serialization.
 Completion returns through the existing main-thread dispatcher before native
