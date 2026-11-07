@@ -1254,7 +1254,6 @@ where
 }
 
 #[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
 pub(super) fn with_temporary_spare_release<F>(profile: ProfileId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1266,6 +1265,7 @@ where
     )
 }
 
+#[cfg(target_os = "windows")]
 pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
