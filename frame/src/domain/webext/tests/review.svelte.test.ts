@@ -1,11 +1,13 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import type { WebExtensionReview } from "$shared/ipc/bindings";
+import type { WebExtensionAccessRequestView, WebExtensionReview } from "$shared/ipc/bindings";
 
 const native = vi.hoisted(() => ({
   prepare: vi.fn(),
   confirm: vi.fn(),
   cancel: vi.fn(),
   list: vi.fn(),
+  answer: vi.fn(),
+  accessListen: vi.fn(),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -15,8 +17,13 @@ vi.mock("$shared/ipc/bindings", async () => {
     webExtensionConfirm: native.confirm,
     webExtensionCancel: native.cancel,
     webExtensionList: native.list,
+    webExtensionAnswerAccess: native.answer,
   });
 });
+
+vi.mock("$shared/ipc/native-events", () => ({
+  events: { webExtensionAccessRequested: { listen: native.accessListen } },
+}));
 
 function review(reviewId: string): WebExtensionReview {
   return {
@@ -97,4 +104,65 @@ test("a newly prepared review clears errors from the replaced review", async () 
   await preparing;
   expect(webext.review()?.review_id).toBe("review-b");
   expect(webext.error()).toBeNull();
+});
+
+test.each(["result", "rejection"])(
+  "a failed access answer (%s) keeps the prompt for retry or denial",
+  async (failure) => {
+    const webext = await import("../webext.svelte");
+    let receive!: (event: { payload: WebExtensionAccessRequestView }) => void;
+    native.accessListen.mockImplementation((listener) => {
+      receive = listener;
+      return Promise.resolve(() => {});
+    });
+    await webext.listenForAccess();
+    const first: WebExtensionAccessRequestView = {
+      profile_id: "profile",
+      request: "1",
+      extension_id: "extension",
+      warnings: [],
+      permissions: ["bookmarks"],
+      patterns: [],
+    };
+    const second = { ...first, request: "2" };
+    receive({ payload: first });
+    receive({ payload: second });
+    if (failure === "result")
+      native.answer.mockResolvedValueOnce({ status: "error", error: "Could not save access." });
+    else native.answer.mockRejectedValueOnce("Could not save access.");
+    await webext.answerAccess(true);
+    expect(webext.accessRequest()).toEqual(first);
+    expect(webext.accessError()).toBe("Could not save access.");
+    expect(webext.isAnswering()).toBe(false);
+    native.answer.mockResolvedValueOnce({ status: "ok", data: null });
+    await webext.answerAccess(false);
+    expect(native.answer).toHaveBeenLastCalledWith(first, false);
+    expect(webext.accessRequest()).toEqual(second);
+    expect(webext.accessError()).toBeNull();
+  },
+);
+
+test("access approval can be retried after a failed save", async () => {
+  const webext = await import("../webext.svelte");
+  const request: WebExtensionAccessRequestView = {
+    profile_id: "profile",
+    request: "1",
+    extension_id: "extension",
+    warnings: [],
+    permissions: [],
+    patterns: [],
+  };
+  native.accessListen.mockImplementation((listener) => {
+    listener({ payload: request });
+    return Promise.resolve(() => {});
+  });
+  await webext.listenForAccess();
+  native.answer.mockResolvedValueOnce({ status: "error", error: "Could not save access." });
+  await webext.answerAccess(true);
+  native.answer.mockResolvedValueOnce({ status: "ok", data: null });
+  await webext.answerAccess(true);
+  expect(native.answer).toHaveBeenCalledTimes(2);
+  expect(native.answer).toHaveBeenLastCalledWith(request, true);
+  expect(webext.accessRequest()).toBeNull();
+  expect(webext.accessError()).toBeNull();
 });
