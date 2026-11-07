@@ -1514,6 +1514,7 @@
   "onb_essentials_keep": "Keep {site}",
   "onb_essentials_remove": "Remove {site}",
   "onb_essentials_failed": "{site} could not be kept. Try again.",
+  "onb_local_model_failed": "The local model could not be saved. Try again.",
   "onb_finish_failed": "The browser could not open. Try again.",
   "onb_launcher_title": "Always a keystroke away.",
   "onb_launcher_body": "The launcher opens over any app. Find a tab, a page from your history, a note or the web, without switching windows.",

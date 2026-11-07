@@ -144,8 +144,14 @@
     // on a page from before is set aside for a new one.
     if (tabs.activeTab()?.url) tabs.open();
     // A server already running here is connected now, so Work opens ready.
-    if (mind === "local" && server && profile)
-      await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
+    if (mind === "local" && server && profile) {
+      const saved = await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
+      if (!saved || saved.fault) {
+        leaving = false;
+        say(m.onb_local_model_failed());
+        return;
+      }
+    }
     // The words go, and the camera goes back into the new tab until its sky
     // is all there is; the browser then arrives on that sky, with its own
     // launch.

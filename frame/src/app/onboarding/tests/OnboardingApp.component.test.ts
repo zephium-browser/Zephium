@@ -17,6 +17,7 @@ const native = vi.hoisted(() => ({
   finished: 0,
   endpoint: null as string | null,
   opens: true,
+  modelFailure: null as "fault" | "invoke" | null,
   material: "none" as Material,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
@@ -49,7 +50,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     ],
     workSetModelEndpoint: async (_profile: string, base: string | null) => {
       native.endpoint = base;
-      return {} as WorkModelsV1;
+      if (native.modelFailure === "invoke") throw new Error("unavailable");
+      return { fault: native.modelFailure === "fault" ? "unavailable" : null } as WorkModelsV1;
     },
     onboardingPlayIntro: async () => {
       native.intro++;
@@ -128,6 +130,7 @@ beforeEach(async () => {
   native.finished = 0;
   native.endpoint = null;
   native.opens = true;
+  native.modelFailure = null;
   native.material = "none";
   fakeTabs.reset();
   browserImport.provide(importer);
@@ -366,3 +369,30 @@ test("whatever was chosen, the browser opens on a new tab", { timeout: 30_000 },
   await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
   expect(fakeTabs.opened()).toBe(1);
 });
+
+for (const failure of ["fault", "invoke"] as const) {
+  test(
+    `local model ${failure} failure keeps onboarding open for retry`,
+    { timeout: 30_000 },
+    async () => {
+      native.modelFailure = failure;
+      render(OnboardingApp);
+      await formed();
+      await page.getByRole("button", { name: /Get started/u }).click();
+      for (let step = 0; step < 4; step++) await next();
+      await page.getByRole("radio", { name: /A local model/u }).click();
+      await next();
+      await page.getByRole("button", { name: /Start browsing/u }).click();
+      await expect
+        .element(page.getByText("The local model could not be saved. Try again."))
+        .toBeVisible();
+      expect(native.finished).toBe(0);
+      await expect
+        .poll(() => document.querySelector(".onboarding")?.getAttribute("data-leaving"))
+        .toBe("false");
+      native.modelFailure = null;
+      await page.getByRole("button", { name: /Start browsing/u }).click();
+      await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
+    },
+  );
+}
