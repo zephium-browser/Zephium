@@ -277,12 +277,27 @@ fn entry(tools: bool) -> WorkModelEntry {
 struct FakeModels {
     entry: WorkModelEntry,
     client: Arc<FakeClient>,
+    gate: Arc<Gate>,
+}
+
+/// Holds the model lookup until opened, while `held` is set.
+#[derive(Default)]
+struct Gate {
+    held: AtomicBool,
+    reached: Notify,
+    open: Notify,
 }
 
 impl ModelSource for FakeModels {
     fn entry<'a>(&'a self, _profile: &'a ProfileId) -> BoxFuture<'a, Option<ModelChoice>> {
         let entry = self.entry.clone();
+        let gate = self.gate.clone();
         Box::pin(async move {
+            if gate.held.load(Ordering::SeqCst) {
+                let open = gate.open.notified();
+                gate.reached.notify_one();
+                open.await;
+            }
             Some(ModelChoice {
                 entry,
                 effort: Some(WorkModelReasoning::High),
@@ -479,6 +494,9 @@ impl ConversationStore for Store {
         self.0.lock().unwrap().get(id).map(|(_, body)| body.clone())
     }
     fn save(&self, _profile: &ProfileId, entry: &StoredConversation, body: String) -> bool {
+        if body.len() > MAX_CHAT_BODY_BYTES || entry.title.len() > MAX_CHAT_TITLE_BYTES {
+            return false;
+        }
         self.0
             .lock()
             .unwrap()
@@ -501,6 +519,7 @@ struct Harness {
     work: Arc<FakeWork>,
     store: Arc<Store>,
     styles: Arc<Styles>,
+    gate: Arc<Gate>,
 }
 
 fn passage(id: u16, role: Role, text: &str) -> Passage {
@@ -607,12 +626,14 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
     let store = Arc::new(Store::default());
     let styles = Arc::new(Styles::default());
     let notes = Arc::new(Notes::default());
+    let gate = Arc::new(Gate::default());
     let service = PageAssist::new(Ports {
         page: page.clone(),
         tabs: tabs.clone(),
         models: Arc::new(FakeModels {
             entry: entry(tools),
             client: client.clone(),
+            gate: gate.clone(),
         }),
         events: sink.clone(),
         clock: Arc::new(RealClock(Instant::now())),
@@ -633,6 +654,7 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
         work,
         store,
         styles,
+        gate,
     }
 }
 
@@ -1551,4 +1573,125 @@ async fn go_to_follows_the_link_in_the_tab_being_worked_in() {
         (steps[0].label.as_str(), steps[0].state),
         ("Go to emudhra.com", PageAssistStepStateV1::Done)
     );
+}
+
+fn exchange(id: u32, words: &str, answer: &str) -> [PageAssistMessageV1; 2] {
+    [
+        PageAssistMessageV1::Person {
+            id,
+            text: words.into(),
+            suggestion: None,
+            attachments: Vec::new(),
+        },
+        PageAssistMessageV1::Reply {
+            id: id + 1,
+            state: PageAssistReplyStateV1::Done,
+            phase: None,
+            blocks: vec![PageAssistBlockV1::Text {
+                text: answer.into(),
+                cites: Vec::new(),
+            }],
+            cost: None,
+            fault: None,
+            inert: false,
+        },
+    ]
+}
+
+fn view_of(exchanges: u32, answer: &str) -> PageAssistConversationV1 {
+    PageAssistConversationV1 {
+        id: "c1".into(),
+        title: Some("Long".into()),
+        messages: (0..exchanges)
+            .flat_map(|n| exchange(n * 2 + 1, &format!("q{n}"), answer))
+            .collect(),
+        seq: 9,
+    }
+}
+
+#[test]
+fn a_conversation_past_the_body_limit_stores_its_newest_exchanges() {
+    let view = view_of(40, &"a".repeat(1000));
+    let whole = serde_json::to_string(&view).unwrap();
+    assert_eq!(
+        stored_body(&view, whole.len()).as_deref(),
+        Some(whole.as_str())
+    );
+
+    let limit = whole.len() / 3;
+    let body = stored_body(&view, limit).expect("the newest exchanges fit");
+    assert!(body.len() <= limit);
+    let stored: PageAssistConversationV1 = serde_json::from_str(&body).unwrap();
+    assert_eq!((stored.id.as_str(), stored.seq), ("c1", 9));
+    assert!(matches!(
+        stored.messages[0],
+        PageAssistMessageV1::Person { .. }
+    ));
+    assert_eq!(stored.messages.last(), view.messages.last());
+    let next = PageAssistConversationV1 {
+        messages: view.messages[view.messages.len() - stored.messages.len() - 2..].to_vec(),
+        ..view.clone()
+    };
+    assert!(
+        serde_json::to_string(&next).unwrap().len() > limit,
+        "keeps as much as fits"
+    );
+}
+
+#[test]
+fn a_single_exchange_past_the_body_limit_is_not_stored() {
+    let view = view_of(2, &"a".repeat(4000));
+    assert_eq!(stored_body(&view, 3000), None);
+}
+
+#[test]
+fn stored_titles_keep_whole_characters_within_the_store_limit() {
+    let title = "😀".repeat(60);
+    let stored = stored_title(&title);
+    assert!(stored.len() <= MAX_CHAT_TITLE_BYTES);
+    assert_eq!(stored, "😀".repeat(MAX_CHAT_TITLE_BYTES / 4));
+    assert_eq!(stored_title("Short"), "Short");
+}
+
+#[tokio::test]
+async fn a_conversation_titled_in_wide_characters_reaches_history() {
+    let h = harness(vec![say("Fine.")]);
+    h.ask(&"😀".repeat(60), false).await.unwrap();
+    h.settle().await;
+    let history = h.service.history(SPACE);
+    assert_eq!(history.conversations.len(), 1);
+    assert!(history.conversations[0].title.starts_with('😀'));
+}
+
+#[tokio::test]
+async fn a_question_held_past_new_conversation_never_starts() {
+    let h = harness(vec![say("First."), say("Late.")]);
+    h.ask("One", false).await.unwrap();
+    h.settle().await;
+    let asked = h.conversation().await;
+    h.gate.held.store(true, Ordering::SeqCst);
+    let reached = h.gate.reached.notified();
+    let service = h.service.clone();
+    let asked_id = asked.clone();
+    let pending = tokio::spawn(async move {
+        service
+            .ask(PageAssistAskV1 {
+                space: SPACE.into(),
+                conversation: asked_id,
+                text: "First question".into(),
+                suggestion: None,
+                attachments: Vec::new(),
+            })
+            .await
+            .map(|(reply, _)| reply)
+    });
+    reached.await;
+    assert!(h.service.new_conversation(SPACE));
+    h.gate.held.store(false, Ordering::SeqCst);
+    h.gate.open.notify_one();
+    assert_eq!(pending.await.unwrap(), Err(PageAssistFaultV1::Invalid));
+    assert!(h.service.state().running.is_empty());
+    let status = h.service.status(SPACE, Some(TAB)).await;
+    assert_ne!(status.conversation.id, asked);
+    assert!(status.conversation.messages.is_empty());
 }

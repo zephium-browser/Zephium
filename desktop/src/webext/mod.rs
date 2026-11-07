@@ -606,7 +606,14 @@ pub(crate) async fn web_extension_answer_access(
         let shell = shell.inner().clone();
         publication(move || {
             let extensions = app.state::<WebExtensions>();
-            imp::answer_access(&shell, &extensions, request, allowed)
+            imp::answer_access(
+                |command| {
+                    shell.dispatch(command);
+                },
+                &extensions,
+                request,
+                allowed,
+            )
         })
         .await
     }

@@ -12,7 +12,8 @@
   import { SpaceFlow } from "../lib/space-flow.svelte";
 
   /** What the browser sets beside the plus: pinned extensions. */
-  let { extras }: { extras?: Snippet } = $props();
+  let { extras, onOpenChange }: { extras?: Snippet; onOpenChange?: (open: boolean) => void } =
+    $props();
 
   // The switcher loads the first time the chip is approached or opened, and
   // stays, so reopening is the panel's motion alone.
@@ -26,6 +27,10 @@
   let chip = $state<HTMLButtonElement>();
   const flow = new SpaceFlow((restore) => {
     if (restore) chip?.focus();
+  });
+  $effect(() => {
+    onOpenChange?.(flow.open);
+    return () => onOpenChange?.(false);
   });
 
   $effect(() => {
@@ -48,7 +53,10 @@
     const away = () => flow.dismiss();
     // WebKit does not focus a pressed button, so Escape is heard window-wide.
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return;
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      // The panel owns Escape ahead of the selection beneath it, regardless
+      // of the order in which the window listeners were installed.
+      event.preventDefault();
       event.stopPropagation();
       flow.escape();
     };

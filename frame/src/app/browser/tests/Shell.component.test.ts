@@ -2,11 +2,17 @@ import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
+import { flushSync } from "svelte";
+import type { SidebarNodeView } from "$shared/ipc/bindings";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { surface } from "$domain/surface";
 import Shell from "../Shell.svelte";
+
+const native = vi.hoisted(() => ({
+  activate: vi.fn(async (_id: string) => ({ accepted: true, operation_id: null })),
+}));
 
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 
@@ -15,13 +21,68 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    tabsActivate: native.activate,
     sidebarSetHidden: async () => {},
   });
 });
 afterEach(() => {
   surface.dispose();
   tabs.dispose();
+  vi.clearAllMocks();
 });
+
+test("activating either Essentials list clears the sidebar selection before native activation", async () => {
+  await page.viewport(900, 640);
+  await surface.init();
+  await tabs.init();
+  const all = ["a", "b", "e1", "e2", "e3", "e4", "e5", "e6"].map((id) =>
+    tabFixture({ id, title: `Tab ${id}` }),
+  );
+  const nodes: SidebarNodeView[] = all.map((tab) => ({
+    id: tab.id,
+    parent_id: null,
+    section: tab.id.startsWith("e") ? "favorites" : "today",
+    kind: { type: "tab", tab_id: tab.id },
+  }));
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision(40),
+    profile: null,
+    spaces: [],
+    active_space_id: null,
+    nodes,
+    tabs: all,
+    active: "a",
+    split_group: null,
+  });
+  const screen = await render(Shell);
+  const selected = () => screen.container.querySelectorAll('[data-multi-selected="true"]');
+  for (const layout of ["dock-row", "dock-stack"]) {
+    screen.container
+      .querySelector<HTMLButtonElement>('[data-zephium-tab-id="b"] .tab-open')!
+      .dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    flushSync();
+    expect(selected()).toHaveLength(2);
+    let selectedAtActivation = -1;
+    let barAtActivation = true;
+    native.activate.mockImplementationOnce(async () => {
+      flushSync();
+      selectedAtActivation = selected().length;
+      barAtActivation = screen.container.querySelector(".selection-bar") !== null;
+      return { accepted: true, operation_id: null };
+    });
+    const tile = screen.container.querySelector<HTMLButtonElement>(
+      `.${layout} .essential > button[data-plate]`,
+    )!;
+    expect(tile).not.toBeNull();
+    tile.click();
+    await expect
+      .poll(() => native.activate.mock.calls.at(-1))
+      .toEqual([tile.closest<HTMLElement>("[data-zephium-tab-id]")!.dataset.zephiumTabId]);
+    expect(selectedAtActivation).toBe(0);
+    expect(barAtActivation).toBe(false);
+  }
+});
+
 test("Settings stands beside the tab rail and returns to the same web tab", async () => {
   await surface.init();
   await tabs.init();

@@ -137,3 +137,92 @@ async fn a_missing_program_is_a_closed_failure() {
     });
     assert!(McpSession::connect(&silent).await.is_err());
 }
+
+#[tokio::test]
+async fn listings_stop_at_item_cursor_and_page_bounds() {
+    use rmcp::model::*;
+    use rmcp::service::RequestContext;
+    use rmcp::{ErrorData, RoleServer, ServerHandler};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[derive(Clone)]
+    struct Pages {
+        mode: u8,
+        calls: Arc<AtomicUsize>,
+    }
+    impl Pages {
+        fn cursor(&self) -> Option<String> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Some(match self.mode {
+                0 => "repeat".into(),
+                1 => String::new(),
+                _ => call.to_string(),
+            })
+        }
+    }
+    impl ServerHandler for Pages {
+        fn get_info(&self) -> ServerConfig {
+            fixture::Fixture.get_info()
+        }
+        async fn list_tools(
+            &self,
+            _: Option<PaginatedRequestParams>,
+            _: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            let mut result = ListToolsResult::with_all_items(if self.mode == 3 {
+                vec![Tool::new("tool", "tool", Arc::new(Map::new())); MAX_TOOLS + 1]
+            } else {
+                vec![]
+            });
+            result.next_cursor = self.cursor();
+            Ok(result)
+        }
+        async fn list_resources(
+            &self,
+            _: Option<PaginatedRequestParams>,
+            _: RequestContext<RoleServer>,
+        ) -> Result<ListResourcesResult, ErrorData> {
+            let mut result = ListResourcesResult::with_all_items(if self.mode == 3 {
+                vec![Resource::new("memo://one", "one"); MAX_RESOURCES + 1]
+            } else {
+                vec![]
+            });
+            result.next_cursor = self.cursor();
+            Ok(result)
+        }
+    }
+    for (mode, expected_calls) in [(0, 2), (1, 1), (2, 32), (3, 1)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Pages {
+            mode,
+            calls: calls.clone(),
+        };
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let task = tokio::spawn(async move {
+            let service = fixture.serve(server).await.unwrap();
+            let _ = service.waiting().await;
+        });
+        let service = client_config()
+            .serve_with_lifecycle(client, lifecycle())
+            .await
+            .unwrap();
+        let session = McpSession::adopt(service, None);
+        let tools = tokio::time::timeout(Duration::from_secs(2), session.tools())
+            .await
+            .expect("tools listing did not stop")
+            .unwrap();
+        assert_eq!(tools.len(), if mode == 3 { MAX_TOOLS } else { 0 });
+        assert_eq!(calls.swap(0, Ordering::SeqCst), expected_calls);
+        let resources = tokio::time::timeout(Duration::from_secs(2), session.resources())
+            .await
+            .expect("resources listing did not stop")
+            .unwrap();
+        assert_eq!(resources.len(), if mode == 3 { MAX_RESOURCES } else { 0 });
+        assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+        session.close().await;
+        task.await.unwrap();
+    }
+}

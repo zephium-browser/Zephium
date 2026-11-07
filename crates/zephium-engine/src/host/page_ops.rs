@@ -14,6 +14,11 @@ fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
+    read.and_then(|(html, truncated)| (!truncated).then_some(html))
+}
+
 impl EngineHost {
     pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
         let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
@@ -159,7 +164,7 @@ impl EngineHost {
             let slot = source.clone();
             self.read_html(id, move |read| {
                 if let Ok(mut slot) = slot.lock() {
-                    *slot = read.map(|(html, _)| html);
+                    *slot = saveable_source(read);
                 }
             });
             let page = crate::platform::imp::native_webview(view);
@@ -283,6 +288,17 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn truncated_html_is_not_offered_for_saving() {
+        assert_eq!(super::saveable_source(Some(("prefix".into(), true))), None);
+        assert_eq!(super::saveable_source(None), None);
+        assert_eq!(
+            super::saveable_source(Some(("complete".into(), false))),
+            Some("complete".into())
+        );
+    }
+
     use super::*;
 
     #[test]

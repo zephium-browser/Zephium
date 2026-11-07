@@ -13,6 +13,7 @@
   let source = $state<PageSourceView | null | undefined>(undefined);
   let copied = $state(false);
   let reset: ReturnType<typeof setTimeout> | undefined;
+  let lifetime = 0;
 
   $effect(() => {
     const asked = tab;
@@ -27,6 +28,7 @@
       });
     return () => {
       active = false;
+      lifetime += 1;
       clearTimeout(reset);
     };
   });
@@ -37,11 +39,13 @@
 
   async function copy() {
     if (!source) return;
+    const asked = lifetime;
     try {
       await navigator.clipboard.writeText(source.text);
     } catch {
       return;
     }
+    if (asked !== lifetime) return;
     copied = true;
     clearTimeout(reset);
     reset = setTimeout(() => (copied = false), 1600);

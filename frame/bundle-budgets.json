@@ -1,7 +1,7 @@
 {
   "browser-panel": {
     "browser": {
-      "js": 484311,
+      "js": 502130,
       "css": 151379
     },
     "lazy:app/browser/WorkWorkspace.svelte": {
