@@ -404,6 +404,8 @@ struct HardExitWatchdog {
     prepared: AtomicBool,
     deadline: Mutex<Option<std::time::Instant>>,
     changed: std::sync::Condvar,
+    #[cfg(any(target_os = "macos", test))]
+    installing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -862,7 +864,38 @@ fn cleanup_supplemental_startup_resources(
     });
 }
 
+#[cfg(target_os = "windows")]
+fn terminate_windows_process(exit_code: i32) -> ! {
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    let logs_flushed = platform::imp::flush_stderr_until(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    let code = if logs_flushed { exit_code } else { 1 };
+    // The coordinator has settled or exhausted its deadline. Do not enter
+    // arbitrary DLL detach handlers via ExitProcess while holding the profile.
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+    std::process::abort();
+}
+
 impl HardExitWatchdog {
+    #[cfg(any(target_os = "macos", test))]
+    fn begin_install(&self) -> bool {
+        let mut deadline = self
+            .deadline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = std::time::Instant::now();
+        if deadline.is_none_or(|deadline| deadline <= now) {
+            return false;
+        }
+        if !self.installing.swap(true, Ordering::AcqRel) {
+            *deadline = Some(now + std::time::Duration::from_secs(60));
+            self.changed.notify_one();
+        }
+        true
+    }
     fn prepare(self: &Arc<Self>) -> std::io::Result<()> {
         if self
             .prepared
@@ -880,23 +913,31 @@ impl HardExitWatchdog {
                     .deadline
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                while deadline.is_none() {
-                    deadline = watchdog
-                        .changed
-                        .wait(deadline)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loop {
+                    if let Some(armed) = *deadline {
+                        let remaining = armed.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        (deadline, _) = watchdog
+                            .changed
+                            .wait_timeout(deadline, remaining)
+                            .unwrap_or_else(|error| error.into_inner());
+                    } else {
+                        deadline = watchdog
+                            .changed
+                            .wait(deadline)
+                            .unwrap_or_else(|error| error.into_inner());
+                    }
                 }
-                let armed_deadline = (*deadline).unwrap_or_else(std::time::Instant::now);
                 drop(deadline);
-
-                let remaining =
-                    armed_deadline.saturating_duration_since(std::time::Instant::now());
-                if !remaining.is_zero() {
-                    std::thread::sleep(remaining);
-                }
+                #[cfg(not(target_os = "windows"))]
                 write_diagnostic(format_args!(
                     "shutdown: process exit did not complete within the hard deadline; forcing unsuccessful termination"
                 ));
+                #[cfg(target_os = "windows")]
+                terminate_windows_process(1);
+                #[cfg(not(target_os = "windows"))]
                 std::process::exit(1);
             });
         if let Err(error) = spawned {
@@ -999,6 +1040,10 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
+        let deadline = shell.shutdown_deadline();
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let deadline = tao::event_loop::system_termination_deadline()
+            .map_or(deadline, |system| system.min(deadline));
         #[cfg(feature = "work-product")]
         if let Some(work) = app.try_state::<work_product::WorkProductState>() {
             let operations = work.operations.clone();
@@ -1008,15 +1053,20 @@ impl ShutdownCoordinator {
                     coordinator.terminal_failure.store(true, Ordering::Release);
                     diagnostic!("shutdown: Work operation cleanup was not proven");
                 }
-                coordinator.request_after_work(app, shell);
+                coordinator.request_after_work(app, shell, deadline);
             });
             return;
         }
-        self.request_after_work(app, shell);
+        self.request_after_work(app, shell, deadline);
     }
 
-    fn request_after_work(&self, app: tauri::AppHandle, shell: Handle) {
-        let completion = shell.shutdown();
+    fn request_after_work(
+        &self,
+        app: tauri::AppHandle,
+        shell: Handle,
+        deadline: std::time::Instant,
+    ) {
+        let completion = shell.shutdown_with_deadline(deadline);
         let coordinator = self.clone();
         // SQLite and the shell actor are blocking by design. Wait away from
         // the event loop, then schedule a permitted exit back onto it.
@@ -1029,9 +1079,7 @@ impl ShutdownCoordinator {
     fn finish_requested_shutdown(&self, app: tauri::AppHandle, outcome: ShutdownOutcome) {
         match outcome {
             ShutdownOutcome::RetryableFailure => {
-                // The shell has not started native teardown, so an embedding
-                // host could safely retry. A desktop close is terminal: exit
-                // non-zero instead of leaving an unclosable process.
+                // An unproven storage barrier must remain an unsuccessful exit.
                 diagnostic!(
                     "shutdown: final session durability was not proven before the deadline; exiting unsuccessfully"
                 );
@@ -6528,6 +6576,16 @@ fn build_profile_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if matches!(event, tauri::RunEvent::Exit)
+        && tao::event_loop::system_termination_deadline()
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        if let Some(shutdown) = app.try_state::<ShutdownCoordinator>() {
+            shutdown.terminal_failure.store(true, Ordering::Release);
+            shutdown.authorized_exit_code.store(1, Ordering::Release);
+        }
+    }
     #[cfg(feature = "macos-work-public-inspection")]
     work_development::on_run_event(app, &event);
     #[cfg(all(
@@ -6705,7 +6763,7 @@ pub fn run() {
             // remain hard failures; an outdated one is an advisory.
             diagnostic!("security: {failure}");
             startup_alert::show_blocking(failure.problem(), failure.detail());
-            std::process::exit(78);
+            terminate_windows_process(78);
         }
     };
 
@@ -6780,6 +6838,30 @@ pub fn run() {
                 // callback or persistent actor exists. Later callbacks only
                 // signal it and can never fail while spawning a watchdog.
                 shutdown.prepare_hard_exit_watchdog()?;
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_app = app.handle().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_owner = shutdown.inner().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tao::event_loop::set_system_termination_handler(
+                    PRE_SHELL_CLEANUP_TIMEOUT,
+                    menu_text::shutdown_reason(),
+                    move || {
+                        if let Some(shell) = termination_app.try_state::<Handle>() {
+                            termination_owner.request(termination_app.clone(), shell.inner().clone());
+                        } else {
+                            termination_owner.request_terminal_startup_failure(
+                                termination_app.clone(),
+                                TerminalStartupResources {
+                                    engine_owner: termination_app.try_state::<StartupEngine>().map(|owner| owner.inner().clone()),
+                                    blocker_owner: termination_app.try_state::<StartupBlocker>().map(|owner| owner.inner().clone()),
+                                    store_owner: termination_app.try_state::<StartupStore>().map(|owner| owner.inner().clone()),
+                                    ..TerminalStartupResources::default()
+                                },
+                            );
+                        }
+                    },
+                );
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
@@ -8012,6 +8094,9 @@ pub fn run() {
                     &error,
                 );
             }
+            #[cfg(target_os = "windows")]
+            terminate_windows_process(1);
+            #[cfg(not(target_os = "windows"))]
             std::process::exit(1);
         });
 
@@ -8023,31 +8108,45 @@ pub fn run() {
         // exact process HANDLE authorize deletion of these private UDFs. A
         // failure remains visible in the process status and quarantines the
         // generation for a later verified cleanup pass.
-        let handle = app.handle().clone();
-        let exit_code = app.run_return(handle_run_event);
-        // Setup can fail after zero or one privileged environment exists.
-        // Every attempted build may have created native state before returning
-        // an error. Require an exact observer/PID/HANDLE proof for that
-        // conservative set; a partial registration therefore mismatches and
-        // keeps the runtime generation quarantined.
-        let expected_environments = expected_privileged_environment_labels(
-            attempted_privileged_environments.load(Ordering::Acquire),
-        );
-        let process_exit_proven =
-            platform::imp::finalize_privileged_environment_observers(&expected_environments);
-        let cleanup_succeeded = process_exit_proven && cleanup_privileged_runtime_after_exit();
-        if !process_exit_proven {
-            diagnostic!(
-                "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
-            );
-        }
-        updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
-        relaunch::finish_after_cleanup(&handle, cleanup_succeeded && exit_code == 0);
-        std::process::exit(if cleanup_succeeded || exit_code != 0 {
-            exit_code
-        } else {
-            1
+        app.run_return(move |app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                handle_run_event(app, event);
+                // The runtime drains its window registry before delivering Exit,
+                // including when WM_ENDSESSION is still on the native stack.
+                let expected_environments = expected_privileged_environment_labels(
+                    attempted_privileged_environments.load(Ordering::Acquire),
+                );
+                let tail_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let tail_deadline = tao::event_loop::system_termination_deadline()
+                    .map_or(tail_deadline, |system| system.min(tail_deadline));
+                let (process_exit_proven, process_exit_clean) =
+                    platform::imp::finalize_privileged_environment_observers(
+                        &expected_environments,
+                        tail_deadline,
+                    );
+                let cleanup_succeeded =
+                    process_exit_proven && cleanup_privileged_runtime_after_exit();
+                let exit_code = app
+                    .try_state::<ShutdownCoordinator>()
+                    .map_or(1, |shutdown| {
+                        let code = shutdown.authorized_exit_code.load(Ordering::Acquire);
+                        if code == NO_AUTHORIZED_EXIT_CODE
+                            || shutdown.terminal_failure.load(Ordering::Acquire)
+                        {
+                            1
+                        } else {
+                            code
+                        }
+                    });
+                let clean = cleanup_succeeded && process_exit_clean && exit_code == 0;
+                updates::finish_after_exit(clean);
+                relaunch::finish_after_cleanup(app, clean);
+                app.cleanup_before_exit();
+                terminate_windows_process(if clean { 0 } else { 1 });
+            }
+            handle_run_event(app, event);
         });
+        terminate_windows_process(1);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -8115,6 +8214,102 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(held);
         assert!(waiting.await.unwrap().is_some());
+    }
+
+    #[test]
+    fn windows_session_end_enters_coordinator_and_pumps_until_settled() {
+        let tao = include_str!("../../vendor/tao/src/platform_impl/windows/event_loop.rs");
+        let query = tao
+            .split("win32wm::WM_QUERYENDSESSION => {")
+            .nth(1)
+            .unwrap()
+            .split("win32wm::WM_ENDSESSION => {")
+            .next()
+            .unwrap();
+        assert!(query.contains("termination.request()"));
+        assert!(query.contains("ShutdownBlockReasonCreate"));
+        let end = tao
+            .split("win32wm::WM_ENDSESSION => {")
+            .nth(1)
+            .unwrap()
+            .split("_ if msg == *USER_EVENT_MSG_ID")
+            .next()
+            .unwrap();
+        assert!(end.contains("SystemTermination::wait_until"));
+        assert!(end.contains("DispatchMessageW"));
+        assert!(end.contains("ShutdownBlockReasonDestroy"));
+        let setup = include_str!("lib.rs")
+            .split(".setup(move |app|")
+            .nth(1)
+            .unwrap()
+            .split("let data_dir =")
+            .next()
+            .unwrap();
+        assert!(setup.contains("set_system_termination_handler"));
+        assert!(setup.contains("termination_owner.request("));
+    }
+
+    #[test]
+    fn macos_system_termination_defers_and_replies_after_cleanup() {
+        let delegate = include_str!("../../vendor/tao/src/platform_impl/macos/app_delegate.rs");
+        assert!(delegate.contains("sel!(applicationShouldTerminate:)"));
+        let should = delegate
+            .split("extern \"C\" fn application_should_terminate")
+            .nth(1)
+            .unwrap()
+            .split("extern \"C\" fn application_will_terminate")
+            .next()
+            .unwrap();
+        assert!(should.contains("defer_system_termination(termination.request())"));
+        assert!(should.contains("2"));
+        let state = include_str!("../../vendor/tao/src/platform_impl/macos/app_state.rs");
+        let exit = state
+            .split("pub fn exit() -> i32")
+            .nth(1)
+            .unwrap()
+            .split("pub fn launched")
+            .next()
+            .unwrap();
+        assert!(
+            exit.find("Event::LoopDestroyed").unwrap()
+                < exit
+                    .find("replyToApplicationShouldTerminate(true)")
+                    .unwrap()
+        );
+        assert!(state.contains("ControlFlow::ExitWithCode(1)"));
+    }
+
+    #[test]
+    fn windows_final_exit_flushes_logs_then_bypasses_dll_detach() {
+        let source = include_str!("lib.rs");
+        let exit = source
+            .split("fn terminate_windows_process(")
+            .nth(1)
+            .unwrap()
+            .split("impl HardExitWatchdog")
+            .next()
+            .unwrap();
+        assert!(
+            exit.find("flush_stderr_until").unwrap()
+                < exit.find("TerminateProcess(GetCurrentProcess()").unwrap()
+        );
+        assert!(!exit.contains("std::process::exit"));
+        let run = source
+            .split("app.run_return(move |app, event|")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(not(target_os = \"windows\"))]")
+            .next()
+            .unwrap();
+        assert!(
+            run.find("finalize_privileged_environment_observers")
+                .unwrap()
+                < run.find("terminate_windows_process").unwrap()
+        );
+        assert!(
+            run.find("updates::finish_after_exit(clean)").unwrap()
+                < run.find("terminate_windows_process").unwrap()
+        );
     }
 
     #[test]
@@ -8704,6 +8899,22 @@ mod tests {
         assert!(active_shutdown
             .terminal_failure
             .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn clean_shutdown_hands_watchdog_to_a_bounded_install_phase_once() {
+        let watchdog = super::HardExitWatchdog::default();
+        watchdog
+            .prepared
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(watchdog.arm());
+        let shutdown_deadline = watchdog.deadline.lock().unwrap().unwrap();
+        watchdog.begin_install();
+        let install_deadline = watchdog.deadline.lock().unwrap().unwrap();
+        assert!(install_deadline > shutdown_deadline + std::time::Duration::from_secs(40));
+        assert!(install_deadline <= std::time::Instant::now() + std::time::Duration::from_secs(60));
+        watchdog.begin_install();
+        assert_eq!(watchdog.deadline.lock().unwrap().unwrap(), install_deadline);
     }
 
     #[test]
@@ -9557,7 +9768,7 @@ mod tests {
 
         let desktop = include_str!("lib.rs");
         let run_return = desktop
-            .find("app.run_return(handle_run_event)")
+            .find("app.run_return(move |app, event|")
             .expect("returning Windows event loop");
         let process_proof = desktop
             .find("platform::imp::finalize_privileged_environment_observers")

@@ -279,7 +279,8 @@ impl UpdaterBuilder {
         self
     }
 
-    /// Function to run before we run the installer and exit the app through `std::process::exit(0)` on Windows
+    /// Function to run before launching the installer on Windows. The host must
+    /// terminate the application after successful installation admission.
     pub fn on_before_exit<F: Fn() + Send + Sync + 'static>(mut self, f: F) -> Self {
         self.on_before_exit.replace(Arc::new(f));
         self
@@ -877,7 +878,11 @@ impl Update {
         };
         installer_launch_result(launched as isize)?;
 
-        std::process::exit(0);
+        // The host owns final log flushing and bounded process termination.
+        // Preserve the temporary installer until that termination, as upstream
+        // did by exiting without running its destructor.
+        std::mem::forget(updater_type);
+        Ok(())
     }
 
     fn installer_args(&self) -> Vec<&OsStr> {
@@ -1476,6 +1481,15 @@ mod metadata_limit_tests {
             update.install(b"untrusted payload"),
             Err(Error::Minisign(_) | Error::Base64(_) | Error::SignatureUtf8(_))
         ));
+    }
+
+    #[test]
+    fn successful_windows_launch_returns_for_host_log_flush_and_termination() {
+        let source = include_str!("updater.rs");
+        let tail = source.split("installer_launch_result(launched as isize)?;").nth(1).unwrap().split("fn installer_args").next().unwrap();
+        assert!(!tail.contains("std::process::exit"));
+        assert!(tail.contains("std::mem::forget(updater_type)"));
+        assert!(tail.contains("Ok(())"));
     }
 
     #[test]

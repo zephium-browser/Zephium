@@ -49,7 +49,14 @@ pub(crate) fn finish_on_exit(app: &tauri::AppHandle) {
 #[cfg(target_os = "windows")]
 pub(crate) fn finish_after_cleanup(app: &tauri::AppHandle, cleanup_succeeded: bool) {
     if AFTER_EXIT.swap(false, Ordering::AcqRel) && cleanup_succeeded && closed_cleanly(app) {
-        tauri::process::restart(&app.env());
+        let env = app.env();
+        if let Err(error) = tauri::process::current_binary(&env).and_then(|path| {
+            std::process::Command::new(path)
+                .args(env.args_os.iter().skip(1))
+                .spawn()
+        }) {
+            diagnostic!("shutdown: could not relaunch Zephium: {error}");
+        }
     }
 }
 
@@ -81,7 +88,18 @@ mod tests {
         let refused = lib.split("relaunch::exit_refused()").next().unwrap();
         assert!(refused.trim_end().ends_with("api.prevent_exit();"));
         let windows = lib.split("let cleanup_succeeded =").nth(1).unwrap();
-        assert!(windows.contains("relaunch::finish_after_cleanup(&handle, cleanup_succeeded"));
+        assert!(windows
+            .contains("let clean = cleanup_succeeded && process_exit_clean && exit_code == 0"));
+        assert!(windows.contains("relaunch::finish_after_cleanup(app, clean)"));
+        let restart = relaunch
+            .split("pub(crate) fn finish_after_cleanup")
+            .nth(1)
+            .unwrap()
+            .split("fn closed_cleanly")
+            .next()
+            .unwrap();
+        assert!(restart.contains(".spawn()"));
+        assert!(!restart.contains("tauri::process::restart"));
         let exit_hook = lib.split("relaunch::finish_on_exit(app)").next().unwrap();
         assert!(exit_hook.trim_end().ends_with(
             "#[cfg(not(target_os = \"windows\"))]\n    if matches!(&event, tauri::RunEvent::Exit) {"

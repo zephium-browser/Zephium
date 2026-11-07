@@ -116,6 +116,7 @@ serde_json.workspace = true
 json-patch = "3"
 
 [dependencies]
+tao = "=0.35.3"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"] }
 tokio = { workspace = true, features = ["time", "fs", "io-util"] }

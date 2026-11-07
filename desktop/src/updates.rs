@@ -537,6 +537,15 @@ fn install_on_quit(app: &tauri::AppHandle) {
     let Some(mut parked) = lock(&updates.parked).take() else {
         return;
     };
+    if !app
+        .try_state::<ShutdownCoordinator>()
+        .is_some_and(|shutdown| shutdown.watchdog.begin_install())
+    {
+        write_diagnostic(format_args!(
+            "updates: install on quit postponed because the shutdown deadline expired"
+        ));
+        return;
+    }
     let result = parked
         .artifact
         .verified_bytes()
@@ -550,7 +559,8 @@ fn install_on_quit(app: &tauri::AppHandle) {
 }
 
 /// Called after the WebView2 runtime has been released. On success the
-/// installer takes over and this process exits; it relaunches Zephium itself.
+/// installer takes over; the caller then flushes logs and terminates this
+/// process. The installer relaunches Zephium itself.
 #[cfg(target_os = "windows")]
 pub(crate) fn finish_after_exit(clean: bool) {
     let Some((mut parked, _path)) = lock(&INSTALL_AFTER_EXIT).take() else {
