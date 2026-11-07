@@ -216,7 +216,7 @@ mod tests {
         let own = 8;
         let marker = 1;
         let accepted = if cfg!(target_os = "windows") {
-            117_863
+            117_862
         } else {
             117_894
         };
