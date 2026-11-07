@@ -8,13 +8,20 @@ pub fn bytes_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// Bind provenance, transformation revision and prepared bytes without long
-/// nested names that would consume Windows native path budgets.
+const PUBLICATION_DIGEST_HEX: usize = 16;
+
+/// Bind provenance, transformation revision and prepared bytes in a short
+/// name: WebView2 loads extensions within MAX_PATH, and every character here
+/// is one an extension's own files can't use. Publication refuses a
+/// different tree at an existing name, so a collision can't swap code.
 pub fn publication_identity(source: &str, revision: &str, prepared: &str) -> String {
-    format!(
-        "pkg-{}",
-        bytes_digest(format!("{source}\0{revision}\0{prepared}").as_bytes())
-    )
+    let digest = bytes_digest(format!("{source}\0{revision}\0{prepared}").as_bytes());
+    format!("pkg-{}", &digest[..PUBLICATION_DIGEST_HEX])
+}
+
+/// Packages published before names were shortened carry the full digest.
+pub fn is_long_publication(name: &str) -> bool {
+    name.len() > "pkg-".len() + PUBLICATION_DIGEST_HEX
 }
 
 /// Hash a bounded regular-file tree, including unambiguous relative names.
@@ -116,6 +123,16 @@ pub fn publish_directory(staged: &Path, target: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_names_are_short_and_bind_every_input() {
+        let name = publication_identity("crx-a", "windows-1", "digest");
+        assert_eq!(name.len(), "pkg-".len() + 16);
+        assert!(!is_long_publication(&name));
+        assert_ne!(name, publication_identity("crx-a", "windows-2", "digest"));
+        assert_ne!(name, publication_identity("crx-b", "windows-1", "digest"));
+        assert!(is_long_publication(&format!("pkg-{}", "a".repeat(64))));
+    }
 
     #[test]
     fn publication_never_replaces_another_sources_executable_tree() {

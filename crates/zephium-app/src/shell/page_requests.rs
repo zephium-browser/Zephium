@@ -1,6 +1,6 @@
 //! What a page asks for that only the person can let through: opening a link
-//! in another application, a new tab the browser refused, or signing in to
-//! the site; and a page that stopped responding. Each waits on its tab, in
+//! in another application, a new tab the browser refused, saving a file, or
+//! signing in to the site; and a page that stopped responding. Each waits on its tab, in
 //! chrome the page cannot draw over, until answered or until the tab commits
 //! another document.
 
@@ -8,6 +8,7 @@ use super::*;
 use crate::PageRequestDecision;
 use zephium_core::http_auth::{HttpAuthPrompt, HttpCredentials};
 use zephium_core::item::PageRequest;
+use zephium_core::permissions::{DownloadPermissionPrompt, PageOrigin};
 
 /// After the person chooses to wait, a page still hung this long later is
 /// asked about again.
@@ -36,7 +37,7 @@ impl Shell {
         if shown || waiting || !in_front || !self.items.tab(id).is_some_and(TabState::has_view) {
             return;
         }
-        if self.items.set_page_request(id, PageRequest::Unresponsive) {
+        if self.replace_page_request(id, PageRequest::Unresponsive) {
             self.project_tab(id);
         }
     }
@@ -54,6 +55,7 @@ impl Shell {
         url: String,
         app: Option<String>,
         user_gesture: bool,
+        initiator: navigation::AppLinkSource,
     ) {
         let Some(url) = navigation::external_app_link(&url) else {
             return;
@@ -66,16 +68,33 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return;
         }
-        if self
-            .external_app_grant(id, &url)
-            .is_some_and(|grant| self.external_apps_allowed.contains(&grant))
+        // Only a site the engine can name may open by a kept answer; one it
+        // cannot name is asked about without naming any site.
+        let site = match initiator {
+            navigation::AppLinkSource::Page => self.tab_origin(id),
+            navigation::AppLinkSource::Frame(origin) => Some(origin),
+            navigation::AppLinkSource::Unknown => None,
+        };
+        if site
+            .as_ref()
+            .is_some_and(|site| self.app_link_allowed(id, site, url.scheme()))
         {
             let _ = self.engine.open_external_app(url.as_str());
             return;
         }
-        if self
-            .items
-            .set_page_request(id, PageRequest::ExternalApp { url, app })
+        if self.replace_page_request(id, PageRequest::ExternalApp { url, app, site }) {
+            self.project_tab(id);
+        }
+    }
+
+    /// AutoFill on a page that is not encrypted waits for the person, on the
+    /// tab in front only.
+    pub(super) fn on_insecure_autofill_requested(&mut self, id: ItemId) {
+        let in_front = self.windows.focused().and_then(|window| window.active) == Some(id);
+        if in_front
+            && self
+                .items
+                .set_page_request(id, PageRequest::InsecureAutofill)
         {
             self.project_tab(id);
         }
@@ -83,13 +102,65 @@ impl Shell {
 
     pub(super) fn on_http_auth_requested(&mut self, id: ItemId, prompt: HttpAuthPrompt) {
         let request = prompt.request;
-        if self
-            .items
-            .set_page_request(id, PageRequest::HttpAuth(prompt))
-        {
+        if self.replace_page_request(id, PageRequest::HttpAuth(prompt)) {
             self.project_tab(id);
         } else {
             let _ = self.engine.answer_http_auth(id, request, None);
+        }
+    }
+
+    /// A download waits on this tab for the person to answer.
+    pub(super) fn on_download_permission_requested(
+        &mut self,
+        id: ItemId,
+        prompt: DownloadPermissionPrompt,
+    ) {
+        let request = prompt.request;
+        let shown = matches!(
+            self.items
+                .tab(id)
+                .and_then(|tab| tab.page_request.as_deref()),
+            None | Some(PageRequest::Popup { .. } | PageRequest::ExternalApp { .. })
+        ) || self.download_prompt(id).is_some();
+        if shown {
+            self.withdraw_download_prompt(id);
+        }
+        if shown
+            && self
+                .items
+                .set_page_request(id, PageRequest::Download(prompt))
+        {
+            self.project_tab(id);
+        } else {
+            let _ = self.engine.answer_download_permission(id, request, false);
+        }
+    }
+
+    pub(super) fn on_download_permission_ended(&mut self, id: ItemId, request: u32) {
+        if self.download_prompt(id) == Some(request) {
+            let _ = self.items.take_page_request(id);
+            self.project_tab(id);
+        }
+    }
+
+    fn download_prompt(&self, id: ItemId) -> Option<u32> {
+        match self.items.tab(id)?.page_request.as_deref()? {
+            PageRequest::Download(prompt) => Some(prompt.request),
+            _ => None,
+        }
+    }
+
+    /// Puts `request` on the tab's card. A download waiting there is
+    /// refused rather than left waiting unseen.
+    pub(super) fn replace_page_request(&mut self, id: ItemId, request: PageRequest) -> bool {
+        self.withdraw_download_prompt(id);
+        self.items.set_page_request(id, request)
+    }
+
+    fn withdraw_download_prompt(&mut self, id: ItemId) {
+        if let Some(request) = self.download_prompt(id) {
+            let _ = self.items.take_page_request(id);
+            let _ = self.engine.answer_download_permission(id, request, false);
         }
     }
 
@@ -141,14 +212,56 @@ impl Shell {
     pub(super) fn operation_answer_page_request(
         &mut self,
         id: ItemId,
+        serial: u32,
         decision: PageRequestDecision,
     ) -> OperationDisposition {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        let Some(request) = self.items.take_page_request(id) else {
+        // Filling opens the passwords panel over the page: only the page in
+        // front of the person may be filled, so a tab switched away from
+        // keeps its question.
+        let filling = matches!(
+            decision,
+            PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
+        ) && self.items.tab(id).is_some_and(|tab| {
+            matches!(
+                tab.page_request.as_deref(),
+                Some(PageRequest::InsecureAutofill)
+            )
+        });
+        if filling
+            && (self.active_browser_page().is_some()
+                || self
+                    .windows
+                    .focused()
+                    .is_none_or(|window| window.active != Some(id)))
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        let Some((request, shown)) = self.items.tab(id).and_then(|tab| {
+            Some((
+                tab.page_request.as_deref()?.clone(),
+                tab.page_request_serial,
+            ))
+        }) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
+        // An answer to a card that has since been replaced is not this one's.
+        if shown != serial {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
+        // A lasting answer is kept before anything opens; one that cannot be
+        // kept leaves the card up to say so.
+        if decision == PageRequestDecision::AlwaysAllow
+            && !self.keep_page_request_answer(id, &request)
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreAdmissionRejected,
+            );
+        }
+        let _ = self.items.take_page_request(id);
         self.project_tab(id);
         match (request, decision) {
             // Signing in has its own answer; anything else here cancels.
@@ -156,21 +269,25 @@ impl Shell {
                 let _ = self.engine.answer_http_auth(id, prompt.request, None);
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
-            (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => {
-                if !self.allow_popups_for_tab(id) {
-                    return operation_result(
-                        OperationOutcome::Rejected,
-                        OperationReason::StoreAdmissionRejected,
-                    );
-                }
-                match url {
-                    Some(url) => self.operation_open_url(url.to_string(), true),
-                    None => operation_result(
-                        OperationOutcome::Applied,
-                        OperationReason::MutationApplied,
-                    ),
-                }
+            (PageRequest::Download(prompt), decision) => {
+                self.answer_download_prompt(id, prompt, decision)
             }
+            (PageRequest::Popup { url }, PageRequestDecision::AlwaysAllow) => match url {
+                Some(url) => self.operation_open_url(url.to_string(), true),
+                None => {
+                    operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+                }
+            },
+            (
+                PageRequest::InsecureAutofill,
+                PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow,
+            ) => match self.engine.autofill_insecure_password(id) {
+                NativeDispatch::Rejected | NativeDispatch::Unsupported => operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::NativeDispatchRejected,
+                ),
+                _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
+            },
             (PageRequest::Unresponsive, PageRequestDecision::Dismiss) => {
                 self.crash
                     .unresponsive_waits
@@ -195,12 +312,7 @@ impl Shell {
             (_, PageRequestDecision::Dismiss) | (PageRequest::Popup { url: None }, _) => {
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
-            (PageRequest::ExternalApp { url, .. }, decision) => {
-                if decision == PageRequestDecision::AlwaysAllow {
-                    if let Some(grant) = self.external_app_grant(id, &url) {
-                        self.external_apps_allowed.insert(grant);
-                    }
-                }
+            (PageRequest::ExternalApp { url, .. }, _) => {
                 match self.engine.open_external_app(url.as_str()) {
                     NativeDispatch::Rejected => operation_result(
                         OperationOutcome::Rejected,
@@ -218,14 +330,82 @@ impl Shell {
         }
     }
 
-    /// What an "always" answer is remembered by: the profile, the site the
-    /// tab shows, and the kind of link.
-    fn external_app_grant(
-        &self,
+    /// Keeps an Always allow for the site that asked. A download keeps its
+    /// own answer, and a card that names no site keeps nothing.
+    fn keep_page_request_answer(&mut self, id: ItemId, request: &PageRequest) -> bool {
+        match request {
+            PageRequest::ExternalApp {
+                url,
+                site: Some(site),
+                ..
+            } => self.profile_of_item(id).is_some_and(|profile| {
+                self.set_app_link_site(profile, site.clone(), url.scheme().to_owned(), true)
+            }),
+            PageRequest::Popup { .. } => self.allow_popups_for_tab(id),
+            _ => true,
+        }
+    }
+
+    /// Allow keeps the site allowed, except for a download nobody clicked,
+    /// which is let through once; anything else refuses this download only.
+    fn answer_download_prompt(
+        &mut self,
         id: ItemId,
-        url: &url::Url,
-    ) -> Option<(ProfileId, String, String)> {
-        let host = self.items.tab(id)?.url.as_ref()?.host_str()?.to_owned();
-        Some((self.profile_of_item(id)?, host, url.scheme().to_owned()))
+        prompt: DownloadPermissionPrompt,
+        decision: PageRequestDecision,
+    ) -> OperationDisposition {
+        let mut allow = matches!(
+            decision,
+            PageRequestDecision::Allow | PageRequestDecision::AlwaysAllow
+        );
+        let profile = self.profile_of_item(id);
+        let remembered = profile.and_then(|profile| {
+            self.ensure_download_sites(profile);
+            self.download_sites
+                .get(&profile)?
+                .get(&prompt.site)
+                .copied()
+        });
+        // Blocked from Site settings while the card waited: the block stands.
+        let refused =
+            allow && !zephium_core::permissions::download_answer_allows(allow, remembered, false);
+        if refused {
+            allow = false;
+        }
+        if allow && !prompt.allowed {
+            if let Some(profile) = profile {
+                if !self.set_download_site(profile, prompt.site.clone(), Some(true)) {
+                    crate::diagnostic!("downloads: the site's answer could not be kept");
+                }
+            }
+        }
+        match self
+            .engine
+            .answer_download_permission(id, prompt.request, allow)
+        {
+            NativeDispatch::Rejected | NativeDispatch::Unsupported => operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::NativeDispatchRejected,
+            ),
+            _ if refused => {
+                operation_result(OperationOutcome::Rejected, OperationReason::StoreConflict)
+            }
+            _ => operation_result(OperationOutcome::Applied, OperationReason::MutationApplied),
+        }
+    }
+
+    /// The site a tab shows, as an origin.
+    fn tab_origin(&self, id: ItemId) -> Option<PageOrigin> {
+        PageOrigin::from_url(self.items.tab(id)?.url.as_ref()?).ok()
+    }
+
+    fn app_link_allowed(&mut self, id: ItemId, site: &PageOrigin, scheme: &str) -> bool {
+        let Some(profile) = self.profile_of_item(id) else {
+            return false;
+        };
+        self.ensure_app_link_sites(profile);
+        self.app_link_sites
+            .get(&profile)
+            .is_some_and(|sites| sites.contains(&(site.clone(), scheme.to_owned())))
     }
 }

@@ -794,6 +794,43 @@ pub trait Store {
     ) -> bool {
         false
     }
+    /// The sites `profile` lets open a kind of application link without
+    /// asking, as (site, scheme), or None when they cannot be read.
+    fn app_link_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, String)>> {
+        None
+    }
+    /// Keeps or forgets one (site, scheme). False when nothing was written,
+    /// including when the list is full.
+    fn set_app_link_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _scheme: String,
+        _allowed: bool,
+    ) -> bool {
+        false
+    }
+    /// The download decision `profile` keeps per site, true for Allow and
+    /// false for Block, or None when they cannot be read.
+    fn download_sites(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<(crate::permissions::PageOrigin, bool)>> {
+        None
+    }
+    /// Keeps one site's download decision, or forgets it with None. False
+    /// when nothing was written, including when the list is full.
+    fn set_download_site(
+        &self,
+        _profile: ProfileId,
+        _origin: crate::permissions::PageOrigin,
+        _allowed: Option<bool>,
+    ) -> bool {
+        false
+    }
 
     /// Returns the bounded, durable deletion work that survived the previous
     /// process. An empty default keeps non-persistent test adapters inert.

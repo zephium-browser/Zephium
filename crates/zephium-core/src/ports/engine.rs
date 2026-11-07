@@ -720,9 +720,22 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Names the storage of a profile's views before the first one exists,
+    /// so native state made ahead of them, such as the profile's scriptlet
+    /// context, is made where those views will look for it. Call it before
+    /// the profile's first content policy.
+    fn prepare_profile(&self, _partition: Partition) {}
     /// Replaces the sites in `profile` whose pages may open a new tab
     /// without a click.
     fn set_popup_sites(&self, _profile: ProfileId, _origins: Vec<crate::permissions::PageOrigin>) {}
+    /// Replaces the download decision `profile` keeps per site: true lets a
+    /// site save files without asking, false refuses them.
+    fn set_download_sites(
+        &self,
+        _profile: ProfileId,
+        _sites: Vec<(crate::permissions::PageOrigin, bool)>,
+    ) {
+    }
     /// The decisions the engine itself saved in `profile`. None when it keeps
     /// none of its own, as on macOS, or cannot read them now.
     fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
@@ -896,6 +909,17 @@ pub trait Engine {
     fn autofill_password(&self, _id: ItemId) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Whether the engine itself tries every top-level `http` page over
+    /// https first and falls back on failure, so the browser does not.
+    fn upgrades_https_natively(&self) -> bool {
+        false
+    }
+    /// Opens the passwords panel on a page that is not encrypted, once the
+    /// person has said to fill there anyway; the page gets the keyboard back
+    /// first.
+    fn autofill_insecure_password(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Starts watching the committed document's icon links: what they name
     /// arrives as `EngineEvent::FaviconCandidates` when the head first has
     /// icons and whenever they change until the page has loaded. One call per
@@ -959,6 +983,9 @@ pub trait Engine {
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}
+    /// Close the warm spare, if one is waiting: browsing has gone quiet, and
+    /// the next completed load warms another.
+    fn release_spare(&self) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
     /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
     /// and resumes implicitly when a view becomes visible again.
@@ -1089,6 +1116,11 @@ pub trait Engine {
     fn allow_certificate_exception(&self, _item: ItemId, _url: String) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// The person chose to open the page the lists refused at `url` anyway.
+    /// Its host stays allowed in the tab's profile until the app quits.
+    fn allow_blocked_navigation(&self, _item: ItemId, _url: String) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Answers the tab's sign-in prompt with credentials, or cancels it with
     /// None. A stale or unknown request is ignored and its credentials are
     /// dropped.
@@ -1097,6 +1129,17 @@ pub trait Engine {
         _item: ItemId,
         _request: u32,
         _credentials: Option<crate::http_auth::HttpCredentials>,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Answers the download prompt `request` on `item`: true lets every
+    /// download it holds continue, false cancels them. A stale or unknown
+    /// request is ignored.
+    fn answer_download_permission(
+        &self,
+        _item: ItemId,
+        _request: u32,
+        _allow: bool,
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
@@ -1292,7 +1335,18 @@ pub enum NavigationFailureReason {
     /// The server's certificate was refused, and what the engine could tell
     /// about why.
     Certificate(crate::certificates::CertificateProblem),
+    /// The person's filter lists refused the page.
+    Blocked(NavigationBlockReason),
     Other,
+}
+
+/// Why the filter lists refused a page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NavigationBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1412,6 +1466,12 @@ pub enum EngineEvent {
     /// content profile alone cannot update privileged chrome and must not be
     /// presented as successful adoption.
     RuntimeRestartRequired,
+    /// The engine can no longer prove which browser process owns this
+    /// profile's data, so it retired the profile's views and refuses new ones
+    /// until Zephium restarts. Sticky for the life of the process.
+    ProfileRestartRequired {
+        profile: ProfileId,
+    },
     /// One exact native content-policy installation attempt settled.
     ///
     /// Replacement failure reports `Retained` with the prior known-good
@@ -1592,6 +1652,14 @@ pub enum EngineEvent {
         id: ItemId,
         loading: bool,
     },
+    /// The view's native filters left it unprotected while resumed
+    /// (`degraded`), or a replaced policy left filters behind on it that a
+    /// retry on its next navigation tries to take back.
+    ContentProtectionChanged {
+        id: ItemId,
+        degraded: bool,
+        stranded_filters: u32,
+    },
     MediaCaptureChanged {
         id: ItemId,
         navigation: NavigationPresentationId,
@@ -1717,11 +1785,26 @@ pub enum EngineEvent {
         app: Option<String>,
         /// The person clicked, rather than the page navigating by itself.
         user_gesture: bool,
+        /// Which document asked.
+        initiator: crate::navigation::AppLinkSource,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {
         id: ItemId,
         url: String,
+    },
+    /// The filter lists refused the page the view's main frame was about to
+    /// load; the page that was showing stays, and nothing was requested.
+    NavigationBlocked {
+        id: ItemId,
+        url: String,
+        reason: NavigationBlockReason,
+        /// The navigation the shell asked for that this refuses, when the
+        /// engine can tell; a refused link or redirect names none.
+        request: Option<NavigationRequestId>,
+        /// False where the engine itself refuses the page (WebKit's content
+        /// rules), which allowing the host cannot lift.
+        can_continue: bool,
     },
     LinkedDownloadStarted {
         id: ItemId,
@@ -1750,6 +1833,23 @@ pub enum EngineEvent {
     HttpAuthEnded {
         id: ItemId,
         request: u32,
+    },
+    /// A download waits for the person on this tab, until
+    /// [`Engine::answer_download_permission`] or until the engine gives up on
+    /// it, which [`EngineEvent::DownloadPermissionEnded`] reports.
+    DownloadPermissionRequested {
+        id: ItemId,
+        prompt: crate::permissions::DownloadPermissionPrompt,
+    },
+    /// Every download this prompt held has ended without an answer.
+    DownloadPermissionEnded {
+        id: ItemId,
+        request: u32,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; nothing is
+    /// filled until the person says to.
+    InsecureAutofillRequested {
+        id: ItemId,
     },
     DownloadRequested {
         id: ItemId,

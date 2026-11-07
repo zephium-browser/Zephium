@@ -2,7 +2,7 @@
   import { untrack } from "svelte";
   import * as m from "$shared/i18n/messages";
   import { tabs } from "$domain/tabs";
-  import { DownloadSession } from "$domain/downloads";
+  import { DownloadSession, displayDirectory } from "$domain/downloads";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Button from "$shared/ui/Button";
@@ -28,8 +28,11 @@
   <SettingsRow
     settingId="downloads.path"
     title={m.pref_downloads_path()}
-    description={session.preferences?.directory ??
-      (session.error ? m.download_default_directory() : m.download_settings_loading())}
+    description={session.preferences?.directory
+      ? displayDirectory(session.preferences.directory)
+      : session.preferences || session.error
+        ? m.download_default_directory()
+        : m.download_settings_loading()}
   >
     <Button
       disabled={session.busy || !session.preferences || !session.supported}
