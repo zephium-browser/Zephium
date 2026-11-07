@@ -683,6 +683,58 @@ fn a_zoom_made_in_the_page_is_remembered_like_a_command() {
 }
 
 #[test]
+fn failed_site_zoom_save_retries_the_same_value_and_default() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    let profile = shell.profile_of_item(id).unwrap();
+    for scale in [1.5, 1.0] {
+        store
+            .zoom_save_fails
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let before = saved(&store, profile);
+        gesture(&mut shell, id, scale);
+        assert_eq!(saved(&store, profile), before);
+        assert_eq!(shell.items.tab(id).unwrap().zoom, scale);
+        assert!(requests_for(&engine, id).is_empty());
+        store
+            .zoom_save_fails
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        gesture(&mut shell, id, scale);
+        let expected = if scale == 1.0 {
+            vec![]
+        } else {
+            vec![("github.com".to_owned(), 150)]
+        };
+        assert_eq!(saved(&store, profile), expected);
+    }
+}
+
+#[test]
+fn repeating_reset_retries_a_failed_site_zoom_deletion() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "github.com");
+    gesture(&mut shell, id, 1.5);
+    let profile = shell.profile_of_item(id).unwrap();
+    store
+        .zoom_save_fails
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Run("zoom.reset".into()));
+    settle_last(&mut shell, &engine, id);
+    assert_eq!(saved(&store, profile), [("github.com".into(), 150)]);
+    store
+        .zoom_save_fails
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Run("zoom.reset".into()));
+    assert!(saved(&store, profile).is_empty());
+}
+
+#[test]
 fn a_zoom_made_in_the_page_replaces_a_request_in_flight() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

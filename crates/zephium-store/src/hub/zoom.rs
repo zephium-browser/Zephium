@@ -46,12 +46,12 @@ impl Hub {
         site: &str,
         percent: Option<u16>,
         set_at: i64,
-    ) {
+    ) -> bool {
         if !valid_zoom_site(site)
             || percent.is_some_and(|percent| !valid_percent(percent))
             || !self.zoom_available(profile)
         {
-            return;
+            return false;
         }
         let result = self.profile_conn(profile).and_then(|conn| {
             let tx = conn.transaction()?;
@@ -80,7 +80,9 @@ impl Hub {
         });
         if let Err(e) = result {
             eprintln!("store: save_zoom_level failed for profile {profile}: {e}");
+            return false;
         }
+        true
     }
 }
 
@@ -116,6 +118,22 @@ mod tests {
         assert_eq!(sites(&mut hub, profile), [("example.org".into(), 150)]);
         hub.save_zoom_level(profile, "github.com", None, 50);
         assert_eq!(sites(&mut hub, profile).len(), 1);
+    }
+
+    #[test]
+    fn a_database_failure_is_reported_and_the_same_zoom_can_be_retried() {
+        let (mut hub, profile) = registered_hub();
+        hub.profile_conn(profile).unwrap().execute_batch(
+            "CREATE TRIGGER fail_zoom BEFORE INSERT ON site_zoom BEGIN SELECT RAISE(FAIL, 'disk full'); END;"
+        ).unwrap();
+        assert!(!hub.save_zoom_level(profile, "example.com", Some(150), 1));
+        assert!(sites(&mut hub, profile).is_empty());
+        hub.profile_conn(profile)
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_zoom")
+            .unwrap();
+        assert!(hub.save_zoom_level(profile, "example.com", Some(150), 1));
+        assert_eq!(sites(&mut hub, profile), [("example.com".into(), 150)]);
     }
 
     #[test]

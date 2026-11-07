@@ -223,14 +223,22 @@ impl Shell {
 
     /// Sets a site's level, or forgets it when it is the default, and brings
     /// the site's other tabs to it.
-    fn remember_zoom(&mut self, profile: ProfileId, site: String, applied: f64) {
+    fn remember_zoom(&mut self, profile: ProfileId, site: String, applied: f64) -> bool {
         let percent = zoom::percent(applied);
         let saved = (percent != self.zoom.default_percent).then_some(percent);
         let now = chrono::Utc::now().timestamp();
         let levels = self.site_levels(profile);
         if levels.get(&site).map(|level| level.percent) == saved {
-            return;
+            return true;
         }
+        if !self.incognito_profile(profile)
+            && !self
+                .store
+                .save_zoom_level(profile, site.clone(), saved, now)
+        {
+            return false;
+        }
+        let levels = self.site_levels(profile);
         match saved {
             Some(percent) => {
                 levels.insert(
@@ -255,12 +263,8 @@ impl Shell {
                 levels.remove(&site);
             }
         }
-        if !self.incognito_profile(profile) {
-            let _ = self
-                .store
-                .save_zoom_level(profile, site.clone(), saved, now);
-        }
         self.reconcile_site_zoom(profile, &site);
+        true
     }
 
     pub(super) fn on_zoom_settled(
@@ -308,7 +312,9 @@ impl Shell {
             return;
         }
         if let (ZoomOrigin::Person, Some((profile, site))) = (pending.origin, pending.owner) {
-            self.remember_zoom(profile, site, applied_scale);
+            if !self.remember_zoom(profile, site, applied_scale) {
+                return;
+            }
         }
         // Whatever changed while this was in flight, such as a navigation to
         // another site, is caught up with now.
@@ -338,7 +344,9 @@ impl Shell {
         }
         self.project_tab(id);
         if let Some((profile, site)) = self.zoom_owner(id) {
-            self.remember_zoom(profile, site, applied_scale);
+            if !self.remember_zoom(profile, site, applied_scale) {
+                return;
+            }
         }
         // A level outside the range the page may hold is brought inside it.
         self.reconcile_zoom(id);
@@ -376,6 +384,9 @@ impl Shell {
         };
         let target = zoom::scale(percent);
         if same_scale(target, current) {
+            if let Some((profile, site)) = self.zoom_owner(active) {
+                self.remember_zoom(profile, site, current);
+            }
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         // `Items.zoom` is durable authoritative state, and a site's level
@@ -444,14 +455,17 @@ impl Shell {
 
     /// Forgets a site's saved level, so its tabs show the default.
     pub(super) fn forget_zoom_level(&mut self, profile: ProfileId, site: &str) -> bool {
-        if self.site_levels(profile).remove(site).is_none() {
+        if !self.site_levels(profile).contains_key(site) {
             return false;
         }
-        if !self.incognito_profile(profile) {
-            let _ = self
+        if !self.incognito_profile(profile)
+            && !self
                 .store
-                .save_zoom_level(profile, site.to_owned(), None, 0);
+                .save_zoom_level(profile, site.to_owned(), None, 0)
+        {
+            return false;
         }
+        self.site_levels(profile).remove(site);
         self.reconcile_site_zoom(profile, site);
         true
     }
