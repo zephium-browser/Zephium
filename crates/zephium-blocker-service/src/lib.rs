@@ -30,7 +30,7 @@ use zephium_blocker_update::{
     RefreshAdmission, ShutdownOutcome as UpdateShutdownOutcome, StatusSnapshot, UnavailableReason,
     UpdateStatus,
 };
-use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration};
+use zephium_core::blocker::{BlockerConfig, ContentPolicyGeneration, PageActivity};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::blocker::{
     BlockerCatalog, BlockerCatalogFailure, BlockerCatalogPhase, BlockerCatalogProvenance,
@@ -91,6 +91,39 @@ pub struct ManagedBlocker {
     /// panic, so a marker left at launch names a list that crashed the
     /// browser; it is refused instead of compiled again on every start.
     compile_marker: Option<std::path::PathBuf>,
+    /// A downloaded list still waiting at launch is compiled and checked only
+    /// after the first enabled profile policy, or this long after launch.
+    /// They share one compiler thread and WebKit's compile queue, and the
+    /// profile's policy is what holds the first pages.
+    startup_candidate_yield: Option<(Instant, Arc<AtomicBool>)>,
+    /// A downloaded list then waits until no page has been loading for a
+    /// moment, so its compile never competes with one. The wait for the list
+    /// with this manifest started here; a retry of the same list keeps it.
+    page_activity: Arc<PageActivity>,
+    candidate_quiet_wait: Mutex<Option<([u8; 32], Instant)>>,
+}
+
+const STARTUP_CANDIDATE_YIELD: Duration = Duration::from_secs(10);
+const CANDIDATE_QUIET_PAGES: Duration = Duration::from_secs(2);
+const CANDIDATE_QUIET_WAIT_CAP: Duration = Duration::from_secs(2 * 60);
+
+fn candidate_may_prepare_while_browsing(
+    quiet_for: Option<Duration>,
+    waiting_since: Instant,
+    now: Instant,
+) -> bool {
+    quiet_for.is_some_and(|quiet| quiet >= CANDIDATE_QUIET_PAGES)
+        || now.saturating_duration_since(waiting_since) >= CANDIDATE_QUIET_WAIT_CAP
+}
+
+fn startup_candidate_may_prepare(
+    startup_yield: Option<&(Instant, Arc<AtomicBool>)>,
+    now: Instant,
+) -> bool {
+    startup_yield.is_none_or(|(started, profile_compiled)| {
+        profile_compiled.load(Ordering::Acquire)
+            || now.saturating_duration_since(*started) >= STARTUP_CANDIDATE_YIELD
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +303,9 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -320,6 +356,9 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -382,21 +421,10 @@ impl ManagedBlocker {
             native_retry: None,
             official_verification: None,
         };
+        let mut startup_candidate_yield = None;
         if let Some(candidate) = candidate {
-            if crashed_compile.as_deref().map(str::trim)
-                == Some(hex_digest(&candidate.identity.manifest_sha256).as_str())
-            {
-                eprintln!(
-                    "blocker: a downloaded list stopped the browser while compiling; it is refused"
-                );
-                state.candidate = Some(candidate.identity.clone());
-                state.transition = Some(CatalogTransition::ReadyToReject(
-                    candidate.identity,
-                    FailureKind::Catalog,
-                    CandidateRejectionReason::CompilerPolicy,
-                ));
-            } else {
-                state.admit_activation(candidate, now_unix());
+            if state.admit_startup_candidate(candidate, crashed_compile.as_deref()) {
+                startup_candidate_yield = Some((Instant::now(), Arc::new(AtomicBool::new(false))));
             }
         }
         state.recompute_schedule(&initial_status, now_unix());
@@ -420,6 +448,9 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: Some(compile_marker),
+            startup_candidate_yield,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -487,6 +518,9 @@ impl ManagedBlocker {
             shutdown_result: Mutex::new(None),
             sealed: AtomicBool::new(false),
             compile_marker: None,
+            startup_candidate_yield: None,
+            page_activity: PageActivity::shared(),
+            candidate_quiet_wait: Mutex::new(None),
         }))
     }
 
@@ -601,6 +635,18 @@ impl ManagedBlocker {
         state.snapshot
     }
 
+    fn pages_allow_candidate(&self, manifest: [u8; 32], now: Instant) -> bool {
+        let mut waiting = self
+            .candidate_quiet_wait
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let since = match *waiting {
+            Some((waiting_for, since)) if waiting_for == manifest => since,
+            _ => waiting.insert((manifest, now)).1,
+        };
+        candidate_may_prepare_while_browsing(self.page_activity.quiet_for(now), since, now)
+    }
+
     fn drive_catalog_transition(&self) {
         enum Action {
             Prepare(ActivatedCatalog),
@@ -643,11 +689,19 @@ impl ManagedBlocker {
                 state
                     .pending
                     .clone()
-                    .filter(|_| {
+                    .filter(|pending| {
                         state
                             .native_retry
                             .as_ref()
                             .is_none_or(|(_, _, deadline)| Instant::now() >= *deadline)
+                            && startup_candidate_may_prepare(
+                                self.startup_candidate_yield.as_ref(),
+                                Instant::now(),
+                            )
+                            && self.pages_allow_candidate(
+                                pending.identity.manifest_sha256,
+                                Instant::now(),
+                            )
                     })
                     .map(Action::Prepare)
             }
@@ -660,8 +714,17 @@ impl ManagedBlocker {
                 let identity = candidate.identity.clone();
                 let callback_identity = identity.clone();
                 let marker = self.compile_marker.clone();
+                // Without its name on disk, a list that crashes the browser
+                // would be compiled again on every launch; it waits instead.
                 if let Some(marker) = marker.as_ref() {
-                    let _ = std::fs::write(marker, hex_digest(&identity.manifest_sha256));
+                    if let Err(error) =
+                        std::fs::write(marker, hex_digest(&identity.manifest_sha256))
+                    {
+                        eprintln!(
+                            "blocker: downloaded list waits; compile marker not written: {error}"
+                        );
+                        return;
+                    }
                 }
                 let completion = Arc::clone(&self.transition_completion);
                 let native_validation = self.native_validation.clone();
@@ -669,22 +732,27 @@ impl ManagedBlocker {
                     identity.manifest_sha256,
                     candidate.catalog,
                     Box::new(move |outcome| {
-                        if let Some(marker) = marker.as_ref() {
-                            let _ = std::fs::remove_file(marker);
-                        }
+                        // The marker stays through WebKit's check: a list
+                        // that crashes it is refused at launch too.
+                        let clear_marker = move || {
+                            if let Some(marker) = marker.as_ref() {
+                                let _ = std::fs::remove_file(marker);
+                            }
+                        };
                         let publish=move |value| {completion.lock().unwrap_or_else(|p|p.into_inner()).replace(value);};
                         match outcome {
-                            Err(failure)=>publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(failure))),
+                            Err(failure)=>{clear_marker();publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(failure)))},
                             Ok(rules)=>if let Some(validate)=native_validation {
                                 validate(rules,zephium_core::ports::engine::ContentRuleValidationCompletion::new(move |outcome| {
                                     use zephium_core::ports::engine::ContentRuleValidationOutcome;
+                                    clear_marker();
                                     publish(match outcome {
                                         ContentRuleValidationOutcome::Valid=>CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Prepared),
                                         ContentRuleValidationOutcome::Unavailable=>CatalogTransitionCompletion::NativeUnavailable(callback_identity),
                                         ContentRuleValidationOutcome::Rejected(_)=>CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Failed(BlockerCompileFailure::InvalidSource)),
                                     });
                                 }));
-                            } else {publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Prepared));},
+                            } else {clear_marker();publish(CatalogTransitionCompletion::Prepared(callback_identity,CatalogPreparationOutcome::Prepared));},
                         }
                     }),
                 );
@@ -1399,6 +1467,35 @@ impl ServiceState {
         ));
     }
 
+    /// Admits the candidate still waiting at launch, unless the compile marker
+    /// left by the previous run names it: that list stopped the browser while
+    /// it compiled or while WebKit checked it, so it is refused and the current
+    /// list stays. Returns whether the candidate was admitted.
+    #[cfg_attr(not(feature = "official-https"), allow(dead_code))]
+    fn admit_startup_candidate(
+        &mut self,
+        candidate: ActivatedCatalog,
+        crashed_compile: Option<&str>,
+    ) -> bool {
+        if crashed_compile.map(str::trim)
+            == Some(hex_digest(&candidate.identity.manifest_sha256).as_str())
+        {
+            eprintln!(
+                "blocker: a downloaded list stopped the browser while compiling; it is refused"
+            );
+            self.candidate = Some(candidate.identity.clone());
+            self.transition = Some(CatalogTransition::ReadyToReject(
+                candidate.identity,
+                FailureKind::Catalog,
+                CandidateRejectionReason::CompilerPolicy,
+            ));
+            false
+        } else {
+            self.admit_activation(candidate, now_unix());
+            true
+        }
+    }
+
     fn admit_activation(&mut self, activation: ActivatedCatalog, now: u64) {
         if self
             .source_material_repair
@@ -1727,6 +1824,17 @@ impl BlockerCatalog for ManagedBlocker {
         self.drive_locked(true)
     }
 
+    fn set_change_waker(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(updater) = self
+            .updater
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            updater.set_change_waker(wake);
+        }
+    }
+
     fn request_refresh(&self) -> BlockerCatalogRefreshDispatch {
         let _serial = self
             .maintenance_serial
@@ -1858,11 +1966,19 @@ impl BlockerCompiler for ManagedBlocker {
                 None
             };
             let signal = Arc::clone(&self.source_material_signal);
+            let profile_compiled = self
+                .startup_candidate_yield
+                .as_ref()
+                .filter(|_| config.enabled)
+                .map(|(_, compiled)| Arc::clone(compiled));
             self.compiler.compile(
                 profile,
                 generation,
                 config,
                 Box::new(move |outcome| {
+                    if let Some(compiled) = profile_compiled {
+                        compiled.store(true, Ordering::Release);
+                    }
                     if matches!(
                         &outcome,
                         BlockerCompileOutcome::Failed(BlockerCompileFailure::SourceUnavailable)
@@ -1928,6 +2044,13 @@ impl BlockerCompiler for ManagedBlocker {
                 .ok()
         });
         let compiler_outcome = self.compiler.shutdown_until(deadline);
+        // A list still compiling or under WebKit's check did not crash the
+        // browser if the compiler stopped; one that never let it stop did.
+        if compiler_outcome == BlockerShutdownOutcome::Clean {
+            if let Some(marker) = &self.compile_marker {
+                let _ = std::fs::remove_file(marker);
+            }
+        }
         let updater_outcome = match updater_thread {
             Some(thread) => join_until(thread, deadline).flatten(),
             None => updater_slot.and_then(|slot| {
@@ -2189,6 +2312,114 @@ fn refresh_jitter() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A candidate compiles at background priority, which a busy Windows
+    /// runner can starve for seconds; a prompt compile still answers at once.
+    const CANDIDATE_COMPILED: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_startup_candidate_waits_for_the_first_profile_policy_or_the_yield() {
+        let started = Instant::now();
+        let compiled = Arc::new(AtomicBool::new(false));
+        let startup = (started, Arc::clone(&compiled));
+        assert!(startup_candidate_may_prepare(None, started));
+        assert!(!startup_candidate_may_prepare(Some(&startup), started));
+        assert!(!startup_candidate_may_prepare(
+            Some(&startup),
+            started + STARTUP_CANDIDATE_YIELD - Duration::from_millis(1)
+        ));
+        assert!(startup_candidate_may_prepare(
+            Some(&startup),
+            started + STARTUP_CANDIDATE_YIELD
+        ));
+        compiled.store(true, Ordering::Release);
+        assert!(startup_candidate_may_prepare(Some(&startup), started));
+    }
+
+    #[test]
+    fn a_downloaded_list_waits_for_quiet_pages_or_the_cap() {
+        let since = Instant::now();
+        let quiet = Some(CANDIDATE_QUIET_PAGES);
+        assert!(candidate_may_prepare_while_browsing(quiet, since, since));
+        assert!(!candidate_may_prepare_while_browsing(
+            Some(CANDIDATE_QUIET_PAGES - Duration::from_millis(1)),
+            since,
+            since
+        ));
+        assert!(!candidate_may_prepare_while_browsing(None, since, since));
+        assert!(!candidate_may_prepare_while_browsing(
+            None,
+            since,
+            since + CANDIDATE_QUIET_WAIT_CAP - Duration::from_millis(1)
+        ));
+        assert!(candidate_may_prepare_while_browsing(
+            None,
+            since,
+            since + CANDIDATE_QUIET_WAIT_CAP
+        ));
+    }
+
+    #[test]
+    fn a_page_loading_holds_a_downloaded_list_until_the_cap() {
+        use zephium_blocker::{PolicySource, SourceFormat, SourceId};
+        use zephium_core::ports::engine::{
+            ContentRuleValidationCompletion, ContentRuleValidationOutcome,
+        };
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut current = identity(1, 1);
+        current.created_unix = now_unix();
+        current.expires_unix = now_unix() + 86400;
+        let catalog = |hash| {
+            PolicyCatalog::authenticated(
+                [hash; 32],
+                StaticPolicyCatalog::new(vec![PolicySource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example.invalid^\n##.ad"),
+                )])
+                .unwrap(),
+            )
+        };
+        let mut service = ManagedBlocker::with_release_seed(
+            ReleaseCatalogSeed {
+                identity: current.clone(),
+                catalog: catalog(1),
+            },
+            CompiledArtifactCacheConfig::new(root.path().join("compiled")).unwrap(),
+        )
+        .unwrap();
+        let activity = Arc::new(PageActivity::new());
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ContentRuleValidationCompletion>(1);
+        {
+            let service = Arc::get_mut(&mut service).unwrap();
+            service.page_activity = Arc::clone(&activity);
+            service.native_validation = Some(Arc::new(move |_, done| tx.send(done).unwrap()));
+        }
+        let mut candidate = current.clone();
+        candidate.revision = 2;
+        candidate.manifest_sha256 = [2; 32];
+        service.lock_state().admit_activation(
+            ActivatedCatalog {
+                identity: candidate,
+                catalog: catalog(2),
+            },
+            now_unix(),
+        );
+        let loading = activity.begin_load();
+        service.drive_locked(false);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(service.lock_state().transition.is_none());
+
+        let capped = Instant::now() - CANDIDATE_QUIET_WAIT_CAP;
+        *service.candidate_quiet_wait.lock().unwrap() = Some(([2; 32], capped));
+        service.drive_locked(false);
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
+        // A native retry of the same list does not wait the whole cap again.
+        assert!(service.pages_allow_candidate([2; 32], Instant::now()));
+        assert!(!service.pages_allow_candidate([3; 32], Instant::now()));
+        drop(loading);
+        completion.finish(ContentRuleValidationOutcome::Valid);
+    }
 
     fn cache() -> (tempfile::TempDir, CompiledArtifactCacheConfig) {
         let root = tempfile::tempdir().unwrap();
@@ -3303,6 +3534,121 @@ mod tests {
         assert!(!before.source_refresh_due);
         assert!(after.source_refresh_due);
     }
+    #[cfg(feature = "official-https")]
+    #[test]
+    fn a_list_that_crashes_webkits_check_is_refused_at_the_next_launch() {
+        use zephium_blocker::{PolicySource, SourceFormat, SourceId};
+        use zephium_core::ports::engine::{
+            ContentRuleValidationCompletion, ContentRuleValidationOutcome,
+        };
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut current = identity(1, 1);
+        current.created_unix = now_unix();
+        current.expires_unix = now_unix() + 86400;
+        let catalog = |hash| {
+            PolicyCatalog::authenticated(
+                [hash; 32],
+                StaticPolicyCatalog::new(vec![PolicySource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example.invalid^\n##.ad"),
+                )])
+                .unwrap(),
+            )
+        };
+        let mut service = ManagedBlocker::with_release_seed(
+            ReleaseCatalogSeed {
+                identity: current.clone(),
+                catalog: catalog(1),
+            },
+            CompiledArtifactCacheConfig::new(root.path().join("compiled")).unwrap(),
+        )
+        .unwrap();
+        let marker = root.path().join(COMPILE_MARKER);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ContentRuleValidationCompletion>(1);
+        {
+            let service = Arc::get_mut(&mut service).unwrap();
+            service.compile_marker = Some(marker.clone());
+            service.native_validation = Some(Arc::new(move |_, done| tx.send(done).unwrap()));
+        }
+        let mut candidate = current.clone();
+        candidate.revision = 2;
+        candidate.manifest_sha256 = [2; 32];
+        let activation = || ActivatedCatalog {
+            identity: candidate.clone(),
+            catalog: catalog(2),
+        };
+        service
+            .lock_state()
+            .admit_activation(activation(), now_unix());
+        service.drive_locked(false);
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
+        // WebKit is checking the list: a crash now must leave its name behind.
+        let crashed = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(crashed, hex_digest(&[2; 32]));
+
+        let relaunch = |cache: &str| {
+            ManagedBlocker::with_release_seed(
+                ReleaseCatalogSeed {
+                    identity: current.clone(),
+                    catalog: catalog(1),
+                },
+                CompiledArtifactCacheConfig::new(root.path().join(cache)).unwrap(),
+            )
+            .unwrap()
+        };
+        let relaunched = relaunch("relaunched");
+        let mut state = relaunched.lock_state();
+        assert!(!state.admit_startup_candidate(activation(), Some(&crashed)));
+        assert!(matches!(
+            state.transition,
+            Some(CatalogTransition::ReadyToReject(ref refused, _, _)) if *refused == candidate
+        ));
+        assert_eq!(state.installed.as_ref(), Some(&current));
+        drop(state);
+        let unrelated = relaunch("unrelated");
+        assert!(unrelated
+            .lock_state()
+            .admit_startup_candidate(activation(), Some(&hex_digest(&[9; 32]))));
+
+        completion.finish(ContentRuleValidationOutcome::Valid);
+        assert!(!marker.exists(), "a settled check is not a crash");
+        // Their workers would otherwise recreate cache files after `root` is gone.
+        for service in [&service, &relaunched, &unrelated] {
+            let _ = service.shutdown_until(Instant::now() + Duration::from_secs(5));
+        }
+    }
+
+    #[cfg(feature = "official-https")]
+    #[test]
+    fn a_clean_shutdown_does_not_mark_a_compiling_list_as_crashed() {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut current = identity(1, 1);
+        current.created_unix = now_unix();
+        current.expires_unix = now_unix() + 86400;
+        let mut service = ManagedBlocker::with_release_seed(
+            ReleaseCatalogSeed {
+                identity: current,
+                catalog: PolicyCatalog::authenticated(
+                    [1; 32],
+                    StaticPolicyCatalog::new(vec![zephium_blocker::PolicySource::new(
+                        zephium_blocker::SourceId::new("test").unwrap(),
+                        zephium_blocker::SourceFormat::Standard,
+                        Arc::from("||ads.example.invalid^"),
+                    )])
+                    .unwrap(),
+                ),
+            },
+            CompiledArtifactCacheConfig::new(root.path().join("compiled")).unwrap(),
+        )
+        .unwrap();
+        let marker = root.path().join(COMPILE_MARKER);
+        std::fs::write(&marker, hex_digest(&[2; 32])).unwrap();
+        Arc::get_mut(&mut service).unwrap().compile_marker = Some(marker.clone());
+        let _ = service.shutdown_until(Instant::now() + Duration::from_secs(5));
+        assert!(!marker.exists());
+    }
+
     #[test]
     fn native_preflight_owns_candidate_completion_and_queue_refusal_is_bounded() {
         use zephium_blocker::{PolicySource, SourceFormat, SourceId};
@@ -3352,7 +3698,7 @@ mod tests {
             now_unix(),
         );
         service.drive_locked(false);
-        let completion = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let completion = rx.recv_timeout(CANDIDATE_COMPILED).unwrap();
         assert!(matches!(
             service.lock_state().transition,
             Some(CatalogTransition::Preparing(_))
@@ -3365,7 +3711,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         service.lock_state().native_retry.as_mut().unwrap().2 = Instant::now();
         service.drive_locked(false);
-        rx.recv_timeout(Duration::from_secs(2))
+        rx.recv_timeout(CANDIDATE_COMPILED)
             .unwrap()
             .finish(ContentRuleValidationOutcome::Valid);
         let completion = service

@@ -40,6 +40,8 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(target_os = "macos", feature = "blocker-bench"))]
+pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
@@ -58,6 +60,14 @@ pub use platform::windows::{install_work_rendering_backing, remove_work_renderin
 
 #[cfg(all(feature = "agentic-browser-qa", not(debug_assertions)))]
 compile_error!("agent browser QA is forbidden in optimized builds");
+
+#[cfg(all(
+    feature = "blocker-bench",
+    not(any(debug_assertions, zephium_protection_qa_profile))
+))]
+compile_error!(
+    "the blocker benchmark driver is forbidden in optimized builds outside protection-qa"
+);
 
 #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
 pub use platform::macos::agentic_liveness_probe::{
@@ -541,8 +551,9 @@ pub fn run_windows_agentic_semantic_probe(
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
-    detach_privileged_environment_update, finalize_privileged_environment_registrations,
-    install_privileged_environment_registration,
+    browser_process_record, detach_privileged_environment_update,
+    finalize_privileged_environment_registrations, generation_report_lines,
+    install_privileged_environment_registration, WindowsLeftoverProcesses,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -1090,6 +1101,7 @@ impl RetirementGate {
                     Some(EngineEvent::RuntimeRestartRequired)
                 }
             }
+            event @ EngineEvent::ProfileRestartRequired { .. } => Some(event),
             event @ EngineEvent::ContentRulesSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1164,6 +1176,7 @@ impl RetirementGate {
             | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
             | event @ EngineEvent::LoadingChanged { id, .. }
+            | event @ EngineEvent::ContentProtectionChanged { id, .. }
             | event @ EngineEvent::MediaCaptureChanged { id, .. }
             | event @ EngineEvent::AudioChanged { id, .. }
             | event @ EngineEvent::MediaChanged { id, .. }
@@ -1181,7 +1194,11 @@ impl RetirementGate {
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
             | event @ EngineEvent::HttpAuthEnded { id, .. }
+            | event @ EngineEvent::DownloadPermissionRequested { id, .. }
+            | event @ EngineEvent::DownloadPermissionEnded { id, .. }
+            | event @ EngineEvent::InsecureAutofillRequested { id }
             | event @ EngineEvent::FocusBlocked { id, .. }
+            | event @ EngineEvent::NavigationBlocked { id, .. }
             | event @ EngineEvent::NativeTabOpened { id, .. }
             | event @ EngineEvent::LinkedDownloadStarted { id }
             | event @ EngineEvent::NewWindowRequested { id, .. }
@@ -1686,7 +1703,7 @@ pub fn install(
         dispatch.clone(),
         fatal_security_failure.clone(),
     );
-    host::install(
+    let cleanup_advisory = host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
         data_root,
@@ -1708,7 +1725,7 @@ pub fn install(
         retirement,
         event_delivery,
         fatal_security_failure,
-        runtime_security_advisories,
+        runtime_security_advisories: runtime_security_advisories.with_optional(cleanup_advisory),
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
@@ -1732,6 +1749,14 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// The browser window came back in front.
+    #[cfg(target_os = "windows")]
+    pub fn window_foreground(&self) {
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.store_buttons_foreground());
+        });
+    }
+
     /// Installs the profile-scoped download service before raw views are made.
     pub fn initialize_downloads(
         &self,
@@ -2113,6 +2138,57 @@ impl WebviewEngine {
         answer
     }
 
+    /// QA only: runs script in the page's main world and yields its string
+    /// result, or `None` when the page gave none within the engine's limits.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_evaluate(
+        &self,
+        id: ItemId,
+        script: String,
+    ) -> std::sync::mpsc::Receiver<Option<String>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.blocker_bench_evaluate(id, &script, reply));
+        });
+        answer
+    }
+
+    /// Keeps the compiled rule lists with these digests through the native
+    /// cache's collection, as the blocker's cache still names them.
+    pub fn retain_content_rule_cache_digests(&self, digests: Vec<[u8; 32]>) {
+        #[cfg(not(target_os = "windows"))]
+        self.run(move || {
+            let _ = host::try_with(move |engine| engine.retain_content_rule_cache_digests(digests));
+        });
+        #[cfg(target_os = "windows")]
+        let _ = digests;
+    }
+
+    /// QA only: runs script at document start, in the main world of the main
+    /// frame of every page loaded from now on; yields whether every open page
+    /// took it.
+    #[cfg(all(
+        feature = "blocker-bench",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    #[doc(hidden)]
+    pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            let sent = reply.clone();
+            if !host::try_with(move |engine| {
+                let _ = sent.send(engine.blocker_bench_preload(&script));
+            }) {
+                let _ = reply.send(false);
+            }
+        });
+        answer
+    }
+
     /// Finished page loads in the profile's ordinary tabs on a site: a count
     /// that grows when the person loads a page there, such as after signing in.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2283,8 +2359,19 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| {
-                completion.finish(host.set_blocker_site_preferences(profile, preferences))
+                let applied = host.set_blocker_site_preferences(profile, preferences);
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                if applied {
+                    return host.finish_site_change(profile, completion);
+                }
+                completion.finish(applied)
             });
+        });
+    }
+    #[cfg(target_os = "macos")]
+    fn prepare_profile(&self, partition: Partition) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.prepare_profile(partition));
         });
     }
     fn set_popup_sites(
@@ -2294,6 +2381,18 @@ impl Engine for WebviewEngine {
     ) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| host.set_popup_sites(profile, origins));
+        });
+    }
+    // Only these platforms hold downloads; elsewhere the trait's default
+    // keeps nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_download_sites(profile, sites));
         });
     }
     fn site_permissions(
@@ -2483,6 +2582,10 @@ impl Engine for WebviewEngine {
         self.run(move || {
             host::best_effort_with(move |host| host.set_memory_pressure(pressure));
         });
+    }
+
+    fn release_spare(&self) {
+        self.run(|| host::best_effort_with(|host| host.release_spare()));
     }
 
     fn suspends_hidden_views(&self) -> bool {
@@ -2839,6 +2942,10 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.run_for_active_item(item, move |host| host.allow_blocked_navigation(item, &url))
+    }
+
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
@@ -2873,6 +2980,25 @@ impl Engine for WebviewEngine {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (item, request, credentials);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(item, move |host| {
+                host.answer_download_permission(item, request, allow)
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (item, request, allow);
             NativeDispatch::Unsupported
         }
     }
@@ -3260,6 +3386,24 @@ impl Engine for WebviewEngine {
     #[cfg(target_os = "macos")]
     fn autofill_password(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.autofill_password(id))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn upgrades_https_natively(&self) -> bool {
+        // WebKit names the policy human tabs set from macOS 15.2.
+        static NATIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *NATIVE.get_or_init(|| {
+            objc2::runtime::AnyClass::get(c"WKWebpagePreferences").is_some_and(|class| {
+                class
+                    .instance_method(objc2::sel!(setPreferredHTTPSNavigationPolicy:))
+                    .is_some()
+            })
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.autofill_insecure_password(id))
     }
 
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
@@ -4617,6 +4761,11 @@ mod tests {
                 action: zephium_core::ports::engine::NativeAction::GoBack,
             },
             EngineEvent::LoadingChanged { id, loading: true },
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded: true,
+                stranded_filters: 0,
+            },
             EngineEvent::FaviconPixels {
                 id,
                 page_url: "https://late.invalid".into(),

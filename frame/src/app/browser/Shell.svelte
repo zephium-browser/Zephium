@@ -263,6 +263,9 @@
   let newTabShown = $derived.by(() => {
     const tab = tabs.activeTab();
     if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    // A first load that failed stands in the pane instead, and the sky's
+    // glass over the window would wash it out.
+    if (failedPane(tab)) return false;
     return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
   });
   // Beside a new tab the window, whatever it is made of, takes on the

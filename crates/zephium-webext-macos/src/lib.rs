@@ -24,6 +24,7 @@ mod lifetime;
 mod native;
 mod notifications;
 mod offscreen;
+mod page_script;
 mod privacy;
 mod runtime;
 mod sessions;
@@ -39,6 +40,7 @@ use objc2_foundation::{NSError, NSLocalizedDescriptionKey, NSMutableDictionary, 
 pub use api::BROWSER_PERMISSIONS;
 pub use auth::{AuthAnswer, AuthDetails};
 pub use downloads::{DownloadAnswer, DownloadItem, DownloadRequest};
+pub use page_script::PageScript;
 pub use runtime::{ExtensionSpec, Grants, LoadedExtension, Runtime};
 
 /// A readable message for any error WebKit reports.

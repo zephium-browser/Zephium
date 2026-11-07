@@ -80,6 +80,10 @@ mod disabled_worker {
             match *self {}
         }
         /// Unreachable without an enabled source worker.
+        pub fn set_change_waker(&self, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
+            match *self {}
+        }
+        /// Unreachable without an enabled source worker.
         pub fn official_freshness(&self) -> Option<(u64, bool)> {
             match *self {}
         }

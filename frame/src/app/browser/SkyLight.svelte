@@ -38,8 +38,11 @@
 </div>
 
 <style>
+  /* Absolute, not fixed: the document never scrolls, so both cover the
+     window, but WebKit keeps a fixed one on window-sized layers of its own
+     (30 MB at 1200x800) for as long as a new tab is open. */
   .sky-light {
-    position: fixed;
+    position: absolute;
     inset: 0;
     background: var(--sky-glass);
     opacity: 0;
