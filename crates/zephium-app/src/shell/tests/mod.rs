@@ -980,7 +980,7 @@ impl Engine for FakeEngine {
             item.map_or_else(|| "all".into(), |id| id.to_string())
         ));
     }
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, _request: u64) {
         if self
             .suspends_hidden
             .load(std::sync::atomic::Ordering::Acquire)

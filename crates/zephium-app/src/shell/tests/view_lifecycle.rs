@@ -1522,26 +1522,10 @@ fn split_created_views_are_not_unsafely_discarded() {
     assert!(shell.items.tab(second).unwrap().has_view());
 }
 
-use crate::shell::view_lifecycle::DISCARD_IDLE_GRACE;
-
-/// Backdates every activity time of `id` by `by`, as if it had been left then.
-fn left_ago(shell: &mut Shell, id: ItemId, by: std::time::Duration) {
-    let Some(then) = std::time::Instant::now().checked_sub(by) else {
-        return;
-    };
-    for times in [
-        &mut shell.residency.last_focus,
-        &mut shell.residency.resident_since,
-        &mut shell.residency.inactive_since,
-    ] {
-        if let Some(time) = times.get_mut(&id) {
-            *time = then;
-        }
-    }
-}
-
-/// Four tabs, the first left `idle` ago and the last in front.
-fn four_tabs_first_left(idle: std::time::Duration) -> (Shell, Arc<FakeEngine>, ItemId) {
+/// Four tabs with the last in front. A hidden page sleeps at once; time
+/// passing is a grace set to zero, since a freshly booted runner cannot
+/// represent a moment minutes before its own uptime.
+fn four_tabs_first_left() -> (Shell, Arc<FakeEngine>, ItemId) {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
@@ -1551,22 +1535,22 @@ fn four_tabs_first_left(idle: std::time::Duration) -> (Shell, Arc<FakeEngine>, I
         let id = active_id(&screen);
         navigate_and_commit(&mut shell, id, &format!("idle{n}.example"));
     }
-    left_ago(&mut shell, first, idle);
+    shell.residency.dormant_min = std::time::Duration::ZERO;
     (shell, engine, first)
+}
+
+fn idle_grace_passes(shell: &mut Shell) {
+    shell.residency.discard_idle_min = std::time::Duration::ZERO;
 }
 
 #[test]
 fn a_suspended_hidden_page_is_discarded_once_its_idle_grace_passes() {
-    let (mut shell, engine, first) = four_tabs_first_left(std::time::Duration::from_secs(5 * 60));
+    let (mut shell, engine, first) = four_tabs_first_left();
     shell.handle(Command::Tick);
     assert!(shell.residency.dormant_sent.contains(&first));
     assert!(shell.residency.discard_probes.is_empty());
 
-    left_ago(
-        &mut shell,
-        first,
-        DISCARD_IDLE_GRACE + std::time::Duration::from_secs(60),
-    );
+    idle_grace_passes(&mut shell);
     shell.handle(Command::Tick);
     let (candidate, _) = first_probing_discard(&shell);
     assert_eq!(candidate, first);
@@ -1586,9 +1570,12 @@ fn a_suspended_hidden_page_is_discarded_once_its_idle_grace_passes() {
 
 #[test]
 fn a_suspended_heavy_page_is_discarded_after_the_heavy_grace() {
-    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::from_secs(4 * 60));
+    let (mut shell, _engine, first) = four_tabs_first_left();
     shell.residency.warm_view_limit = 4;
     shell.residency.page_bytes.insert(first, 512 << 20);
+    shell.handle(Command::Tick);
+    assert!(shell.residency.discard_probes.is_empty());
+    shell.residency.heavy_page.1 = std::time::Duration::ZERO;
     shell.handle(Command::Tick);
     let (candidate, _) = first_probing_discard(&shell);
     assert_eq!(candidate, first);
@@ -1596,13 +1583,14 @@ fn a_suspended_heavy_page_is_discarded_after_the_heavy_grace() {
 
 #[test]
 fn a_page_that_refuses_suspension_runs_until_shown_and_can_still_be_discarded() {
-    let (mut shell, engine, first) = four_tabs_first_left(std::time::Duration::from_secs(60));
+    let (mut shell, engine, first) = four_tabs_first_left();
     shell.handle(Command::Tick);
     assert!(shell.residency.dormant_sent.contains(&first));
     let profile = shell.profile_of_item(first).unwrap();
     shell.handle(Command::Engine(EngineEvent::DormancyRefused {
         id: first,
         profile,
+        request: shell.residency.dormant_request,
     }));
     assert!(!shell.residency.dormant_sent.contains(&first));
     assert!(engine
@@ -1618,41 +1606,82 @@ fn a_page_that_refuses_suspension_runs_until_shown_and_can_still_be_discarded() 
     );
 
     // Awake, it is still discarded after its idle grace.
-    left_ago(
-        &mut shell,
-        first,
-        DISCARD_IDLE_GRACE + std::time::Duration::from_secs(60),
-    );
+    idle_grace_passes(&mut shell);
     shell.handle(Command::Tick);
     assert_eq!(first_probing_discard(&shell).0, first);
 }
 
 #[test]
 fn a_refused_suspension_is_asked_again_after_the_page_was_shown() {
-    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::from_secs(60));
+    let (mut shell, _engine, first) = four_tabs_first_left();
     shell.handle(Command::Tick);
     let profile = shell.profile_of_item(first).unwrap();
     shell.handle(Command::Engine(EngineEvent::DormancyRefused {
         id: first,
         profile,
+        request: shell.residency.dormant_request,
     }));
     shell.handle(Command::Activate(first));
     assert!(!shell.residency.suspend_refused.contains(&first));
     shell.handle(Command::Open);
-    left_ago(&mut shell, first, std::time::Duration::from_secs(60));
     shell.handle(Command::Tick);
     assert!(shell.residency.dormant_sent.contains(&first));
 }
 
 #[test]
 fn a_refusal_for_a_page_not_asked_to_sleep_is_ignored() {
-    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::ZERO);
+    let (mut shell, _engine, first) = four_tabs_first_left();
     let profile = shell.profile_of_item(first).unwrap();
     shell.handle(Command::Engine(EngineEvent::DormancyRefused {
         id: first,
         profile,
+        request: shell.residency.dormant_request,
     }));
     assert!(shell.residency.suspend_refused.is_empty());
+}
+
+#[test]
+fn a_refusal_of_an_earlier_ask_does_not_cancel_a_newer_one() {
+    let (mut shell, _engine, first) = four_tabs_first_left();
+    shell.handle(Command::Tick);
+    let earlier = shell.residency.dormant_request;
+    shell.handle(Command::Activate(first));
+    shell.handle(Command::Open);
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DormancyRefused {
+        id: first,
+        profile,
+        request: earlier,
+    }));
+    assert!(shell.residency.suspend_refused.is_empty());
+    assert!(shell.residency.dormant_sent.contains(&first));
+}
+
+#[test]
+fn a_refused_page_is_asked_again_once_sleep_is_turned_back_on() {
+    let (mut shell, _engine, first) = four_tabs_first_left();
+    shell.handle(Command::Tick);
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DormancyRefused {
+        id: first,
+        profile,
+        request: shell.residency.dormant_request,
+    }));
+    assert!(shell.residency.suspend_refused.contains(&first));
+    shell.handle(Command::SetAppSetting {
+        key: "performance.sleep".into(),
+        value: "false".into(),
+    });
+    shell.handle(Command::Tick);
+    assert!(shell.residency.suspend_refused.is_empty());
+    shell.handle(Command::SetAppSetting {
+        key: "performance.sleep".into(),
+        value: "true".into(),
+    });
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
 }
 
 /// Every test above again, with hidden views really suspended as on Windows.
@@ -1712,5 +1741,7 @@ mod suspending {
         a_page_that_refuses_suspension_runs_until_shown_and_can_still_be_discarded
         a_refused_suspension_is_asked_again_after_the_page_was_shown
         a_refusal_for_a_page_not_asked_to_sleep_is_ignored
+        a_refusal_of_an_earlier_ask_does_not_cancel_a_newer_one
+        a_refused_page_is_asked_again_once_sleep_is_turned_back_on
     }
 }

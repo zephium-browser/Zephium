@@ -529,6 +529,8 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
+            dormant_request: 0,
+            #[cfg(target_os = "windows")]
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),

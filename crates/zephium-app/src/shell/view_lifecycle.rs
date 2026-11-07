@@ -79,6 +79,10 @@ pub(super) struct ResidencyState {
     last_shown: std::collections::HashSet<ItemId>,
     pub(super) dormant_min: std::time::Duration,
     pub(super) dormant_sent: Vec<ItemId>,
+    /// The number of the last desired set sent, and the one each page in it
+    /// was first asked under: a refusal answering an older ask is stale.
+    pub(super) dormant_request: u64,
+    pub(super) dormant_asked: std::collections::HashMap<ItemId, u64>,
     /// Hidden pages the engine could not suspend; they run until shown again
     /// and stay out of the desired dormant set, so it matches the engine.
     pub(super) suspend_refused: std::collections::HashSet<ItemId>,
@@ -114,6 +118,8 @@ impl Default for ResidencyState {
             last_shown: std::collections::HashSet::new(),
             dormant_min: DORMANT_GRACE,
             dormant_sent: Vec::new(),
+            dormant_request: 0,
+            dormant_asked: std::collections::HashMap::new(),
             suspend_refused: std::collections::HashSet::new(),
             discard_idle_min: DISCARD_IDLE_GRACE,
             discard_probe_timeout: DISCARD_PROBE_TIMEOUT,
@@ -227,10 +233,14 @@ impl Shell {
 
     /// The engine gave up suspending a hidden page: it stays awake until it
     /// is shown again, and its discard grace still applies.
-    pub(super) fn on_dormancy_refused(&mut self, id: ItemId, profile: ProfileId) {
+    pub(super) fn on_dormancy_refused(&mut self, id: ItemId, profile: ProfileId, request: u64) {
         if self.profile_of_item(id) != Some(profile)
             || !self.items.tab(id).is_some_and(TabState::has_view)
-            || !self.residency.dormant_sent.contains(&id)
+            || self
+                .residency
+                .dormant_asked
+                .get(&id)
+                .is_none_or(|asked| request < *asked)
         {
             return;
         }
@@ -619,31 +629,26 @@ impl Shell {
             self.engine.cancel_discard(id, probe);
         }
 
-        self.residency.suspend_refused.retain(|id| {
-            !shown.contains(id) && self.items.tab(*id).is_some_and(TabState::has_view)
-        });
+        // A refusal lasts while the page could sleep; once it no longer may,
+        // the next time it can is asked afresh.
+        let refused = std::mem::take(&mut self.residency.suspend_refused);
+        self.residency.suspend_refused = refused
+            .into_iter()
+            .filter(|id| self.may_sleep(*id, &shown))
+            .collect();
         let mut dormant: Vec<ItemId> = self
             .items
             .view_ids()
             .into_iter()
             .filter(|id| {
-                self.residency.sleeping
+                self.may_sleep(*id, &shown)
                     && !self.residency.suspend_refused.contains(id)
-                    && !self.site_kept_awake(*id)
-                    && !self.keeps_running(*id)
-                    && !shown.contains(id)
-                    && !self.residency.discard_probes.contains_key(id)
-                    && self
-                        .items
-                        .tab(*id)
-                        .is_some_and(|tab| !tab.loading && tab.url.is_some())
                     && self.idle_for(*id, self.residency.dormant_min)
             })
             .collect();
         dormant.sort();
         if dormant != self.residency.dormant_sent {
-            self.residency.dormant_sent = dormant.clone();
-            self.engine.set_dormant(dormant);
+            self.send_dormant(dormant);
         }
         // The grace is short next to the maintenance tick: wake when the next
         // hidden page is due rather than up to a tick late.
@@ -741,8 +746,9 @@ impl Shell {
             // Replace the desired dormant set first; main-thread FIFO then
             // guarantees resume is requested before the probe evaluation.
             if self.residency.dormant_sent.contains(&id) {
-                self.residency.dormant_sent.retain(|dormant| *dormant != id);
-                self.engine.set_dormant(self.residency.dormant_sent.clone());
+                let mut dormant = self.residency.dormant_sent.clone();
+                dormant.retain(|dormant| *dormant != id);
+                self.send_dormant(dormant);
             }
             if !self.engine.probe_discard_safety(id, probe) {
                 self.residency.discard_probes.remove(&id);
@@ -1086,6 +1092,33 @@ impl Shell {
         self.residency
             .resident_since
             .insert(id, std::time::Instant::now());
+    }
+
+    /// Whether a live page could be asked to sleep, idle time aside.
+    fn may_sleep(&self, id: ItemId, shown: &std::collections::HashSet<ItemId>) -> bool {
+        self.residency.sleeping
+            && !self.site_kept_awake(id)
+            && !self.keeps_running(id)
+            && !shown.contains(&id)
+            && !self.residency.discard_probes.contains_key(&id)
+            && self
+                .items
+                .tab(id)
+                .is_some_and(|tab| tab.has_view() && !tab.loading && tab.url.is_some())
+    }
+
+    /// Replaces the engine's desired dormant set under a new request number.
+    fn send_dormant(&mut self, dormant: Vec<ItemId>) {
+        self.residency.dormant_request += 1;
+        let request = self.residency.dormant_request;
+        self.residency
+            .dormant_asked
+            .retain(|id, _| dormant.contains(id));
+        for id in &dormant {
+            self.residency.dormant_asked.entry(*id).or_insert(request);
+        }
+        self.residency.dormant_sent = dormant.clone();
+        self.engine.set_dormant(dormant, request);
     }
 
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {

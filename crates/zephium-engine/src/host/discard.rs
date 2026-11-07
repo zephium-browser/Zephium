@@ -1286,9 +1286,10 @@ impl EngineHost {
     /// Suspends hidden views: WebView2 `TrySuspend` on Windows, WebKit's
     /// suspend scheduling policy on macOS. Neither is reported as proof that
     /// a renderer stopped; macOS still runs audible or capturing pages.
-    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>) {
+    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>, request: u64) {
         #[cfg(target_os = "windows")]
         {
+            self.dormant_request = request;
             let next: std::collections::HashSet<ItemId> = ids
                 .into_iter()
                 .filter(|id| self.hidden.contains(id))
@@ -1327,6 +1328,8 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = request;
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = ids;
     }
@@ -1531,6 +1534,7 @@ impl EngineHost {
                         EngineEvent::DormancyRefused {
                             id,
                             profile: partition.profile(),
+                            request: self.dormant_request,
                         },
                     );
                 }

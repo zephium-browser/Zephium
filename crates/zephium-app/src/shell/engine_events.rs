@@ -494,7 +494,11 @@ impl Shell {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => {
                 self.on_view_discard_refused(id, profile, probe)
             }
-            EngineEvent::DormancyRefused { id, profile } => self.on_dormancy_refused(id, profile),
+            EngineEvent::DormancyRefused {
+                id,
+                profile,
+                request,
+            } => self.on_dormancy_refused(id, profile, request),
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }

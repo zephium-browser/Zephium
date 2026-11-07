@@ -720,6 +720,9 @@ pub(crate) struct EngineHost {
     dormant: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     desired_dormant: std::collections::HashSet<ItemId>,
+    /// The shell's number for the desired set above, echoed by a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_request: u64,
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
