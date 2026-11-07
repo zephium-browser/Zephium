@@ -6554,6 +6554,14 @@ pub fn run() {
     APP_STARTED.get_or_init(std::time::Instant::now);
     let context = tauri::generate_context!();
     focus_alerts::claim_identity(&context.config().identifier);
+    #[cfg(target_os = "windows")]
+    default_browser::windows::claim(
+        context
+            .config()
+            .product_name
+            .as_deref()
+            .unwrap_or("Zephium"),
+    );
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
     platform::imp::open_startup_log(&context.config().identifier);
