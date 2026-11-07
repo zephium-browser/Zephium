@@ -63,6 +63,8 @@
 
   let mind = $state<Mind | null>(null);
   let server = $state.raw<WorkLocalServerV1 | null>(null);
+  let discovering = $state(true);
+  let waitingForLocal = $derived(step === "ai" && mind === "local" && discovering);
 
   let kept = $derived(keptSites(tabs.sidebarNodes(), tabs.tabs(), SITE_URLS));
   let sites = $derived([...kept.keys()].flatMap((id) => SITES.filter((site) => site.id === id)));
@@ -137,15 +139,26 @@
   }
 
   async function finish() {
-    if (leaving) return;
+    if (leaving || waitingForLocal) return;
     leaving = true;
     const profile = tabs.profile()?.id;
+    // A server already running here is connected now, so Work opens ready.
+    if (mind === "local") {
+      if (!server || !profile) {
+        leaving = false;
+        say(m.onb_local_model_failed());
+        return;
+      }
+      const saved = await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
+      if (!saved || saved.fault) {
+        leaving = false;
+        say(m.onb_local_model_failed());
+        return;
+      }
+    }
     // The scene ends on the new tab, so the browser opens on one: a tab left
     // on a page from before is set aside for a new one.
     if (tabs.activeTab()?.url) tabs.open();
-    // A server already running here is connected now, so Work opens ready.
-    if (mind === "local" && server && profile)
-      await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
     // The words go, and the camera goes back into the new tab until its sky
     // is all there is; the browser then arrives on that sky, with its own
     // launch.
@@ -161,7 +174,11 @@
     if (step === "ready") return m.onb_start();
     return m.onb_continue();
   });
-  const advance = () => (step === "ready" ? void finish() : go(neighbour(step, 1, ai)));
+  const advance = () => {
+    if (waitingForLocal) return;
+    if (step === "ready") void finish();
+    else go(neighbour(step, 1, ai));
+  };
 
   function keydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.repeat || event.isComposing) return;
@@ -279,7 +296,12 @@
         {:else if step === "launcher"}
           <Launcher />
         {:else if step === "ai"}
-          <Models bind:mind bind:server onsubmit={advance} />
+          <Models bind:mind bind:server bind:discovering onsubmit={advance} />
+          {#if discovering}
+            <p id="local-discovery-status" class="discovery" role="status">
+              {m.onb_ai_discovering()}
+            </p>
+          {/if}
         {/if}
       </div>
     {/key}
@@ -305,8 +327,14 @@
         {/if}
       </span>
       <span class="side end">
-        <Button variant="primary" size="large" shape="capsule" onclick={advance} pending={leaving}
-          >{primary}<KeyHint keys={["↵"]} /></Button
+        <Button
+          variant="primary"
+          size="large"
+          shape="capsule"
+          onclick={advance}
+          pending={leaving}
+          aria-describedby={waitingForLocal ? "local-discovery-status" : undefined}
+          disabled={waitingForLocal}>{primary}<KeyHint keys={["↵"]} /></Button
         >
       </span>
     </nav>
@@ -314,7 +342,13 @@
 
   <div class="top" data-tauri-drag-region data-native-caption={IS_WINDOWS || undefined}>
     {#if step !== "welcome" && step !== "ready"}
-      <button type="button" class="skip" onclick={() => void finish()}>{m.onb_skip()}</button>
+      <button
+        type="button"
+        class="skip"
+        disabled={waitingForLocal}
+        aria-describedby={waitingForLocal ? "local-discovery-status" : undefined}
+        onclick={() => void finish()}>{m.onb_skip()}</button
+      >
     {/if}
     {#if !IS_MAC && windowControls}{@render windowControls()}{/if}
   </div>
@@ -542,6 +576,12 @@
 
   .scene[data-scene="ai"] {
     inset-block-start: 236px;
+  }
+
+  .discovery {
+    margin: 16px 0 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   /* One quiet row for the whole journey, at the foot of the stage: nothing

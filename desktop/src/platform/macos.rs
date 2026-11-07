@@ -971,9 +971,10 @@ thread_local! {
 }
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
-/// key equivalent, so a local monitor matches them before the focused web
-/// view sees the keystroke, and extensions' commands after them. Only the main
-/// window's keys are considered; the launcher panel keeps its own.
+/// key equivalent, and Next/Previous Tab must not reach the page (a page
+/// keystroke hides the pointer), so a local monitor matches them before the
+/// focused web view sees the keystroke, and extensions' commands after them.
+/// Only the main window's keys are considered; the launcher panel keeps its own.
 pub fn install_key_monitor(
     window: &WebviewWindow,
     table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,

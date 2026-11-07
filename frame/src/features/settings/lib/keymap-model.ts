@@ -53,6 +53,8 @@ const TITLES: Record<string, () => string> = {
   "tab.below": m.command_tab_below,
   "space.next": m.command_space_next,
   "space.previous": m.command_space_previous,
+  "profile.next": m.command_profile_next,
+  "profile.previous": m.command_profile_previous,
   "tool.downloads": m.command_tool_downloads,
   "bookmark.add": m.command_bookmark_add,
   "tool.bookmarks": m.command_tool_bookmarks,
@@ -103,6 +105,11 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
     holds: (entry) => (entry.group === "window" || entry.group === "keys") && tabCommand(entry),
   },
   { id: "spaces", title: m.keymap_group_spaces, holds: (entry) => entry.id.startsWith("space.") },
+  {
+    id: "profiles",
+    title: m.keymap_group_profiles,
+    holds: (entry) => entry.id.startsWith("profile."),
+  },
   {
     id: "view",
     title: m.keymap_group_view,

@@ -3855,6 +3855,20 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
 }
 
 fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAdmission {
+    execute_command_or(app, id, || {
+        app.try_state::<Handle>()
+            .map_or_else(rejected_operation, |shell| {
+                dispatch_operation(app, &shell, Command::Run(id.to_string()))
+            })
+    })
+}
+
+/// Runs a command the app owns itself, handing one the shell owns to `shell`.
+fn execute_command_or(
+    app: &tauri::AppHandle,
+    id: &str,
+    shell: impl FnOnce() -> zephium_ipc::OperationAdmission,
+) -> zephium_ipc::OperationAdmission {
     if id == "browser.quit" {
         app.exit(0);
         return accepted_ui_operation();
@@ -4085,9 +4099,7 @@ fn execute_command(app: &tauri::AppHandle, id: &str) -> zephium_ipc::OperationAd
             });
     }
     if zephium_core::commands::get(id).is_some() {
-        if let Some(shell) = app.try_state::<Handle>() {
-            return dispatch_operation(app, &shell, Command::Run(id.to_string()));
-        }
+        return shell();
     }
     rejected_operation()
 }
@@ -4371,9 +4383,102 @@ fn launcher_run(
     // Only an address can be sent behind the current tab; every other action
     // is about where the user is going next.
     let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    // Armed before either path runs, so one action at a time reaches the
+    // launcher's outcome, wherever it is carried out.
     if !overlay.arm_action(&operation_id, &context, background) {
         return finish_operation_admission(&ledger, operation_id, false);
     }
+    let zephium_ipc::SearchAction::RunCommand { id } = &action else {
+        return run_in_shell(
+            &shell,
+            &overlay,
+            &ledger,
+            operation_id,
+            action,
+            context,
+            background,
+        );
+    };
+    let (admission, settlement) = route_launcher_command(
+        |to_shell| execute_command_or(&app, id, to_shell),
+        || {
+            run_in_shell(
+                &shell,
+                &overlay,
+                &ledger,
+                operation_id.clone(),
+                action.clone(),
+                context.clone(),
+                false,
+            )
+        },
+    );
+    match settlement {
+        LauncherSettlement::Shell => {}
+        LauncherSettlement::Admitted => {
+            // No disposition will ever carry this id back, so it settles here.
+            ledger.cancel_reservation(&operation_id);
+            overlay.operation(zephium_ipc::OperationDisposition {
+                operation_id,
+                outcome: zephium_ipc::OperationOutcome::Applied,
+                reason: zephium_ipc::OperationReason::MutationApplied,
+            });
+        }
+        LauncherSettlement::Refused => {
+            ledger.cancel_reservation(&operation_id);
+            overlay.action_rejected(&operation_id);
+        }
+    }
+    admission
+}
+
+/// Who settles an armed launcher command, and when.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherSettlement {
+    /// The shell owns it; its disposition settles the launcher later.
+    Shell,
+    /// The app ran it, so the launcher settles now and steps aside.
+    Admitted,
+    /// The app refused it; the launcher stays open to say so.
+    Refused,
+}
+
+/// The shell runs only what acts on tabs and pages. A Settings section, a
+/// tool or a browser page belongs to the app, so `execute` runs it the way a
+/// menu or a key runs it, and calls `to_shell` only for a command the shell
+/// owns.
+fn route_launcher_command(
+    execute: impl FnOnce(
+        Box<dyn FnOnce() -> zephium_ipc::OperationAdmission + '_>,
+    ) -> zephium_ipc::OperationAdmission,
+    to_shell: impl FnOnce() -> zephium_ipc::OperationAdmission,
+) -> (zephium_ipc::OperationAdmission, LauncherSettlement) {
+    let mut in_shell = false;
+    let admission = execute(Box::new(|| {
+        in_shell = true;
+        to_shell()
+    }));
+    let settlement = if in_shell {
+        LauncherSettlement::Shell
+    } else if admission.accepted {
+        LauncherSettlement::Admitted
+    } else {
+        LauncherSettlement::Refused
+    };
+    (admission, settlement)
+}
+
+/// Sends an armed launcher action to the shell, whose disposition settles
+/// the launcher.
+fn run_in_shell(
+    shell: &Handle,
+    overlay: &overlay::Overlay,
+    ledger: &OperationLedger,
+    operation_id: String,
+    action: zephium_ipc::SearchAction,
+    context: zephium_ipc::SearchContext,
+    background: bool,
+) -> zephium_ipc::OperationAdmission {
     let accepted = shell.dispatch_operation(
         operation_id.clone(),
         Command::RunSearchAction {
@@ -4386,7 +4491,7 @@ fn launcher_run(
     if !accepted {
         overlay.action_rejected(&operation_id);
     }
-    finish_operation_admission(&ledger, operation_id, accepted)
+    finish_operation_admission(ledger, operation_id, accepted)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -7270,6 +7375,22 @@ pub fn run() {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
                 }
                 Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
+                Projection::RaiseWindow => {
+                    let app = emit_handle.clone();
+                    let _ = emit_handle.run_on_main_thread(move || {
+                        let Some(main) = app.get_webview_window(MAIN_LABEL) else {
+                            return;
+                        };
+                        #[cfg(target_os = "macos")]
+                        panel::raise(&main);
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            let _ = main.unminimize();
+                            let _ = main.show();
+                            let _ = main.set_focus();
+                        }
+                    });
+                }
                 Projection::RuntimeStatus(status) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
                 }
@@ -9979,5 +10100,50 @@ mod tests {
         assert_eq!(super::appearance_code("light"), super::APPEARANCE_LIGHT);
         assert_eq!(super::appearance_code("dark"), super::APPEARANCE_DARK);
         assert_eq!(super::appearance_code("invalid"), super::APPEARANCE_SYSTEM);
+    }
+
+    fn launcher_admitted() -> zephium_ipc::OperationAdmission {
+        zephium_ipc::OperationAdmission {
+            operation_id: Some("0000000000000001".into()),
+            accepted: true,
+        }
+    }
+
+    #[test]
+    fn an_accepted_app_command_settles_the_launcher_at_admission() {
+        let (admission, settlement) = super::route_launcher_command(
+            |_| super::accepted_ui_operation(),
+            || panic!("an app command never reaches the shell"),
+        );
+        assert!(admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Admitted);
+    }
+
+    #[test]
+    fn an_accepted_shell_command_waits_for_its_disposition() {
+        let (admission, settlement) =
+            super::route_launcher_command(|to_shell| to_shell(), launcher_admitted);
+        assert_eq!(admission.operation_id.as_deref(), Some("0000000000000001"));
+        assert_eq!(settlement, super::LauncherSettlement::Shell);
+    }
+
+    #[test]
+    fn a_refused_app_command_leaves_the_launcher_open() {
+        let (admission, settlement) = super::route_launcher_command(
+            |_| super::rejected_operation(),
+            || panic!("a refused command never reaches the shell"),
+        );
+        assert!(!admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Refused);
+    }
+
+    #[test]
+    fn a_shell_refusal_is_the_shell_paths_to_settle() {
+        // `run_in_shell` already releases the launcher when the shell
+        // refuses admission; settling it again here would be a second answer.
+        let (admission, settlement) =
+            super::route_launcher_command(|to_shell| to_shell(), super::rejected_operation);
+        assert!(!admission.accepted);
+        assert_eq!(settlement, super::LauncherSettlement::Shell);
     }
 }

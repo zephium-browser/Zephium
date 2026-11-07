@@ -214,6 +214,63 @@ test("a close waits only for a Work save that has not landed, never for an edit 
   session.dispose();
 });
 
+test.each(["running", "completed"] as const)(
+  "draft words survive observation teardown in their owning work and profile (%s)",
+  async (status) => {
+    const { WorkSession } = await import("../work.svelte");
+    const limits = {
+      model_tokens: 100,
+      cost_micro_usd: 0,
+      operations: 1,
+      timeout_seconds: 60,
+      max_workers: 1,
+    };
+    const source = projection("1", [
+      {
+        id: "execution",
+        approved_revision: "1",
+        status,
+        attempts: [],
+        spec: {
+          plan_revision: "1",
+          limits,
+          nodes: [{ node: "node", parent: null, capability: { kind: "synthesize" }, limits }],
+        },
+        artifacts: [
+          {
+            version: 1,
+            id: "draft",
+            execution: "execution",
+            node: "node",
+            attempt: "attempt",
+            output: "Draft",
+            title: "A message",
+            data: { kind: "draft", destination: "slack", body: "Original" },
+            evidence: [],
+            review: "mechanical",
+            presentation: "automatic",
+          },
+        ],
+        user_artifacts: [],
+      },
+    ]);
+    const session = new WorkSession(profile);
+    session.selected = "another-work";
+    const data = { kind: "draft", destination: "slack", body: "Keep my words" } as const;
+    session.editArtifact("execution", "draft", data, source);
+    session.stopObserving();
+    expect(session.artifactDraft("draft", work)?.data).toEqual(data);
+    expect(session.artifactDraft("draft")).toBeUndefined();
+    session.selected = work;
+    expect(session.artifactDraft("draft")?.data).toEqual(data);
+    const other = new WorkSession("other-profile");
+    other.editArtifact("execution", "draft", data, source);
+    expect(other.artifactDraft("draft", work)).toBeUndefined();
+    other.dispose();
+    session.dispose();
+  },
+);
+
 test("page frames survive a settled run, an overtaking read, and a return to Work", async () => {
   const { WorkSession } = await import("../work.svelte");
   const limits = {
