@@ -140,16 +140,38 @@ test("manual installation opens the exact release instead of retrying an impossi
   expect(screen.getByRole("button", { name: "Relaunch to update" }).query()).toBeNull();
 });
 
-test("a postponed update remains ready with its failure explained", async () => {
+test.each([
+  [
+    "previousInstallIncomplete",
+    "The previous update did not finish. Your downloaded update is still ready to install.",
+  ],
+  [
+    "workNotSaved",
+    "Your work could not be saved. The update is still ready; try again after saving.",
+  ],
+] as const)("a ready update localizes retry reason %s", async (reason, message) => {
   native.status = {
     state: "ready",
     version: "1.0.2",
-    retry_reason:
-      "The previous update did not finish. Your downloaded update is still ready to install.",
+    retry_reason: reason,
   };
   const screen = await render(AboutPage);
-  await expect.element(screen.getByText(native.status.retry_reason!)).toBeVisible();
+  await expect.element(screen.getByText(message)).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Relaunch to update" })).toBeEnabled();
+});
+
+test("automatic update installation explains when this platform installs", async () => {
+  native.status = { state: "upToDate" };
+  const screen = await render(AboutPage);
+  await expect
+    .element(
+      screen.getByText(
+        IS_MAC
+          ? "New versions download in the background and install when you relaunch or quit."
+          : "New versions download in the background and install when you relaunch.",
+      ),
+    )
+    .toBeVisible();
 });
 
 test("the links open Zephium's own pages in a tab", async () => {

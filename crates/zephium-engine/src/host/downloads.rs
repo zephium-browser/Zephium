@@ -261,6 +261,14 @@ pub(crate) struct Downloads {
 }
 
 impl Downloads {
+    pub(crate) fn in_progress(&self) -> bool {
+        self.active.try_borrow().map_or(true, |active| {
+            active
+                .values()
+                .any(|transfer| !transfer.record.state.terminal())
+        })
+    }
+
     /// A transfer or destination decision still owns this profile. Retaining
     /// its view costs less than risking a stalled or revoked native operation.
     #[cfg(target_os = "windows")]

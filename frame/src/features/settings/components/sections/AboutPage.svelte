@@ -56,7 +56,10 @@
       case "downloading":
         return m.update_status_downloading();
       case "ready":
-        return update.retry_reason ?? m.update_status_ready({ version: update.version });
+        if (update.retry_reason === "previousInstallIncomplete")
+          return m.update_retry_previous_install_incomplete();
+        if (update.retry_reason === "workNotSaved") return m.update_retry_work_not_saved();
+        return m.update_status_ready({ version: update.version });
       case "manualInstall":
         return m.update_status_manual({ version: update.version });
       case "installing":

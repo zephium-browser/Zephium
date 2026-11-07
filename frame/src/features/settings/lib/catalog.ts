@@ -1,4 +1,5 @@
 import * as m from "$shared/i18n/messages";
+import { IS_WINDOWS } from "$shared/platform";
 export const fields = {
   "privacy.cleanup": {
     preview: true,
@@ -618,7 +619,7 @@ export const fields = {
   "updates.auto-check": {
     section: "about",
     label: m.pref_updates_auto,
-    description: m.pref_updates_auto_help,
+    description: IS_WINDOWS ? m.pref_updates_auto_help : m.pref_updates_auto_help_mac,
     initial: true,
   },
   "about.diagnostics": {

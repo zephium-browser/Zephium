@@ -18,6 +18,18 @@ def job(text, name):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_guide_keeps_betas_off_stable_clients_after_bootstrap(self):
+        guide = (ROOT / '.github/RELEASE.md').read_text()
+        self.assertIn('After a stable release exists, publish betas with "Set as a pre-release"\n   checked and "Set as the latest release" unchecked', guide)
+        self.assertIn('prerelease=true', WORKFLOW.read_text())
+
+    def test_stable_publisher_checks_downloaded_assets_before_publishing(self):
+        publish = job((ROOT / '.github/workflows/publish-stable.yml').read_text(), 'publish')
+        command = 'cargo run --locked -p xtask -- check-release-assets dist "${TAG}" "${GITHUB_REPOSITORY}"'
+        self.assertIn(command, publish)
+        self.assertLess(publish.index('gh release download'), publish.index(command))
+        self.assertLess(publish.index(command), publish.index('gh release edit'))
+
     def test_components_have_one_retry_and_an_explicit_emergency_opt_out(self):
         workflow = WORKFLOW.read_text()
         self.assertRegex(workflow, r'emergency:\n(?:.*\n){1,4}?        type: boolean')

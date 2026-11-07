@@ -57,6 +57,12 @@ fn main() {
                 exit(1);
             }
         }
+        Some("check-release-assets") => {
+            if let Err(error) = updater_sign::check_release_assets(&arguments[1..]) {
+                eprintln!("release asset verification failed: {error}");
+                exit(1);
+            }
+        }
         Some("check-frame-styles") => run("node", &["frame/scripts/check-styles.mjs"]),
         Some("check-engine-floors") => {
             check_engine_floors(strict_flag(&arguments[1..], "check-engine-floors"))
@@ -133,7 +139,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-release-assets <directory> <tag> <owner/repo>|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
             );
             exit(2);
         }

@@ -97,6 +97,85 @@ pub(super) fn request_with_result(app: tauri::AppHandle, done: impl FnOnce(bool)
     request_inner(app, false, done);
 }
 
+pub(super) fn confirm_update_relaunch(
+    app: tauri::AppHandle,
+    done: impl FnOnce(bool) + Send + 'static,
+) {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    if app
+        .run_on_main_thread(move || {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            zephium_engine::downloads_in_progress(move |active| {
+                let _ = send.send(active);
+            });
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let _ = send.send(false);
+        })
+        .is_err()
+    {
+        done(false);
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let Ok(Ok(downloads)) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), receive).await
+        else {
+            done(false);
+            return;
+        };
+        #[cfg(feature = "work-product")]
+        let work = app
+            .try_state::<super::work_product::WorkProductState>()
+            .is_some_and(|owner| owner.operations.running());
+        #[cfg(not(feature = "work-product"))]
+        let work = false;
+        confirm_update_activity(
+            downloads,
+            work,
+            move |message, answer| {
+                use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+                app.dialog()
+                    .message(message)
+                    .title(menu_text::label("Relaunch to update?"))
+                    .kind(MessageDialogKind::Warning)
+                    .buttons(MessageDialogButtons::OkCancelCustom(
+                        menu_text::label("Relaunch"),
+                        menu_text::label("Cancel"),
+                    ))
+                    .show(answer);
+            },
+            done,
+        );
+    });
+}
+
+fn confirm_update_activity(
+    downloads: bool,
+    work: bool,
+    ask: impl FnOnce(String, Box<dyn FnOnce(bool) + Send>),
+    done: impl FnOnce(bool) + Send + 'static,
+) {
+    let (key, english) = match (downloads, work) {
+        (false, false) => {
+            done(true);
+            return;
+        }
+        (true, true) => (
+            "native_relaunch_stops_downloads_work",
+            "Downloads in progress will stop, and running Work will be stopped.",
+        ),
+        (true, false) => (
+            "native_relaunch_stops_downloads",
+            "Downloads in progress will stop.",
+        ),
+        (false, true) => (
+            "native_relaunch_stops_work",
+            "Running Work will be stopped.",
+        ),
+    };
+    ask(menu_text::message(key, english), Box::new(done));
+}
+
 pub(super) fn cancel_prepared(app: &tauri::AppHandle) {
     let flushed = {
         let mut gate = gate().lock().unwrap_or_else(|e| e.into_inner());
@@ -251,6 +330,49 @@ pub(super) fn is_closing() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn update_relaunch_requires_confirmation_only_for_active_downloads_or_work() {
+        for (downloads, work, expected) in [
+            (false, false, None),
+            (true, false, Some("Downloads in progress will stop.")),
+            (false, true, Some("Running Work will be stopped.")),
+            (
+                true,
+                true,
+                Some("Downloads in progress will stop, and running Work will be stopped."),
+            ),
+        ] {
+            for confirmed in [true, false] {
+                let (send, receive) = std::sync::mpsc::channel();
+                confirm_update_activity(
+                    downloads,
+                    work,
+                    |message, answer| {
+                        assert_eq!(Some(message.as_str()), expected);
+                        answer(confirmed);
+                    },
+                    move |proceed| {
+                        send.send(proceed).unwrap();
+                    },
+                );
+                assert_eq!(receive.recv().unwrap(), expected.is_none() || confirmed);
+            }
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut pending = None;
+        confirm_update_activity(
+            true,
+            true,
+            |_, answer| pending = Some(answer),
+            move |proceed| {
+                send.send(proceed).unwrap();
+            },
+        );
+        assert!(receive.try_recv().is_err(), "wait for the person's choice");
+        pending.unwrap()(false);
+        assert!(!receive.recv().unwrap());
+    }
+
     #[test]
     fn prepared_install_refuses_new_drafts_until_cancelled() {
         let mut gate = Gate {

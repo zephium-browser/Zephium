@@ -116,7 +116,7 @@ it("takes each feature's pages out of navigation and search while its switch is 
 it("offers SmartScreen search results only on Windows", async () => {
   for (const windows of [false, true]) {
     vi.resetModules();
-    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows }));
+    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows, IS_MAC: !windows }));
     const model = await import("../lib/settings-model");
     expect(
       model.searchSettings("SmartScreen").some((field) => field.target === "privacy.smartscreen"),
@@ -127,3 +127,47 @@ it("offers SmartScreen search results only on Windows", async () => {
   }
   vi.doUnmock("$shared/platform");
 });
+
+it.each([true, false])(
+  "About localizes update reasons and install timing (mac=%s)",
+  async (mac) => {
+    vi.resetModules();
+    vi.doMock("$shared/platform", () => ({ IS_MAC: mac, IS_WINDOWS: !mac }));
+    let reason: "previousInstallIncomplete" | "workNotSaved" = "previousInstallIncomplete";
+    vi.doMock("$domain/updates", () => ({
+      updates: {
+        status: () => ({ state: "ready", version: "1.0.5", retry_reason: reason }),
+        pendingRelaunch: () => false,
+      },
+      releaseNotesUrl: () => "",
+      systemUpdateTarget: () => null,
+    }));
+    try {
+      const { render } = await import("svelte/server");
+      const { default: AboutPage } = await import("../components/sections/AboutPage.svelte");
+      for (const [value, message] of [
+        [
+          "previousInstallIncomplete",
+          "The previous update did not finish. Your downloaded update is still ready to install.",
+        ],
+        [
+          "workNotSaved",
+          "Your work could not be saved. The update is still ready; try again after saving.",
+        ],
+      ] as const) {
+        reason = value;
+        const html = render(AboutPage).body;
+        expect(html).toContain(message);
+        expect(html).toContain(
+          mac
+            ? "New versions download in the background and install when you relaunch or quit."
+            : "New versions download in the background and install when you relaunch.",
+        );
+      }
+    } finally {
+      vi.doUnmock("$shared/platform");
+      vi.doUnmock("$domain/updates");
+      vi.resetModules();
+    }
+  },
+);
