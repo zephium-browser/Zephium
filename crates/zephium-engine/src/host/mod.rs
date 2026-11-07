@@ -766,7 +766,7 @@ pub(crate) struct EngineHost {
     /// while no tab of that profile is open; released when the sync ends.
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     work_profile_cookie_sources:
-        HashMap<zephium_agentic::ContextId, construction::WindowsWorkEnvironmentBootstrap>,
+        HashMap<zephium_agentic::ContextId, construction::WindowsEnvironmentBootstrap>,
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     anonymous_work_environments:
         HashMap<zephium_agentic::ContextRunId, work_windows::AnonymousWorkEnvironment>,

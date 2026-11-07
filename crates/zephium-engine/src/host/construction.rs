@@ -987,6 +987,8 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let mut extension_startup = None;
         #[cfg(target_os = "windows")]
+        let mut environment_bootstrap = None;
+        #[cfg(target_os = "windows")]
         let (builder, expected_user_data_folder) = {
             let profile = partition.profile();
             let root = match partition {
@@ -1005,18 +1007,21 @@ impl EngineHost {
                 }
             };
             if !matches!(partition, Partition::Ephemeral(_)) {
-                if let Err(error) = self.ensure_windows_profile_environment_at_path(
+                match self.ensure_windows_profile_environment_at_path(
                     profile,
                     std::time::Instant::now() + std::time::Duration::from_secs(5),
                     path.clone(),
                     true,
                 ) {
-                    eprintln!("extensions: profile startup refused: {error:?}");
-                    if report_failure {
-                        event_permit
-                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                    Ok(bootstrap) => environment_bootstrap = bootstrap,
+                    Err(error) => {
+                        eprintln!("extensions: profile startup refused: {error:?}");
+                        if report_failure {
+                            event_permit
+                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                        }
+                        return None;
                     }
-                    return None;
                 }
                 extension_startup = self.windows_extension_startup(profile, &path).ok();
                 extension_startup.as_ref()?;
@@ -2230,6 +2235,10 @@ impl EngineHost {
             }
             captured_process
         };
+        // A new browser keeps its bootstrap controller until this first real
+        // controller is built and proven; every earlier return drops it.
+        #[cfg(target_os = "windows")]
+        drop(environment_bootstrap);
         #[cfg(target_os = "windows")]
         if let Err(error) = self
             .environments
@@ -2899,18 +2908,22 @@ pub(super) enum WindowsProfileEnvironmentFailure {
 }
 
 /// A page-inert, counted native owner that bridges environment bootstrap
-/// into real Work controller construction. It never loads a site. It ends
-/// with the synchronous constructor unless a Work site page borrows it, while
-/// no tab of the profile is open, as the person's own profile for one bounded
-/// cookie sync; failed close retains the exact native debt.
+/// into the first real controller of a new environment. It never loads a
+/// site. A new browser process left with no controller starts shutting down,
+/// and a controller that attaches meanwhile can find the profile's cookie
+/// store empty, so the caller keeps this until its first controller is built
+/// and cross-checked. A Work site page may also borrow it, while no tab of
+/// the profile is open, as the person's own profile for one bounded cookie
+/// sync. Dropping it closes it; failed close retains the exact native debt.
 #[cfg(target_os = "windows")]
-pub(super) struct WindowsWorkEnvironmentBootstrap {
+#[must_use = "a new browser must keep a controller until its first real one attaches"]
+pub(super) struct WindowsEnvironmentBootstrap {
     view: wry::WebView,
     profile: zephium_core::ids::ProfileId,
     resource: Option<super::resources::NativeResourceLease>,
 }
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
-impl WindowsWorkEnvironmentBootstrap {
+impl WindowsEnvironmentBootstrap {
     /// The person's own profile cookies, through this controller of that
     /// profile in the exact expected environment.
     pub(super) fn profile_cookie_manager(
@@ -2927,7 +2940,7 @@ impl WindowsWorkEnvironmentBootstrap {
     }
 }
 #[cfg(target_os = "windows")]
-impl Drop for WindowsWorkEnvironmentBootstrap {
+impl Drop for WindowsEnvironmentBootstrap {
     fn drop(&mut self) {
         if let Err(debt) = wry::WebViewExtWindows::close(&mut self.view) {
             super::queue_windows_cleanup_debt(
@@ -2942,15 +2955,15 @@ impl Drop for WindowsWorkEnvironmentBootstrap {
 impl EngineHost {
     /// Establishes or rejoins a profile's environment at one exact
     /// already-authorized storage root. Without a live environment, one
-    /// short-lived, page-inert controller is created solely to obtain it and
-    /// is closed before this function returns.
+    /// page-inert controller is created solely to obtain it and handed back:
+    /// the caller drops it once its own first controller is built.
     pub(super) fn ensure_windows_profile_environment_at_path(
         &mut self,
         profile: zephium_core::ids::ProfileId,
         deadline: std::time::Instant,
         path: std::path::PathBuf,
         extensions_enabled: bool,
-    ) -> Result<(), WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.ensure_windows_profile_environment_impl(
             profile,
             deadline,
@@ -2958,11 +2971,11 @@ impl EngineHost {
             extensions_enabled,
             false,
         )
-        .map(|_| ())
     }
 
     /// Keep the exact bootstrap generation alive until a Work controller owns
-    /// the same environment. All other callers retain immediate close behavior.
+    /// the same environment, starting a new bootstrap even when the
+    /// environment is already live.
     #[cfg_attr(
         all(target_os = "windows", not(feature = "agentic-browser")),
         allow(dead_code)
@@ -2973,7 +2986,7 @@ impl EngineHost {
         deadline: std::time::Instant,
         path: std::path::PathBuf,
         extensions_enabled: bool,
-    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.ensure_windows_profile_environment_impl(
             profile,
             deadline,
@@ -2990,7 +3003,7 @@ impl EngineHost {
         path: std::path::PathBuf,
         extensions_enabled: bool,
         retain_bootstrap: bool,
-    ) -> Result<Option<WindowsWorkEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
+    ) -> Result<Option<WindowsEnvironmentBootstrap>, WindowsProfileEnvironmentFailure> {
         self.collect_pending_windows_cleanup_debts();
         if std::time::Instant::now() >= deadline
             || self.windows_view_admission_blocked(profile)
@@ -3208,9 +3221,9 @@ impl EngineHost {
                     failure = Some(WindowsProfileEnvironmentFailure::Construction);
                 }
             }
-            if retain_bootstrap && failure.is_none() && std::time::Instant::now() < deadline {
+            if failure.is_none() && std::time::Instant::now() < deadline {
                 let view = built.map_err(|_| WindowsProfileEnvironmentFailure::Construction)?;
-                return Ok(Some(WindowsWorkEnvironmentBootstrap {
+                return Ok(Some(WindowsEnvironmentBootstrap {
                     view,
                     profile,
                     resource: construction_resource.take(),
