@@ -188,6 +188,8 @@
   /* It opens over its own trigger: at least as wide, so the label under it
      never moves sideways, and solid, so that label never reads through. */
   :global(.ui-select-menu) {
+    /* Portalled to the body, above Settings dialogs (81) and their overlay. */
+    z-index: 90;
     min-width: var(--bits-floating-anchor-width, 0);
     background: var(--color-float);
     backdrop-filter: none;
