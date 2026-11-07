@@ -3893,6 +3893,7 @@
   "assist_decision_failed": "Couldn’t send your choice. Try again.",
   "profiles_delete_pending": "Deletion is still pending. It will retry automatically.",
   "profiles_delete_check": "Check Deletion",
+  "profiles_delete_done": "Perfil eliminado.",
   "privacy_windows_group": "Microsoft services on Windows",
   "privacy_smartscreen": "Microsoft Defender SmartScreen",
   "privacy_smartscreen_launch_unavailable": "SmartScreen is on for this launch because your saved choice could not be read. Restart Zephium to try again.",
