@@ -449,12 +449,45 @@ impl Reply {
 
     fn history(&self) -> Vec<WorkModelMessage> {
         let messages = {
-            let state = self.service.state();
-            state
-                .live
-                .get(&self.conversation)
-                .map(|live| live.conversation.messages().to_vec())
-                .unwrap_or_default()
+            let mut state = self.service.state();
+            let Some(live) = state.live.get_mut(&self.conversation) else {
+                return Vec::new();
+            };
+            let messages = live.conversation.messages().to_vec();
+            let mut sites = std::collections::BTreeSet::new();
+            let mut unknown = false;
+            for message in &messages {
+                if let PageAssistMessageV1::Person { attachments, .. } = message {
+                    for attachment in attachments {
+                        let (tab, host) = match attachment {
+                            PageAssistAttachmentV1::Page { tab, host, .. }
+                            | PageAssistAttachmentV1::Selection { tab, host, .. }
+                            | PageAssistAttachmentV1::Element { tab, host, .. } => (tab, host),
+                        };
+                        if let Some(site) = site_of(Some(&format!("https://{host}"))) {
+                            sites.insert((tab.clone(), site));
+                        } else {
+                            unknown = true;
+                        }
+                    }
+                }
+                if let PageAssistMessageV1::Reply { id, .. } = message {
+                    if *id == self.reply {
+                        continue;
+                    }
+                    if let Some(data) = live.replies.get(id) {
+                        sites.extend(data.read_sites.iter().cloned());
+                        unknown |= data.unknown_read_sites;
+                    } else {
+                        unknown = true;
+                    }
+                }
+            }
+            if let Some(data) = live.replies.get_mut(&self.reply) {
+                data.read_sites.extend(sites);
+                data.unknown_read_sites |= unknown;
+            }
+            messages
         };
         let mut model = Vec::new();
         for exchange in prompt::history(&messages) {
@@ -1468,16 +1501,22 @@ impl Plan {
             if !label.is_empty() {
                 row.label = text::bounded(&text::clean(label), 120);
                 let sites = reply.other_sites(&self.record.page.site);
+                let unknown = reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true);
                 if let Some(value) = self.requests.get(index).and_then(|step| {
-                    (step.verb == Verb::Fill && !sites.is_empty())
+                    (step.verb == Verb::Fill && (!sites.is_empty() || unknown))
                         .then_some(step.value.as_deref())
                         .flatten()
                 }) {
+                    let sources = if sites.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} → ", sites.join(", "))
+                    };
                     row.label = format!(
-                        "{value:?} → {}\n{} → {}",
-                        row.label,
-                        sites.join(", "),
-                        self.record.page.site
+                        "{value:?} → {}\n{sources}{}",
+                        row.label, self.record.page.site
                     );
                 }
             }
@@ -1688,9 +1727,11 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
 /// `Err(None)` ends the steps and tells the model; `Err(Some)` ends the reply.
 async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<(), Option<End>> {
     let page = reply.service.ports().page.clone();
-    for index in 0..plan.requests.len() {
+    let mut index = 0;
+    while index < plan.requests.len() {
         if reply.took_over.swap(false, Ordering::AcqRel) {
             take_over(reply, text, plan, index).await?;
+            continue;
         }
         let step = plan.requests[index].clone();
         let resolved = admissible(&plan.record, &step)
@@ -1702,7 +1743,12 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 return Err(None);
             }
         };
-        if step.verb == Verb::Fill && !reply.other_sites(&plan.record.page.site).is_empty() {
+        if step.verb == Verb::Fill
+            && (!reply.other_sites(&plan.record.page.site).is_empty()
+                || reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true))
+        {
             resolved.effect = StepEffect::Commit(WorkConfirmCategoryV1::Type);
         }
         if let StepEffect::Commit(_) = resolved.effect {
@@ -1729,6 +1775,9 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 Err(reason) => return Err(Some(End::Cancelled(reason))),
             }
         }
+        if reply.took_over.load(Ordering::Acquire) {
+            continue;
+        }
         plan.mark(
             reply,
             index,
@@ -1749,6 +1798,7 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 return Err(None);
             }
         }
+        index += 1;
     }
     Ok(())
 }

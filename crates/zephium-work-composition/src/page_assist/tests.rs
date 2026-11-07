@@ -1164,15 +1164,177 @@ async fn cross_site_fills_wait_for_each_decision() {
                     .iter()
                     .all(|step| step.state == PageAssistStepStateV1::Done));
             }
-            h.ask("Type new reply", true).await.unwrap();
+            let reply = h.ask("Type new reply", true).await.unwrap();
+            h.waiting().await;
+            assert_eq!(h.page.lock().acted.len(), expected);
+            assert!(h
+                .service
+                .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
             h.settle().await;
-            assert_eq!(
-                h.page.lock().acted.len(),
-                expected + 1,
-                "provenance is reply-local"
-            );
+            assert_eq!(h.page.lock().acted.len(), expected + 1);
         }
     }
+}
+
+#[tokio::test]
+async fn cross_site_fill_approval_is_invalidated_by_human_input() {
+    for changed in [false, true] {
+        let h = harness(vec![
+            tool("list_tabs", json!({})),
+            tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "draft"}]}),
+            ),
+            say("Done."),
+        ]);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        let reply = h.ask("Fill the field", true).await.unwrap();
+        h.waiting().await;
+        let conversation = h.conversation().await;
+        let reads_before_takeover = h.page.lock().reads;
+        h.service.human_input(TAB);
+        if changed {
+            h.page.lock().steps.get_mut(&7).unwrap().label = "Type into \"Other\"".into();
+        }
+        assert!(h
+            .service
+            .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+        for _ in 0..200 {
+            if h.state().await != PageAssistReplyStateV1::Waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(h.state().await, PageAssistReplyStateV1::Paused);
+        assert!(h.page.lock().acted.is_empty());
+        assert!(h.service.resume(&conversation, reply));
+        if !changed {
+            for _ in 0..200 {
+                if h.state().await != PageAssistReplyStateV1::Paused {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            h.waiting().await;
+            assert!(h.page.lock().acted.is_empty());
+            assert!(h
+                .service
+                .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+        }
+        h.settle().await;
+        let page = h.page.lock();
+        assert!(
+            page.reads > reads_before_takeover,
+            "resuming revalidates the page"
+        );
+        assert_eq!(page.acted.len(), usize::from(!changed));
+        if !changed {
+            assert!(page.acted[0].read > reads_before_takeover);
+        }
+    }
+}
+
+#[tokio::test]
+async fn history_provenance_survives_replay_and_missing_in_memory_records() {
+    for restored in [false, true] {
+        let h = harness(vec![
+            tool("list_tabs", json!({})),
+            say("The other page is Guide."),
+            say("Remembered Guide."),
+            tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Guide"}]}),
+            ),
+            say("Done."),
+        ]);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        h.ask("Name the other page", true).await.unwrap();
+        h.settle().await;
+        let conversation = h.conversation().await;
+        if restored {
+            assert!(h.service.new_conversation(SPACE));
+            h.service.state().live.remove(&conversation);
+            assert!(h.service.open(SPACE, &conversation));
+        }
+        h.ask("Remember it", false).await.unwrap();
+        h.settle().await;
+        assert!(
+            h.request_text(2).contains("The other page is Guide."),
+            "restored={restored}: {}",
+            h.request_text(2)
+        );
+        let reply = h.ask("Type it", true).await.unwrap();
+        h.waiting().await;
+        assert!(h.request_text(3).contains("Remembered Guide."));
+        assert!(h.page.lock().acted.is_empty());
+        let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+            panic!()
+        };
+        assert!(steps[0]
+            .label
+            .starts_with("\"Guide\" → Type into \"Message\"\n"));
+        assert!(h
+            .service
+            .decide(&conversation, reply, 0, PageAssistDecisionV1::Decline));
+        h.settle().await;
+        assert!(h.page.lock().acted.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn history_keeps_attachment_title_provenance_when_the_page_read_failed() {
+    let h = harness(vec![
+        say("Could not read the page."),
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Other title"}]}),
+        ),
+        say("Done."),
+    ]);
+    {
+        let mut page = h.page.lock();
+        let mut source = facts("https://docs.example.com/");
+        source.title = Some("Other title".into());
+        page.facts.insert(TAB.into(), source);
+        page.readouts.remove(TAB);
+    }
+    h.ask("Read this", true).await.unwrap();
+    h.settle().await;
+    {
+        let mut page = h.page.lock();
+        page.facts
+            .insert(TAB.into(), facts("https://news.ycombinator.com/"));
+        page.readouts.insert(TAB.into(), hacker_news());
+    }
+    h.fill_field(FieldKind::Text, StepEffect::Draft);
+    let reply = h.ask("Type the title", true).await.unwrap();
+    h.waiting().await;
+    assert!(h.request_text(1).contains("Other title"));
+    assert!(h.page.lock().acted.is_empty());
+    let conversation = h.conversation().await;
+    assert!(h
+        .service
+        .decide(&conversation, reply, 0, PageAssistDecisionV1::Decline));
+    h.settle().await;
+    assert!(h.page.lock().acted.is_empty());
+}
+
+#[tokio::test]
+async fn same_site_history_does_not_require_fill_approval() {
+    let h = harness(vec![
+        say("This page is Hacker News."),
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Hacker News"}]}),
+        ),
+        say("Done."),
+    ]);
+    h.fill_field(FieldKind::Text, StepEffect::Draft);
+    h.ask("Name this page", true).await.unwrap();
+    h.settle().await;
+    h.ask("Type it", true).await.unwrap();
+    h.settle().await;
+    assert_eq!(h.page.lock().acted.len(), 1);
 }
 
 #[tokio::test]

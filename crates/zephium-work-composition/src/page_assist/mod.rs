@@ -145,8 +145,10 @@ struct PendingStyle {
 struct ReplyData {
     book: CitationBook,
     reads: Vec<ReadRecord>,
-    /// Tab/site pairs whose page text or title was disclosed in this reply.
+    /// Tab/site pairs disclosed directly or inherited through conversation history.
     read_sites: std::collections::BTreeSet<(String, String)>,
+    /// Replayed history whose source sites are no longer available in memory.
+    unknown_read_sites: bool,
     /// `t1`, `t2`… in the order the reply met the tabs.
     handles: Vec<String>,
     outlines: HashMap<usize, Outline>,
