@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use zephium_core::blocker::DocumentStyleProvider;
 
-use sha2::{Digest, Sha256};
+use zephium_blocker::Sha256;
 use zephium_blocker::{
     BlockerCompileFailure, CompiledArtifactCacheConfig, PolicyCatalog, PolicySource, SourceFormat,
     SourceId, StaticPolicyCatalog, WorkerBlocker,
@@ -23,7 +23,7 @@ use zephium_core::ports::blocker::{
 };
 
 const MANIFEST: &[u8] = include_bytes!("../../../assets/blocker-seed/v1/catalog.json");
-const SOURCES: [(&str, &[u8]); 2] = [
+const SOURCES: [(&str, &[u8]); 9] = [
     (
         "easylist",
         include_bytes!("../../../assets/blocker-seed/v1/easylist.txt.gz"),
@@ -31,6 +31,34 @@ const SOURCES: [(&str, &[u8]); 2] = [
     (
         "easyprivacy",
         include_bytes!("../../../assets/blocker-seed/v1/easyprivacy.txt.gz"),
+    ),
+    (
+        "ublock-filters",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-filters.txt.gz"),
+    ),
+    (
+        "ublock-quick-fixes",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-quick-fixes.txt.gz"),
+    ),
+    (
+        "ublock-link-shorteners",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-link-shorteners.txt.gz"),
+    ),
+    (
+        "ublock-privacy",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-privacy.txt.gz"),
+    ),
+    (
+        "ublock-resource-abuse",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-resource-abuse.txt.gz"),
+    ),
+    (
+        "ublock-unbreak",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-unbreak.txt.gz"),
+    ),
+    (
+        "ublock-badware",
+        include_bytes!("../../../assets/blocker-seed/v1/ublock-badware.txt.gz"),
     ),
 ];
 
@@ -111,7 +139,7 @@ fn release_seed_recovers_after_byte_release_and_restart_without_source_loading()
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let identity: [u8; 32] = Sha256::digest(MANIFEST).into();
+    let identity: [u8; 32] = Sha256::digest(MANIFEST);
     let loads = Arc::new(AtomicUsize::new(0));
     let observed = loads.clone();
     let cold_catalog = PolicyCatalog::deferred_reloadable(identity, move || {

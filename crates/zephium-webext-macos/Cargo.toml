@@ -13,6 +13,11 @@ name = "webext-lab"
 path = "src/bin/webext-lab.rs"
 required-features = ["lab"]
 
+[[bin]]
+name = "page-script-lab"
+path = "src/bin/page-script-lab.rs"
+required-features = ["lab"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"

@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tough::{
     ExpirationEnforcement, IntoVec, Limits, Repository, RepositoryLoader, TargetName, Transport,
 };
 use zephium_blocker::PolicyCatalog;
+use zephium_blocker::Sha256;
 
 use crate::manifest::{decode_sha256, CatalogManifest, ManifestError, CATALOG_MANIFEST_TARGET};
 use crate::storage::{seal_tuf_stage, CatalogStore, PreparedTufDatastore};
@@ -248,7 +248,7 @@ async fn verify_loaded_repository(
     if manifest.expires_unix <= verified_at_unix {
         return Err(VerificationError::Manifest);
     }
-    let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes).into();
+    let manifest_sha256: [u8; 32] = Sha256::digest(&manifest_bytes);
     let source_count =
         u32::try_from(manifest.sources.len()).map_err(|_| VerificationError::Catalog)?;
     let identity = CatalogIdentity {

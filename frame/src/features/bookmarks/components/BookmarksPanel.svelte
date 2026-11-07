@@ -68,6 +68,16 @@
     },
   });
 
+  // The ghost stays over the panel: past it, pages are native views above
+  // the chrome and would hide it.
+  let panel = $state<HTMLElement>();
+  let ghostWidth = $state(0);
+  const ghostX = $derived.by(() => {
+    const x = drag.at.x + 12;
+    const edge = panel?.getBoundingClientRect().right;
+    return edge === undefined ? x : Math.max(0, Math.min(x, edge - ghostWidth - 4));
+  });
+
   function landingAt(item: BookmarkView, target: Element | null, y: number): Landing | null {
     const crumb = target?.closest<HTMLElement>("[data-bookmark-crumb]");
     if (crumb) return { kind: "into", folder: crumb.dataset.bookmarkCrumb || null };
@@ -296,7 +306,7 @@
   };
 </script>
 
-<div class="bookmarks">
+<div class="bookmarks" bind:this={panel}>
   {#if !session.searching && session.folder !== null}
     <div class="place">
       <IconButton
@@ -532,7 +542,12 @@
 {/if}
 {#if drag.item}
   {@const carried = drag.item}
-  <div class="ghost" style:translate={`${drag.at.x + 12}px ${drag.at.y + 8}px`} aria-hidden="true">
+  <div
+    class="ghost"
+    bind:clientWidth={ghostWidth}
+    style:translate={`${ghostX}px ${drag.at.y + 8}px`}
+    aria-hidden="true"
+  >
     <span class="glyph"
       >{#if carried.url === null}<Icon icon={Folder01Icon} size={14} />{:else}<FavIcon
           image={favicons.mark(carried.icon, carried.url)?.image ?? null}

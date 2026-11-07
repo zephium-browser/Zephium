@@ -116,6 +116,10 @@ impl Shell {
                     self.forget_content_fullscreen(*id);
                 }
             }
+            // A quarantined profile's views are gone, and its prompt with them.
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.cancel_page_permission_for_profile(*profile);
+            }
             EngineEvent::ProfileProcessExited { profile, ids } => {
                 self.cancel_page_permission_for_profile(*profile);
                 for id in ids {
@@ -129,6 +133,14 @@ impl Shell {
                 if !self.runtime_restart_required {
                     self.runtime_restart_required = true;
                     self.project_runtime_status();
+                }
+            }
+            EngineEvent::ProfileRestartRequired { profile } => {
+                self.runtime_restart_required = true;
+                if self.restart_profiles.insert(profile) {
+                    // The status now names the profile as the reason.
+                    self.project_runtime_status();
+                    self.project_items();
                 }
             }
             EngineEvent::ContentRulesSettled {
@@ -403,10 +415,7 @@ impl Shell {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
                     .filter(|url| url.as_str() != "about:blank" && navigation::is_allowed(url));
-                if self
-                    .items
-                    .set_page_request(id, zephium_core::item::PageRequest::Popup { url })
-                {
+                if self.replace_page_request(id, zephium_core::item::PageRequest::Popup { url }) {
                     self.project_tab(id);
                 }
             }
@@ -415,12 +424,29 @@ impl Shell {
                 url,
                 app,
                 user_gesture,
-            } => self.on_external_app_requested(id, url, app, user_gesture),
+                initiator,
+            } => self.on_external_app_requested(id, url, app, user_gesture, initiator),
             EngineEvent::HttpAuthRequested { id, prompt } => {
                 self.on_http_auth_requested(id, prompt)
             }
             EngineEvent::HttpAuthEnded { id, request } => self.on_http_auth_ended(id, request),
+            EngineEvent::DownloadPermissionRequested { id, prompt } => {
+                self.on_download_permission_requested(id, prompt)
+            }
+            EngineEvent::DownloadPermissionEnded { id, request } => {
+                self.on_download_permission_ended(id, request)
+            }
+            EngineEvent::InsecureAutofillRequested { id } => {
+                self.on_insecure_autofill_requested(id)
+            }
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
+            EngineEvent::NavigationBlocked {
+                id,
+                url,
+                reason,
+                request,
+                can_continue,
+            } => self.on_navigation_blocked(id, url, reason, request, can_continue),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
                     tab.url
@@ -456,6 +482,11 @@ impl Shell {
                 probe,
                 can_discard,
             } => self.on_discard_safety(id, probe, can_discard),
+            EngineEvent::ContentProtectionChanged {
+                id,
+                degraded,
+                stranded_filters,
+            } => self.on_content_protection_changed(id, degraded, stranded_filters),
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
@@ -481,12 +512,14 @@ impl Shell {
                             .get(&id)
                             .map(|(current, _)| *current)
                     });
+                let was_running = self.keeps_running(id);
                 if current_document == Some(navigation)
                     && self
                         .items
                         .set_media_capture(id, state.is_capturing().then_some((navigation, state)))
                 {
                     self.project_tab(id);
+                    self.follow_running(id, was_running);
                 }
             }
             EngineEvent::AudioChanged { id, audible } => self.on_audio_changed(id, audible),
@@ -546,6 +579,19 @@ impl Shell {
                             replaced_page && navigation::is_browser_target(url)
                         }
                     });
+                // An https try that failed loads over http next; its error
+                // never shows.
+                match self.https_first_failed(id) {
+                    super::https_first::HttpsFallback::NotATry => {}
+                    super::https_first::HttpsFallback::LoadingOverHttp => return,
+                    super::https_first::HttpsFallback::Refused(asked) => {
+                        if self.items.record_failure_at(id, reason, asked) {
+                            let _ = self.relayout();
+                            self.project_tab(id);
+                        }
+                        return;
+                    }
+                }
                 let covered = self
                     .items
                     .tab(id)
@@ -656,7 +702,7 @@ impl Shell {
                     // asynchronous image decode. Poll immediately at load
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
-                    self.engine.warm_spare(self.partition_of(id));
+                    self.warm_spare_after_load(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -666,8 +712,13 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 };
+                self.https_first_settled(id, &committed_url);
                 if !navigation::is_browser_target(&committed_url) {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
+                    return;
+                }
+                // Expected, not rejected: the view under a refused first page.
+                if self.items.is_refused_stand_in(id, &committed_url) {
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
@@ -749,7 +800,8 @@ impl Shell {
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
-            | EngineEvent::ProfileProcessExited { profile, .. } => Some(*profile),
+            | EngineEvent::ProfileProcessExited { profile, .. }
+            | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
             EngineEvent::UserContentSettled {
                 scope: ContentScope::Profile(profile),
                 ..
@@ -790,6 +842,7 @@ impl Shell {
             | EngineEvent::ZoomGesture { id, .. }
             | EngineEvent::NativeActionFailed { id, .. }
             | EngineEvent::LoadingChanged { id, .. }
+            | EngineEvent::ContentProtectionChanged { id, .. }
             | EngineEvent::FaviconPixels { id, .. }
             | EngineEvent::FaviconRasterFailed { id, .. }
             | EngineEvent::FaviconCandidates { id, .. }
@@ -801,7 +854,11 @@ impl Shell {
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
             | EngineEvent::HttpAuthEnded { id, .. }
+            | EngineEvent::DownloadPermissionRequested { id, .. }
+            | EngineEvent::DownloadPermissionEnded { id, .. }
+            | EngineEvent::InsecureAutofillRequested { id }
             | EngineEvent::FocusBlocked { id, .. }
+            | EngineEvent::NavigationBlocked { id, .. }
             | EngineEvent::NativeTabOpened { id, .. }
             | EngineEvent::LinkedDownloadStarted { id }
             | EngineEvent::NewWindowRequested { id, .. }

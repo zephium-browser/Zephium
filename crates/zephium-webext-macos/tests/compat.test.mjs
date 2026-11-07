@@ -97,14 +97,23 @@ function context(kind, declared = []) {
     i18n: { getMessage: (key) => (key === "name" ? "Probe" : "") },
     webRequest: {
       onBeforeRequest: {
-        addListener(_listener, filter) {
+        addListener(listener, filter) {
           if (filter.urls.some((url) => url.startsWith("ws"))) throw new Error("invalid match pattern");
           if ((filter.types || []).includes("webbundle")) throw new Error("invalid resource type");
           this.filters.push(filter.urls);
           this.types.push(filter.types);
+          this.listeners.push(listener);
+        },
+        removeListener(listener) {
+          const index = this.listeners.indexOf(listener);
+          if (index >= 0) this.listeners.splice(index, 1);
+        },
+        hasListener(listener) {
+          return this.listeners.includes(listener);
         },
         filters: [],
         types: [],
+        listeners: [],
       },
     },
     contextMenus: {
@@ -372,6 +381,32 @@ test("filters and patterns WebKit can't read are narrowed, not refused", async (
   assert.equal(await chrome.permissions.contains({ origins: ["http://localhost:8080/*"] }), true);
   assert.equal(chrome.declarativeNetRequest.RuleActionType.BLOCK, "block");
   assert.equal(chrome.identity.AccountStatus.ANY, "ANY");
+});
+
+test("a frame's document reaches webRequest listeners as sub_frame, once per listener", () => {
+  const { chrome } = context("worker");
+  const event = chrome.webRequest.onBeforeRequest;
+  const seen = [];
+  const listener = (details) => seen.push(details.type);
+  event.addListener(listener, { urls: ["<all_urls>"], types: ["sub_frame"] });
+  event.addListener(listener, { urls: ["<all_urls>"] });
+  assert.equal(event.listeners.length, 1);
+  assert.equal(JSON.stringify(event.types.at(-1)), JSON.stringify(["sub_frame", "main_frame"]));
+  for (const relay of event.listeners) {
+    relay({ type: "main_frame", frameId: 4 });
+    relay({ type: "main_frame", frameId: 0 });
+  }
+  assert.equal(JSON.stringify(seen), JSON.stringify(["sub_frame"]));
+  assert.equal(event.hasListener(listener), true);
+  event.removeListener(listener);
+  assert.equal(event.hasListener(listener), false);
+  assert.equal(event.listeners.length, 0);
+
+  const retried = () => {};
+  assert.throws(() => event.addListener(retried, undefined));
+  event.addListener(retried, { urls: ["<all_urls>"] });
+  assert.equal(event.hasListener(retried), true);
+  assert.equal(event.listeners.length, 1);
 });
 
 test("API methods work apart from their namespace", async () => {

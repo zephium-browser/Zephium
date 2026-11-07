@@ -1,12 +1,13 @@
-//! Bounded static CSS policy. No scriptlets, replacement code or DOM scanning.
+//! Bounded static CSS policy, plus the scriptlet rules the scriptlet program is
+//! built from (see `scriptlets`). No replacement code or DOM scanning.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::Sha256;
 use adblock::filters::cosmetic::{CosmeticFilter, CosmeticFilterMask};
 use adblock::{Engine, FilterSet};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const MAX_RULES: usize = 50_000;
 const MAX_SELECTOR_BYTES: usize = 4 * 1024;
@@ -14,7 +15,10 @@ const MAX_SCOPE_DOMAINS: usize = 1_024;
 const MAX_SCOPE_PREDICATES: usize = 100_000;
 const MAX_POLICY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STYLESHEET_BYTES: usize = 1024 * 1024;
-const MAX_CONTROLS: usize = 1_024;
+const MAX_CONTROLS: usize = 4_096;
+/// The generic-hide matcher's per-regex compile limits.
+const CONTROL_REGEX_SIZE_BYTES: usize = 96 * 1024;
+const CONTROL_REGEX_DFA_SIZE_BYTES: usize = 16 * 1024;
 
 /// Static cosmetic admission statistics, separate from network rule coverage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -26,6 +30,20 @@ pub struct CosmeticReport {
     pub rejected: usize,
     /// Generic-hide controls admitted into the document matcher.
     pub generic_controls: usize,
+    /// `##+js` and `#@#+js` rules admitted for the scriptlet program.
+    pub scriptlet_rules: usize,
+    /// Admitted scriptlet rules naming a scriptlet the library lacks.
+    pub unknown_scriptlet_rules: usize,
+    /// Admitted scriptlet rules that run with a stand-in for what they name:
+    /// `no-xhr-if` answers a `war:` resource the app does not ship with an
+    /// empty body, still keeping the request from leaving.
+    pub substituted_scriptlet_rules: usize,
+    /// Scriptlet rules left out: generic, overlong, or a hostname form the
+    /// program cannot key.
+    pub unsupported_scriptlet_rules: usize,
+    /// Markers left out of Zephium's player-marker rules because no admitted
+    /// uBlock Origin rule both edits on and strips them.
+    pub dropped_player_markers: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -64,8 +82,11 @@ struct Data {
     version: u32,
     rules: Vec<Rule>,
     controls: Vec<String>,
+    scriptlets: Vec<crate::scriptlets::ScriptletRule>,
     report: CosmeticReport,
 }
+
+const DATA_VERSION: u32 = 3;
 
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
@@ -77,6 +98,7 @@ pub struct CosmeticPolicy {
     generic_index: Arc<str>,
     generic_index_digest: zephium_core::blocker::ContentRuleDigest,
     fallback_generic: Vec<Rule>,
+    scriptlets: Option<crate::scriptlets::Program>,
 }
 
 // Retain no policy by ourselves. Native profiles own the live public policy;
@@ -107,16 +129,28 @@ impl CosmeticPolicy {
     pub fn compile<'a>(
         sources: impl IntoIterator<Item = &'a str>,
     ) -> Result<Arc<Self>, CosmeticError> {
+        Self::compile_with_trust(
+            sources
+                .into_iter()
+                .map(|source| (source, crate::ScriptletTrust::Plain)),
+        )
+    }
+
+    /// As [`Self::compile`], with each source's scriptlet trust.
+    pub fn compile_with_trust<'a>(
+        sources: impl IntoIterator<Item = (&'a str, crate::ScriptletTrust)>,
+    ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
-            version: 1,
+            version: DATA_VERSION,
             rules: Vec::new(),
             controls: Vec::new(),
+            scriptlets: Vec::new(),
             report: CosmeticReport::default(),
         };
         let mut bytes = 0usize;
         let mut lines = 0usize;
         let mut predicates = 0usize;
-        for (source_index, source) in sources.into_iter().enumerate() {
+        for (source_index, (source, trust)) in sources.into_iter().enumerate() {
             if source_index >= 32 {
                 return Err(CosmeticError::ResourceLimit);
             }
@@ -134,13 +168,48 @@ impl CosmeticPolicy {
                 if line.starts_with('!') || line.starts_with('[') || line.is_empty() {
                     continue;
                 }
-                if let Some(control) = generic_control(line)? {
-                    data.controls.push(control);
-                    if data.controls.len() > MAX_CONTROLS {
-                        return Err(CosmeticError::ResourceLimit);
+                match crate::scriptlets::classify(line) {
+                    crate::scriptlets::Kind::None => {}
+                    crate::scriptlets::Kind::Unsupported => {
+                        data.report.unsupported_scriptlet_rules += 1;
+                        continue;
                     }
-                    data.report.generic_controls += 1;
-                    continue;
+                    crate::scriptlets::Kind::Rule {
+                        unknown,
+                        substituted,
+                    } => {
+                        // A scriptlet the library lacks runs nowhere, so it
+                        // is counted and never reaches the program.
+                        if !unknown {
+                            data.scriptlets.push(crate::scriptlets::ScriptletRule {
+                                line: line.to_owned(),
+                                trust,
+                            });
+                        }
+                        data.report.scriptlet_rules += 1;
+                        data.report.unknown_scriptlet_rules += usize::from(unknown);
+                        data.report.substituted_scriptlet_rules += usize::from(substituted);
+                        continue;
+                    }
+                }
+                match generic_control(line) {
+                    Ok(Some(control)) if !control_compiles(&control) => {
+                        data.report.rejected += 1;
+                        continue;
+                    }
+                    Ok(Some(control)) => {
+                        data.controls.push(control);
+                        if data.controls.len() > MAX_CONTROLS {
+                            return Err(CosmeticError::ResourceLimit);
+                        }
+                        data.report.generic_controls += 1;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        data.report.rejected += 1;
+                        continue;
+                    }
                 }
                 if !crate::compiler::looks_like_cosmetic_rule(line) {
                     continue;
@@ -165,6 +234,10 @@ impl CosmeticPolicy {
         data.rules.dedup();
         data.controls.sort();
         data.controls.dedup();
+        data.report.dropped_player_markers =
+            crate::scriptlets::keep_edited_markers(&mut data.scriptlets);
+        data.scriptlets.sort();
+        data.scriptlets.dedup();
         Self::from_data(data)
     }
 
@@ -194,8 +267,26 @@ impl CosmeticPolicy {
         self.report
     }
 
+    /// The program every frame runs at document start in its own world, when
+    /// any host has scriptlets.
+    pub fn scriptlet_program(&self) -> Option<&str> {
+        self.scriptlets
+            .as_ref()
+            .map(|program| program.script.as_ref())
+    }
+
+    /// Hosts with an entry in the scriptlet program, and distinct call sets.
+    pub fn scriptlet_coverage(&self) -> (usize, usize) {
+        self.scriptlets
+            .as_ref()
+            .map_or((0, 0), |program| (program.hosts, program.calls))
+    }
+
     fn from_data(data: Data) -> Result<Arc<Self>, CosmeticError> {
-        if data.version != 1
+        if data.version != DATA_VERSION
+            || data.scriptlets.len() > data.report.scriptlet_rules
+            || data.report.unknown_scriptlet_rules > data.report.scriptlet_rules
+            || data.scriptlets.windows(2).any(|pair| pair[0] >= pair[1])
             || data.rules.len() > MAX_RULES
             || data.controls.len() > MAX_CONTROLS
             || data.rules.len() > data.report.accepted
@@ -206,6 +297,12 @@ impl CosmeticPolicy {
             || data.rules.windows(2).any(|pair| pair[0] >= pair[1])
             || data.controls.windows(2).any(|pair| pair[0] >= pair[1])
         {
+            return Err(CosmeticError::InvalidPolicy);
+        }
+        // A stored policy holds only the markers its own edits support, as
+        // compiling leaves it.
+        let mut guarded = data.scriptlets.clone();
+        if crate::scriptlets::keep_edited_markers(&mut guarded) != 0 || guarded != data.scriptlets {
             return Err(CosmeticError::InvalidPolicy);
         }
         let mut generic = Vec::new();
@@ -247,8 +344,9 @@ impl CosmeticPolicy {
             if generic_control(&original)?.as_ref() != Some(control) {
                 return Err(CosmeticError::InvalidPolicy);
             }
-            adblock::filters::network::NetworkFilter::parse(control, false, Default::default())
-                .map_err(|_| CosmeticError::InvalidPolicy)?;
+            if !control_compiles(control) {
+                return Err(CosmeticError::InvalidPolicy);
+            }
         }
         // Let adblock-rust own generic classification and hostname exceptions.
         let mut selected_filters = FilterSet::new(false);
@@ -286,8 +384,8 @@ impl CosmeticPolicy {
                 max_pattern_bytes: 256 * 1024,
                 max_patterns_per_regex: 256,
                 max_pattern_bytes_per_regex: 128 * 1024,
-                max_regex_size_bytes: 96 * 1024,
-                max_regex_dfa_size_bytes: 16 * 1024,
+                max_regex_size_bytes: CONTROL_REGEX_SIZE_BYTES,
+                max_regex_dfa_size_bytes: CONTROL_REGEX_DFA_SIZE_BYTES,
                 max_filter_checks_per_request: 256,
             })
             .map_err(|_| CosmeticError::ResourceLimit)?;
@@ -353,20 +451,24 @@ impl CosmeticPolicy {
             .filter(|r| fallback_names.contains(&r.selector))
             .cloned()
             .collect();
+        // Rebuilt from the rules on every decode: the program is executable, so
+        // a persisted copy is never trusted.
+        let scriptlets = crate::scriptlets::build(&data.scriptlets)?;
         let encoded = serde_json::to_vec(&data).map_err(|_| CosmeticError::InvalidPolicy)?;
         if encoded.len() > MAX_POLICY_BYTES {
             return Err(CosmeticError::ResourceLimit);
         }
         let policy = Arc::new(Self {
             report: data.report,
-            fingerprint: Sha256::digest(&encoded).into(),
+            fingerprint: Sha256::digest(&encoded),
             encoded: encoded.into(),
             selective,
             generic_index_digest: zephium_core::blocker::ContentRuleDigest::from_bytes(
-                Sha256::digest(generic_index.as_bytes()).into(),
+                Sha256::digest(generic_index.as_bytes()),
             ),
             generic_index,
             fallback_generic,
+            scriptlets,
         });
         *LIVE_POLICY.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&policy);
         Ok(policy)
@@ -374,6 +476,12 @@ impl CosmeticPolicy {
 }
 
 impl zephium_core::blocker::DocumentStyleProvider for CosmeticPolicy {
+    fn scriptlet_program(&self) -> Option<Arc<str>> {
+        self.scriptlets
+            .as_ref()
+            .map(|program| program.script.clone())
+    }
+
     fn fingerprint(&self) -> zephium_core::blocker::ContentRuleDigest {
         zephium_core::blocker::ContentRuleDigest::from_bytes(self.fingerprint)
     }
@@ -692,6 +800,26 @@ fn parse_rule(line: &str) -> Result<Rule, CosmeticError> {
     })
 }
 
+/// Whether a control parses and its regex compiles within the generic-hide
+/// matcher's limits, so one control cannot fail the whole matcher.
+fn control_compiles(control: &str) -> bool {
+    use adblock::filters::network::{FilterPart, NetworkFilter};
+    let Ok(filter) = NetworkFilter::parse(control, false, Default::default()) else {
+        return false;
+    };
+    let patterns: Vec<&str> = match &filter.filter {
+        FilterPart::Empty => Vec::new(),
+        FilterPart::Simple(pattern) => vec![pattern.as_ref()],
+        FilterPart::AnyOf(patterns) => patterns.iter().map(AsRef::as_ref).collect(),
+    };
+    adblock::regex_manager::regex_compiles_within(
+        filter.mask,
+        &patterns,
+        CONTROL_REGEX_SIZE_BYTES,
+        CONTROL_REGEX_DFA_SIZE_BYTES,
+    )
+}
+
 fn generic_control(line: &str) -> Result<Option<String>, CosmeticError> {
     let Some((pattern, options)) = line.rsplit_once('$') else {
         return Ok(None);
@@ -791,12 +919,27 @@ mod tests {
             "example.com##+js(foo)\nexample.com##.ad:remove()\nexample.com##.ad:has-text(foo)\nexample.com##.ad{}body{color:red}\nexample.*##.ad\n##.good",
         ]).unwrap();
         assert_eq!(policy.report().accepted, 1);
-        assert_eq!(policy.report().rejected, 5);
+        // The scriptlet rule goes to the scriptlet program, never into CSS.
+        assert_eq!(policy.report().rejected, 4);
+        assert_eq!(policy.report().scriptlet_rules, 1);
+        assert_eq!(policy.report().unknown_scriptlet_rules, 1);
         assert_eq!(
             policy.stylesheet("https://example.com/").unwrap().as_ref(),
             ".good{display:none!important}\n"
         );
-        assert!(CosmeticPolicy::compile(["@@||example.com^$generichide,third-party"]).is_err());
+        // An unsupported generic-hide control is rejected alone, so hiding
+        // stays on there instead of the whole policy failing.
+        let unsupported =
+            CosmeticPolicy::compile(["@@||example.com^$generichide,third-party\n##.good"]).unwrap();
+        assert_eq!(unsupported.report().rejected, 1);
+        assert_eq!(unsupported.report().generic_controls, 0);
+        assert_eq!(
+            unsupported
+                .stylesheet("https://example.com/")
+                .unwrap()
+                .as_ref(),
+            ".good{display:none!important}\n"
+        );
     }
 
     #[test]
@@ -815,6 +958,31 @@ mod tests {
         let mut data: Data = serde_json::from_slice(&bytes).unwrap();
         data.rules[0].selector = ".ad{}body{color:red}".into();
         assert!(CosmeticPolicy::decode(&serde_json::to_vec(&data).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_stored_marker_without_its_edits_is_rejected() {
+        let edits = concat!(
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+            "\n",
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (lactmilli)\b/"\,"replacement":""}))"#,
+            "\n",
+        );
+        let marker = r"www.youtube.com##+js(zephium-player-marker, lactmilli, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x, a.b*=t)";
+        let policy = CosmeticPolicy::compile_with_trust([
+            (edits, crate::ScriptletTrust::Trusted),
+            (marker, crate::ScriptletTrust::Zephium),
+        ])
+        .unwrap();
+        let bytes = policy.encode().unwrap();
+        let data: Data = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data.scriptlets.len(), 3);
+        assert!(CosmeticPolicy::decode(&bytes).is_ok());
+        let mut stripped = data;
+        stripped
+            .scriptlets
+            .retain(|rule| !rule.line.contains("createCommentParams"));
+        assert!(CosmeticPolicy::decode(&serde_json::to_vec(&stripped).unwrap()).is_err());
     }
 
     #[test]
@@ -934,6 +1102,51 @@ mod tests {
         assert_eq!(
             policy.generic_selectors("https://normal.example/", &vec![".x".to_owned(); 257]),
             Err(DocumentStyleFailure::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn a_scriptlet_the_library_lacks_is_counted_and_leaves_no_trace() {
+        let policy = CosmeticPolicy::compile([concat!(
+            "known.example##+js(set, a.b, true)\n",
+            "only-unknown.example##+js(no-such-scriptlet, x)\n",
+        )])
+        .unwrap();
+        assert_eq!(policy.report().scriptlet_rules, 2);
+        assert_eq!(policy.report().unknown_scriptlet_rules, 1);
+        assert_eq!(policy.scriptlet_coverage(), (1, 1));
+        let program = policy.scriptlet_program().unwrap();
+        assert!(!program.contains("no-such-scriptlet"));
+        assert!(!program.contains(&crate::scriptlets::key_hash("only-unknown.example").to_string()));
+        let encoded = String::from_utf8_lossy(&policy.encode().unwrap()).into_owned();
+        assert!(!encoded.contains("no-such-scriptlet"));
+    }
+
+    #[test]
+    fn a_generic_hide_control_past_the_regex_limits_is_rejected() {
+        let policy = CosmeticPolicy::compile([concat!(
+            "@@||ok.example^$generichide\n",
+            r"@@/^https?:\/\/big\.example\/[+\/0-9a-zA-Z]{400,1200}$/$generichide",
+            "\n",
+        )])
+        .unwrap();
+        assert_eq!(policy.report().generic_controls, 1);
+        assert_eq!(policy.report().rejected, 1);
+    }
+
+    #[test]
+    fn generic_hide_controls_are_admitted_up_to_their_limit() {
+        let controls = |count: usize| -> String {
+            (0..count)
+                .map(|n| format!("@@||c{n}.example^$generichide\n"))
+                .collect()
+        };
+        let policy = CosmeticPolicy::compile([controls(MAX_CONTROLS).as_str()]).unwrap();
+        assert_eq!(policy.report().generic_controls, MAX_CONTROLS);
+        assert!(CosmeticPolicy::decode(&policy.encode().unwrap()).is_ok());
+        assert_eq!(
+            CosmeticPolicy::compile([controls(MAX_CONTROLS + 1).as_str()]).err(),
+            Some(CosmeticError::ResourceLimit)
         );
     }
 }

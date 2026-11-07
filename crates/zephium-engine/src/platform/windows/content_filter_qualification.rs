@@ -287,7 +287,17 @@ fn policy() -> (Arc<WorkerBlocker>, Arc<ContentRules>) {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocker-seed/v1");
     let mut sources = Vec::new();
-    for name in ["easylist", "easyprivacy"] {
+    for name in [
+        "easylist",
+        "easyprivacy",
+        "ublock-filters",
+        "ublock-quick-fixes",
+        "ublock-link-shorteners",
+        "ublock-privacy",
+        "ublock-resource-abuse",
+        "ublock-unbreak",
+        "ublock-badware",
+    ] {
         let mut text = String::new();
         flate2::read::GzDecoder::new(
             std::fs::File::open(root.join(format!("{name}.txt.gz"))).unwrap(),
@@ -351,6 +361,8 @@ fn native_protection_qualification() {
         "news" => "https://www.theguardian.com/technology/2026/sep/02/google-defeats-justice-department-bid-ad-tech-sale".into(),
         "github" => "https://github.com/rust-lang/rust".into(),
         "google" => "https://www.google.com/search?q=rust+programming".into(),
+        "cnn" => "https://www.cnn.com/".into(),
+        "nytimes" => "https://www.nytimes.com/".into(),
         _ => panic!("unknown fixed qualification site"),
     };
     let (worker, rules) = policy();
@@ -384,12 +396,19 @@ fn native_protection_qualification() {
     for _ in 0..tabs {
         let loaded = Rc::new(Cell::new(None::<Instant>));
         let event = loaded.clone();
+        let top = crate::platform::top_document::TopDocument::default();
+        let committed = top.clone();
         let mut builder = WebViewBuilder::new_with_web_context(&mut context)
             .with_visible(true)
             .with_focused(false)
             .with_devtools(false)
             .with_on_page_load_handler(move |phase, _| {
                 event.set(matches!(phase, wry::PageLoadEvent::Finished).then(Instant::now));
+            })
+            .with_navigation_event_handler(move |event| {
+                if event.phase == wry::NavigationEventPhase::Committed {
+                    committed.committed(&event.url);
+                }
             });
         if site == "csp" {
             // Exercise the exact fixed production bootstrap in a native CSP
@@ -472,7 +491,9 @@ fn native_protection_qualification() {
         } else {
             &policy
         };
-        registrations.push(install_scoped_on_view(&view, selected, &pause).unwrap());
+        registrations.push(
+            install_scoped_on_view(&view, selected, &pause, &Default::default(), &top).unwrap(),
+        );
         loaded.set(None);
         let started = Instant::now();
         view.load_url(&url).unwrap();
@@ -608,6 +629,27 @@ fn native_protection_qualification() {
             ),
         );
     }
+    if mode == "paused" && site != "coverage" {
+        // A paused view's filters are removed, so no request reaches the handler.
+        assert!(samples.callback.is_empty());
+        if site == "fixture" {
+            pause.set(false);
+            evaluate(&views[0], "globalThis.qaBeforeResume = true");
+            views[0].load_url(&url).unwrap();
+            until(
+                || {
+                    evaluate(
+                        &views[0],
+                        "!globalThis.qaBeforeResume && document.readyState === 'complete'",
+                    ) == true
+                },
+                30,
+            );
+            assert_eq!(evaluate(&views[0], "globalThis.usefulExecuted || 0"), 100);
+            assert_eq!(evaluate(&views[0], "globalThis.adExecuted || 0"), 0);
+            pause.set(true);
+        }
+    }
     let count = counter.0.load(Ordering::Relaxed);
     if site == "fixture" {
         assert_eq!(
@@ -616,10 +658,11 @@ fn native_protection_qualification() {
         );
         assert_eq!(
             count,
-            if mode == "on" && counting == "on" {
-                100 * tabs as u64
-            } else {
-                0
+            match (mode.as_str(), counting.as_str()) {
+                ("on", "on") => 100 * tabs as u64,
+                // The first view reloads once with protection resumed.
+                ("paused", "on") => 100,
+                _ => 0,
             }
         );
     }

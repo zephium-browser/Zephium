@@ -1,31 +1,148 @@
-//! Durable two-source snapshots and scheduling hints for official HTTPS lists.
+//! Durable snapshots and scheduling hints for the official HTTPS lists.
 use crate::storage_io::{
     atomic_write, create_private_directory, read_bounded_regular, remove_verified_regular,
     sync_directory, StoreError,
 };
 use crate::types::{ActivatedCatalog, CatalogIdentity};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zephium_blocker::Sha256;
 use zephium_blocker::{PolicyCatalog, PolicySource, SourceFormat, SourceId, StaticPolicyCatalog};
-use zephium_update_transport::official_filters::FilterValidators;
+use zephium_update_transport::official_filters::{FilterValidators, OfficialFilter};
 
 const MAX_SOURCE: u64 = 16 * 1024 * 1024;
 const MAX_STATE: u64 = 64 * 1024;
-const MAX_OBJECTS: usize = 16;
+const MAX_OBJECTS: usize = 32;
 const DAY: u64 = 24 * 60 * 60;
+const HOUR: u64 = 60 * 60;
+const SCHEMA: u32 = 3;
+
+/// What a valid copy of one official list looks like, and how often to check it.
+struct Spec {
+    title: &'static str,
+    /// uBlock Origin's assembled `.min` lists carry no homepage line.
+    homepage: Option<&'static str>,
+    adblock_header: bool,
+    min_bytes: usize,
+    min_rules: u64,
+    /// Lists without a version number are versioned by their modification date.
+    dated: bool,
+    /// Lists that legitimately shrink a lot between updates skip this guard.
+    halving_guard: bool,
+    /// Checked as often as the list's `Expires` header asks, within bounds.
+    follows_expires: bool,
+}
+
+fn spec(filter: OfficialFilter) -> Spec {
+    match filter {
+        OfficialFilter::EasyList | OfficialFilter::EasyPrivacy => Spec {
+            title: if filter == OfficialFilter::EasyList {
+                "! Title: EasyList"
+            } else {
+                "! Title: EasyPrivacy"
+            },
+            homepage: Some("! Homepage: https://easylist.to/"),
+            adblock_header: true,
+            min_bytes: 256 * 1024,
+            min_rules: 1000,
+            dated: false,
+            halving_guard: true,
+            follows_expires: false,
+        },
+        OfficialFilter::UblockFilters => Spec {
+            title: "! Title: uBlock filters",
+            homepage: None,
+            adblock_header: false,
+            min_bytes: 128 * 1024,
+            min_rules: 1000,
+            dated: true,
+            halving_guard: true,
+            follows_expires: false,
+        },
+        OfficialFilter::UblockQuickFixes => Spec {
+            title: "! Title: uBlock\u{2080} filters \u{2013} Quick fixes",
+            homepage: Some(UASSETS),
+            adblock_header: false,
+            min_bytes: 8 * 1024,
+            min_rules: 50,
+            dated: true,
+            halving_guard: false,
+            follows_expires: true,
+        },
+        OfficialFilter::UblockLinkShorteners => uassets(
+            "! Title: uBlock filters \u{2013} Link shorteners",
+            Some(UASSETS),
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockPrivacy => uassets(
+            "! Title: uBlock filters \u{2013} Privacy",
+            None,
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockResourceAbuse => uassets(
+            "! Title: uBlock filters \u{2013} Resource abuse",
+            Some(UASSETS),
+            2 * 1024,
+            20,
+        ),
+        OfficialFilter::UblockUnbreak => uassets(
+            "! Title: uBlock filters \u{2013} Unbreak",
+            None,
+            32 * 1024,
+            500,
+        ),
+        OfficialFilter::UblockBadware => uassets(
+            "! Title: uBlock filters \u{2013} Badware risks",
+            None,
+            32 * 1024,
+            1000,
+        ),
+    }
+}
+
+const UASSETS: &str = "! Homepage: https://github.com/uBlockOrigin/uAssets";
+
+/// One of uBlock Origin's daily lists, versioned by its modification date.
+const fn uassets(
+    title: &'static str,
+    homepage: Option<&'static str>,
+    min_bytes: usize,
+    min_rules: u64,
+) -> Spec {
+    Spec {
+        title,
+        homepage,
+        adblock_header: false,
+        min_bytes,
+        min_rules,
+        dated: true,
+        halving_guard: true,
+        follows_expires: false,
+    }
+}
+
+pub(crate) fn filter_for(id: &str) -> Option<OfficialFilter> {
+    OfficialFilter::ALL
+        .into_iter()
+        .find(|filter| filter.id() == id)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Source {
+    pub id: String,
     pub sha256: [u8; 32],
     pub bytes: u64,
     pub rules: u64,
     pub version: String,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    /// Seconds until the list is due again, from its own header.
+    pub interval: u64,
 }
 impl Source {
     pub fn validators(&self) -> FilterValidators {
@@ -40,8 +157,35 @@ impl Source {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Package {
     pub identity: CatalogIdentity,
-    pub sources: [Source; 2],
+    /// One per official list, in `OfficialFilter::ALL` order.
+    pub sources: Vec<Source>,
 }
+
+/// When one list is next due, how many checks of it failed in a row, and an
+/// older copy than the one kept that recent checks returned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Schedule {
+    pub due: u64,
+    pub failure_streak: u8,
+    /// The older copy, and how many checks in a row returned exactly it.
+    #[serde(default)]
+    pub stale: Option<([u8; 32], u8)>,
+    /// Checks that returned an older copy than the one kept.
+    #[serde(default)]
+    pub rollbacks: u32,
+    /// When this list was last checked successfully.
+    #[serde(default)]
+    pub checked: Option<u64>,
+    /// A rejected copy of this list that the list has not been checked past
+    /// since.
+    #[serde(default)]
+    pub rejected: Option<[u8; 32]>,
+}
+
+/// An older copy returned this many checks in a row is upstream's own revert,
+/// not a stale cache, and is accepted.
+pub(crate) const REVERT_AFTER: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,7 +201,228 @@ pub(crate) struct Record {
     pub current: Option<Package>,
     pub previous: Option<Package>,
     pub candidate: Option<Package>,
-    pub rejected: Option<Package>,
+    /// One per official list, in `OfficialFilter::ALL` order.
+    pub schedule: Vec<Schedule>,
+    /// Downloaded lists kept from an older schema, reused while their bytes
+    /// still verify until a package holds every list.
+    pub retained: Vec<Source>,
+}
+
+impl Record {
+    fn fresh(highest_revision: u64, now: u64) -> Self {
+        Self {
+            schema: SCHEMA,
+            highest_revision,
+            jitter: jitter(),
+            due: now,
+            attempted: None,
+            checked: None,
+            failure_streak: 0,
+            verification: 0,
+            current: None,
+            previous: None,
+            candidate: None,
+            schedule: vec![
+                Schedule {
+                    due: now,
+                    ..Schedule::default()
+                };
+                OfficialFilter::ALL.len()
+            ],
+            retained: Vec::new(),
+        }
+    }
+
+    /// Remembers the copy of each list the candidate changed as rejected,
+    /// until that list is checked past it.
+    pub fn reject_candidate(&mut self) {
+        let Some(rejected) = self.candidate.take() else {
+            return;
+        };
+        for (index, source) in rejected.sources.iter().enumerate() {
+            let kept = self
+                .current
+                .as_ref()
+                .and_then(|current| current.sources.get(index))
+                .is_some_and(|current| current.sha256 == source.sha256);
+            if !kept {
+                self.schedule[index].rejected = Some(source.sha256);
+            }
+        }
+    }
+
+    /// The newest descriptor of `filter` this record holds.
+    /// A rejected copy is never a list's prior copy: reusing it would stage
+    /// the same rejected bytes again.
+    pub fn prior(&self, filter: OfficialFilter) -> Option<&Source> {
+        [&self.candidate, &self.current]
+            .into_iter()
+            .flatten()
+            .next()
+            .and_then(|package| package.sources.iter().find(|s| s.id == filter.id()))
+            .or_else(|| self.retained.iter().find(|s| s.id == filter.id()))
+    }
+}
+
+/// The first schema: EasyList and EasyPrivacy only.
+mod v1 {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Source {
+        pub sha256: [u8; 32],
+        pub bytes: u64,
+        pub rules: u64,
+        pub version: String,
+        pub etag: Option<String>,
+        pub last_modified: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Package {
+        #[allow(dead_code)]
+        pub identity: crate::types::CatalogIdentity,
+        pub sources: [Source; 2],
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(super) struct Record {
+        pub schema: u32,
+        pub highest_revision: u64,
+        pub jitter: u64,
+        #[allow(dead_code)]
+        pub due: u64,
+        pub attempted: Option<u64>,
+        #[allow(dead_code)]
+        pub checked: Option<u64>,
+        #[allow(dead_code)]
+        pub failure_streak: u8,
+        pub verification: u64,
+        pub current: Option<Package>,
+        pub previous: Option<Package>,
+        #[allow(dead_code)]
+        pub candidate: Option<Package>,
+        #[allow(dead_code)]
+        pub rejected: Option<Package>,
+    }
+}
+
+/// A schema-1 record: the lists of its newest package whose bytes still
+/// verify are kept for reuse, and every list is due now, since no package can
+/// be complete without the new ones.
+fn migrate(old: v1::Record, now: u64, intact: impl Fn(&Source) -> bool) -> Option<Record> {
+    if old.schema != 1 {
+        return None;
+    }
+    let mut record = Record::fresh(old.highest_revision, now);
+    record.jitter = old.jitter;
+    record.attempted = old.attempted;
+    record.verification = old.verification;
+    record.retained = [old.current, old.previous]
+        .into_iter()
+        .flatten()
+        .map(|package| -> Vec<Source> {
+            let [easylist, easyprivacy] = package.sources;
+            [
+                (OfficialFilter::EasyList, easylist),
+                (OfficialFilter::EasyPrivacy, easyprivacy),
+            ]
+            .into_iter()
+            .map(|(filter, source)| Source {
+                id: filter.id().to_owned(),
+                sha256: source.sha256,
+                bytes: source.bytes,
+                rules: source.rules,
+                version: source.version,
+                etag: source.etag,
+                last_modified: source.last_modified,
+                interval: DAY,
+            })
+            .collect()
+        })
+        .find(|sources| sources.iter().all(&intact))
+        .unwrap_or_default();
+    Some(record)
+}
+
+/// The lists a schema-2 record's schedule is in, in its order.
+const SCHEMA_2_LISTS: [OfficialFilter; 4] = [
+    OfficialFilter::EasyList,
+    OfficialFilter::EasyPrivacy,
+    OfficialFilter::UblockFilters,
+    OfficialFilter::UblockQuickFixes,
+];
+
+/// A schema-2 record, from before uBlock Origin's other lists: every list it
+/// downloaded that still verifies is kept for reuse, and every list is due now.
+/// Its packages lack five of the lists, so none is current and the bundled
+/// seed stays in use until a refresh commits. Its uBlock filters came from
+/// `filters.txt` without its includes, a smaller list than `filters.min.txt`,
+/// so that copy is never reused. A list's rejected copy stays rejected until
+/// that list is checked past it.
+fn migrate_lists(old: Record, now: u64, intact: impl Fn(&Source) -> bool) -> Record {
+    let mut record = Record::fresh(old.highest_revision, now);
+    record.jitter = old.jitter;
+    record.attempted = old.attempted;
+    record.verification = old.verification;
+    for (filter, schedule) in SCHEMA_2_LISTS.iter().zip(&old.schedule) {
+        if let Some(index) = OfficialFilter::ALL.iter().position(|known| known == filter) {
+            record.schedule[index].rejected = schedule.rejected;
+        }
+    }
+    for source in [old.candidate, old.current, old.previous]
+        .into_iter()
+        .flatten()
+        .flat_map(|package| package.sources)
+        .chain(old.retained)
+    {
+        if filter_for(&source.id).is_some_and(|filter| filter != OfficialFilter::UblockFilters)
+            && !record.retained.iter().any(|kept| kept.id == source.id)
+            && intact(&source)
+        {
+            record.retained.push(source);
+        }
+    }
+    record
+}
+
+/// Whether a source's object is present with exactly its bytes.
+fn source_intact(root: &Path, source: &Source) -> bool {
+    use std::io::Read;
+    if source.bytes > MAX_SOURCE {
+        return false;
+    }
+    let Some(mut file) =
+        crate::file_identity::open_verified_regular(&root.join(object_name(&source.sha256)))
+    else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if metadata.len() != source.bytes {
+        return false;
+    }
+    let mut digest = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes) => {
+                total = total.saturating_add(bytes as u64);
+                if total > source.bytes {
+                    return false;
+                }
+                digest.update(&buffer[..bytes]);
+            }
+            Err(_) => return false,
+        }
+    }
+    total == source.bytes && digest.finalize() == source.sha256
 }
 
 pub(crate) struct OfficialStore {
@@ -73,35 +438,36 @@ impl OfficialStore {
         create_private_directory(&root)?;
         let lock = crate::cache_lock::CacheLock::acquire(&root.join("lock-v1"))
             .ok_or(StoreError::LockUnavailable)?;
-        let decode = |path: &Path| -> Result<Record, StoreError> {
+        let decode = |path: &Path| -> Result<(Record, bool), StoreError> {
             let bytes = read_bounded_regular(path, MAX_STATE)?;
-            let record: Record =
-                serde_json::from_slice(&bytes).map_err(|_| StoreError::StateCorrupt)?;
+            let (record, migrated) = match serde_json::from_slice::<Record>(&bytes) {
+                Ok(record) if record.schema == 2 => (
+                    migrate_lists(record, now, |source| source_intact(&root, source)),
+                    true,
+                ),
+                Ok(record) => (record, false),
+                Err(_) => serde_json::from_slice::<v1::Record>(&bytes)
+                    .ok()
+                    .and_then(|old| migrate(old, now, |source| source_intact(&root, source)))
+                    .map(|record| (record, true))
+                    .ok_or(StoreError::StateCorrupt)?,
+            };
             validate_record(&record, now)?;
-            Ok(record)
+            Ok((record, migrated))
         };
         let primary = decode(&root.join("state.json"));
-        let needs_checkpoint = primary.is_err();
+        let mut needs_checkpoint = !matches!(primary, Ok((_, false)));
         let record = match primary {
-            Ok(record) => record,
+            Ok((record, _)) => record,
             Err(StoreError::NotFound) if root.join("state.previous.json").exists() => {
-                decode(&root.join("state.previous.json"))?
+                decode(&root.join("state.previous.json"))?.0
             }
-            Err(StoreError::NotFound) => Record {
-                schema: 1,
-                highest_revision: seed_revision,
-                jitter: jitter(),
-                due: now,
-                attempted: None,
-                checked: None,
-                failure_streak: 0,
-                verification: 0,
-                current: None,
-                previous: None,
-                candidate: None,
-                rejected: None,
-            },
-            Err(StoreError::StateCorrupt) => decode(&root.join("state.previous.json"))?,
+            Err(StoreError::NotFound) => Record::fresh(seed_revision, now),
+            Err(StoreError::StateCorrupt) => {
+                let (record, migrated) = decode(&root.join("state.previous.json"))?;
+                needs_checkpoint |= migrated;
+                record
+            }
             Err(error) => return Err(error),
         };
         let store = Self {
@@ -123,28 +489,28 @@ impl OfficialStore {
             catalog: PolicyCatalog::deferred_reloadable(
                 package.identity.manifest_sha256,
                 move || {
-                    let mut sources = Vec::with_capacity(2);
-                    for (index, source) in package.sources.iter().enumerate() {
+                    let mut sources = Vec::with_capacity(package.sources.len());
+                    for source in &package.sources {
+                        let filter = filter_for(&source.id)
+                            .ok_or(zephium_blocker::BlockerCompileFailure::InvalidSource)?;
                         let bytes = read_source(&root, source).map_err(|_| {
                             zephium_blocker::BlockerCompileFailure::SourceUnavailable
                         })?;
                         let text = String::from_utf8(bytes)
                             .map_err(|_| zephium_blocker::BlockerCompileFailure::InvalidSource)?;
-                        let (version, rules) = validate_source(index, &text)
+                        let (version, rules, _) = validate_source(filter, &text)
                             .map_err(|_| zephium_blocker::BlockerCompileFailure::InvalidSource)?;
                         if version != source.version || rules != source.rules {
                             return Err(zephium_blocker::BlockerCompileFailure::SourceUnavailable);
                         }
-                        sources.push(PolicySource::new(
-                            SourceId::new(if index == 0 {
-                                "easylist"
-                            } else {
-                                "easyprivacy"
-                            })
-                            .expect("fixed source id"),
-                            SourceFormat::Standard,
-                            Arc::from(text),
-                        ));
+                        let id = SourceId::new(filter.id()).expect("fixed source id");
+                        let trusted = zephium_blocker::official_source_trusts_scriptlets(&id);
+                        let source = PolicySource::new(id, SourceFormat::Standard, Arc::from(text));
+                        sources.push(if trusted {
+                            source.trusting_scriptlets()
+                        } else {
+                            source
+                        });
                     }
                     StaticPolicyCatalog::new(sources)
                         .map_err(|_| zephium_blocker::BlockerCompileFailure::InvalidSource)
@@ -156,37 +522,10 @@ impl OfficialStore {
     /// Check retained source identity with a small fixed buffer before choosing
     /// the startup current/LKG snapshot. This does not parse or inflate lists.
     pub fn intact(&self, package: &Package) -> bool {
-        use std::io::Read;
-        package.sources.iter().all(|source| {
-            let Some(mut file) = crate::file_identity::open_verified_regular(
-                &self.root.join(object_name(&source.sha256)),
-            ) else {
-                return false;
-            };
-            let Ok(metadata) = file.metadata() else {
-                return false;
-            };
-            if metadata.len() != source.bytes {
-                return false;
-            }
-            let mut digest = Sha256::new();
-            let mut total = 0u64;
-            let mut buffer = [0u8; 65536];
-            loop {
-                match file.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(bytes) => {
-                        total = total.saturating_add(bytes as u64);
-                        if total > source.bytes {
-                            return false;
-                        }
-                        digest.update(&buffer[..bytes]);
-                    }
-                    Err(_) => return false,
-                }
-            }
-            total == source.bytes && <[u8; 32]>::from(digest.finalize()) == source.sha256
-        })
+        package
+            .sources
+            .iter()
+            .all(|source| source_intact(&self.root, source))
     }
 
     pub fn cached_bytes(&self, source: &Source) -> Result<Vec<u8>, StoreError> {
@@ -195,7 +534,7 @@ impl OfficialStore {
 
     pub fn put_source(
         &self,
-        index: usize,
+        filter: OfficialFilter,
         bytes: &[u8],
         validators: FilterValidators,
         previous: Option<&Source>,
@@ -204,28 +543,32 @@ impl OfficialStore {
             return Err(StoreError::ActivationSealed);
         }
         let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidPackage)?;
-        let (version, rules) = validate_source(index, text)?;
-        if previous.is_some_and(|old| rules < old.rules / 2 || (bytes.len() as u64) < old.bytes / 2)
+        let (version, rules, interval) = validate_source(filter, text)?;
+        if spec(filter).halving_guard
+            && previous
+                .is_some_and(|old| rules < old.rules / 2 || (bytes.len() as u64) < old.bytes / 2)
         {
             return Err(StoreError::InvalidPackage);
         }
-        let sha256 = Sha256::digest(bytes).into();
+        let sha256 = Sha256::digest(bytes);
         let path = self.root.join(object_name(&sha256));
         let identical = read_bounded_regular(&path, MAX_SOURCE).is_ok_and(|stored| stored == bytes);
         if !identical {
             atomic_write(&path, bytes)?;
         }
         Ok(Source {
+            id: filter.id().to_owned(),
             sha256,
             bytes: bytes.len() as u64,
             rules,
             version,
             etag: validators.etag,
             last_modified: validators.last_modified,
+            interval,
         })
     }
 
-    pub fn new_package(&self, sources: [Source; 2], now: u64) -> Result<Package, StoreError> {
+    pub fn new_package(&self, sources: Vec<Source>, now: u64) -> Result<Package, StoreError> {
         let revision = self
             .record
             .highest_revision
@@ -244,10 +587,10 @@ impl OfficialStore {
         Ok(Package {
             identity: CatalogIdentity {
                 revision,
-                manifest_sha256: Sha256::digest(manifest).into(),
+                manifest_sha256: Sha256::digest(manifest),
                 created_unix: now,
                 expires_unix: now.saturating_add(7 * DAY),
-                source_count: 2,
+                source_count: u32::try_from(sources.len()).map_err(|_| StoreError::StateCorrupt)?,
                 source_bytes: sources.iter().map(|s| s.bytes).sum(),
             },
             sources,
@@ -292,11 +635,12 @@ impl OfficialStore {
             self.record.current.as_ref(),
             self.record.previous.as_ref(),
             self.record.candidate.as_ref(),
-            self.record.rejected.as_ref(),
         ]
         .into_iter()
         .flatten()
-        .flat_map(|p| p.sources.iter().map(|s| object_name(&s.sha256)))
+        .flat_map(|p| p.sources.iter())
+        .chain(&self.record.retained)
+        .map(|s| object_name(&s.sha256))
         .collect();
         let mut count = 0;
         for entry in std::fs::read_dir(&self.root).map_err(|_| StoreError::Io)? {
@@ -352,15 +696,13 @@ fn object_name(hash: &[u8; 32]) -> String {
 }
 fn read_source(root: &Path, source: &Source) -> Result<Vec<u8>, StoreError> {
     let bytes = read_bounded_regular(&root.join(object_name(&source.sha256)), source.bytes)?;
-    if bytes.len() as u64 != source.bytes
-        || <[u8; 32]>::from(Sha256::digest(&bytes)) != source.sha256
-    {
+    if bytes.len() as u64 != source.bytes || Sha256::digest(&bytes) != source.sha256 {
         return Err(StoreError::ObjectCorrupt);
     }
     Ok(bytes)
 }
 fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
-    if record.schema != 1
+    if record.schema != SCHEMA
         || record.highest_revision == 0
         || record.jitter > 6 * 60 * 60
         || record.due > now.saturating_add(31 * DAY)
@@ -372,6 +714,21 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
         || record
             .attempted
             .is_some_and(|t| t > now.saturating_add(31 * DAY))
+        || record.schedule.len() != OfficialFilter::ALL.len()
+        || record.schedule.iter().any(|s| {
+            s.due > now.saturating_add(31 * DAY)
+                || s.failure_streak > 8
+                || s.stale
+                    .is_some_and(|(_, seen)| seen == 0 || seen >= REVERT_AFTER)
+                || s.checked.is_some_and(|t| t > now.saturating_add(31 * DAY))
+        })
+        || record.retained.len() > OfficialFilter::ALL.len()
+        || record
+            .retained
+            .iter()
+            .enumerate()
+            .any(|(n, s)| record.retained[..n].iter().any(|other| other.id == s.id))
+        || !record.retained.iter().all(valid_source)
     {
         return Err(StoreError::StateCorrupt);
     }
@@ -379,14 +736,19 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
         record.current.as_ref(),
         record.previous.as_ref(),
         record.candidate.as_ref(),
-        record.rejected.as_ref(),
     ]
     .into_iter()
     .flatten()
     {
         if package.identity.revision == 0
             || package.identity.revision > record.highest_revision
-            || package.identity.source_count != 2
+            || package.identity.source_count as usize != OfficialFilter::ALL.len()
+            || package.sources.len() != OfficialFilter::ALL.len()
+            || !package
+                .sources
+                .iter()
+                .zip(OfficialFilter::ALL)
+                .all(|(source, filter)| source.id == filter.id())
             || package.identity.created_unix >= package.identity.expires_unix
             || package.identity.expires_unix
                 != package.identity.created_unix.saturating_add(7 * DAY)
@@ -405,63 +767,85 @@ fn validate_record(record: &Record, now: u64) -> Result<(), StoreError> {
                 .collect::<Vec<_>>(),
         ))
         .map_err(|_| StoreError::StateCorrupt)?;
-        if package.identity.manifest_sha256 != <[u8; 32]>::from(Sha256::digest(manifest)) {
+        if package.identity.manifest_sha256 != Sha256::digest(manifest) {
             return Err(StoreError::StateCorrupt);
         }
-        for source in &package.sources {
-            if source.bytes == 0
-                || source.bytes > MAX_SOURCE
-                || source.rules < 1000
-                || source.rules > 500000
-                || source.version.len() != 12
-                || !source.version.bytes().all(|b| b.is_ascii_digit())
-                || [&source.etag, &source.last_modified]
-                    .into_iter()
-                    .flatten()
-                    .any(|s| {
-                        s.is_empty() || s.len() > 512 || !s.bytes().all(|b| (32..=126).contains(&b))
-                    })
-            {
-                return Err(StoreError::StateCorrupt);
-            }
+        if !package.sources.iter().all(valid_source) {
+            return Err(StoreError::StateCorrupt);
         }
     }
     Ok(())
 }
-fn validate_source(index: usize, text: &str) -> Result<(String, u64), StoreError> {
-    if text.len() < 256 * 1024
+fn valid_source(source: &Source) -> bool {
+    let Some(filter) = filter_for(&source.id) else {
+        return false;
+    };
+    source.bytes != 0
+        && source.bytes <= MAX_SOURCE
+        && (spec(filter).min_rules..=500000).contains(&source.rules)
+        && source.version.len() == 12
+        && source.version.bytes().all(|b| b.is_ascii_digit())
+        && (4 * HOUR..=DAY).contains(&source.interval)
+        && [&source.etag, &source.last_modified]
+            .into_iter()
+            .flatten()
+            .all(|s| !s.is_empty() && s.len() <= 512 && s.bytes().all(|b| (32..=126).contains(&b)))
+}
+/// The list's version, rule count and check interval.
+fn validate_source(filter: OfficialFilter, text: &str) -> Result<(String, u64, u64), StoreError> {
+    let spec = spec(filter);
+    if text.len() < spec.min_bytes
         || text.len() as u64 > MAX_SOURCE
-        || !matches!(
-            text.lines().next(),
-            Some("[Adblock Plus 1.1]" | "[Adblock Plus 2.0]")
-        )
+        || (spec.adblock_header
+            && !matches!(
+                text.lines().next(),
+                Some("[Adblock Plus 1.1]" | "[Adblock Plus 2.0]")
+            ))
         || text.contains('\0')
     {
         return Err(StoreError::InvalidPackage);
     }
     let head = text.lines().take(32).collect::<Vec<_>>();
-    let title = if index == 0 {
-        "! Title: EasyList"
-    } else {
-        "! Title: EasyPrivacy"
-    };
-    if !head.contains(&title) || !head.contains(&"! Homepage: https://easylist.to/") {
+    if !head.contains(&spec.title) || spec.homepage.is_some_and(|line| !head.contains(&line)) {
         return Err(StoreError::InvalidPackage);
     }
-    let version = head
-        .iter()
-        .find_map(|line| line.strip_prefix("! Version: "))
-        .filter(|s| s.len() == 12 && s.bytes().all(|b| b.is_ascii_digit()))
-        .ok_or(StoreError::InvalidPackage)?
-        .to_owned();
+    let field = |name: &str| head.iter().find_map(|line| line.strip_prefix(name));
+    let version = if spec.dated {
+        field("! Last modified: ")
+            .and_then(zephium_update_transport::official_filters::version_from_date)
+    } else {
+        field("! Version: ")
+            .filter(|s| s.len() == 12 && s.bytes().all(|b| b.is_ascii_digit()))
+            .map(str::to_owned)
+    }
+    .ok_or(StoreError::InvalidPackage)?;
     let rules = text
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('!') && !l.starts_with('['))
         .count() as u64;
-    if !(1000..=500000).contains(&rules) {
+    if !(spec.min_rules..=500000).contains(&rules) {
         return Err(StoreError::InvalidPackage);
     }
-    Ok((version, rules))
+    let interval = if spec.follows_expires {
+        field("! Expires: ")
+            .and_then(expires_seconds)
+            .unwrap_or(6 * HOUR)
+            .clamp(4 * HOUR, DAY)
+    } else {
+        DAY
+    };
+    Ok((version, rules, interval))
+}
+/// `8 hours`, `5 days` or `4 days (update frequency)` in seconds.
+fn expires_seconds(value: &str) -> Option<u64> {
+    let mut words = value.split_whitespace();
+    let count: u64 = words.next()?.parse().ok()?;
+    let unit = match words.next()?.trim_end_matches('s') {
+        "hour" => HOUR,
+        "day" => DAY,
+        _ => return None,
+    };
+    count.checked_mul(unit)
 }
 fn jitter() -> u64 {
     std::time::SystemTime::now()
@@ -482,22 +866,44 @@ pub(super) fn object_name_for_test(hash: &[u8; 32]) -> String {
     object_name(hash)
 }
 
+/// A valid copy of `filter`'s list with enough rules for its spec.
+#[cfg(test)]
+pub(super) fn test_list(filter: OfficialFilter) -> Vec<u8> {
+    let spec = spec(filter);
+    let mut text = String::new();
+    if spec.adblock_header {
+        text.push_str("[Adblock Plus 2.0]\n! Version: 202609300001\n");
+    } else {
+        text.push_str("! Last modified: Wed, 30 Sep 2026 00:01:00 +0000\n! Expires: 8 hours\n");
+    }
+    text.push_str(spec.title);
+    text.push('\n');
+    if let Some(homepage) = spec.homepage {
+        text.push_str(homepage);
+        text.push('\n');
+    }
+    for n in 0..12000 {
+        text.push_str(&format!("||ads{n}.{}.example.invalid^\n", filter.id()));
+    }
+    text.into_bytes()
+}
+
+/// One valid descriptor per official list.
+#[cfg(test)]
+pub(super) fn test_sources(store: &OfficialStore, validators: &FilterValidators) -> Vec<Source> {
+    OfficialFilter::ALL
+        .into_iter()
+        .map(|filter| {
+            store
+                .put_source(filter, &test_list(filter), validators.clone(), None)
+                .unwrap()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn source(index: usize) -> Vec<u8> {
-        let title = if index == 0 {
-            "EasyList"
-        } else {
-            "EasyPrivacy"
-        };
-        let header = if index == 0 { "2.0" } else { "1.1" };
-        let mut text=format!("[Adblock Plus {header}]\n! Version: 202609300001\n! Title: {title}\n! Homepage: https://easylist.to/\n");
-        for n in 0..12000 {
-            text.push_str(&format!("||ads{n}.example.invalid^\n"));
-        }
-        text.into_bytes()
-    }
     fn root() -> tempfile::TempDir {
         tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap()
     }
@@ -507,14 +913,7 @@ mod tests {
         let directory = root();
         let path = directory.path().join("official");
         let mut store = OfficialStore::open(path.clone(), 100, 1000).unwrap();
-        let sources = [
-            store
-                .put_source(0, &source(0), FilterValidators::default(), None)
-                .unwrap(),
-            store
-                .put_source(1, &source(1), FilterValidators::default(), None)
-                .unwrap(),
-        ];
+        let sources = test_sources(&store, &FilterValidators::default());
         let package = store.new_package(sources, 1000).unwrap();
         let mut next = store.record.clone();
         next.highest_revision = package.identity.revision;
@@ -537,19 +936,17 @@ mod tests {
                 .identity,
             package.identity
         );
-        let mut changed = source(0);
+        let mut changed = test_list(OfficialFilter::EasyList);
         changed.extend_from_slice(b"||another.example.invalid^\n");
-        let sources = [
-            store
-                .put_source(
-                    0,
-                    &changed,
-                    FilterValidators::default(),
-                    Some(&package.sources[0]),
-                )
-                .unwrap(),
-            package.sources[1].clone(),
-        ];
+        let mut sources = package.sources.clone();
+        sources[0] = store
+            .put_source(
+                OfficialFilter::EasyList,
+                &changed,
+                FilterValidators::default(),
+                Some(&package.sources[0]),
+            )
+            .unwrap();
         let newer = store.new_package(sources, 1002).unwrap();
         let mut next = store.record.clone();
         next.highest_revision = newer.identity.revision;
@@ -573,7 +970,12 @@ mod tests {
         let directory = root();
         let store = OfficialStore::open(directory.path().join("official"), 100, 1000).unwrap();
         let source = store
-            .put_source(0, &source(0), FilterValidators::default(), None)
+            .put_source(
+                OfficialFilter::EasyList,
+                &test_list(OfficialFilter::EasyList),
+                FilterValidators::default(),
+                None,
+            )
             .unwrap();
         let path = store.root.join(object_name(&source.sha256));
         atomic_write(&path, b"wrong source").unwrap();
@@ -595,14 +997,7 @@ mod tests {
         drop(store);
         let recovered = OfficialStore::open(path, 100, 1001).unwrap();
         assert_eq!(recovered.record.due, 1000);
-        let sources = [
-            recovered
-                .put_source(0, &source(0), FilterValidators::default(), None)
-                .unwrap(),
-            recovered
-                .put_source(1, &source(1), FilterValidators::default(), None)
-                .unwrap(),
-        ];
+        let sources = test_sources(&recovered, &FilterValidators::default());
         let mut package = recovered.new_package(sources, 1000).unwrap();
         package.sources[0].sha256[0] ^= 1;
         let mut record = recovered.record.clone();
@@ -612,5 +1007,338 @@ mod tests {
             validate_record(&record, 1001),
             Err(StoreError::StateCorrupt)
         );
+    }
+
+    #[test]
+    fn each_list_is_checked_against_its_own_spec() {
+        for filter in OfficialFilter::ALL {
+            let (version, rules, interval) =
+                validate_source(filter, std::str::from_utf8(&test_list(filter)).unwrap()).unwrap();
+            assert_eq!(rules, 12000, "{filter:?}");
+            assert_eq!(version.len(), 12);
+            let expected = if filter == OfficialFilter::UblockQuickFixes {
+                8 * HOUR
+            } else {
+                DAY
+            };
+            assert_eq!(interval, expected, "{filter:?}");
+        }
+        // uBO's lists carry no version; theirs comes from the modification date.
+        let ublock = test_list(OfficialFilter::UblockFilters);
+        let text = std::str::from_utf8(&ublock).unwrap();
+        assert_eq!(
+            validate_source(OfficialFilter::UblockFilters, text)
+                .unwrap()
+                .0,
+            "202609300001"
+        );
+        // A list cannot pass as another one.
+        assert_eq!(
+            validate_source(OfficialFilter::EasyList, text),
+            Err(StoreError::InvalidPackage)
+        );
+        let undated = text.replace("! Last modified:", "! Modified:");
+        assert_eq!(
+            validate_source(OfficialFilter::UblockFilters, &undated),
+            Err(StoreError::InvalidPackage)
+        );
+    }
+
+    #[test]
+    fn quick_fixes_follow_their_expires_header_within_bounds() {
+        let list = String::from_utf8(test_list(OfficialFilter::UblockQuickFixes)).unwrap();
+        for (expires, interval) in [
+            ("8 hours", 8 * HOUR),
+            ("1 hour", 4 * HOUR),
+            ("5 days", DAY),
+            ("soon", 6 * HOUR),
+        ] {
+            let text = list.replace("! Expires: 8 hours", &format!("! Expires: {expires}"));
+            assert_eq!(
+                validate_source(OfficialFilter::UblockQuickFixes, &text)
+                    .unwrap()
+                    .2,
+                interval,
+                "{expires}"
+            );
+        }
+        let missing = list.replace("! Expires: 8 hours\n", "");
+        assert_eq!(
+            validate_source(OfficialFilter::UblockQuickFixes, &missing)
+                .unwrap()
+                .2,
+            6 * HOUR
+        );
+    }
+
+    #[test]
+    fn quick_fixes_may_shrink_where_the_daily_lists_may_not() {
+        let directory = root();
+        let store = OfficialStore::open(directory.path().join("official"), 100, 1000).unwrap();
+        let sources = test_sources(&store, &FilterValidators::default());
+        let shrink = |filter: OfficialFilter| {
+            let text = String::from_utf8(test_list(filter)).unwrap();
+            let kept: Vec<&str> = text.lines().take(5000).collect();
+            format!("{}\n", kept.join("\n")).into_bytes()
+        };
+        for (index, filter) in OfficialFilter::ALL.into_iter().enumerate() {
+            let result = store.put_source(
+                filter,
+                &shrink(filter),
+                FilterValidators::default(),
+                Some(&sources[index]),
+            );
+            assert_eq!(
+                result.is_ok(),
+                filter == OfficialFilter::UblockQuickFixes,
+                "{filter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_schema_state_keeps_its_downloaded_lists() {
+        let directory = root();
+        let path = directory.path().join("official");
+        create_private_directory(&path).unwrap();
+        let mut ids = Vec::new();
+        let mut old_sources = Vec::new();
+        for filter in [OfficialFilter::EasyList, OfficialFilter::EasyPrivacy] {
+            let bytes = test_list(filter);
+            let sha256 = Sha256::digest(&bytes);
+            atomic_write(&path.join(object_name(&sha256)), &bytes).unwrap();
+            ids.push(filter.id());
+            old_sources.push(serde_json::json!({
+                "sha256": sha256,
+                "bytes": bytes.len(),
+                "rules": 12000,
+                "version": "202609300001",
+                "etag": "\"stable\"",
+                "last_modified": null,
+            }));
+        }
+        let identity = |revision: u64| {
+            serde_json::json!({
+                "revision": revision,
+                "manifest_sha256": vec![7u8; 32],
+                "created_unix": 900,
+                "expires_unix": 900 + 7 * DAY,
+                "source_count": 2,
+                "source_bytes": 1,
+            })
+        };
+        let state = serde_json::json!({
+            "schema": 1,
+            "highest_revision": 101,
+            "jitter": 60,
+            "due": 5000,
+            "attempted": 950,
+            "checked": 950,
+            "failure_streak": 0,
+            "verification": 3,
+            "current": { "identity": identity(101), "sources": old_sources },
+            "previous": null,
+            "candidate": null,
+            "rejected": null,
+        });
+        atomic_write(
+            &path.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let mut store = OfficialStore::open(path.clone(), 100, 1000).unwrap();
+        assert_eq!(store.record.highest_revision, 101);
+        assert_eq!(store.record.jitter, 60);
+        assert_eq!(store.record.verification, 3);
+        assert!(store.record.current.is_none());
+        assert!(store.record.schedule.iter().all(|s| s.due == 1000));
+        let retained: Vec<&str> = store
+            .record
+            .retained
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(retained, ids);
+        for filter in [OfficialFilter::EasyList, OfficialFilter::EasyPrivacy] {
+            let prior = store.record.prior(filter).unwrap();
+            assert_eq!(prior.etag.as_deref(), Some("\"stable\""));
+            assert!(store.cached_bytes(prior).is_ok(), "{filter:?}");
+        }
+        assert!(store.record.prior(OfficialFilter::UblockFilters).is_none());
+        // The worker's first persist writes the migrated state in the new schema.
+        store.persist(store.record.clone()).unwrap();
+        let written: Record =
+            serde_json::from_slice(&std::fs::read(path.join("state.json")).unwrap()).unwrap();
+        assert_eq!(written.schema, SCHEMA);
+        assert_eq!(written.retained.len(), 2);
+    }
+
+    #[test]
+    fn a_first_schema_state_keeps_its_previous_lists_when_the_current_ones_are_gone() {
+        // A current object that is missing, or of the right size with other bytes.
+        for tampered in [false, true] {
+            migrates_to_previous_lists(tampered);
+        }
+    }
+
+    fn migrates_to_previous_lists(tampered: bool) {
+        let directory = root();
+        let path = directory.path().join("official");
+        create_private_directory(&path).unwrap();
+        let source = |bytes: &[u8], version: &str| {
+            serde_json::json!({
+                "sha256": Sha256::digest(bytes),
+                "bytes": bytes.len(),
+                "rules": 12000,
+                "version": version,
+                "etag": null,
+                "last_modified": null,
+            })
+        };
+        let (mut current, mut previous) = (Vec::new(), Vec::new());
+        for filter in [OfficialFilter::EasyList, OfficialFilter::EasyPrivacy] {
+            let older = test_list(filter);
+            atomic_write(&path.join(object_name(&Sha256::digest(&older))), &older).unwrap();
+            previous.push(source(&older, "202609290001"));
+            let mut newer = test_list(filter);
+            newer.extend_from_slice(b"||newer.example.invalid^\n");
+            // Only the second current list is on disk intact.
+            let object = path.join(object_name(&Sha256::digest(&newer)));
+            if filter == OfficialFilter::EasyPrivacy {
+                atomic_write(&object, &newer).unwrap();
+            } else if tampered {
+                let mut other = newer.clone();
+                *other.last_mut().unwrap() = b' ';
+                atomic_write(&object, &other).unwrap();
+            }
+            current.push(source(&newer, "202609300001"));
+        }
+        let identity = |revision: u64| {
+            serde_json::json!({
+                "revision": revision,
+                "manifest_sha256": vec![7u8; 32],
+                "created_unix": 900,
+                "expires_unix": 900 + 7 * DAY,
+                "source_count": 2,
+                "source_bytes": 1,
+            })
+        };
+        let state = serde_json::json!({
+            "schema": 1,
+            "highest_revision": 102,
+            "jitter": 60,
+            "due": 5000,
+            "attempted": 950,
+            "checked": 950,
+            "failure_streak": 0,
+            "verification": 3,
+            "current": { "identity": identity(102), "sources": current },
+            "previous": { "identity": identity(101), "sources": previous },
+            "candidate": null,
+            "rejected": null,
+        });
+        atomic_write(
+            &path.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let store = OfficialStore::open(path.clone(), 100, 1000).unwrap();
+        let versions: Vec<&str> = store
+            .record
+            .retained
+            .iter()
+            .map(|s| s.version.as_str())
+            .collect();
+        assert_eq!(
+            versions,
+            ["202609290001", "202609290001"],
+            "tampered {tampered}"
+        );
+        for source in &store.record.retained {
+            assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
+    }
+
+    #[test]
+    fn a_record_from_before_the_other_ublock_lists_keeps_the_lists_it_has() {
+        let directory = root();
+        let path = directory.path().join("official");
+        create_private_directory(&path).unwrap();
+        let mut sources = Vec::new();
+        for filter in &OfficialFilter::ALL[..4] {
+            let bytes = test_list(*filter);
+            // EasyPrivacy's copy is gone from disk.
+            if *filter != OfficialFilter::EasyPrivacy {
+                atomic_write(&path.join(object_name(&Sha256::digest(&bytes))), &bytes).unwrap();
+            }
+            sources.push(serde_json::json!({
+                "id": filter.id(),
+                "sha256": Sha256::digest(&bytes),
+                "bytes": bytes.len(),
+                "rules": 12000,
+                "version": "202609300001",
+                "etag": null,
+                "last_modified": null,
+                "interval": DAY,
+            }));
+        }
+        let state = serde_json::json!({
+            "schema": 2,
+            "highest_revision": 102,
+            "jitter": 60,
+            "due": 5000,
+            "attempted": 950,
+            "checked": 950,
+            "failure_streak": 0,
+            "verification": 3,
+            "current": {
+                "identity": {
+                    "revision": 102,
+                    "manifest_sha256": vec![7u8; 32],
+                    "created_unix": 900,
+                    "expires_unix": 900 + 7 * DAY,
+                    "source_count": 4,
+                    "source_bytes": 1,
+                },
+                "sources": sources,
+            },
+            "previous": null,
+            "candidate": null,
+            "schedule": [
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0 },
+                { "due": 5000, "failure_streak": 0, "rejected": vec![9u8; 32] },
+                { "due": 5000, "failure_streak": 0 },
+            ],
+            "retained": [],
+        });
+        atomic_write(
+            &path.join("state.json"),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        let store = OfficialStore::open(path, 100, 1000).unwrap();
+        assert_eq!(store.record.schema, SCHEMA);
+        assert_eq!(store.record.verification, 3);
+        assert!(store.record.current.is_none());
+        assert_eq!(store.record.schedule.len(), OfficialFilter::ALL.len());
+        assert!(store.record.schedule.iter().all(|s| s.due == 1000));
+        let kept: Vec<&str> = store
+            .record
+            .retained
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        // EasyPrivacy's bytes are gone; uBlock Origin's filters were a different list.
+        assert_eq!(kept, ["easylist", "ublock-quick-fixes"]);
+        for source in &store.record.retained {
+            assert!(store.cached_bytes(source).is_ok(), "{}", source.id);
+        }
+        assert!(store.record.prior(OfficialFilter::UblockFilters).is_none());
+        // uBlock Origin's filters keep their rejected copy; no other list has one.
+        for (filter, schedule) in OfficialFilter::ALL.iter().zip(&store.record.schedule) {
+            let expected = (*filter == OfficialFilter::UblockFilters).then_some([9u8; 32]);
+            assert_eq!(schedule.rejected, expected, "{}", filter.id());
+        }
     }
 }

@@ -9,7 +9,7 @@
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import KeyHint from "$shared/ui/KeyHint";
-  import { IS_MAC } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import { reducedMotion } from "$shared/lib/motion";
   import { WORDMARK } from "$shared/lib/wordmark";
   import * as motion from "$session/motion.svelte";
@@ -312,7 +312,7 @@
     </nav>
   </div>
 
-  <div class="top" data-tauri-drag-region>
+  <div class="top" data-tauri-drag-region data-native-caption={IS_WINDOWS || undefined}>
     {#if step !== "welcome" && step !== "ready"}
       <button type="button" class="skip" onclick={() => void finish()}>{m.onb_skip()}</button>
     {/if}
@@ -627,6 +627,12 @@
     gap: 8px;
     block-size: 52px;
     padding-inline-end: 20px;
+  }
+
+  /* Windows keeps its own caption buttons in this corner, 3 x 44 + 2 x 3
+     wide, and their input host takes every click over them. */
+  .top[data-native-caption] {
+    padding-inline-end: calc(3 * 44px + 2 * 3px + 12px);
   }
 
   .skip {
