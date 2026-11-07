@@ -170,6 +170,7 @@ pub(super) struct SuspendAttempt {
     deadline: std::time::Instant,
     started: std::sync::atomic::AtomicBool,
     expired: std::sync::atomic::AtomicBool,
+    cycle: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -1304,6 +1305,10 @@ impl EngineHost {
             }
             self.suspend_failed.retain(|id| next.contains(id));
             self.suspend_retries.retain(|id, _| next.contains(id));
+            self.dormant_cycles.retain(|id, _| next.contains(id));
+            for id in &next {
+                self.dormant_cycles.entry(*id).or_insert(request);
+            }
             let cancelled: Vec<_> = self
                 .views
                 .iter()
@@ -1379,7 +1384,9 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
-        self.suspend_refused(id);
+        if self.attempt_is_current(id, &attempt) {
+            self.suspend_refused(id);
+        }
         let timer = self
             .views
             .get_mut(&id)
@@ -1493,12 +1500,19 @@ impl EngineHost {
                     crate::platform::imp::resume(view);
                 }
             }
-            if self.desired_dormant.contains(&id) {
+            if self.desired_dormant.contains(&id) && self.attempt_is_current(id, &attempt) {
                 self.suspend_refused(id);
             }
         }
         self.refresh_missed_styles(id);
         self.pump_suspends();
+    }
+
+    /// Whether `attempt` was started in the page's current dormancy cycle: a
+    /// late answer from an earlier one settles without being counted.
+    #[cfg(target_os = "windows")]
+    fn attempt_is_current(&self, id: ItemId, attempt: &SuspendAttempt) -> bool {
+        self.dormant_cycles.get(&id) == Some(&attempt.cycle)
     }
 
     /// A refused suspension is asked once more after a pause; refused again,
@@ -1597,6 +1611,7 @@ impl EngineHost {
                 started: std::sync::atomic::AtomicBool::new(false),
                 expired: std::sync::atomic::AtomicBool::new(false),
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+                cycle: self.dormant_cycles.get(&id).copied().unwrap_or_default(),
             });
             let Some(view) = self.views.get_mut(&id) else {
                 continue;

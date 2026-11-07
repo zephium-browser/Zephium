@@ -723,6 +723,10 @@ pub(crate) struct EngineHost {
     /// The shell's number for the desired set above, echoed by a refusal.
     #[cfg(target_os = "windows")]
     dormant_request: u64,
+    /// The request under which each desired page last entered that set: its
+    /// dormancy cycle. Only an attempt of the current cycle counts a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_cycles: std::collections::HashMap<ItemId, u64>,
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
