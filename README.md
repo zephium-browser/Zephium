@@ -125,8 +125,9 @@ along.
 - Inactive tabs go to sleep and wake when you return, so memory stays low with
   many tabs open.
 - A native ad and tracker blocker, on by default, built on Brave's
-  [adblock-rust](https://github.com/brave/adblock-rust) with EasyList and
-  EasyPrivacy. Requests are stopped before a page can make them, and you can
+  [adblock-rust](https://github.com/brave/adblock-rust) with EasyList,
+  EasyPrivacy and uBlock Origin's filters. Requests are stopped before a page
+  can make them, and you can
   hide anything else on a page with a click.
 
 ### Designed to live in
@@ -267,7 +268,9 @@ Please report vulnerabilities privately, not in a public issue. See
 Zephium is licensed under the [Mozilla Public License 2.0](LICENSE).
 
 The bundled EasyList and EasyPrivacy filter lists are used under
-[CC BY-SA 3.0](assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt); see
+[CC BY-SA 3.0](assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt), and uBlock
+Origin's filters and quick fixes, unmodified, under
+[GPL-3.0](assets/blocker-seed/v1/LICENSE-GPL-3.0.txt); see
 [the notice](assets/blocker-seed/v1/NOTICE) for attribution.
 
 The Zephium name and logo are not licensed under the MPL.
@@ -275,5 +278,6 @@ The Zephium name and logo are not licensed under the MPL.
 ## Acknowledgements
 
 Zephium stands on [Tauri](https://tauri.app), [Wry](https://github.com/tauri-apps/wry),
-Brave's [adblock-rust](https://github.com/brave/adblock-rust) and
-[EasyList](https://easylist.to).
+Brave's [adblock-rust](https://github.com/brave/adblock-rust),
+[EasyList](https://easylist.to) and uBlock Origin's
+[uAssets](https://github.com/uBlockOrigin/uAssets).

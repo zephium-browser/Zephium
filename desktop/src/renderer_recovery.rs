@@ -14,6 +14,7 @@ pub(crate) struct Recovery {
     attempts: u8,
     pending: Option<u8>,
     terminal: bool,
+    restarting: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl Recovery {
     }
 
     pub(crate) fn crashed(&mut self) -> Action {
-        if self.terminal || self.pending.is_some() {
+        if std::mem::take(&mut self.restarting) || self.terminal || self.pending.is_some() {
             return Action::Ignore;
         }
         if self.attempts == 2 {
@@ -44,6 +45,18 @@ impl Recovery {
         self.attempts += 1;
         self.pending = Some(self.attempts);
         Action::Reload(self.attempts)
+    }
+
+    /// The next end of the content process is one the app asked for.
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn expect_restart(&mut self) {
+        self.restarting = true;
+    }
+
+    /// Whatever restart was asked for is over, ended or not.
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn restart_settled(&mut self) {
+        self.restarting = false;
     }
 
     pub(crate) fn ready(&mut self) -> bool {
@@ -159,6 +172,29 @@ pub(crate) fn failed(app: &AppHandle, label: &str, browser_exited: bool) {
     });
 }
 
+/// Marks the main document's next process end as asked for, not a crash.
+#[cfg(target_os = "macos")]
+pub(crate) fn expect_restart(app: &AppHandle) {
+    if let Some(renderers) = app.try_state::<Renderers>() {
+        renderers
+            .main
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect_restart();
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn restart_settled(app: &AppHandle) {
+    if let Some(renderers) = app.try_state::<Renderers>() {
+        renderers
+            .main
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .restart_settled();
+    }
+}
+
 /// The recovered document initialized; true once per recovery.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn ready(window: &WebviewWindow) -> bool {
@@ -213,6 +249,19 @@ mod tests {
         assert!(!recovery.timed_out(2));
         assert!(!recovery.ready());
         assert_eq!(recovery.crashed(), Action::Ignore);
+    }
+
+    #[test]
+    fn an_asked_for_restart_is_not_a_crash_and_never_hides_a_later_one() {
+        let mut recovery = Recovery::default();
+        recovery.expect_restart();
+        assert_eq!(recovery.crashed(), Action::Ignore);
+        assert_eq!(recovery.crashed(), Action::Reload(1));
+        assert!(recovery.ready());
+
+        recovery.expect_restart();
+        recovery.restart_settled();
+        assert_eq!(recovery.crashed(), Action::Reload(2));
     }
 
     #[test]

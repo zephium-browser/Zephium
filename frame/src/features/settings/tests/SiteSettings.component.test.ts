@@ -17,9 +17,9 @@ const saved: SitePermissionsView = {
   complete: true,
   kinds: ["camera", "microphone", "geolocation", "popups"],
   entries: [
-    { origin: "https://meet.example", kind: "camera", decision: "allow" },
-    { origin: "https://maps.example", kind: "geolocation", decision: "block" },
-    { origin: "https://mail.example", kind: "popups", decision: "allow" },
+    { origin: "https://meet.example", kind: "camera", decision: "allow", scheme: null },
+    { origin: "https://maps.example", kind: "geolocation", decision: "block", scheme: null },
+    { origin: "https://mail.example", kind: "popups", decision: "allow", scheme: null },
   ],
 };
 
@@ -33,11 +33,39 @@ test("saved decisions are grouped by permission and can be changed or removed", 
 
   await page.getByRole("button", { name: "Location · https://maps.example" }).click();
   await page.getByRole("option", { name: "Allow" }).click();
-  expect(native.set).toHaveBeenLastCalledWith("https://maps.example", "geolocation", "allow");
+  expect(native.set).toHaveBeenLastCalledWith("https://maps.example", "geolocation", "allow", null);
 
   await page.getByRole("button", { name: "Remove https://meet.example" }).click();
-  expect(native.set).toHaveBeenLastCalledWith("https://meet.example", "camera", null);
+  expect(native.set).toHaveBeenLastCalledWith("https://meet.example", "camera", null, null);
   expect(native.list).toHaveBeenCalledTimes(3);
+});
+
+test("an app link grant names its scheme, offers no Block and is removed by scheme", async () => {
+  const link = (scheme: string) => ({
+    origin: "https://meet.example",
+    kind: "app_links" as const,
+    decision: "allow" as const,
+    scheme,
+  });
+  native.list.mockResolvedValue({
+    ...saved,
+    kinds: [...saved.kinds, "app_links"],
+    entries: [link("zoommtg"), link("msteams")],
+  });
+  render(SiteSettings);
+  await expect.element(page.getByRole("region", { name: "Links to apps" })).toBeVisible();
+  await expect.element(page.getByText("zoommtg links", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("msteams links", { exact: true })).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Links to apps · https://meet.example · zoommtg links" })
+    .click();
+  await expect.element(page.getByRole("option", { name: "Allow" })).toBeVisible();
+  await expect.element(page.getByRole("option", { name: "Block" })).not.toBeInTheDocument();
+  await page.getByRole("option", { name: "Allow" }).click();
+
+  await page.getByRole("button", { name: "Remove https://meet.example · zoommtg links" }).click();
+  expect(native.set).toHaveBeenLastCalledWith("https://meet.example", "app_links", null, "zoommtg");
 });
 
 test("a failed change says so", async () => {

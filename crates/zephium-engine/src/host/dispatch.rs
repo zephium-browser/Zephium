@@ -253,8 +253,14 @@ enum HostTaskKey {
     // deadline (or the reverse) would leave the attempt's guard unsettled.
     #[cfg(target_os = "windows")]
     SuspendDeadline(ItemId),
+    // A suspend retry's timer: kept in the lifecycle band, so a full queue
+    // of ordinary work cannot drop it and leave a hidden page awake.
+    #[cfg(target_os = "windows")]
+    SuspendRetry(ItemId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
+    #[cfg(target_os = "macos")]
+    Scriptlets(ProfileId),
 }
 
 struct QueuedHostTask {
@@ -330,7 +336,7 @@ pub(crate) fn install(
     >,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
-) -> Result<(), String> {
+) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
     let _install_claim = HostInstallClaim::acquire()?;
     let user_content = super::scripts::UserContentRegistry::with_initial_global(
         initial_user_content_generation,
@@ -346,12 +352,32 @@ pub(crate) fn install(
     #[cfg(not(target_os = "windows"))]
     let content_rule_cache = crate::erasure::canonical_owned_root(&data_root.join("content-rules"))
         .map_err(|error| format!("cannot secure content-rule cache: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let scriptlet_root = crate::erasure::canonical_owned_root(&data_root.join("scriptlets"))
+        .map_err(|error| format!("cannot secure scriptlet packages: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let private_scriptlet_root =
+        crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
+            .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
         &data_root.join("private-runtime"),
         zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
+        &crate::platform::imp::WindowsLeftoverProcesses,
     )
     .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
+    #[cfg(target_os = "windows")]
+    for line in crate::platform::imp::generation_report_lines("private", private_runtime.report()) {
+        eprintln!("{line}");
+    }
+    #[cfg(target_os = "windows")]
+    let cleanup_advisory = private_runtime
+        .report()
+        .overdue
+        .is_some()
+        .then(zephium_core::runtime_security::RuntimeSecurityAdvisory::cleanup_overdue);
+    #[cfg(not(target_os = "windows"))]
+    let cleanup_advisory = None;
     HOST_SEALED.with(|sealed| sealed.set(false));
     PENDING.with(|pending| {
         pending
@@ -425,10 +451,15 @@ pub(crate) fn install(
             content_rule_preflight: None,
             #[cfg(not(target_os = "windows"))]
             preflight_cache_digests: Default::default(),
+            #[cfg(not(target_os = "windows"))]
+            retained_cache_digests: Vec::new(),
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            blocker_navigation: HashMap::new(),
             popup_sites: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_tab_download_ask: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificate_exceptions: HashMap::new(),
             page_styles: HashMap::new(),
@@ -485,6 +516,10 @@ pub(crate) fn install(
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             webext: Default::default(),
+            #[cfg(target_os = "macos")]
+            scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
+            #[cfg(target_os = "windows")]
+            scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
@@ -497,6 +532,8 @@ pub(crate) fn install(
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            suspend_retries: HashMap::new(),
             #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -543,8 +580,9 @@ pub(crate) fn install(
             erasure_attempts: HashMap::new(),
             sink: Sink::new(sink),
         });
-        Ok(())
-    })
+        Ok::<(), String>(())
+    })?;
+    Ok(cleanup_advisory)
 }
 
 // WebView2 construction pumps the Windows message loop. A nested main-thread
@@ -575,6 +613,7 @@ pub(super) fn try_open_native_tab(
     activity: crate::navigation_epoch::NavigationActivity,
     url: &str,
     features: wry::NewWindowFeatures,
+    clicked: bool,
 ) -> wry::NewWindowResponse {
     if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
         return wry::NewWindowResponse::Deny;
@@ -586,7 +625,22 @@ pub(super) fn try_open_native_tab(
         let Some(host) = slot.as_mut() else {
             return wry::NewWindowResponse::Deny;
         };
-        host.open_native_tab(source, permit, activity, url, features)
+        host.open_native_tab(source, permit, activity, url, features, clicked)
+    })
+}
+
+/// Synchronous: a key monitor must answer whether it consumed the event.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        slot.as_ref()
+            .is_some_and(|host| host.webext.perform_command(event))
     })
 }
 
@@ -1144,6 +1198,28 @@ pub(super) fn with_extension_lifecycle<F>(
     );
 }
 
+/// The profile's scriptlet context is in place, or its wait timed out.
+#[cfg(target_os = "macos")]
+pub(super) fn with_scriptlets_ready<F>(profile: ProfileId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::Scriptlets(profile)),
+        f,
+    );
+}
+
+/// A view took, or failed to take, a replaced scriptlet program.
+#[cfg(target_os = "windows")]
+pub(super) fn with_scriptlets<F>(f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(HostTaskPriority::Lifecycle, None, f);
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn with_profile_exit<F>(
     profile: ProfileId,
@@ -1167,6 +1243,18 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::Suspend(id)),
+        f,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::SuspendRetry(id)),
         f,
     )
 }

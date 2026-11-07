@@ -23,6 +23,7 @@ test("resuming after a pause starts a fresh time-left estimate", async () => {
     received: "0",
     total: "10000",
     error: null,
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => ({
     kind: call.kind === "list" ? "page" : "updates",
@@ -82,6 +83,7 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
     received: "10",
     total: "100",
     error: null,
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -145,6 +147,7 @@ test("a folder the system refused says so once and offers another folder", async
     received: "0",
     total: null,
     error: "permission",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -194,6 +197,7 @@ test.each<[DownloadError, string]>([
       received: "10",
       total: "100",
       error,
+      insecure: false,
     };
     native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
       call.kind === "list"
@@ -236,6 +240,7 @@ test("retry resumes a retained interrupted transfer by ID and keeps cancellation
     received: "10",
     total: "100",
     error: "connection_lost",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "resume") {
@@ -284,6 +289,7 @@ test("a resumable short response explains retry without presenting a finished co
     received: "10",
     total: "100",
     error: "integrity",
+    insecure: false,
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
     call.kind === "list"
@@ -354,6 +360,7 @@ const base: DownloadView = {
   received: "10",
   total: "100",
   error: null,
+  insecure: false,
 };
 
 test("a receiving download can be paused and then resumed, and a pause is not shown as a problem", async () => {

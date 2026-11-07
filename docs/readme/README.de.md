@@ -133,8 +133,8 @@ die Arbeitsfläche.
   zurückkehrst. So bleibt der Speicherverbrauch auch mit vielen offenen Tabs
   niedrig.
 - Ein nativer Werbe- und Trackerblocker, standardmäßig aktiv, aufgebaut auf
-  Braves [adblock-rust](https://github.com/brave/adblock-rust) mit EasyList und
-  EasyPrivacy. Anfragen werden gestoppt, bevor eine Seite sie stellen kann, und
+  Braves [adblock-rust](https://github.com/brave/adblock-rust) mit EasyList,
+  EasyPrivacy und den Filtern von uBlock Origin. Anfragen werden gestoppt, bevor eine Seite sie stellen kann, und
   alles andere auf einer Seite kannst du mit einem Klick ausblenden.
 
 ### Gemacht, um darin zu leben
