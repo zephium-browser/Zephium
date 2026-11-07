@@ -27,7 +27,9 @@ pub struct StdioServer {
 
 /// The running child; dropping it ends the server and its group.
 pub struct Process {
-    child: Child,
+    child: Option<Child>,
+    #[cfg(all(test, unix))]
+    before_escalation: Option<Box<dyn FnOnce() + Send>>,
     group: Option<i32>,
     #[cfg(windows)]
     job: windows::Job,
@@ -39,6 +41,12 @@ impl Drop for Process {
         self.job.stop();
         #[cfg(unix)]
         if let Some(group) = self.group {
+            // Retain the unreaped leader until SIGKILL so its pid (and pgid)
+            // cannot be reused, including if spawning the worker fails.
+            let child = std::sync::Arc::new(self.child.take());
+            let retained = child.clone();
+            #[cfg(test)]
+            let before_escalation = self.before_escalation.take();
             // SAFETY: a negative pid addresses the group this process created
             // for its own child; no other process is named.
             unsafe {
@@ -47,11 +55,16 @@ impl Drop for Process {
             if std::thread::Builder::new()
                 .name("mcp-stop".into())
                 .spawn(move || {
+                    #[cfg(test)]
+                    if let Some(before_escalation) = before_escalation {
+                        before_escalation();
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     // SAFETY: this is the child's process group, as above.
                     unsafe {
                         libc::kill(-group, libc::SIGKILL);
                     }
+                    drop(retained);
                 })
                 .is_err()
             {
@@ -63,7 +76,9 @@ impl Drop for Process {
         }
         #[cfg(not(unix))]
         let _ = self.group;
-        let _ = self.child.start_kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -107,7 +122,9 @@ impl StdioServer {
         }
         Ok((
             Process {
-                child,
+                child: Some(child),
+                #[cfg(all(test, unix))]
+                before_escalation: None,
                 group,
                 #[cfg(windows)]
                 job,
@@ -243,13 +260,42 @@ mod tests {
         })
         .await
         .expect("fixture did not report its descendant");
-        assert!(
-            tokio::time::timeout(Duration::from_secs(10), process.child.wait())
-                .await
-                .expect("fixture parent did not exit")
-                .unwrap()
-                .success()
-        );
+        #[cfg(not(unix))]
+        assert!(tokio::time::timeout(
+            Duration::from_secs(10),
+            process.child.as_mut().unwrap().wait()
+        )
+        .await
+        .expect("fixture parent did not exit")
+        .unwrap()
+        .success());
+        #[cfg(unix)]
+        {
+            // Observe exit without reaping the leader or releasing its pid.
+            let leader = process.child.as_mut().unwrap().id().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+                    assert_eq!(
+                        unsafe {
+                            libc::waitid(
+                                libc::P_PID,
+                                leader,
+                                &mut info,
+                                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                            )
+                        },
+                        0
+                    );
+                    if info.si_pid == i32::try_from(leader).unwrap() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture parent did not exit");
+        }
         (process, descendant, output.into_inner())
     }
 
@@ -274,6 +320,48 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn cleanup_reserves_the_exited_leader_until_escalation() {
+        let (mut process, _, mut stdout) = orphaned_descendant().await;
+        let leader = process.child.as_ref().unwrap().id().unwrap();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (started, worker) = std::sync::mpsc::channel();
+        process.before_escalation = Some(Box::new(move || {
+            started.send(()).unwrap();
+            let _ = gate.recv();
+        }));
+        drop(process);
+        worker.recv().unwrap();
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                leader,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        // Release cleanup even if the ownership assertion fails.
+        drop(release);
+        assert_eq!(result, 0, "leader was reaped before escalation");
+        assert_eq!(info.si_pid, i32::try_from(leader).unwrap());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while unsafe { libc::kill(i32::try_from(leader).unwrap(), 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader was not reaped after escalation");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn dropping_server_kills_a_group_ignoring_sigterm() {
         let server = StdioServer {
             program: "/bin/sh".into(),
@@ -284,7 +372,7 @@ mod tests {
             env: vec![],
             cwd: None,
         };
-        let (process, stdout, stdin) = server.spawn().unwrap();
+        let (mut process, stdout, stdin) = server.spawn().unwrap();
         drop(stdin);
         let group = process.group.unwrap();
         let mut stdout = BufReader::new(stdout);
@@ -295,9 +383,17 @@ mod tests {
             .unwrap();
         let descendant: i32 = line.trim().parse().unwrap();
         assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
-        let started = std::time::Instant::now();
+        let (started, worker) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        process.before_escalation = Some(Box::new(move || {
+            started.send(std::thread::current().id()).unwrap();
+            let _ = gate.recv();
+        }));
         drop(process);
-        assert!(started.elapsed() < Duration::from_millis(100));
+        // Drop returns while escalation is still blocked on this test.
+        let worker_thread = worker.recv().unwrap();
+        drop(release);
+        assert_ne!(worker_thread, std::thread::current().id());
         let ended = tokio::time::timeout(
             Duration::from_secs(3),
             tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
