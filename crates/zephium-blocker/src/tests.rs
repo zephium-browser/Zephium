@@ -1837,9 +1837,11 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
     };
     let other_rules = [
         "||ads.example^",
-        // Counted: the blocked path, a host below the blocked one, a host
-        // above it, and a $badfilter for the badware rule itself.
+        // Counted: the blocked path, a path the blocked one starts with, a
+        // host below the blocked one, a host above it, and a $badfilter for
+        // the badware rule itself.
         "@@||cdn.example/bad/ok.js",
+        "@@||cdn.example/bad$script",
         "@@||sub.scam.example^$script",
         "@@||hosting.example/js/$script",
         "||scam.example^$all,badfilter",
@@ -1867,10 +1869,41 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
         .unwrap();
     let shadowed =
         |rules: &crate::CompiledRules| rules.report().runtime().unwrap().badware_shadowed_rules();
-    assert_eq!(shadowed(&compiled), 4);
+    assert_eq!(shadowed(&compiled), 5);
     // Without the badware list nothing is shadowed.
     let alone = Compiler::default()
         .compile(CompileTarget::Runtime, vec![other()])
         .unwrap();
     assert_eq!(shadowed(&alone), 0);
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
+    use std::fmt::Write as _;
+    // Many blocks and exceptions on one host, on disjoint paths, and one
+    // exception for a path inside a blocked one.
+    let (mut blocks, mut exceptions) = (String::new(), String::new());
+    for n in 0..10_000 {
+        writeln!(blocks, "||crowded.example/block-{n}/$script").unwrap();
+        writeln!(exceptions, "@@||crowded.example/allow-{n}/$script").unwrap();
+    }
+    exceptions.push_str("@@||crowded.example/block-7/ok.js$script\n");
+    let compiled = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                FilterSource::new(id("ublock-badware"), SourceFormat::Standard, blocks),
+                FilterSource::new(id("maintained"), SourceFormat::Standard, exceptions),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        compiled
+            .report()
+            .runtime()
+            .unwrap()
+            .badware_shadowed_rules(),
+        1
+    );
 }

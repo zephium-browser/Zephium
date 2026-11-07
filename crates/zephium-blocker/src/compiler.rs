@@ -992,19 +992,34 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
         return 0;
     }
     let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
-    // Each block under its host and under every domain above it, so an
-    // exception looks up blocks on related hosts only, not every block.
-    let mut by_host: std::collections::HashMap<&str, Vec<&Parsed>> = Default::default();
-    let mut below: std::collections::HashMap<&str, Vec<&Parsed>> = Default::default();
+    // Each block's path under its host and under every domain above it,
+    // sorted, so an exception looks up blocks on related hosts only, and
+    // within each host only the paths that may overlap its own.
+    let mut by_host: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    let mut below: std::collections::HashMap<&str, Vec<&str>> = Default::default();
     for block in &blocks {
         let Some(host) = block.host.as_deref() else {
             continue;
         };
-        by_host.entry(host).or_default().push(block);
+        by_host.entry(host).or_default().push(&block.path);
         for (dot, _) in host.match_indices('.') {
-            below.entry(&host[dot + 1..]).or_default().push(block);
+            below.entry(&host[dot + 1..]).or_default().push(&block.path);
         }
     }
+    for paths in by_host.values_mut().chain(below.values_mut()) {
+        paths.sort_unstable();
+        paths.dedup();
+    }
+    // A path in `paths` that starts with `path`, or that `path` starts with.
+    let may_overlap = |paths: &Vec<&str>, path: &str| {
+        let longer = paths.partition_point(|block| *block < path);
+        paths
+            .get(longer)
+            .is_some_and(|block| block.starts_with(path))
+            || (0..=path.len())
+                .filter(|&end| path.is_char_boundary(end))
+                .any(|end| paths.binary_search(&&path[..end]).is_ok())
+    };
     // An exception that names a related host (the same, one above or one
     // below) on a path that may overlap.
     let overlaps = |exception: &Parsed| {
@@ -1016,10 +1031,7 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
         same_or_above
             .filter_map(|domain| by_host.get(domain))
             .chain(below.get(host))
-            .flatten()
-            .any(|block| {
-                block.path.starts_with(&exception.path) || exception.path.starts_with(&block.path)
-            })
+            .any(|paths| may_overlap(paths, &exception.path))
     };
     prepared
         .iter()
