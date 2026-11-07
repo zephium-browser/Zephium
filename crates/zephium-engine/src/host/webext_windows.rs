@@ -721,6 +721,7 @@ impl super::EngineHost {
         let navigation_url = url.clone();
         let builder = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(|_, core| crate::reputation::configure(core))
             .with_browser_extension_startup_gate(move |environment, core| {
                 startup.authenticate(environment, core)
             })
@@ -1017,6 +1018,11 @@ impl super::EngineHost {
         &mut self,
         request: ExtensionActionRequest,
     ) -> ExtensionActionSettlement {
+        if request.is_menu() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::UnsupportedPlatform,
+            );
+        }
         let result = self.present_windows_extension_popup(request);
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }
@@ -1157,13 +1163,23 @@ impl super::EngineHost {
             return wry::NewWindowResponse::Deny;
         }
         let permit = view.event_permit.clone();
-        self.adopt_native_tab(source, &permit, activity, url, features, move || {
-            // Construction pumps native messages: closing or defocusing the
-            // popup during that interval must invalidate its pending request.
-            unsafe {
-                GetForegroundWindow() == opener_window && IsWindowVisible(opener_window).as_bool()
-            }
-        })
+        let clicked = features.user_initiated;
+        self.adopt_native_tab(
+            source,
+            &permit,
+            activity,
+            url,
+            features,
+            clicked,
+            move || {
+                // Construction pumps native messages: closing or defocusing the
+                // popup during that interval must invalidate its pending request.
+                unsafe {
+                    GetForegroundWindow() == opener_window
+                        && IsWindowVisible(opener_window).as_bool()
+                }
+            },
+        )
     }
 
     fn present_windows_extension_popup(
@@ -1305,6 +1321,7 @@ impl super::EngineHost {
         let message_base = base.clone();
         let built = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(|_, core| crate::reputation::configure(core))
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
             .with_initialization_script(&initialization)
             .with_initialization_script(zephium_webext::windows::POPUP_SIZE_SCRIPT)

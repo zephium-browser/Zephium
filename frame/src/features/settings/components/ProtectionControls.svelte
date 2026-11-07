@@ -57,7 +57,7 @@
   </SettingsRow>
   <SettingsRow
     title="Filter lists"
-    description="EasyList and EasyPrivacy from their official HTTPS publisher. Updates are validated before activation, with a built-in offline fallback."
+    description="EasyList, EasyPrivacy, and uBlock Origin's filters and quick fixes from their official HTTPS publishers. Updates are validated before activation, with a built-in offline fallback."
   >
     <Button
       disabled={busy || !status.can_refresh_sources}

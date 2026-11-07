@@ -343,7 +343,10 @@ export function createSearchSurface(options: {
     }
     // Sending something behind the current tab is a deliberate choice about
     // a row the user can see; it is never deferred onto an answer they cannot.
-    if (query.trim() && !background) queued = row?.id ?? "";
+    // Until the user aims at a row, the row on screen is the previous query's
+    // typed action, whose identity carries the previous text. Queuing that id
+    // would match nothing in the answer and drop the Enter.
+    if (query.trim() && !background) queued = moved ? (row?.id ?? "") : "";
   }
 
   async function copy() {
@@ -429,6 +432,9 @@ export function createSearchSurface(options: {
     expiresAt = 0;
     clearTimeout(expiry);
     context = next;
+    // Before the controller exists, so its first request is for the address
+    // and not for an empty field that the seed immediately replaces.
+    if (next.seed) seed(next.seed);
     if (listening) void initialize();
   }
 
@@ -489,6 +495,7 @@ export function createSearchSurface(options: {
     controller = createSearchController({
       owner,
       emptyQuery: anchored ? "skip" : "search",
+      shown: { results, answered },
       send: (value, requestId) =>
         options.tabId
           ? commands.newtabSearch(value, { ...owner, request_id: requestId })
@@ -537,7 +544,6 @@ export function createSearchSurface(options: {
     begin,
     end,
     changed,
-    seed,
     submit,
     capture,
     copy,

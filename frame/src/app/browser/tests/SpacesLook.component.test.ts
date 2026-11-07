@@ -1,4 +1,4 @@
-import { afterEach, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
@@ -24,6 +24,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -210,7 +212,7 @@ const THREE: ProfilesView = {
 };
 
 afterEach(() => {
-  sidebar.adoptMode("default");
+  sidebar.setMode("default");
   favicons.dispose();
   surface.dispose();
   tabs.dispose();
@@ -236,72 +238,108 @@ async function stage(theme: "light" | "dark") {
 
 const away = () => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
 
+type Stage = Awaited<ReturnType<typeof stage>>;
+type ColumnLook = {
+  name: string;
+  prepare?: (screen: Stage) => void | Promise<void>;
+  capture?: typeof shot;
+};
+
+function rail(active = "read") {
+  spaced(active);
+  sidebar.setMode("compact");
+}
+async function railEditor(screen: Stage) {
+  rail();
+  await settle();
+  await screen.getByRole("button", { name: "Spaces — Reading" }).click();
+  await screen.getByRole("menuitem", { name: "Edit Reading" }).click();
+}
+const columnLooks: readonly ColumnLook[] = [
+  { name: "expanded", capture: shot },
+  { name: "expanded-icon", prepare: () => spaced("read") },
+  {
+    name: "switcher",
+    prepare: async (screen) => {
+      await screen.getByRole("button", { name: "Spaces — Personal" }).click();
+    },
+  },
+  {
+    name: "editor",
+    prepare: async (screen) => {
+      await screen.getByRole("button", { name: "Spaces — Personal" }).click();
+      await screen.getByRole("button", { name: "Edit Studio" }).click();
+    },
+  },
+  {
+    name: "themed-space",
+    capture: shot,
+    prepare: () => {
+      themed("rose-pine");
+      spaced("work");
+    },
+  },
+  {
+    name: "themed-switcher",
+    prepare: async (screen) => {
+      themed("rose-pine");
+      spaced("work");
+      await screen.getByRole("button", { name: "Spaces — Studio" }).click();
+    },
+  },
+  { name: "empty", prepare: () => spaced("side", true) },
+  { name: "rail", prepare: () => rail() },
+  {
+    name: "rail-stack",
+    prepare: async (screen) => {
+      rail();
+      await screen.getByRole("button", { name: "Spaces — Reading" }).click();
+    },
+  },
+  { name: "rail-editor", capture: wide, prepare: railEditor },
+  {
+    name: "rail-after",
+    prepare: async (screen) => {
+      await railEditor(screen);
+      await screen.getByRole("button", { name: "Done" }).click();
+    },
+  },
+  { name: "rail-no-icon", prepare: () => rail("home") },
+  {
+    name: "site-info",
+    prepare: async (screen) => {
+      await screen.getByRole("button", { name: "Site information" }).click();
+    },
+  },
+  {
+    name: "beside-settings",
+    capture: shot,
+    prepare: async (screen) => {
+      emitNativeEvent("uiCommand", "browser.settings");
+      await expect
+        .element(screen.getByRole("region", { name: "Settings", exact: true }))
+        .toBeVisible();
+    },
+  },
+];
+
 for (const theme of ["light", "dark"] as const) {
-  test(`spaces in the column, ${theme}`, async () => {
-    const screen = await stage(theme);
-    await shot(`${theme}-expanded`);
-    spaced("read");
-    await settle();
-    await crop(`${theme}-expanded-icon`);
-    spaced("home");
-
-    await screen.getByRole("button", { name: "Spaces — Personal" }).click();
-    await settle();
-    await crop(`${theme}-switcher`);
-    await screen.getByRole("button", { name: "Edit Studio" }).click();
-    await settle();
-    await crop(`${theme}-editor`);
-    away();
-
-    // The space with a theme of its own wears it over the whole window.
-    themed("rose-pine");
-    spaced("work");
-    await settle();
-    await shot(`${theme}-themed-space`);
-    await screen.getByRole("button", { name: "Spaces — Studio" }).click();
-    await settle();
-    await crop(`${theme}-themed-switcher`);
-    away();
-
-    themed("zephium");
-    spaced("side", true);
-    await settle();
-    await crop(`${theme}-empty`);
-
-    spaced("read");
-    sidebar.adoptMode("compact");
-    await settle();
-    await crop(`${theme}-rail`);
-    // The rail's first button opens a short stack beside it; editing takes the column in place.
-    await screen.getByRole("button", { name: "Spaces — Reading" }).click();
-    await settle();
-    await crop(`${theme}-rail-stack`);
-    await screen.getByRole("menuitem", { name: "Edit Reading" }).click();
-    await settle();
-    await settle();
-    await wide(`${theme}-rail-editor`);
-    await screen.getByRole("button", { name: "Done" }).click();
-    await settle();
-    await settle();
-    await crop(`${theme}-rail-after`);
-    spaced("home");
-    await settle();
-    await crop(`${theme}-rail-no-icon`);
-    sidebar.adoptMode("default");
-    await settle();
-
-    // The panel on the address steps the column back under it, as the
-    // switcher does.
-    await screen.getByRole("button", { name: "Site information" }).click();
-    await settle();
-    await crop(`${theme}-site-info`);
-    away();
-
-    emitNativeEvent("uiCommand", "browser.settings");
-    await settle();
-    await settle();
-    await shot(`${theme}-beside-settings`);
-  });
+  // Each retained image gets its own budget. The former fourteen-image walk
+  // exceeded 15 seconds on CI and cancelled its final screenshot.
+  for (const look of columnLooks) {
+    test(`spaces in the column, ${look.name}, ${theme}`, async () => {
+      const screen = await stage(theme);
+      try {
+        if (look.prepare) {
+          await look.prepare(screen);
+          await settle();
+        }
+        await (look.capture ?? crop)(`${theme}-${look.name}`);
+      } finally {
+        await screen.unmount();
+      }
+    });
+  }
 
   test(`the spaces as one sheet mid-swipe, ${theme}`, async () => {
     await stage(theme);
@@ -364,7 +402,7 @@ for (const theme of ["light", "dark"] as const) {
       await crop(`${theme}-profile-menu-${count}`);
       away();
 
-      sidebar.adoptMode("compact");
+      sidebar.setMode("compact");
       await settle();
       emitNativeEvent("profilesChanged", roster);
       await screen.getByRole("button", { name: /^Tools/ }).click();
@@ -373,14 +411,14 @@ for (const theme of ["light", "dark"] as const) {
       away();
 
       // Back from the rail, the stack opens whole again.
-      sidebar.adoptMode("default");
+      sidebar.setMode("default");
       await settle();
       await screen.getByRole("button", { name: /^Tools/ }).click();
       await settle();
       await crop(`${theme}-profile-after-rail-${count}`);
       away();
       await screen.unmount();
-      sidebar.adoptMode("default");
+      sidebar.setMode("default");
       favicons.dispose();
       surface.dispose();
       tabs.dispose();

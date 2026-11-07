@@ -403,6 +403,52 @@ test("a launcher reopened a moment later resumes, and a fresh session asks again
   expect(native.search.mock.calls.at(-1)![0]).toBe("rust");
 });
 
+test("a reopened launcher keeps its home list on the frame it appears", async () => {
+  const tab: SearchResult = {
+    kind: "tab",
+    title: "Rust Book",
+    detail: "doc.rust-lang.org",
+    icon: null,
+    action: { type: "ActivateTab", id: "tab-1" },
+  };
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await reply("", [tab]);
+  await expect.element(screen.getByRole("option", { name: /Rust Book/u })).toBeVisible();
+  await vi.waitFor(() => expect(native.layout).toHaveBeenCalled());
+  const home = native.layout.mock.calls.at(-1)![0].height;
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  const calls = native.search.mock.calls.length;
+  await screen.rerender({
+    context: { ...context, revision: "0000000000000003", session_id: "0000000000000003" },
+  });
+  // The new presentation's request has gone out and nothing has answered yet.
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(1);
+  expect(native.layout.mock.calls.at(-1)![0].height).toBe(home);
+});
+
+test("editing an address asks for that address and never for an empty field first", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, visible: false }, destinations },
+  });
+  // Let the page start listening, so the next presentation binds a controller
+  // directly rather than waiting for one at mount.
+  await new Promise((done) => setTimeout(done, 50));
+  await screen.rerender({
+    context: {
+      ...context,
+      revision: "0000000000000002",
+      session_id: "0000000000000002",
+      seed: "https://example.com/",
+      seed_tab: "tab-1",
+    },
+  });
+  await vi.waitFor(() => expect(native.search).toHaveBeenCalled());
+  await new Promise((done) => setTimeout(done, 100));
+  expect(native.search.mock.calls.map(([query]) => query)).toEqual(["https://example.com/"]);
+  await expect.element(screen.getByRole("combobox")).toHaveValue("https://example.com/");
+});
+
 test("sleeping past the resume deadline clears a query even when its timer never fired", async () => {
   const screen = await render(LauncherPanel, { props: { context, destinations } });
   await screen.getByRole("combobox").fill("private old query");
@@ -486,4 +532,134 @@ test("Windows paints one continuous wash while the native clip follows content h
   await reply("few", [search("few")]);
   await vi.waitFor(() => expect(native.layout.mock.calls.at(-1)![0].height).toBeLessThan(300));
   expect(launcher.getBoundingClientRect().height).toBe(600);
+});
+
+test("an Enter that commits a composition does not run the row", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  const input = field.element() as HTMLInputElement;
+  await field.fill("にほんご");
+  await reply("にほんご", [search("にほんご")]);
+  const asked = native.search.mock.calls.length;
+  // WebKit ends the composition before the keydown that committed it, which
+  // then reports isComposing false and the IME's keyCode 229.
+  input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+  input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: input.value }));
+  const commit = new KeyboardEvent("keydown", {
+    key: "Enter",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  input.dispatchEvent(commit);
+  expect(commit.keyCode).toBe(229);
+  expect(commit.isComposing).toBe(false);
+  expect(commit.defaultPrevented).toBe(false);
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(asked));
+  await reply("にほんご", [search("にほんご")]);
+  await new Promise((done) => setTimeout(done, 50));
+  expect(native.run).not.toHaveBeenCalled();
+  // The next Enter is an ordinary one.
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() => expect(native.run).toHaveBeenCalledOnce());
+});
+
+test("a press anywhere in the launcher but the field leaves the caret in it", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  const input = field.element();
+  await field.fill("zzz");
+  await reply("zzz", []);
+  await expect.element(screen.getByText("No matching results").first()).toBeVisible();
+  for (const target of [".lead", ".empty", "footer"]) {
+    await userEvent.click(screen.container.querySelector<HTMLElement>(target)!);
+    expect(document.activeElement, target).toBe(input);
+  }
+});
+
+test("Tab stays in the field, and Return on a focused chip presses the chip", async () => {
+  const onTool = vi.fn();
+  const screen = await render(LauncherPanel, { props: { context, destinations, onTool } });
+  const input = screen.getByRole("combobox").element() as HTMLInputElement;
+  input.focus();
+  await userEvent.tab();
+  expect(document.activeElement).toBe(input);
+  (screen.getByRole("button", { name: "Tasks" }).element() as HTMLElement).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(onTool).toHaveBeenCalledExactlyOnceWith("tasks");
+  expect(native.run).not.toHaveBeenCalled();
+});
+
+test("the field names the actions sheet while it is open, and results are announced", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  const input = field.element();
+  await field.fill("rust");
+  await reply("rust", [search("rust"), visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await expect.element(screen.getByRole("status")).toHaveTextContent("Results: 2");
+  expect(input.getAttribute("aria-haspopup")).toBe("listbox");
+
+  await userEvent.keyboard(`{ArrowDown}{${primary}>}k{/${primary}}`);
+  const menu = screen.getByRole("menu");
+  await expect.element(menu).toBeVisible();
+  const items = [...menu.element().querySelectorAll('[role="menuitem"]')];
+  expect(input.getAttribute("aria-haspopup")).toBe("menu");
+  expect(input.getAttribute("aria-controls")).toBe(menu.element().id);
+  expect(input.getAttribute("aria-expanded")).toBe("true");
+  await vi.waitFor(() => expect(input.getAttribute("aria-activedescendant")).toBe(items[0]!.id));
+  await userEvent.keyboard("{ArrowDown}");
+  await vi.waitFor(() => expect(input.getAttribute("aria-activedescendant")).toBe(items[1]!.id));
+
+  await userEvent.keyboard("{Escape}");
+  await expect.element(screen.getByRole("menu")).not.toBeInTheDocument();
+  expect(input.getAttribute("aria-haspopup")).toBe("listbox");
+  expect(input.getAttribute("aria-controls")).toBe("launcher-results");
+  expect(input.getAttribute("aria-activedescendant")).toBe("launcher-results-option-1");
+
+  await field.fill("zzz");
+  await reply("zzz", []);
+  await expect.element(screen.getByRole("status")).toHaveTextContent("No matching results");
+});
+
+test("a list moving under a resting pointer does not move the selection", async () => {
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await screen.getByRole("combobox").fill("rust");
+  await reply("rust", [
+    search("rust"),
+    visit("Rust Book", "https://doc.rust-lang.org/book/"),
+    visit("Rust Blog", "https://blog.rust-lang.org/"),
+  ]);
+  const rows = [...screen.container.querySelectorAll<HTMLElement>('[role="option"]')];
+  const move = (row: HTMLElement, screenX: number, screenY: number) =>
+    row.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, screenX, screenY }));
+  move(rows[1]!, 411, 233);
+  await vi.waitFor(() => expect(rows[1]!.getAttribute("aria-selected")).toBe("true"));
+  // The browser repeats the last move when content shifts under the pointer.
+  move(rows[2]!, 411, 233);
+  await new Promise((done) => setTimeout(done, 30));
+  expect(rows[1]!.getAttribute("aria-selected")).toBe("true");
+  expect(rows[2]!.getAttribute("aria-selected")).toBe("false");
+  move(rows[2]!, 415, 233);
+  await vi.waitFor(() => expect(rows[2]!.getAttribute("aria-selected")).toBe("true"));
+});
+
+test("the sheet stops where a short display lets the window stop", async () => {
+  const available = vi.spyOn(window.screen, "availHeight", "get").mockReturnValue(400);
+  try {
+    document.documentElement.dataset.material = "liquid_glass";
+    await page.viewport(760, 700);
+    const screen = await render(LauncherPanel, { props: { context, destinations } });
+    await screen.getByRole("combobox").fill("rust");
+    await reply(
+      "rust",
+      Array.from({ length: 20 }, (_, i) => visit("Result " + i, "https://example.com/" + i)),
+    );
+    // The display's 400 less a margin of 24 above and below.
+    await vi.waitFor(() => expect(native.layout.mock.calls.at(-1)![0].height).toBe(352));
+    const layout = native.layout.mock.calls.at(-1)![0];
+    // Room is left under the sheet for the glass's shadow.
+    expect((layout.sheet!.y ?? 0) + (layout.sheet!.height ?? 0)).toBeLessThanOrEqual(352 - 40);
+  } finally {
+    available.mockRestore();
+  }
 });

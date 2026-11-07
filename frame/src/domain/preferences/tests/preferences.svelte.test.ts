@@ -28,6 +28,19 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 describe("preference observation lifecycle", () => {
+  it.each([null, "continue", "pages", "new-tab"])(
+    "defaults startup to a new tab while preserving the stored choice %s",
+    async (choice) => {
+      native.get.mockImplementation(async (key: string) =>
+        key === "tabs.startup" ? choice : null,
+      );
+      const preferences = await import("../preferences.svelte");
+      await preferences.init();
+      expect(preferences.value("tabs.startup")).toBe(choice ?? "new-tab");
+      expect(native.set).not.toHaveBeenCalled();
+      preferences.dispose();
+    },
+  );
   it("initializes once and keeps a live update ahead of an older startup read", async () => {
     const preferences = await import("../preferences.svelte");
     let finish!: (value: string) => void;

@@ -56,7 +56,7 @@ fn active_profile_publishes_all_logical_tabs_before_native_creation() {
     let other_space = ItemId::from(3);
     assert!(shell
         .items
-        .insert_tab(favorite, Placement::Favorites { profile }));
+        .insert_tab(favorite, Placement::Favorites { space: first_space }));
     assert!(shell.items.insert_tab(
         active,
         Placement::Space {

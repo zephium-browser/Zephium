@@ -205,8 +205,20 @@ fn bootstrap_hydrates_restored_tab_icons_without_native_callbacks() {
     restored.handle(Command::Bootstrap);
 
     let state = last(&restored_screen);
-    assert_eq!(state.tabs.len(), 2);
-    assert!(state.tabs.iter().all(|tab| tab.icon.is_some()));
+    assert_eq!(state.tabs.len(), 3);
+    for id in [first_id, second_id] {
+        assert!(state
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id.to_string())
+            .unwrap()
+            .icon
+            .is_some());
+    }
+    assert_eq!(
+        restored.items.tab(active_id(&restored_screen)).unwrap().url,
+        None
+    );
     assert!(engine
         .calls()
         .iter()
@@ -702,6 +714,68 @@ fn a_listed_address_without_an_icon_is_fetched_once_and_sent_to_the_surface_that
 }
 
 #[test]
+fn the_launcher_is_sent_its_icons_again_only_after_its_page_loads_afresh() {
+    let store = Arc::new(FakeStore::default());
+    store.icons.lock().unwrap().push((
+        "https://stored.example".to_owned(),
+        vec![4; zephium_core::icon::RGBA32_BYTES],
+    ));
+    store
+        .icon_ages
+        .lock()
+        .unwrap()
+        .insert("https://stored.example".to_owned(), 60);
+    let (mut shell, _engine, _screen, icons) = setup_with_icon_log(store);
+    shell.handle(Command::Bootstrap);
+    let window = shell.windows.focused().unwrap();
+    let (profile, window_id, space) = (window.profile, window.id, window.space);
+    let sent = |icons: &IconLog| {
+        icons
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|view| view.surface == zephium_ipc::IconSurface::Panel)
+            .map(|view| view.entries.len())
+            .sum::<usize>()
+    };
+    let present = |shell: &mut Shell, session: &str| {
+        shell.handle(Command::SearchScoped {
+            query: String::new(),
+            context: Box::new(zephium_ipc::SearchContext {
+                window_id: window_id.to_string(),
+                profile_id: profile.to_string(),
+                space_id: space.to_string(),
+                session_id: session.into(),
+                request_id: session.into(),
+            }),
+        });
+        shell.want_icons(
+            zephium_ipc::IconSurface::Panel,
+            profile,
+            ["https://stored.example/page"],
+        );
+        // Once held, a result names the icon it carries and the surface is
+        // sent whatever it lacks.
+        let _ = shell.icon_ref_for(
+            zephium_ipc::IconSurface::Panel,
+            profile,
+            "https://stored.example",
+        );
+        shell.publish_icons();
+    };
+
+    present(&mut shell, "first");
+    assert_eq!(sent(&icons), 1);
+    // The page stays mounted between presentations and still holds it.
+    present(&mut shell, "second");
+    assert_eq!(sent(&icons), 1);
+    // A page loaded afresh holds nothing.
+    shell.handle(Command::PanelLoaded);
+    present(&mut shell, "third");
+    assert_eq!(sent(&icons), 2);
+}
+
+#[test]
 fn an_essential_never_opened_is_given_its_icon_from_the_store_or_the_network() {
     let store = Arc::new(FakeStore::default());
     store.icons.lock().unwrap().push((
@@ -717,7 +791,9 @@ fn an_essential_never_opened_is_given_its_icon_from_the_store_or_the_network() {
         url: url.into(),
         title: String::new(),
     };
+    let destination = shell.import_destination().unwrap();
     shell.handle(Command::Import {
+        destination,
         work: Box::new(crate::ImportWork::Essentials(vec![
             site("https://kept.example/inbox"),
             site("https://bare.example/"),

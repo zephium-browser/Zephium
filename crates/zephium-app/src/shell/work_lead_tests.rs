@@ -78,15 +78,17 @@ impl Script {
                             json!({"kind": "reply", "title": "Shorter trip", "data": {
                             "headline": "Home a day early", "text": "The plan now ends on Friday."}}),
                         ),
-                        call(
-                            "r5",
-                            "create",
-                            json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
-                                {"title": "Fly home early", "kind": "travel"}]}}),
-                        ),
                     ]
                 }
-                2 => {
+                // This update depends on r2's durable revision. A later model
+                // turn observes that settlement instead of racing its read.
+                2 => vec![call(
+                    "r5",
+                    "create",
+                    json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
+                        {"title": "Fly home early", "kind": "travel"}]}}),
+                )],
+                3 => {
                     // A second plan on the same subject revises the first.
                     assert!(!seen.contains("already covers this subject"), "{seen}");
                     vec![call(
@@ -587,6 +589,7 @@ pub(super) fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
         command: WorkCommandId::generate(),
         intent: WorkRuntimeIntent::BeginAgent {
             grant: WorkAgentGrantV1 {
+                no_usage_charge: false,
                 draft: None,
                 provider: WorkSearchProvider::OpenAi,
                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -797,21 +800,31 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
     .unwrap();
     let follow_up = second.executions.last().unwrap();
     assert!(follow_up.parts.is_empty());
-    let revised = follow_up
+    let plans: Vec<_> = follow_up
         .artifacts
         .iter()
-        .find(|a| a.data.kind_name() == "plan")
-        .unwrap();
+        .filter(|a| a.data.kind_name() == "plan")
+        .collect();
+    // Both settled updates remain immutable history; only the newest stands.
+    assert_eq!(plans.len(), 2);
+    let (revised, latest) = (plans[0], plans[1]);
     assert_eq!(revised.revises, Some(object("plan").id));
     assert_eq!(revised.title, "Your trip");
-    assert_eq!(
-        follow_up
-            .artifacts
-            .iter()
-            .filter(|a| a.data.kind_name() == "plan")
-            .count(),
-        1
-    );
+    assert_eq!(latest.revises, Some(revised.id));
+    let canvas = crate::work_lead::objects::canvas(&second, follow_up.id);
+    let current: Vec<_> = canvas
+        .iter()
+        .filter(|object| object.current && object.artifact.data.kind_name() == "plan")
+        .collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].artifact.id, latest.id);
+    assert_eq!(current[0].artifact.title, "Your trip");
+    let WorkArtifactDataV1::Plan { steps, .. } = &current[0].artifact.data else {
+        panic!("the current plan")
+    };
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].title, "Fly home early");
+    assert_eq!(steps[0].when, None);
 }
 
 /// A part whose site fails says what it needs; the lead may not stand a
@@ -1067,7 +1080,7 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
     };
     let answering = {
         let handle = handle.clone();
-        tokio::spawn(async move {
+        async move {
             let mut answered = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1082,21 +1095,47 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                 let Some(execution) = projection.executions.last() else {
                     continue;
                 };
-                let open = execution.steps.iter().find_map(|step| match &step.kind {
-                    WorkStepKindV1::Ask {
-                        options,
-                        answer: None,
-                        purpose,
-                        ..
-                    } if step.status == WorkStepStatus::Running => {
-                        Some((step.id, options[0].clone(), *purpose))
+                let intent = execution.steps.iter().find_map(|step| {
+                    if step.status != WorkStepStatus::Running {
+                        return None;
                     }
-                    _ => None,
+                    match &step.kind {
+                        WorkStepKindV1::Ask {
+                            options,
+                            answer: None,
+                            purpose,
+                            ..
+                        } => {
+                            assert_eq!(*purpose, Some(WorkAskPurposeV1::Connection));
+                            Some(WorkRuntimeIntent::AnswerStep {
+                                execution: execution.id,
+                                step: step.id,
+                                answer: options[0].clone(),
+                            })
+                        }
+                        WorkStepKindV1::Confirm { confirm } if confirm.decision.is_none() => {
+                            assert_eq!(confirm.site, "slack");
+                            assert_eq!(confirm.action, "run echo");
+                            assert_eq!(confirm.headline, "Echo on Slack?");
+                            assert!(!confirm.run_option);
+                            assert_eq!(
+                                serde_json::from_str::<Value>(confirm.text.as_deref().unwrap())
+                                    .unwrap(),
+                                json!({"text": "mentions"})
+                            );
+                            Some(WorkRuntimeIntent::ApproveStep {
+                                execution: execution.id,
+                                step: step.id,
+                                approve: true,
+                                for_run: false,
+                            })
+                        }
+                        _ => None,
+                    }
                 });
-                let Some((step, first, purpose)) = open else {
+                let Some(intent) = intent else {
                     continue;
                 };
-                assert_eq!(purpose, Some(WorkAskPurposeV1::Connection));
                 answered += 1;
                 let _ = handle
                     .work_command(
@@ -1106,11 +1145,7 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                             work,
                             expected_revision: projection.work.revision,
                             command: WorkCommandId::generate(),
-                            intent: WorkRuntimeIntent::AnswerStep {
-                                execution: execution.id,
-                                step,
-                                answer: first,
-                            },
+                            intent,
                         },
                     )
                     .unwrap()
@@ -1119,24 +1154,29 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                     return answered;
                 }
             }
-        })
+        }
     };
-    let done = drive(
-        &mut shell,
-        &queue,
-        WorkLeadService::new(handle.clone()).run(
-            profile,
-            command(work, WorkRevision::INITIAL),
-            None,
-            models,
-            &Search,
-            |_, _| async { panic!("the Slack part never opens the website") },
-            |_| {},
-        ),
+    let service = WorkLeadService::new(handle.clone());
+    let done = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        drive(&mut shell, &queue, async {
+            tokio::select! {
+            result = service.run(
+                profile,
+                command(work, WorkRevision::INITIAL),
+                None,
+                models,
+                &Search,
+                |_, _| async { panic!("the Slack part never opens the website") },
+                |_| {},
+            ) => result,
+            answered = answering => panic!("fixture responder stopped after {answered} answers"),
+            }
+        }),
     )
     .await
+    .expect("the local fixture run must settle after its consent decisions")
     .unwrap();
-    answering.abort();
     let run = &done.executions[0];
     let asks: Vec<&str> = run
         .steps
@@ -1150,10 +1190,31 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
     let slack = &run.parts[0];
     assert_eq!(slack.helper, WorkHelperV1::Connection);
     assert_eq!(slack.state, WorkPartStateV1::Done);
-    assert!(run
+    let confirmations: Vec<_> = run
         .steps
         .iter()
-        .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Confirm { confirm } => Some(confirm),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(confirmations.len(), 1);
+    assert_eq!(
+        confirmations[0].decision,
+        Some(WorkConfirmDecisionV1::Approved)
+    );
+    let calls: Vec<_> = run
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Call { call } => Some((step.status, call)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, WorkStepStatus::Succeeded);
+    assert_eq!(calls[0].1.service, "slack");
+    assert_eq!(calls[0].1.tool, "slack__echo");
     let _ = std::fs::remove_dir_all(&data);
 }
 

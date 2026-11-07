@@ -29,30 +29,36 @@ Chromium's full site-isolation model.
    page-world bootstraps for discard-safety observation, bounded HTML extraction, and
    scripted-print denial. Those scripts expose no native bridge or application
    authority; all injected page-world code has exactly the page's trust level.
-4. **Extension execution (unprivileged; ordinary-product-disabled).** The architecture reserves
-   one non-reusable native principal per installed extension. Content scripts may run
+4. **Extension execution (unprivileged; managed ordinary profiles).** Ordinary startup
+   attempts to restore the installed, enabled cohorts of persistent profiles through
+   their managed native adapters. Successful native admission enables those cohorts;
+   unsupported profiles, unavailable interfaces or failed admission keep them
+   unavailable. Private and agent contexts do not inherit an ordinary cohort. Each
+   installed extension uses one non-reusable native principal. Content scripts may run
    only in engine-provided isolated worlds scoped to that principal. Extension-owned
    background and UI surfaces do not inherit application-WebView privilege and receive
    neither generic Tauri/Wry IPC nor a generic custom protocol. Any enabled native
    registration must bind the profile, install, principal, and generation and never
    accept identity from a JavaScript payload; only capability-specific,
-   permission-checked brokers may cross into zone 1. This is the required enablement
-   contract, not a current product claim: production adapters remain disabled until
-   platform-native hostile tests enforce it. A manifest-declared extension sandbox is
+   permission-checked brokers may cross into zone 1. These are the current managed
+   adapter boundaries. Platform admission and additional compatibility/provisioning
+   paths remain separately gated and require platform-native qualification. A
+   manifest-declared extension sandbox is
    not itself a fifth trust zone on macOS: the live WKWebExtension gate proves such a
    page retains its `webkit-extension` origin and `chrome` API, even when its extension
    URL is placed in an explicit `sandbox="allow-scripts"` iframe. A separate live gate
    proves the permitted replacement primitive: an authenticated content script fetches
    a public inert payload and instantiates it through a Blob-backed `allow-scripts`
    frame whose message origin is `null`, whose extension APIs are absent, and whose DOM
-   is inaccessible to the parent. Product provisioning remains disabled until the
-   pinned package deterministically adopts that topology and its authenticated message
+   is inaccessible to the parent. This separate sandbox-compatibility provisioning
+   path remains disabled until its pinned package deterministically adopts that
+   topology and its authenticated message
    flow passes hostile tests. Native naming, CSP text, or the `sandbox` attribute alone
    is never accepted as isolation evidence.
 
-   The explicit macOS staging build is the sole current exception to ordinary
-   product provisioning, not an exception to this trust boundary. It uses an
-   isolated bundle identifier and fixed embedded catalog transport. Extension
+   The explicit macOS staging build uses an isolated bundle identifier and fixed
+   embedded catalog transport for its additional provisioning/qualification paths.
+   Extension
    action popups and settings views are native WKWebExtension surfaces with no
    application bridge. An options view admits only its exact extension origin;
    programmatic remote navigation is cancelled, while a user-activated HTTP(S)
@@ -178,9 +184,18 @@ Any change that breaks one of these invariants must fail review and release:
    protocol. Page script cannot invoke Zephium commands.
 2. `main` and `panel` are constructed at exact `about:blank`, receive all mandatory
    native hardening, and only then navigate to the bundled application origin. Debug
-   builds additionally allow the exact local Vite origin. Other navigation is rejected.
+   builds additionally allow the exact local Vite origin. A bundled Windows first run
+   serves onboarding from its own custom-protocol host, `zephium-onboarding.localhost`,
+   which only `main` may load, and only until handover. It serves that exact document and
+   the bundle's non-page files, the same bytes `main` already reads from its app origin,
+   and no other page. The browser that replaces it is then a cross-site navigation;
+   this is a memory measure, not an isolation boundary, and WebView2 does not guarantee
+   a new renderer process for it. Other navigation is rejected.
    On Windows the same policy is installed on WebView2's separate subframe-navigation
-   event, and every request to launch an OS-registered URI scheme is cancelled.
+   event, and the native launch of an OS-registered URI scheme is always cancelled.
+   `main` and `panel` cancel it silently. Only a person's tab routes the request on,
+   to Zephium's own app-link card, which names the app and asks; nothing opens
+   without the person's answer.
 3. Application-requested tab navigation is checked in core and again before the native
    load; page-initiated navigation is checked by Wry's navigation handler. Only `http`,
    `https`, and exact `about:blank` are allowed. URLs are limited to 8 KiB; credentials,
@@ -303,7 +318,20 @@ to the configured search engine; search expansion is bounded before admission.
 Page-initiated top-level navigation uses the same allowlist. On Windows, raw subframe
 navigation also uses that allowlist, privileged subframes remain on the app origin, and
 WebView2's external-URI event is cancelled for every view. No blocked scheme is
-automatically opened through the OS shell. Human macOS/Windows new windows require
+automatically opened through the OS shell. A link for another application, a scheme
+outside a fixed list that excludes content, script, file, share and handler schemes,
+never loads in a tab. It goes to an app-link card on the tab that names the
+application, and the host opens the application only after the person's answer. A
+page that acts by itself with no registered application is ignored. A frame from
+another site (WebKit's source frame, WebView2's `InitiatingOrigin`) is heard only when
+the person clicked in it, and the card then names that frame's site rather than the
+tab's. A WebKit subframe whose site cannot be named is refused. A link whose source
+cannot be named at all (one reaching the new-window path, or a WebView2 origin that is
+no site) is asked about with a card that names no site and never opens by a kept
+answer. An Always allow answer is kept per profile, canonical site origin and scheme in
+the profile database (`app_link_sites`, profile migration 41, at most 512) and listed
+under Links to apps in Site settings; a private profile keeps it in memory until the
+session ends. Human macOS/Windows new windows require
 native user-activation admission and become host-owned tabs as described below. The
 one exception is a site the person allowed to open pop-ups, from the blocked-pop-up
 card or Site settings: its canonical origin is kept in the profile database
@@ -520,7 +548,8 @@ intent does not grant permission to reveal page content.
 
 Rust owns transfer state, bounded profile history and native paths. The trusted
 UI receives typed metadata and issues ID-scoped actions. Private-profile records
-remain in memory. Default behavior asks for a destination; a native directory
+remain in memory. A clicked download saves straight to the Downloads folder by
+default; asking for a destination first is an opt-in preference. A native directory
 selection records its filesystem identity before automatic saves are permitted.
 Same-volume private staging is journaled before native bytes are admitted.
 Publication applies and checks quarantine, synchronizes the file, and uses an
@@ -545,9 +574,9 @@ view/navigation/presentation and foreground parent. The default saves into the
 system Downloads directory; a custom directory requires its picker-issued identity.
 The optional ask-first preference opens the native save dialog. A page's second
 automatic download asks through WebView2's multiple-automatic-download prompt
-described above, and every download it admits still passes this adapter. This admits a first download
-from a foreground document without claiming initiating-frame activation, which
-DownloadStarting does not expose. HTTP origins
+described above, and every download it admits still passes this adapter. Once the
+site is allowed, this admits a download from a foreground document without claiming
+initiating-frame activation, which DownloadStarting does not expose. HTTP origins
 are displayed without URL secrets; origin-less data downloads label their top
 page origin as context, not an initiating-frame assertion.
 
@@ -565,6 +594,52 @@ the retained controller at about:blank until its transfer ends. Native process
 exit proof joins download drain during shutdown/profile retirement. These Windows
 paths have been cross-checked, not yet qualified on a native Windows runtime.
 See [Windows qualification and implementation notes](file-workflows-windows-qa.md).
+
+**Site download permission.** On macOS and Windows a site needs the person's
+permission before it may save files. Decisions are kept per profile and canonical
+top-level site origin in the profile database (`download_sites`, at most 512 sites;
+1 allows, 0 blocks, no row asks). A private profile never reaches the store: an Allow
+lasts only until the private session ends. The engine keeps a mirror per profile. At
+admission a blocked site's download is refused before any record exists. For a site
+with no decision the native download is held (on macOS before its destination is
+chosen, on Windows on the existing `DownloadStarting` deferral) and the shell shows a
+card under the address field with the file name. Allow keeps the site allowed; Not
+now cancels that download only. Further downloads from the same tab and site join the
+waiting card, and a different request while one card waits on that tab is cancelled.
+The wait ends after five minutes, when the page that started it navigates away or its
+view goes (switching to another tab does not end it), or when another card (a sign-in,
+an app link, a blocked pop-up, a hung page) takes the slot, which refuses the download.
+An Allow that arrives after the wait, or for a site blocked while the card waited, is
+taken as Not now and keeps nothing. Each card answer carries the per-tab serial of the
+request it showed, and the shell refuses one that does not match the request waiting. Block is set from Settings ▸ Privacy ▸ Site settings
+or the address field's site panel. Downloads the person starts from the browser itself
+(WebKit's context-menu download, WebView2's Save link/image as, extension downloads)
+skip the question. A download that a native new tab starts at once is asked about on
+the tab that opened it, keyed by that tab's site.
+
+**Downloads nobody clicked.** On macOS 15.2 and later a download that WebKit does not
+report as user-initiated (`WKDownload.isUserInitiated`) is confirmed on the same card
+even on an allowed site. The card says the site wants to download a file and that
+nothing the person clicked starts it; the choices are Download and Cancel, and the
+answer is never remembered. A download from a cross-origin subframe
+(`WKDownload.originatingFrame`) that nobody clicked in is refused outright. macOS 14.0
+to 15.1 have neither API, so neither check runs there: the download is keyed to the
+tab's site, a site with no decision still gets the site question, and every download
+not just allowed on that card goes through the save sheet, which names the file and
+its folder before anything is written. Refusing every unattributed download there
+would refuse them all. On Windows
+`DownloadStarting` reports neither the click nor the frame, so the site permission is
+the guard there, together with WebView2's multiple-automatic-download prompt.
+
+**Held downloads.** A download of a type that can run, install or carry a script or
+macro (programs, installers, disk images, help, shell and installer formats, macOS
+location files) is received in full and then held, not placed among the person's
+files, until the person chooses Keep or Delete. The list is `is_dangerous_file`. A
+download whose response URL (macOS, after redirects) or download URI (Windows) is
+plain `http` to a host outside the person's own network, or on macOS cannot be read, by the same local-host rule
+as certificate exceptions, is held the same way, and the card says the file came over
+a connection that isn't encrypted. The record stores that flag only when it is true.
+A hold is a prompt, not a scan, and no download reputation check runs on macOS.
 
 **Profiles and storage.** Persistent profiles use distinct native engine data
 partitions: profile paths/contexts on Windows and Linux and named WKWebsiteDataStore
@@ -657,21 +732,73 @@ so a correctly marked generation whose volatile key is absent has crossed a rebo
 boundary and may be reclaimed without inferring process death from filesystem access.
 Pre-provenance Zephium directories are first bounded, marked, and classified as
 same-boot; they cannot be reclaimed until a later reboot. Malformed or unowned objects
-are never adopted or deleted. Startup is bounded to 32 same-boot generations, 128 total
-including the new allocation, 2 GiB of quarantined logical file bytes, and 250,000
-inspected entries. Saturation fails with an explicit full-Windows-restart remediation;
-opaque data that remains after reboot requires the runtime directory to be moved aside
-manually while Zephium is closed. Successful exact cleanup removes its volatile subkey,
-so clean relaunches do not grow HKCU for the rest of the boot.
+are never adopted or deleted. Successful exact cleanup removes its volatile subkey, so
+clean relaunches do not grow HKCU for the rest of the boot.
+
+Each generation also keeps a versioned, append-only process record of every WebView2
+browser process its data belongs to. Before anything that may start a browser there, the
+record gains a `pending` entry; once that browser is recorded, its id and creation time
+and a `resolved` entry follow. The privileged root expects both of its browsers when
+it is prepared; the private root expects one each time a private browser may start:
+for a new environment, and for a reused one whose browser has exited. A same-boot
+generation whose run never proved its exit is reclaimed by the next launch, before any
+environment or view exists, only when that record proves it safe. A recorded process
+is gone only when its id names no process at all, or names one created at another
+time; a process that cannot be opened or queried for any other reason is never taken
+for gone, and keeps the generation. If every recorded process is gone, the data is
+deleted. A recorded process that still runs is an orphan of a dead run, because the
+exclusive root lease means no live Zephium instance owns anything in that root. If it
+is an `msedgewebview2.exe`, every one of its direct child processes created after it
+is checked first: if the children cannot be listed, or one is not WebView2, cannot be
+opened to be ended, or does not itself name the browser as its parent, nothing is ended
+and the generation stays until reboot. The browser stays open while its children are
+checked, so its id cannot be reused meanwhile. Otherwise all of them are ended, and the
+data is deleted once every exit is proven within two seconds and a fresh listing shows
+no child of the browser still running. Ending is not all or nothing once it starts:
+a process that does not exit in time keeps the generation until reboot, though the
+others may already be gone. A generation holding nothing but its own marker and a whole
+record with nothing pending and no browser is deleted outright. Every other generation
+keeps the reboot-only rule: one from a build that predates the record, one whose record
+is missing, still has a `pending` entry or is malformed in any way, including a torn
+last line, and one whose record was invalidated. A browser in any of those may still
+be starting with no files of its own yet. A boot key whose invalidation mark cannot
+be read keeps its generation, reported as unchecked. Any failure to expect or record
+a browser, or to confirm it is outside the private root, invalidates the record: it
+is marked on the generation's volatile boot registry key first, where a record file
+that cannot be changed cannot contradict it, and the file is then removed or made
+unreadable. If neither holds when a browser is expected, a private window fails to
+open; privileged chrome still starts, and its generation may be cleared at the next
+same-boot launch. Each outcome is logged as one line.
+
+Startup budgets are 32 same-boot generations, 128 total, 2 GiB of quarantined logical
+file bytes, and 250,000 inspected entries. A budget never blocks a launch. Over a budget,
+or when a leftover cannot be inspected, removed or recognised, has no complete record,
+or keeps an orphan that cannot be ended, that leftover stays in place and the launch
+goes ahead with only its own new generation, logging the overdue cleanup and its
+reason. Privileged chrome receives the closed `cleanup_overdue` advisory, as it does
+when one of its own browsers starts uncovered by the record. It asks for a restart,
+names the manual step below for data a restart cannot clear, and carries no path or
+reason. Opaque data that remains after reboot requires the runtime directory to be
+moved aside manually while Zephium is closed.
+
+On macOS, a private window's ad blocker scriptlets also touch disk. WebKit loads a
+WebExtension only from files, so the program a private profile runs, with the sites
+paused in that private profile and no others, is written to
+`private-scriptlets/<profile>` below the engine's data root, readable by its owner
+alone. It exists only while that private profile lives: the profile's files are removed
+when its data is erased, the directory is emptied when the engine shuts down and again
+when it starts, so a crash leaves them until the next launch. Normal profiles' packages
+are kept apart and never shared with a private one.
 
 Separate UDFs cost an additional WebView2 browser session/process set and must remain in
 resource benchmarks. Consequently, "incognito never writes a byte to disk" is **not** a
-guarantee on Windows. Crash, power loss, swap, filesystem snapshots, and engine defects
-remain relevant to private data on every OS. Windows does not provide the Unix directory
-fsync durability used by Zephium's deletion journal. The cross-restart completed
-tombstone prevents the application from forgetting cleanup authorization after a single
-acknowledged unlink, but packaged NTFS power-cut erasure testing remains a release gate
-rather than an asserted guarantee.
+guarantee on Windows or, for a private window's scriptlet program, on macOS. Crash,
+power loss, swap, filesystem snapshots, and engine defects remain relevant to private
+data on every OS. Windows does not provide the Unix directory fsync durability used by
+Zephium's deletion journal. The cross-restart completed tombstone prevents the
+application from forgetting cleanup authorization after a single acknowledged unlink,
+but packaged NTFS power-cut erasure testing remains a release gate rather than an
+asserted guarantee.
 
 The engine now exposes a narrow, asynchronous profile-retirement primitive. It
 tombstones the profile before teardown, rejects later view/navigation/spare work, drops
@@ -905,8 +1032,9 @@ call, and exposes neither bindings nor raw repository mutation over its
 mailbox. Internal-only authenticated tests exercise that boundary through
 activation, exact retirement, profile retirement, shutdown, and post-drain
 Store/repository reopen while denying stale authority. They use a bounded
-native fake; production adapters remain disabled, so the low-level and service
-APIs are still not a release-enablement claim.
+native fake. These structural tests do not qualify ordinary native adapters;
+release enablement still requires the platform and lifecycle evidence described
+below.
 
 Logical content views have a warm set and two watermarks. The most recently used hidden
 pages (four by default, two to save memory, ten to keep tabs ready) stay resident; every
@@ -996,10 +1124,11 @@ eight seconds for native teardown. Windows spends at most five seconds of that b
 on its internal whole-process-group proof before bounded private-root cleanup. A
 negative result or timeout is logged and permits forced process exit with a non-zero
 status; the sealed actor never resumes. On Windows, a failed cleanup leaves that
-generation quarantined. A later startup never reuses it: the shared bounded generation
-manager reclaims only exact marked prior-boot data, baselines legacy data for one reboot,
-and keeps same-boot or opaque state quarantined. Hitting a crash-loop budget produces a
-recoverable full-Windows-restart instruction instead of an irreversible assertion.
+generation quarantined. A later startup never reuses it. The shared bounded generation
+manager reclaims exact marked prior-boot data, and same-boot data once its recorded
+browser processes are proven gone or have been ended. It baselines legacy data for one
+reboot and keeps unrecorded or opaque state quarantined. A crash-loop budget never stops
+a launch; it is logged as overdue cleanup.
 Store worker queues are also bounded. Page-controlled history growth and extraction
 results are capped. These are denial-of-service controls, not proof that arbitrary web
 pages cannot exhaust an engine renderer.
@@ -1032,9 +1161,10 @@ policies; they must not restore a generic fetch capability for page-controlled U
 
 **Native network blocker (release seed active; TUF unprovisioned).** The tree contains a
 bounded authenticated source updater, network-rule compiler, persistent caches,
-coordinator, and native enforcement adapters. The desktop embeds exact immutable EasyList
-and EasyPrivacy snapshots whose compressed/raw bytes, upstream revisions, approved
-CC-BY-SA-3.0 metadata, and compiler reports are authenticated by the signed application
+coordinator, and native enforcement adapters. The desktop embeds exact immutable EasyList,
+EasyPrivacy, uBlock filters and uBlock quick-fixes snapshots whose compressed/raw bytes,
+upstream revisions, approved CC-BY-SA-3.0 or GPL-3.0-only metadata, and compiler reports
+are authenticated by the signed application
 release. It deliberately embeds no production TUF root or repository origins/identity, so
 bundled mode performs no source-network request and exposes distinct `release_bundle`
 provenance. Profile preferences remain disabled by default. Disabled profiles install an
@@ -1054,10 +1184,14 @@ precompiled frozen matcher to document-sourced WebView2 request contexts. Servic
 shared-worker requests remain unsupported until one profile/environment owner can avoid
 WebView2's per-view callback fanout. The synchronous callback
 performs no I/O or actor dispatch and fails open on malformed/oversized native data, lock
-contention, matcher failure, or the per-request filter-evaluation ceiling. Because WebView2
-does not supply the exact initiating frame URL, only source-independent blocks are applied;
-a potentially applicable source-sensitive exception makes a normal generic block fail
-open. macOS and Linux install digest-exact
+contention, matcher failure, or the per-request filter-evaluation ceiling. WebView2 does
+not supply the initiating frame URL, so each request is matched against the view's
+last-committed HTTP(S) main document: domain and party options are judged against that
+page, never the frame. The source changes at commit, not at navigation start, so a
+document's requests during a navigation keep their own source; its unload-time
+requests can be judged against the next page. Without a committed HTTP(S) document,
+only source-independent blocks apply and a potentially applicable source-sensitive
+exception makes a normal generic block fail open. macOS and Linux install digest-exact
 native WebKit declarative filters and validate native cache identities. The application
 holds first raw navigation until native installation settles, retains a proved previous
 generation on replacement failure, and exposes only a trusted in-process typed status and
@@ -1068,8 +1202,8 @@ slot quarantined until its exact callback.
 
 The release-seed loader verifies deterministic gzip identity and performs bounded lazy
 inflation plus exact raw length/digest/header validation after a compiled-cache miss. It
-drops inflated source strings after compilation. EasyList's source-refresh timestamp is
-reported as advisory `source_refresh_due` for release-bundle provenance; it cannot
+drops inflated source strings after compilation. The catalog's earliest source-refresh
+time is reported as advisory `source_refresh_due` for release-bundle provenance; it cannot
 invalidate the signed release's immutable policy or degrade an exactly installed native
 generation. Bundles install the exact attribution notice and license legal text.
 
@@ -1211,8 +1345,15 @@ These inherited properties must not be overstated:
   is not proof of renderer/site isolation.
 - TLS errors fail with the engine's default evaluation. Zephium's error page names
   the problem where the engine can tell, and offers a way past only for a host on the
-  person's own network. There is no HTTPS-only mode, certificate pinning, or
-  independently tested TLS policy yet.
+  person's own network. A top-level page asked for over plain `http` with a public
+  DNS name on the default port is tried over `https` first and loads over `http`
+  only when that fails: on macOS 15.2 and later through WebKit's own
+  `preferredHTTPSNavigationPolicy` (automatic fallback) for every top-level
+  navigation, elsewhere by the browser for the pages it opens itself (typed
+  addresses, bookmarks, history, restored tabs), with a host that failed not tried
+  again until Zephium quits. On Windows a page's own links to `http` are not
+  upgraded. There is no HTTPS-only mode, certificate pinning, or independently
+  tested TLS policy yet.
 - Cookies, cache, service workers, storage quotas, and clearing semantics are chiefly
   engine-owned. Per-profile partition construction and a verified engine-store
   retirement primitive are implemented. A crash-resumable coordinator now spans
@@ -1220,13 +1361,25 @@ These inherited properties must not be overstated:
   journal-authorized profile database. Cookie inspection/editing and origin-selective
   clearing are not implemented, and the full-profile coordinator still requires the
   packaged native data-type/crash matrix described in the release gates.
-- "Zero telemetry" currently means no first-party Zephium telemetry client is wired
-  into this tree. It does not mean pages make no requests or that OS WebViews and
-  services make no vendor requests. For example, WebView2 content protection remains
-  enabled and may follow Microsoft/OS policy. Zephium configures custom crash
-  reporting to prevent WebView2's automatic crash upload; this does not disable
-  separately governed required diagnostics or SmartScreen. A production privacy claim needs a
-  platform-by-platform traffic audit.
+- Zephium has no first-party browsing telemetry client. On Windows, Microsoft
+  Edge WebView2 still collects required diagnostic data regardless of the Windows
+  optional diagnostic-data setting. Optional collection follows Windows Settings
+  → Privacy (Windows 10) or Privacy & security (Windows 11) → Diagnostics & feedback,
+  and organization policy.
+  Settings → Privacy links to that fixed system pane. Zephium configures custom
+  crash reporting to prevent WebView2's automatic crash uploads; that does not
+  disable required diagnostics. Microsoft Defender SmartScreen is on by default
+  and can send website addresses and download information to Microsoft for reputation
+  checks. The Windows-only Privacy switch persists a restart-required choice;
+  it does not claim to change required diagnostics. Windows/organization policy
+  may independently override SmartScreen. Default ON uses WebView2's native
+  default without requiring Settings8. Only explicit OFF is set and read back;
+  API failure or refusal keeps browsing available and marks the switch managed.
+  Unavailable or slow startup preference reads retain ON for that launch; Settings
+  shows read-only ON with a local-read explanation until restart. See [Microsoft's WebView2 data and
+  privacy documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy)
+  and [Settings8's reputation-checking contract](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2settings8).
+  These controls do not establish a platform traffic audit.
 - A sandbox limits impact; it does not make engine vulnerabilities impossible. Native
   engine security updates are part of the product's security boundary.
 - Hard runtime admission, recommended maintenance, and review age are separate
@@ -1255,9 +1408,12 @@ These inherited properties must not be overstated:
 
 ### Windows / WebView2
 
-- Browser extensions remain disabled in every ordinary WebView2 environment.
+- Ordinary startup restores authenticated extension cohorts for persistent
+  profiles through the managed extension lifecycle. Profiles without an admitted
+  cohort remain extension-disabled;
+  private and agent environments do not inherit ordinary extensions.
   A direct `browser_extensions_enabled(true)` request and every unmanaged
-  extension path fail before COM/HWND construction. The only enabled path is
+  extension path fail before COM/HWND construction. The enabled path is
   an engine-owned Wry startup gate invoked after exact controller retention but
   before WebView initialization or initial navigation. It pointer-attests the
   controller environment through canonical `IUnknown` identity, the exact UDF,
@@ -1327,10 +1483,21 @@ These inherited properties must not be overstated:
   and default context menus and requires Settings7 to hide PDF Save, Save As, and Print.
   Privileged downloads remain denied; raw human views use the native download adapter. Both view classes replace Wry's
   broader default browser arguments with only the `msWebOOUI`/`msPdfOOUI` suppressions,
-  so Zephium does not deliberately disable SmartScreen.
+  so browser arguments do not disable SmartScreen. One preference is captured
+  before controller construction; changing it requires restarting Zephium.
+  Default ON keeps WebView2's own default without querying Settings8. Only explicit
+  OFF requests `IsReputationCheckingRequired = false` and reads it back on raw,
+  agent, extension-host, extension-popup and privileged controllers. Missing API
+  support, readback failure or policy refusal keeps browsing available and marks
+  the switch managed. Applying OFF to every controller matters because a shared
+  UDF keeps SmartScreen on while any controller requires it. Readback verifies the
+  requested controller value; Windows/organization policy governs the effective
+  service.
 - Every view also requires CoreWebView2_18. Raw and privileged subframe navigations are
-  checked by native handlers, and OS-registered external URI schemes are always
-  cancelled. Client-certificate selection is also cancelled before WebView2 can fall
+  checked by native handlers, and the native launch of OS-registered external URI
+  schemes is always cancelled. The privileged main and panel views cancel it silently;
+  only a person's tab sends the request on to the app-link card, which names the app
+  and asks. Client-certificate selection is also cancelled before WebView2 can fall
   back to its native certificate dialog, and HTTP authentication is cancelled
   except on tabs a person reads, which defer it to the sign-in card described above. A
   missing interface or failed registration rejects the raw view or aborts
@@ -1362,7 +1529,8 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version. The reviewed security floor and latest recommendation are
-  `156.0.4314.42`, published October 22, 2026. An older Stable runtime is admitted
+  `156.0.4314.56`, published October 29, 2026; the latest recommendation is
+  `156.0.4314.58`, published October 30. An older Stable runtime is admitted
   with an update-recommended advisory. A newer stable major receives
   an unreviewed-runtime advisory. Preview-channel and malformed strings are
   refused (exit 78 with a native alert).
@@ -1370,14 +1538,14 @@ These inherited properties must not be overstated:
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after October 31, 2026; runtime reports an overdue-review
+  expire this review after November 9, 2026; runtime reports an overdue-review
   advisory instead. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16. Microsoft listed CVE-2026-85046 as
   exploited in the wild in Stable `152.0.4191.62` on September 2, then published
-  Stable security updates through `156.0.4314.42` on October 22.
+  Stable security updates through `156.0.4314.58` on October 30.
   Microsoft publishes no WebView2-specific per-CVE applicability matrix;
   Zephium therefore treats the shared runtime release as a conservative floor
   rather than claiming each listed CVE applies to WebView2. The October 2 review
@@ -1386,8 +1554,10 @@ These inherited properties must not be overstated:
   October 6 review raised them to `154.0.4258.62`. On October 6 Microsoft
   again acknowledged a pending Chromium security fix. The October 24 review
   found no such notice remaining and four later Stable security releases, and
-  raised both to `156.0.4314.42`, clearing the publication blocker. See
-  [the review evidence](windows-webview2-security-review-2026-10-24.md).
+  raised both to `156.0.4314.42`, clearing the publication blocker. The
+  November 2 review raised the floor to `156.0.4314.56`, the newest release
+  with Update Catalog packages, and the recommendation to `156.0.4314.58`. See
+  [the review evidence](windows-webview2-security-review-2026-11-02.md).
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
@@ -1464,13 +1634,12 @@ These inherited properties must not be overstated:
   macOS 14.0 or newer.
 - Before Tauri constructs any WebView, runtime admission requires macOS 14 or newer
   with Safari 26 or newer. The reviewed recommendation is Sonoma 14.8.9 with
-  Safari 26.6.1, Sequoia 15.8.1 or Tahoe 26.7.1 with Safari 27 (which carries
-  WebKit fixes those point releases do not), or macOS 27.0.1 (September 14/28
-  releases). A supported system below that, or one whose canonical Safari bundle
+  Safari 26.6.1, Sequoia 15.8.2 or Tahoe 26.7.2 with Safari 27.2, or macOS
+  27.2 (October 26 security releases, reviewed October 27). A supported system below that, or one whose canonical Safari bundle
   build differs from the loaded `com.apple.WebKit` framework build, starts with
   an update-recommended advisory. Newer major lines (macOS 28, Safari 28)
   receive an unreviewed-runtime advisory. The review expires for CI/release
-  after October 31, while runtime
+  after November 9, while runtime
   keeps starting and reports review age to privileged chrome.
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an
@@ -1526,12 +1695,12 @@ These inherited properties must not be overstated:
   context construction, before any WebView can launch a Web process. A rejected or
   disabled configuration therefore fails closed, but the public property is not an
   attestation of the confinement actually applied to a spawned process. The newest
-  stable release reviewed in this pass is 2.54.1 (October 2, a bug-fix release); the
+  stable release reviewed in this pass is 2.54.2 (October 23, a bug-fix release); the
   enforced 2.54.0 boundary is the first stable release fixed for WSA-2026-0006
   (September 29), and no later 2.52 release carries those fixes, so the reviewed
   line moved from 2.52 to 2.54. The official advisory index and release feed were
-  re-reviewed on October 4, 2026; 2.53.92 remains an odd-minor development
-  release. CI/release review expires after November 3, 2026; runtime reports that
+  re-reviewed on November 2, 2026; 2.53.92 remains an odd-minor development
+  release. CI/release review expires after November 9, 2026; runtime reports that
   expiry without disabling an otherwise admitted engine.
 - Both privileged WebViews request non-persistent contexts. Their native permission and
   file-chooser denial handlers must install successfully, and the native context is
@@ -1792,7 +1961,7 @@ saved decisions per kind and changes or removes them. On macOS they come from th
 page-permission catalog through the same revision-checked patch path as the prompt;
 on Windows from the human WebView2 profile (`GetNonDefaultPermissionSettings`,
 `SetPermissionState`), reached through a live human view of that profile, so the list
-reports itself incomplete when none is open. Pop-ups come from `popup_sites` on both.
+reports itself incomplete when none is open. Pop-ups come from `popup_sites` and Downloads from `download_sites` on both.
 The actor chooses the profile; chrome supplies only a canonical origin, a closed kind
 and a decision. A private profile lists nothing and every change to it is refused. The
 same two commands (`site_permissions`, optionally for one origin, and
@@ -1811,11 +1980,13 @@ The following are roadmap items or disabled backends, not current security guara
 - Linux as a supported platform: the code stays in the tree, but the app refuses to
   start there;
 - native Windows release qualification of downloads/protection,
-  guaranteed malware detection, and automatic transfer resumption;
+  guaranteed malware detection (macOS runs no download reputation check), and
+  automatic transfer resumption;
 - Chrome/Firefox extension compatibility beyond the subset in
   `docs/extension-release-scope.md`;
-- continuously maintained online blocker sources or full EasyList semantics: the usable
-  network-only release seed is bundled, but production TUF trust is unprovisioned and
+- signed blocker-list publication or full filter-list semantics: the release seed is
+  bundled and the official lists update over HTTPS from their publishers, but TUF
+  publication is unprovisioned, so no list update carries a Zephium signature, and
   packaged enforcement/endurance proof is still a release gate;
 - an anti-phishing service, or any way past a certificate error for a public site;
 - rollback-resistant update metadata: the updater (`desktop/src/updates.rs`) verifies a
@@ -2033,3 +2204,25 @@ mechanisms, not a sandbox. The retained runner uses a fixed environment and no U
 login shell. Native Windows runtime qualification remains outstanding. This policy
 cannot identify secrets stored in arbitrary ordinary file contents and is not a
 claim of complete secret detection or same-user process isolation.
+
+Profile deletion removes the exact extension registry, its temporary file and
+profile-owned staging through the existing deletion journal. Cleanup failures
+retain that journal entry for retry. Package preparation does not hold a profile
+lifetime lease. Shared package collection remains with the extension cache prune.
+
+Startup compatibility rebuilding runs on the blocking worker pool, using
+profile-independent temporary package directories. Prepared registry commits
+compare the exact captured registry bytes under a short commit/unlink guard;
+profile deletion, uninstall and newer access choices win over stale work.
+That guard never covers package preparation or native work and does not lease a
+profile lifetime. Shutdown seals background admission, and the shell rejects
+late results for missing, deleting or private profiles. Bounded preparation
+failures join the existing per-profile extension status readback; Retry carries
+the displayed profile and installation identity in one native request.
+
+Ordinary extension mutations cannot recreate a missing registry. A fresh install
+registers a bounded, revocable ticket before final native profile validation;
+Store deletion cancels matching live tickets under the registry guard. A ticket
+holds no deletion lease and dead tickets leave no profile history. Once startup
+restore finishes, a missing runtime status is a visible failure even if bounded
+actor admission rejected the startup delivery.

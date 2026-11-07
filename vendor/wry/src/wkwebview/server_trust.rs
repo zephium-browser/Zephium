@@ -12,14 +12,14 @@ use std::ptr::NonNull;
 use objc2::{msg_send, rc::Retained, runtime::AnyObject, ClassType};
 use objc2_core_foundation::{CFArray, CFError, CFRetained, CFString, CFType};
 use objc2_foundation::{
-  NSError, NSURLAuthenticationChallenge, NSURLCredential,
-  NSURLErrorFailingURLErrorKey, NSURLErrorFailingURLPeerTrustErrorKey, NSURL,
+  NSError, NSURLAuthenticationChallenge, NSURLCredential, NSURLErrorFailingURLErrorKey,
+  NSURLErrorFailingURLPeerTrustErrorKey, NSURL,
 };
 use objc2_security::{
   errSecCertificateExpired, errSecCertificateNotValidYet, errSecCertificateRevoked,
   errSecCreateChainFailed, errSecHostNameMismatch, errSecInvalidCertAuthority, errSecInvalidRoot,
-  errSecNoBasicConstraints, errSecNotTrusted, errSecVerifyActionFailed, SecCertificate,
-  SecPolicy, SecTrust,
+  errSecNoBasicConstraints, errSecNotTrusted, errSecVerifyActionFailed, SecCertificate, SecPolicy,
+  SecTrust,
 };
 use sha2::{Digest, Sha256};
 
@@ -182,8 +182,9 @@ pub(crate) fn excepted(
   }
   // SAFETY: +credentialForTrust: returns an autoreleased credential for a
   // live trust.
-  let credential: Retained<NSURLCredential> =
-    unsafe { msg_send![NSURLCredential::class(), credentialForTrust: (trust as *const SecTrust).cast::<std::ffi::c_void>()] };
+  let credential: Retained<NSURLCredential> = unsafe {
+    msg_send![NSURLCredential::class(), credentialForTrust: (trust as *const SecTrust).cast::<std::ffi::c_void>()]
+  };
   Some(credential)
 }
 

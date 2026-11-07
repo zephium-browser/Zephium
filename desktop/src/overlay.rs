@@ -8,7 +8,11 @@ mod model;
 mod viewport;
 use model::{Model, Owner};
 use std::sync::{Arc, Mutex};
-use tauri::{LogicalSize, Manager, PhysicalPosition, WebviewWindow};
+#[cfg(not(target_os = "macos"))]
+use tauri::PhysicalPosition;
+#[cfg(target_os = "windows")]
+use tauri::PhysicalSize;
+use tauri::{LogicalSize, Manager, WebviewWindow};
 #[cfg(target_os = "macos")]
 use zephium_core::ports::store::Store;
 use zephium_ipc::{
@@ -60,6 +64,10 @@ struct State {
     focus_timer: bool,
     closed: bool,
     suspending: bool,
+    /// DWM can discard a backdrop installed while the window was hidden, and
+    /// this one was; it is put back once, when the window first appears.
+    #[cfg(target_os = "windows")]
+    material_restored: bool,
 }
 impl State {
     /// A new presentation never inherits an action still awaiting settlement.
@@ -111,6 +119,8 @@ impl Overlay {
                 focus_timer: false,
                 closed: false,
                 suspending: false,
+                #[cfg(target_os = "windows")]
+                material_restored: false,
             })),
         };
         #[cfg(target_os = "macos")]
@@ -174,6 +184,11 @@ impl Overlay {
     }
     pub fn ready(&self) -> PanelState {
         self.state().model.ready = true;
+        // Every load of the page reports here, and a page just loaded holds
+        // none of the icons it was sent before.
+        if let Some(shell) = self.window.app_handle().try_state::<zephium_app::Handle>() {
+            shell.dispatch(zephium_app::Command::PanelLoaded);
+        }
         self.on_main(|this| this.present());
         self.snapshot()
     }
@@ -416,14 +431,19 @@ impl Overlay {
         }
         self.publish();
         if !snapshot.visible {
-            if visible(&self.window) {
+            if shown(&self.window) {
                 self.tell_browser("launcher.dismissed");
             }
             do_hide(&self.window);
             return;
         }
+        // On macOS the window stays up through its fade-out, so a launcher
+        // called back inside it arrives without ever having been ordered out.
+        let arriving = !shown(&self.window);
         if !visible(&self.window) {
             self.place();
+        }
+        if arriving {
             self.tell_browser("launcher.presented");
         }
         #[cfg(target_os = "macos")]
@@ -432,6 +452,17 @@ impl Overlay {
         {
             let _ = self.window.show();
             let _ = self.window.set_focus();
+        }
+        #[cfg(target_os = "windows")]
+        self.restore_material();
+    }
+    #[cfg(target_os = "windows")]
+    fn restore_material(&self) {
+        let first = !std::mem::replace(&mut self.state().material_restored, true);
+        if first && !crate::restore_window_material(&self.window) {
+            crate::write_diagnostic(format_args!(
+                "material: launcher backdrop could not be restored after first reveal"
+            ));
         }
     }
     pub fn search_context(&self, request_id: &str) -> Option<SearchContext> {
@@ -562,7 +593,36 @@ impl Overlay {
         idle::destroyed();
     }
     /// Places the launcher on the display under the pointer, where the user is
+    /// looking, at the same height every time. Everything is in points: the
+    /// pointer, the displays and the frame are AppKit's own, so displays of
+    /// different scale are never converted between.
+    #[cfg(target_os = "macos")]
+    fn place(&self) {
+        let Some(work) = crate::panel::work_area(&self.window) else {
+            return;
+        };
+        let placement = geometry::Placement::new(
+            work.width,
+            work.height,
+            if animated_shapes() {
+                geometry::SHAPE_INSET
+            } else {
+                0.0
+            },
+        );
+        let height = placement.height(self.state().content_height);
+        crate::panel::place(
+            &self.window,
+            work.left + placement.x,
+            work.top - placement.y,
+            placement.width,
+            height,
+        );
+        self.state().placement = Some(placement);
+    }
+    /// Places the launcher on the display under the pointer, where the user is
     /// looking, at the same height every time.
+    #[cfg(not(target_os = "macos"))]
     fn place(&self) {
         let monitor = self
             .window
@@ -601,23 +661,40 @@ impl Overlay {
                 0.0
             },
         );
+        let height = placement.height(self.state().content_height);
+        // Windows rescales a window that lands on a display of another scale,
+        // so it moves first and is then sized in that display's own units.
+        // Sized in the previous display's units, its viewport and clip were
+        // wrong after the first crossing.
         #[cfg(target_os = "windows")]
         {
-            let _ = self.window.as_ref().set_bounds(tauri::Rect {
-                position: tauri::LogicalPosition::new(0.0, 0.0).into(),
-                size: LogicalSize::new(placement.width, placement.height(geometry::MAX_HEIGHT))
-                    .into(),
-            });
-        }
-        let height = placement.height(self.state().content_height);
-        let _ = self
-            .window
-            .set_size(LogicalSize::new(placement.width, height));
-        if position_supported() {
             let _ = self.window.set_position(PhysicalPosition::new(
                 f64::from(work.position.x) + placement.x * scale,
                 f64::from(work.position.y) + placement.y * scale,
             ));
+            let _ = self.window.as_ref().set_bounds(tauri::Rect {
+                position: PhysicalPosition::new(0.0, 0.0).into(),
+                size: PhysicalSize::new(
+                    placement.width * scale,
+                    placement.height(geometry::MAX_HEIGHT) * scale,
+                )
+                .into(),
+            });
+            let _ = self
+                .window
+                .set_size(PhysicalSize::new(placement.width * scale, height * scale));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = self
+                .window
+                .set_size(LogicalSize::new(placement.width, height));
+            if position_supported() {
+                let _ = self.window.set_position(PhysicalPosition::new(
+                    f64::from(work.position.x) + placement.x * scale,
+                    f64::from(work.position.y) + placement.y * scale,
+                ));
+            }
         }
         self.state().placement = Some(placement);
     }
@@ -682,6 +759,20 @@ fn animated_shapes() -> bool {
     }
 }
 
+/// Widens the hidden window around freshly installed shapes. The page first
+/// measures it when it loads, and a width settled later would move the shapes
+/// it had already laid out, gliding the glass in from the corner on the first
+/// arrival.
+#[cfg(target_os = "macos")]
+pub fn fit_to_shapes(window: &WebviewWindow) {
+    if animated_shapes() {
+        let _ = window.set_size(LogicalSize::new(
+            geometry::WIDTH + 2.0 * geometry::SHAPE_INSET,
+            geometry::INITIAL_HEIGHT,
+        ));
+    }
+}
+
 fn destination(tool: ToolKind) -> &'static str {
     match tool {
         ToolKind::Notes => "browser.notes",
@@ -731,15 +822,9 @@ pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn position_supported() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var_os("WAYLAND_DISPLAY").is_none()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
+    std::env::var_os("WAYLAND_DISPLAY").is_none()
 }
 fn do_hide(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
@@ -775,6 +860,20 @@ fn visible(window: &WebviewWindow) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         window.is_visible().unwrap_or(false)
+    }
+}
+
+/// Whether the launcher is up and not on its way out, which on macOS is
+/// shorter than the window being visible.
+fn shown(window: &WebviewWindow) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        crate::panel::is_shown()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        visible(window)
     }
 }
 

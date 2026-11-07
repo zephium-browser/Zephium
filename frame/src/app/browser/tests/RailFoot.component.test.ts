@@ -35,7 +35,10 @@ vi.mock("$shared/ipc/bindings", async () => {
       },
     }),
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
+    settingSet: async () => ({ accepted: true, operation_id: null }),
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
     settingGet: async () => null,
@@ -44,7 +47,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 afterEach(() => {
-  sidebar.adoptMode("default");
+  sidebar.setMode("default");
   favicons.dispose();
   surface.dispose();
   tabs.dispose();
@@ -73,7 +76,8 @@ test("the rail's foot stands in the same place in Browse and in Work", async () 
   await page.viewport(900, 640);
   await paint();
   const screen = await render(Shell);
-  sidebar.adoptMode("compact");
+  // The rail a Mac now keeps for Work and the tools, set directly.
+  sidebar.setMode("compact");
   await settle();
   const shoot = async (name: string) => {
     for (const theme of ["dark", "light"]) {

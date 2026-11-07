@@ -75,7 +75,7 @@ pub(crate) fn cost(entry: &WorkModelEntry, usage: &WorkModelUsage) -> PageAssist
             model,
             credits: None,
         },
-        WorkModelProvider::Compatible => PageAssistCostV1::Local { model },
+        _ if entry.is_free_compatible() => PageAssistCostV1::Local { model },
         provider => {
             let micros = usage.cost_micros.or_else(|| {
                 entry.price.as_ref().map(|price| {
@@ -106,6 +106,37 @@ pub(crate) fn cost(entry: &WorkModelEntry, usage: &WorkModelUsage) -> PageAssist
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_cost_distinguishes_local_and_remote_compatible_servers() {
+        let mut entry = zephium_agentic::lead::models::builtin()
+            .into_iter()
+            .next()
+            .unwrap();
+        entry.model.provider = WorkModelProvider::Compatible;
+        entry.price = Some(zephium_core::work::model::WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        });
+        let usage = WorkModelUsage {
+            cost_micros: Some(9000),
+            ..Default::default()
+        };
+        assert!(matches!(
+            cost(&entry, &usage),
+            PageAssistCostV1::Local { .. }
+        ));
+        entry.price = None;
+        assert!(matches!(
+            cost(&entry, &usage),
+            PageAssistCostV1::Byok { usd: Some(_), .. }
+        ));
+        assert!(matches!(
+            cost(&entry, &WorkModelUsage::default()),
+            PageAssistCostV1::Byok { usd: None, .. }
+        ));
+    }
 
     #[test]
     fn faults_keep_the_retry_hint_and_hosting() {

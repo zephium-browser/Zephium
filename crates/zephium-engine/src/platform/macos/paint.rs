@@ -23,7 +23,9 @@ use super::{ContentPolicyTimeout, ContentStage};
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 // Animation frames fire on a blank canvas; the cover holds until the page
 // has painted content (or the bound passes) so no empty white frame shows.
-const MAX_COVER_TIME: Duration = Duration::from_millis(600);
+// The bound covers most sites' first paint after commit: lifting sooner
+// shows the engine's empty white page, which reads as a flash.
+const MAX_COVER_TIME: Duration = Duration::from_millis(1200);
 const FIRST_FRAME: &str = "await new Promise(resolve => { const settle = () => requestAnimationFrame(() => resolve()); try { if (performance.getEntriesByName('first-contentful-paint').length) return settle(); const observer = new PerformanceObserver(list => { if (list.getEntriesByName('first-contentful-paint').length) { observer.disconnect(); settle(); } }); observer.observe({type: 'paint', buffered: true}); } catch (_) { requestAnimationFrame(settle); } }); return true;";
 // A restored page reloads from cache under its last frame. Hold that frame
 // until the document has parsed and painted twice, within a short bound.

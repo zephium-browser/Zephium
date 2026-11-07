@@ -9,6 +9,11 @@ on:
         description: Existing tag to rebuild, for example v1.0.0-beta.1
         required: true
         type: string
+      emergency:
+        description: Emergency release only — skip component tests and disclose this in release notes
+        required: false
+        default: false
+        type: boolean
 
 permissions: {}
 
@@ -34,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       pubkey: ${{ steps.version.outputs.pubkey }}
+      signpath: ${{ steps.signpath.outputs.enabled }}
     steps:
       - name: Require release secrets
         env:
@@ -62,7 +68,19 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Bind release provenance to the workflow tag
+        run: bash scripts/release/check_tag_ref.sh
+      - name: Assess Windows publisher signing configuration
+        id: signpath
+        env:
+          SIGNPATH_RELEASE_MODE: ${{ vars.SIGNPATH_RELEASE_MODE }}
+          SIGNPATH_RELEASE_CERT_THUMBPRINT: ${{ vars.SIGNPATH_RELEASE_CERT_THUMBPRINT }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
+        run: bash scripts/release/signpath_config.sh
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - run: rustup toolchain install --profile minimal
@@ -110,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Require successful CI for this exact release commit
@@ -138,11 +156,10 @@ jobs:
           echo "::error::No successful main CI run exists for release commit ${candidate}."
           exit 1
 
-  # The component suite runs only on demand elsewhere, so every release runs
-  # it and shows its result. It does not hold the builds or the draft yet:
-  # some of its tests have never passed on GitHub's macOS runner while they
-  # pass locally on the same WebKit build. Gate again once they do.
+  # Components gate drafts unless an explicit emergency dispatch skips them.
+  # Builds run concurrently; a failed component shard always blocks publication.
   components:
+    if: ${{ !inputs.emergency }}
     needs: gate
     permissions:
       contents: read
@@ -160,15 +177,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: pnpm
       - run: rustup toolchain install --profile minimal --target aarch64-apple-darwin
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-macos
       - run: pnpm install --frozen-lockfile
@@ -287,13 +304,13 @@ jobs:
           cp "${UPDATER}" dist/Zephium-macOS-arm64.app.tar.gz
           cp "${UPDATER}.sig" dist/Zephium-macOS-arm64.app.tar.gz.sig
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-macos
           path: dist/
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: symbols-macos-${{ env.VERSION }}
           path: target/aarch64-apple-darwin/release/*.dSYM
@@ -304,9 +321,11 @@ jobs:
     name: Windows (x64)
     needs: gate
     runs-on: windows-latest
-    timeout-minutes: 75
+    # 75 minutes build + 75 minutes signing + 30 minutes setup/verification.
+    timeout-minutes: 180
     permissions:
       contents: read
+      actions: read
     defaults:
       run:
         shell: bash
@@ -315,15 +334,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: pnpm
       - run: rustup toolchain install --profile minimal
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-windows
       - run: pnpm install --frozen-lockfile
@@ -335,6 +354,7 @@ jobs:
             || python scripts/release/third_party_notices.py target/THIRD_PARTY_NOTICES.txt
 
       - name: Build
+        timeout-minutes: 75
         working-directory: desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -345,10 +365,59 @@ jobs:
           CARGO_PROFILE_RELEASE_STRIP: none
         run: pnpm tauri build --bundles nsis --config "${RELEASE_CONFIG}"
 
-      # Authenticode signing (SignPath) goes here. It changes the installer's
-      # bytes, so it must run before the updater signature is made: sign the
-      # installer, then replace Tauri's .sig with
-      # `pnpm tauri signer sign <signed installer>` before staging.
+      - name: Upload the unsigned setup for SignPath
+        if: needs.gate.outputs.signpath == 'true'
+        id: signpath-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signpath-unsigned-windows-x64
+          path: target/release/bundle/nsis/Zephium_${{ env.VERSION }}_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign the Windows setup
+        timeout-minutes: 75
+        if: needs.gate.outputs.signpath == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: zephium
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: windows-nsis
+          github-artifact-id: ${{ steps.signpath-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          service-unavailable-timeout-in-seconds: 300
+          download-signed-artifact-timeout-in-seconds: 180
+          output-artifact-directory: ${{ runner.temp }}/signpath-signed
+
+      - name: Verify publisher trust and timestamp before replacing the setup
+        if: needs.gate.outputs.signpath == 'true'
+        shell: pwsh
+        env:
+          SIGNPATH_SIGNER_SUBJECT: ${{ vars.SIGNPATH_SIGNER_SUBJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "Zephium_${env:VERSION}_x64-setup.exe"
+          $signed = Join-Path $env:RUNNER_TEMP "signpath-signed/$name"
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -cne $env:SIGNPATH_SIGNER_SUBJECT -or
+              $null -eq $signature.TimeStamperCertificate) {
+            throw "Installer publisher, trust chain or timestamp verification failed."
+          }
+          Copy-Item -LiteralPath $signed -Destination "target/release/bundle/nsis/$name" -Force
+
+      # Authenticode changes bytes, so replace the bundler's updater signature
+      # only after verifying and copying the signed setup.
+      - name: Sign the final Windows bytes for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: >-
+          cargo run --locked -p xtask -- sign-windows-updater
+          "target/release/bundle/nsis/Zephium_${VERSION}_x64-setup.exe" "${VERSION}"
 
       - name: Stage release assets
         run: |
@@ -359,13 +428,13 @@ jobs:
           cp "${setup}" dist/Zephium-Windows-x64-setup.exe
           cp "${setup}.sig" dist/Zephium-Windows-x64-setup.exe.sig
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows
           path: dist/
           if-no-files-found: error
           retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: symbols-windows-${{ env.VERSION }}
           path: target/release/*.pdb
@@ -374,7 +443,8 @@ jobs:
 
   publish:
     name: Draft release
-    needs: [gate, ci, macos, windows]
+    needs: [gate, ci, components, macos, windows]
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.ci.result == 'success' && needs.macos.result == 'success' && needs.windows.result == 'success' && (needs.components.result == 'success' || (inputs.emergency && needs.components.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -384,8 +454,10 @@ jobs:
     env:
       VERSION: ${{ needs.gate.outputs.version }}
       UPDATER_PUBKEY: ${{ needs.gate.outputs.pubkey }}
+      SIGNPATH_ENABLED: ${{ needs.gate.outputs.signpath }}
+      EMERGENCY_SKIP_COMPONENTS: ${{ inputs.emergency }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           merge-multiple: true
@@ -455,16 +527,24 @@ jobs:
             fi
             gh release delete "${TAG}" --repo "${GITHUB_REPOSITORY}" --yes
           fi
+          windows_signing="The Windows installer is unsigned while SignPath certificate setup is pending. SmartScreen may ask for confirmation."
+          if [[ "${SIGNPATH_ENABLED}" == true ]]; then
+            windows_signing="The Windows installer carries a verified Authenticode publisher signature and timestamp. SmartScreen reputation checks still apply."
+          fi
           cat > "${RUNNER_TEMP}/notes.md" <<EOF
           Download Zephium ${VERSION}:
 
           - macOS (Apple Silicon): [Zephium-macOS-arm64.dmg](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-macOS-arm64.dmg)
           - Windows (x64): [Zephium-Windows-x64-setup.exe](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Zephium-Windows-x64-setup.exe)
 
-          Installed copies update themselves. The Windows installer is not yet Authenticode-signed, so SmartScreen may ask for confirmation.
+          Installed copies update themselves. ${windows_signing}
 
           Verify a download with \`SHA256SUMS\` or \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`.
           EOF
+          if [[ "${EMERGENCY_SKIP_COMPONENTS}" == true ]]; then
+            printf '\n**EMERGENCY: Component tests were skipped for this release.**\n' >> "${RUNNER_TEMP}/notes.md"
+            echo "::warning::Emergency release: component tests were skipped; release notes disclose the bypass."
+          fi
           # releases/latest skips prereleases, and the website and updater read it.
           # Betas stay on it until the first stable release; after that they must
           # never reach stable users.

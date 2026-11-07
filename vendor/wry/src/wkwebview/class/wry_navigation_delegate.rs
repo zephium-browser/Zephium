@@ -167,6 +167,7 @@ define_class!(
       }
       if let Some(delegate) = &self.ivars().download_delegate {
         if let Some(native) = &delegate.ivars().native {
+          let _menu = crate::wkwebview::ContextMenuDownload::begin();
           if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
             unsafe { download.cancel(None) };
           }
@@ -297,9 +298,8 @@ define_class!(
           let responder = crate::wkwebview::http_auth::responder(completion_handler);
           // A panicking embedder drops the responder while unwinding, which
           // cancels the native request.
-          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handler(request, responder)
-          }));
+          let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(request, responder)));
           return;
         }
       }

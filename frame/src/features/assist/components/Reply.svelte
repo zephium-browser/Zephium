@@ -14,6 +14,7 @@
   import ItemsBlock from "./blocks/ItemsBlock.svelte";
   import OpenedBlock from "./blocks/OpenedBlock.svelte";
   import StepsBlock from "./blocks/StepsBlock.svelte";
+  import SearchBlock from "./blocks/SearchBlock.svelte";
   import StyleBlock from "./blocks/StyleBlock.svelte";
   import TextBlock from "./blocks/TextBlock.svelte";
   import "$shared/ui/Shine/shine.css";
@@ -91,6 +92,14 @@
         <StepsBlock
           steps={block.steps}
           {site}
+          ondecide={(decision) => session.decide(reply.id, index, decision)}
+        />
+      {:else if block.kind === "search"}
+        <SearchBlock
+          destination={block.destination}
+          query={block.query}
+          state={block.state}
+          inert={reply.inert || reply.state !== "waiting"}
           ondecide={(decision) => session.decide(reply.id, index, decision)}
         />
       {:else if block.kind === "paused"}

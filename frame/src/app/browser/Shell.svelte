@@ -11,6 +11,8 @@
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
   import type { TabView } from "$shared/ipc/bindings";
+  import { newTabImage } from "$session/newtab-background.svelte";
+  import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadClearSiteData, loadSettings } from "$features/settings";
   import { EssentialTile } from "$features/essentials";
@@ -22,7 +24,7 @@
   import { mediaPlayer } from "$domain/media-player";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionsSection } from "$features/extensions";
+  import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
@@ -261,8 +263,15 @@
   let newTabShown = $derived.by(() => {
     const tab = tabs.activeTab();
     if (!tab || tab.url || (tab.content ?? "web") !== "web") return false;
+    // A first load that failed stands in the pane instead, and the sky's
+    // glass over the window would wash it out.
+    if (failedPane(tab)) return false;
     return browserPage.currentPage() === null && (!tab.loading || newTabLoad === tab.id);
   });
+  // Beside a new tab the window, whatever it is made of, takes on the
+  // sky's light; it gives it back as a page arrives.
+  let skyShown = $derived(newTabShown && newTabImage() === null);
+
   $effect(() => {
     const tab = tabs.activeTab();
     const idle = !!tab && !tab.url && !tab.loading && (tab.content ?? "web") === "web";
@@ -337,6 +346,7 @@
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
   data-private={incognito || undefined}
 >
+  {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
     >{#snippet browserBody(compact)}
       {#if compact && (inWork || paneled)}
@@ -388,7 +398,9 @@
             {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
                 {m.choose_split()}
               </p>{/if}
-            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab} />
+            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab}>
+              {#snippet extras()}<PinnedExtensions />{/snippet}
+            </SidebarBody>
             <!-- Brief notices and downloads sit at the foot of the column, by the dock. -->
             <SidebarNotice />
             {#if tabs.profile()?.id}<DownloadStatus

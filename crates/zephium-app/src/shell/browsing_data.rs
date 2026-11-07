@@ -24,7 +24,7 @@ use zephium_ipc::{
 /// The parts of one clear still running. The last to settle answers.
 struct Join {
     remaining: usize,
-    cleared: bool,
+    failure: Option<BrowsingDataError>,
     done: Option<BrowsingDataCompletion>,
 }
 
@@ -32,24 +32,31 @@ impl Join {
     fn new(parts: usize, done: BrowsingDataCompletion) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             remaining: parts,
-            cleared: true,
+            failure: None,
             done: Some(done),
         }))
     }
 
     fn settle(join: &Arc<Mutex<Self>>, cleared: bool) {
+        Self::settle_result(join, cleared.then_some(()).ok_or(BrowsingDataError::Failed));
+    }
+
+    fn settle_result(join: &Arc<Mutex<Self>>, result: Result<(), BrowsingDataError>) {
         let mut state = join.lock().unwrap_or_else(|error| error.into_inner());
-        state.cleared &= cleared;
+        if let Err(error) = result {
+            state.failure.get_or_insert(error);
+        }
         state.remaining = state.remaining.saturating_sub(1);
         if state.remaining > 0 {
             return;
         }
         if let Some(done) = state.done.take() {
-            done.finish(if state.cleared {
-                BrowsingDataResponse::Cleared
-            } else {
-                error(BrowsingDataError::Failed)
-            });
+            done.finish(
+                state
+                    .failure
+                    .take()
+                    .map_or(BrowsingDataResponse::Cleared, error),
+            );
         }
     }
 }
@@ -187,17 +194,33 @@ impl Shell {
         origin: Option<String>,
         done: BrowsingDataCompletion,
     ) {
+        let join = Join::new(2, done);
+        self.discard_browsing_backup(partition.profile(), &join);
+        let settled = join.clone();
         self.engine.browsing_data_call(
             partition,
             EngineDataCall::ForgetSite { site, origin },
             EngineDataCompletion::new(move |reply| {
-                done.finish(match reply {
-                    EngineDataReply::Cleared => BrowsingDataResponse::Cleared,
-                    EngineDataReply::Failed(why) => error(failure(why)),
-                    EngineDataReply::Sites { .. } => error(BrowsingDataError::Failed),
-                })
+                Join::settle_result(
+                    &settled,
+                    match reply {
+                        EngineDataReply::Cleared => Ok(()),
+                        EngineDataReply::Failed(why) => Err(failure(why)),
+                        EngineDataReply::Sites { .. } => Err(BrowsingDataError::Failed),
+                    },
+                );
             }),
         );
+    }
+
+    fn discard_browsing_backup(&self, profile: ProfileId, join: &Arc<Mutex<Join>>) {
+        let settled = join.clone();
+        if !self.store.discard_session_backup(
+            profile,
+            Box::new(move |cleared| Join::settle(&settled, cleared)),
+        ) {
+            Join::settle(join, false);
+        }
     }
 
     fn clear_browsing_data(
@@ -214,8 +237,14 @@ impl Shell {
             site_data: cookies,
             cache,
         };
-        let parts = usize::from(!kinds.is_empty()) + usize::from(downloads) + usize::from(history);
+        let parts = usize::from(!kinds.is_empty())
+            + usize::from(downloads)
+            + usize::from(history)
+            + usize::from(cookies);
         let join = Join::new(parts, done);
+        if cookies {
+            self.discard_browsing_backup(profile, &join);
+        }
 
         if !kinds.is_empty() {
             let settled = join.clone();

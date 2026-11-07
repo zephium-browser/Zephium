@@ -15,6 +15,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     runCommand: native.run,
     profilesGet: async () => ({ status: "ok" as const, data: null }),
     settingGet: async () => null,
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: vi.fn(async () => undefined),
   });
 });

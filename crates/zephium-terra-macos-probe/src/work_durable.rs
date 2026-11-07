@@ -2473,6 +2473,7 @@ async fn agent_workflow(
         )
         .map_err(|_| "link_provider")?;
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         lead: None,
         provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
         model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),

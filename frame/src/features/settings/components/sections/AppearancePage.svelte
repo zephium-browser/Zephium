@@ -45,15 +45,17 @@
     return () => observer.disconnect();
   });
 
-  // What the person may choose here. Windows has one material worth having;
-  // a Mac offers the glass, the older vibrancy, or neither.
+  // What the person may choose here: the sky on a new tab with the system's
+  // glass beyond it, or the system's glass alone. Windows has one system
+  // material worth having; a Mac offers the glass or the older vibrancy.
   const materialOptions = IS_WINDOWS
     ? [
-        { value: "auto", label: m.settings_material_acrylic() },
+        { value: "auto", label: m.settings_material_automatic() },
+        { value: "mica", label: m.settings_material_mica() },
         { value: "none", label: m.settings_material_solid() },
       ]
     : [
-        { value: "auto", label: m.settings_material_auto() },
+        { value: "auto", label: m.settings_material_automatic() },
         { value: "liquid_glass", label: m.settings_material_glass() },
         { value: "vibrancy", label: m.settings_material_vibrancy() },
         { value: "none", label: m.settings_material_solid() },
@@ -163,7 +165,9 @@
       disabled={preferences.saving()}
       options={[
         { value: "default", label: m.settings_expanded() },
-        { value: "compact", label: m.settings_compact() },
+        IS_WINDOWS
+          ? { value: "compact", label: m.settings_compact() }
+          : { value: "hidden", label: m.settings_hidden() },
       ]}
       onchange={(v) => void preferences.set("sidebar.mode", v)}
     />

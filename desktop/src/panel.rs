@@ -15,10 +15,10 @@ use objc2::rc::Retained;
 use objc2::Message;
 use objc2_app_kit::{
     NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
-    NSApplicationActivationOptions, NSColor, NSRunningApplication, NSWindow,
+    NSApplicationActivationOptions, NSColor, NSEvent, NSRunningApplication, NSScreen, NSWindow,
     NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWorkspace,
 };
-use objc2_foundation::{MainThreadMarker, NSProcessInfo, NSRect};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSProcessInfo, NSRect, NSSize};
 use objc2_quartz_core::CAMediaTimingFunction;
 use objc2_web_kit::WKWebView;
 use tauri::WebviewWindow;
@@ -279,9 +279,92 @@ pub fn is_visible(window: &WebviewWindow) -> bool {
     visible
 }
 
+/// Whether the launcher is on screen or arriving. Unlike `is_visible` this is
+/// false through the fade-out, when the window is still up but already away.
+pub fn is_shown() -> bool {
+    SHOWN.get()
+}
+
+/// The usable area of a display, in points and AppKit's bottom-up screen
+/// coordinates, which are the ones the pointer, every screen and the window's
+/// frame already speak. Placement stays in them end to end, so displays of
+/// different scale never have to be converted between.
+pub struct Work {
+    pub left: f64,
+    /// The y of the area's top edge.
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The usable area of the display under the pointer, else the one the window
+/// is on, else the main one.
+pub fn work_area(window: &WebviewWindow) -> Option<Work> {
+    let mtm = MainThreadMarker::new()?;
+    let pointer = NSEvent::mouseLocation();
+    let screens = NSScreen::screens(mtm).to_vec();
+    // The pointer parked on a display's top or right edge sits exactly on its
+    // frame's far side, which the strict test refuses.
+    let under = screens
+        .iter()
+        .find(|screen| holds(screen.frame(), pointer, false))
+        .or_else(|| {
+            screens
+                .iter()
+                .find(|screen| holds(screen.frame(), pointer, true))
+        })
+        .cloned();
+    let mut current = None;
+    with_window(window, |window| current = window.screen());
+    let screen = under.or(current).or_else(|| NSScreen::mainScreen(mtm))?;
+    let visible = screen.visibleFrame();
+    Some(Work {
+        left: visible.origin.x,
+        top: visible.origin.y + visible.size.height,
+        width: visible.size.width,
+        height: visible.size.height,
+    })
+}
+
+fn holds(rect: NSRect, point: NSPoint, inclusive: bool) -> bool {
+    let within = |value: f64, start: f64, length: f64| {
+        value >= start && (value < start + length || (inclusive && value == start + length))
+    };
+    within(point.x, rect.origin.x, rect.size.width)
+        && within(point.y, rect.origin.y, rect.size.height)
+}
+
+/// Sets the window's frame in one change, from its top-left corner in the
+/// screen coordinates of `work_area`.
+pub fn place(window: &WebviewWindow, left: f64, top: f64, width: f64, height: f64) {
+    with_window(window, |window| {
+        window.setFrame_display(
+            NSRect::new(NSPoint::new(left, top - height), NSSize::new(width, height)),
+            true,
+        );
+    });
+}
+
 pub fn application_active() -> bool {
     let Some(main) = MainThreadMarker::new() else {
         return false;
     };
     objc2_app_kit::NSApplication::sharedApplication(main).isActive()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pointer_on_a_displays_far_edge_belongs_to_it_only_when_nothing_else_does() {
+        let display = NSRect::new(NSPoint::new(-1440.0, 0.0), NSSize::new(1440.0, 900.0));
+        // The top row of a display reads as exactly its height.
+        let parked = NSPoint::new(-700.0, 900.0);
+        assert!(!holds(display, parked, false));
+        assert!(holds(display, parked, true));
+        assert!(holds(display, NSPoint::new(-1440.0, 0.0), false));
+        assert!(!holds(display, NSPoint::new(0.0, 450.0), false));
+        assert!(!holds(display, NSPoint::new(-700.0, 901.0), true));
+    }
 }

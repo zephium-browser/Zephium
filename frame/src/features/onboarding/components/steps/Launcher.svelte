@@ -9,6 +9,7 @@
   import LauncherScene from "../LauncherScene.svelte";
 
   let trigger = $state<LauncherTrigger | null>(null);
+  let location = $state<string | null>(null);
   let held = $state<Held>(NOTHING_HELD);
   /** The drawn launcher has opened and is typing. */
   let typing = $state(false);
@@ -16,12 +17,20 @@
   let real = $state(false);
   let keys = $derived(trigger ? acceleratorKeys(trigger.shortcut, IS_MAC) : []);
   let down = $derived(trigger ? heldParts(trigger.shortcut, held, IS_MAC) : []);
+  let locationKeys = $derived(location ? acceleratorKeys(location, IS_MAC) : []);
+  let locationDown = $derived(location ? heldParts(location, held, IS_MAC) : []);
 
   onMount(() => {
     let live = true;
     void commands.launcherTrigger().then(
       (value) => {
         if (live) trigger = value;
+      },
+      () => {},
+    );
+    void commands.keymapEntries().then(
+      (entries) => {
+        if (live) location = entries.find((entry) => entry.id === "url.focus")?.accelerator ?? null;
       },
       () => {},
     );
@@ -49,14 +58,30 @@
 <div class="launcher">
   <LauncherScene {typing} away={real} />
   <div class="try">
-    <div class="keys" aria-label={keys.join(" ")}>
-      {#each keys as key, index (index)}
-        <kbd data-down={down[index] ?? false} data-lit={real} data-wide={key.length > 2}>{key}</kbd>
-      {/each}
+    <div class="shortcut">
+      <div class="keys" aria-label={keys.join(" ")}>
+        {#each keys as key, index (index)}
+          <kbd data-down={down[index] ?? false} data-lit={real} data-wide={key.length > 2}
+            >{key}</kbd
+          >
+        {/each}
+      </div>
+      <p>
+        {trigger && !trigger.registered ? m.launcher_shortcut_unregistered() : m.onb_launcher_try()}
+      </p>
     </div>
-    <p>
-      {trigger && !trigger.registered ? m.launcher_shortcut_unregistered() : m.onb_launcher_try()}
-    </p>
+    {#if location}
+      <div class="shortcut">
+        <div class="keys" aria-label={locationKeys.join(" ")}>
+          {#each locationKeys as key, index (index)}
+            <kbd data-down={locationDown[index] ?? false} data-lit={real} data-wide={key.length > 2}
+              >{key}</kbd
+            >
+          {/each}
+        </div>
+        <p>{m.onb_launcher_browser_try()}</p>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -70,8 +95,14 @@
   .try {
     display: grid;
     justify-items: center;
-    gap: 12px;
+    gap: 22px;
     animation: lift 640ms var(--ease-emphasized) 320ms backwards;
+  }
+
+  .shortcut {
+    display: grid;
+    justify-items: center;
+    gap: 12px;
   }
 
   .keys {

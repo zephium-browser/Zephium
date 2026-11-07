@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import {
     Alert02Icon,
@@ -63,9 +64,22 @@
   let editing = $state(false);
   let pending = $state(false);
   let failed = $state(false);
+  // What hangs from the field (its tray) is as wide as the field.
+  let fieldWidth = $state(0);
   let composing = false;
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
+  // A failure that fills the pane (a refused or unopened page) names its own
+  // address; the page behind it, if any, is not what the person sees. The
+  // pane shows it on the same terms as the shell's failedPane.
+  let failedUrl = $derived.by(() => {
+    const tab = tabs.activeTab();
+    const failure = tab?.failure;
+    if (!tab || !failure) return null;
+    const fills =
+      failure.covers_page || (!tab.loading && (!tab.url || tab.availability?.state === "sleeping"));
+    return fills ? failure.url : null;
+  });
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
   // The page in front using the camera or microphone says so where its
   // address is, as well as on its tab.
@@ -83,6 +97,19 @@
     void listedId;
     removing = false;
   });
+  $effect(() => {
+    if (compact || listedInstalled === null || !webext.isRemovalAsked(listedInstalled.id)) return;
+    removing = true;
+    webext.settleRemovalAsk();
+  });
+  // Asked from the store's own page, the question waits in the field; a
+  // hidden column comes out with it.
+  $effect(() => {
+    if (removing) return attention.hold();
+  });
+  $effect(() => {
+    if (webext.error() !== null && webext.review() === null) attention.pulse(4000);
+  });
   let placeholder = $derived(
     activeContent === "extension_owned"
       ? "Extension page — enter an address to open a new tab"
@@ -90,10 +117,12 @@
   );
   let zoom = $derived(tabs.activeTab()?.zoom ?? null);
   let standardZoom = $derived(Number(preferences.value("zoom.default")));
-  let authoritativeValue = $derived(restingAddress(activeUrl));
+  let authoritativeValue = $derived(restingAddress(failedUrl ?? activeUrl));
   let value = $derived(editing ? draft : authoritativeValue);
   let security = $derived(
-    addressSecurity(activeUrl, tabs.activeTab()?.certificate_exception === true),
+    failedUrl === null
+      ? addressSecurity(activeUrl, tabs.activeTab()?.certificate_exception === true)
+      : "none",
   );
   // A web page in front has a site to describe. A new tab, an internal page
   // and a page behind Settings have none.
@@ -116,18 +145,23 @@
       : null,
   );
 
+  /** ⌘L edits a page's address in the launcher, which has room for what a
+   *  sidebar-wide field cannot show; a click edits it here. False where
+   *  there is no page to edit and the field takes the typing. */
+  function editInLauncher(): boolean {
+    const tab = tabs.activeTab();
+    const url = failedUrl ?? tab?.url;
+    if (!tab || !url || (tab.content ?? "web") !== "web") return false;
+    // Work has no page in front, so there the launcher opens empty.
+    if (surface.currentPage() === "work") void commands.runCommand("launcher.toggle");
+    else void commands.launcherEdit(tab.id, url);
+    return true;
+  }
+
   $effect(() => {
     const command = ui.uiCommand();
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
-    // At rail width the field is not drawn; the launcher stands in for it.
-    const tab = untrack(() => tabs.activeTab());
-    if (compact && tab?.url && (tab.content ?? "web") === "web") {
-      // Work has no page in front, so there the launcher opens empty.
-      if (untrack(() => surface.currentPage()) === "work")
-        void commands.runCommand("launcher.toggle");
-      else void commands.launcherEdit(tab.id, tab.url);
-      return;
-    }
+    if (untrack(editInLauncher)) return;
     input.focus();
     input.select();
   });
@@ -173,7 +207,7 @@
     // Keep the resting chrome quiet while preserving the complete location
     // when the user explicitly enters edit mode.
     const from = textStart();
-    draft = editingAddress(activeUrl) || value;
+    draft = editingAddress(failedUrl ?? activeUrl) || value;
     editing = true;
     flushSync();
     input.select();
@@ -237,6 +271,7 @@
   });
 
   let pageRequest = $derived(tabs.activeTab()?.page_request ?? null);
+  let pageRequestSerial = $derived(tabs.activeTab()?.page_request_serial ?? 0);
 
   // What appears only on demand is fetched the first time it is wanted, not
   // at startup; a failed fetch is tried again at the next request.
@@ -267,6 +302,8 @@
   <div
     class:sr-only={compact}
     class:flex={!compact}
+    bind:clientWidth={fieldWidth}
+    style:--address-width={fieldWidth ? `${fieldWidth}px` : undefined}
     class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
     class="address-field h-[34px] items-center gap-2 rounded-row bg-address ps-2.5 pe-1 shadow-[var(--shadow-tile)] transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-address-hover focus-within:shadow-[var(--shadow-field-focus)] hover:bg-address-hover"
   >
@@ -439,8 +476,8 @@
       <Icon icon={Alert02Icon} size={14} />
     </p>
   {:else if pageRequest && RequestCard}
-    {#key `${tabs.activeId()}:${JSON.stringify(pageRequest)}`}
-      <RequestCard tab={tabs.activeId()!} request={pageRequest} />
+    {#key `${tabs.activeId()}:${pageRequestSerial}:${JSON.stringify(pageRequest)}`}
+      <RequestCard tab={tabs.activeId()!} serial={pageRequestSerial} request={pageRequest} />
     {/key}
   {/if}
 </form>

@@ -908,7 +908,7 @@ fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "essential.example");
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     let original_url = shell.items.tab(id).unwrap().url.clone();
     let before = engine.calls().len();
     let result = shell.handle_operation(Command::SetTabEssential {
@@ -922,7 +922,7 @@ fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
     ));
     assert_eq!(
         shell.items.get(id).unwrap().placement,
-        Placement::Favorites { profile }
+        Placement::Favorites { space }
     );
     assert_eq!(shell.items.tab(id).unwrap().url, original_url);
     assert!(shell.items.tab(id).unwrap().has_view());
@@ -964,11 +964,12 @@ fn essential_move_rejects_foreign_and_invalid_drop_targets() {
     });
     assert_eq!(denied.outcome, OperationOutcome::Rejected);
     let foreign_profile = add_inactive_named_profile(&mut shell, 900);
+    let foreign_space = shell.spaces.first_for(foreign_profile).unwrap();
     let foreign_tab = ItemId::from(902_u128);
     assert!(shell.items.insert_tab(
         foreign_tab,
         Placement::Favorites {
-            profile: foreign_profile
+            space: foreign_space
         }
     ));
     let denied = shell.handle_operation(Command::SetTabEssential {
@@ -980,7 +981,7 @@ fn essential_move_rejects_foreign_and_invalid_drop_targets() {
     assert_eq!(
         shell.items.get(foreign_tab).unwrap().placement,
         Placement::Favorites {
-            profile: foreign_profile
+            space: foreign_space
         }
     );
 }
@@ -992,7 +993,7 @@ fn essential_move_survives_session_restore() {
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "saved-essential.example");
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     shell.handle_operation(Command::SetTabEssential {
         id,
         essential: true,
@@ -1003,7 +1004,7 @@ fn essential_move_survives_session_restore() {
     restored.handle(Command::Bootstrap);
     assert_eq!(
         restored.items.get(id).unwrap().placement,
-        Placement::Favorites { profile }
+        Placement::Favorites { space }
     );
     assert_eq!(
         restored
@@ -1201,6 +1202,76 @@ fn sidebar_shape_slides_precede_layout() {
 }
 
 #[test]
+fn a_hidden_sidebar_gives_the_page_the_window_and_comes_over_it_on_request() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "hidden.example");
+    let window = shell.windows.focused().unwrap().id;
+    let raises = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("raise@"))
+            .collect::<Vec<_>>()
+    };
+
+    // A sidebar that is shown has nothing beneath the page to bring up.
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    assert!(raises(&engine).is_empty());
+
+    shell.handle(Command::SetSidebarHidden(true));
+    let region = engine
+        .layout_regions
+        .lock()
+        .unwrap()
+        .last()
+        .copied()
+        .flatten();
+    assert_eq!(region.map(|region| region.x), Some(8.0));
+
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    shell.handle(Command::PeekSidebar {
+        peek: false,
+        slide: false,
+    });
+    // Shown from its card, the sidebar keeps its chrome over the page while
+    // the page slides out from under it; the frame lowers it after.
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    shell.handle(Command::SetSidebarHidden(false));
+    shell.handle(Command::PeekSidebar {
+        peek: false,
+        slide: false,
+    });
+    assert_eq!(
+        raises(&engine),
+        [
+            format!("raise@{window} true"),
+            format!("raise@{window} false"),
+            format!("raise@{window} true"),
+            format!("raise@{window} false"),
+        ]
+    );
+    let region = engine
+        .layout_regions
+        .lock()
+        .unwrap()
+        .last()
+        .copied()
+        .flatten();
+    assert!(region.is_some_and(|region| region.x > 8.0));
+}
+
+#[test]
 fn sidebar_resize_guide_does_not_mutate_width_or_layout() {
     let (mut shell, engine, _) = setup();
     shell.handle(Command::Bootstrap);
@@ -1324,7 +1395,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                 item(
                     favorite,
                     None,
-                    Placement::Favorites { profile },
+                    Placement::Favorites { space },
                     page("favorite.example"),
                 ),
                 item(
@@ -1351,6 +1422,12 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
         })),
         ..Default::default()
     });
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
+
     let (mut shell, _engine, screen) = setup_with(store);
     shell.handle(Command::Bootstrap);
 

@@ -17,6 +17,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -27,7 +29,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 afterEach(() => {
-  sidebar.adoptMode("default");
+  sidebar.setMode("default");
   favicons.dispose();
   surface.dispose();
   tabs.dispose();
@@ -51,7 +53,7 @@ for (const theme of ["light", "dark"] as const) {
     expect(switchShown()).toBe(false);
     await shot(`work-off-${theme}`);
 
-    sidebar.adoptMode("compact");
+    sidebar.setMode("compact");
     await settle();
     expect(switchShown()).toBe(false);
     await shot(`work-off-${theme}-rail`);

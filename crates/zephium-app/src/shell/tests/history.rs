@@ -129,14 +129,23 @@ fn history_never_answers_a_profile_other_than_the_focused_one() {
     let (mut shell, screen, _queue) = browsed(store);
     visit(&mut shell, &screen, "private.example");
 
-    let answer = dispatch(&mut shell, ProfileId::from(9_999), page("", 50));
-
-    assert!(matches!(
-        taken(&answer),
-        HistoryResponse::Error {
-            error: HistoryError::Invalid
-        }
-    ));
+    for call in [
+        page("", 50),
+        HistoryCall::Forget {
+            urls: vec!["https://private.example/".into()],
+        },
+        HistoryCall::Clear {
+            range: HistoryRange::Everything,
+        },
+    ] {
+        let answer = dispatch(&mut shell, ProfileId::from(9_999), call);
+        assert!(matches!(
+            taken(&answer),
+            HistoryResponse::Error {
+                error: HistoryError::Invalid
+            }
+        ));
+    }
 }
 
 #[test]

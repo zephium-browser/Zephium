@@ -80,10 +80,15 @@ Its security-relevant deltas currently enforce these invariants:
   client-certificate event interfaces and registers deny handlers before the
   initial navigation. Basic authentication is cancelled; certificate
   selection is cancelled and marked handled, so neither can fall back to an
-  unowned native dialog. It also requires `ICoreWebView2_25` and cancels plus
-  suppresses `SaveAsUIShowing`, closing the independent native Save As surface
-  that context-menu, accelerator, PDF-toolbar, and download policy do not
-  comprehensively cover.
+  unowned native dialog. It also requires `ICoreWebView2_25` and registers a
+  `SaveAsUIShowing` gate. Browser-initiated document saves retain the default
+  dialog while their document gate is active. A resource save is admitted only
+  when download policy permits it, native context-menu and download handlers
+  are installed, and `native_resource_save_handler` accepts it; the default
+  dialog is suppressed and the native download broker owns its picker and path.
+  Every request is cancelled before configuring dialog suppression, and only
+  an admitted save clears cancellation afterward. A suppression failure or
+  resource handler panic therefore leaves the request denied.
 - WebView2 and WebKitGTK page-driven close requests default to a no-op.
   Destroying Wry's child container/widget is an explicit builder policy for
   embedders that can also reconcile native and logical-view ownership; a page
@@ -224,6 +229,22 @@ SaveAsUIShowing cancellation registration because document Save As is distinct
 from DownloadStarting. Privileged/agent defaults remain unchanged. See the
 [application qualification record](../../docs/native-links-implementation.md).
 
+### Navigation source frame and context-menu download marker (macOS, 2026-11-05)
+
+`AppleNavigationAction.source` carries `AppleNavigationSource`: whether the
+action's `sourceFrame` is the main frame, and that frame's security-origin
+scheme, host and port. Scheme and host are read with `ORIGIN_PART_LIMIT`
+(512 UTF-16 units / UTF-8 bytes); one that does not fit is reported empty, never
+truncated, so the host can tell a frame it cannot name from the main frame and
+refuse it. `source` is `None` when WebKit names no source frame. The struct
+holds strings, so `AppleNavigationAction` is `Clone` and no longer `Copy`.
+
+`context_menu_download_in_progress()` is true while the native download handler
+runs for a download started from WebKit's own context menu
+(`_webView:contextMenuDidCreateDownload:`), marked by a scoped thread-local
+guard that restores the previous value on drop. The host uses it to tell a
+download the person chose from one a page started.
+
 ### Page dialogs and failure categories (macOS)
 
 `alert`, `confirm` and `prompt` show as an `NSAlert` sheet on the view's window,
@@ -231,7 +252,11 @@ titled by the initiating frame's security-origin host ("example.com says", or
 "An embedded page at … says"). A hidden view, or a window that already shows a
 sheet, gets the dismissed answer, as upstream's no-UI default did. From the
 second dialog within ten seconds the sheet offers to silence the page until its
-URL changes. Messages are bounded to 1,024 characters.
+URL changes. Messages are bounded to 1,024 characters. Message and prompt-default native
+strings are admitted at 2,048 UTF-16 units / 4,096 UTF-8 bytes before a Rust
+copy; oversized values dismiss once. Origin titles, document URLs and prompt
+answers also use native preallocation bounds. Native WebKit may already own
+its input NSString; this prevents duplicating an attacker-sized value in Rust.
 
 `navigation_failure_handler` reduces a failed main-frame navigation's
 `NSURLError` code to a category the host can explain (offline, host not found,
@@ -243,4 +268,58 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 not reported as one, so the failure lands on the document the person asked for
 and the host can show its own explanation. The handler's `FailedDocument` says
 when that error document replaced the shown page, with the address from Wry's
-in-flight navigation record; macOS always reports `Kept`.
+in-flight navigation record.
+
+On macOS, `WebKitErrorDomain` 104 (a content rule blocked the frame load) maps
+to `NavigationFailure::Blocked`, and its `FailedDocument` is `Refused { url }`:
+the address the error's `NSURLErrorFailingURLErrorKey` names, bounded like
+every page URL. The view's own URL is still the previous page at that point,
+so the host must not name the refusal by it. Other macOS failures report
+`Kept`.
+
+### macOS https-first navigation policy (2026-11-05)
+
+`AppleHttpsUpgrade` and the builder's `with_https_upgrade` set WebKit's
+`WKWebpagePreferences.preferredHTTPSNavigationPolicy` on the view's default
+page preferences: `AutomaticFallback` tries plain http addresses over https and
+falls back to http when that fails; `UserMediatedFallback` asks first. The
+setter is called only where the preferences respond to it (macOS 15.2 and
+later); earlier systems keep WebKit's own upgrades of known https hosts. Other
+platforms ignore the attribute. Without the builder call nothing changes.
+
+### Independent Windows controller initialization (2026-10-27)
+
+`with_controller_initialization_hook` configures the retained controller before
+WebView initialization and navigation without changing browser-extension
+options. The separate extension startup gate retains its original admission
+role and runs first when present. Either failure follows owned controller cleanup.
+Zephium applies reputation settings through this hook for extension-disabled
+ordinary, private and agent controllers as well as admitted extension contexts.
+Portable callback tests execute OFF-preserving configuration and gate refusal;
+Windows builder tests cover the actual enablement field. The Windows-only native
+`native_controller_hook_applies_reputation_with_extensions_disabled` fixture
+constructs default/private/agent-shaped controllers with requested extensions OFF,
+verifies actual Settings8 reputation readback, and refuses an inert local extension
+install. An extension-enabled control must install that same fixture successfully.
+The resulting environment has no enablement getter, so this native control
+checks admission in addition to the builder option. It requires
+an unmanaged Windows desktop/WebView2 runtime; native execution remains pending here.
+Native Windows/WebView2 execution remains required; cross-target lint with an empty C-object shim is not
+native SDK or device evidence. The upstream revision and dependency graph are
+unchanged, so the application and standalone fork locks retain their versions.
+
+The required standalone formatter exposed pre-existing WebKit whitespace drift;
+only those formatter changes are normalized. The existing eight-argument
+`attach_handlers` registration boundary carries a scoped, Rust 1.77-compatible
+lint allowance with its retained-owner rationale in a comment. It does not use
+`#[expect]` or lint-reason syntax, which require Rust 1.81. Its signature/behavior
+is unchanged and workspace and standalone Clippy retain `-D warnings`.
+
+### Native class bundle identity compatibility (2026-10-27)
+
+The class-origin gate compares bundle pointers as numeric identities. It uses
+a pointer-to-`usize` cast, preserving that comparison under the inherited Rust
+1.77 manifest floor; `pointer.addr()` requires Rust 1.84. No pointer is recreated
+or dereferenced from the integer, and the admission policy is unchanged.
+The dependency graph and locked upstream versions remain unchanged. Strict
+standalone validation uses the manifest's default MSRV with no lint overrides.

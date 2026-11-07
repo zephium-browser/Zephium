@@ -6,6 +6,7 @@
 mod action;
 mod active_profiles;
 mod browser_surface;
+mod registry_io;
 mod runtime;
 
 pub use action::{
@@ -17,6 +18,7 @@ pub use action::{
     MAX_EXTENSION_ACTION_BADGE_BYTES, MAX_EXTENSION_ACTION_LABEL_BYTES,
     MAX_EXTENSION_INSTALLS_PER_PROFILE, MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH,
     MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH, WINDOWS_EXTENSION_CAPACITY_MESSAGE,
+    WINDOWS_RUNNING_EXTENSIONS,
 };
 pub use active_profiles::{ExtensionActiveProfiles, MAX_EXTENSION_ACTIVE_PROFILES};
 pub use browser_surface::{
@@ -29,3 +31,5 @@ pub use browser_surface::{
     MAX_PENDING_EXTENSION_BROWSER_REQUESTS_PER_PROFILE,
 };
 pub use runtime::{ExtensionRuntimeGeneration, ExtensionRuntimeInstance};
+
+pub use registry_io::{ExtensionPublicationTicket, ExtensionRegistryIo, REGISTRY_IO};

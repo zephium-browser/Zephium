@@ -3,6 +3,7 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import PrivacyPage from "../components/sections/PrivacyPage.svelte";
 
+vi.mock("$shared/platform", () => ({ IS_WINDOWS: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings();
@@ -52,6 +53,8 @@ test("the release page offers browsing data that works and none of the previews"
   await expect.element(page.getByRole("button", { name: "Manage…" })).toBeVisible();
 
   const text = screen.container.textContent;
+  expect(text).not.toContain("Microsoft Defender SmartScreen");
+  expect(text).not.toContain("Windows diagnostic settings");
   expect(text).not.toContain("Interface preview");
   expect(text).not.toContain("Site exceptions");
   expect(text).not.toContain("Clear site data when Zephium closes");

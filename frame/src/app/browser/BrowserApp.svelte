@@ -33,6 +33,7 @@
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import { applyLanguage } from "$shared/lib/locale.svelte";
   import { applySpaceTheme, spaceThemeValues } from "$features/tabs";
+  import * as m from "$shared/i18n/messages";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -41,7 +42,8 @@
   // the page's slide short.
   $effect(() => {
     const mode = preferences.value("sidebar.mode");
-    if (mode === "default" || mode === "compact") untrack(() => sidebar.adoptMode(mode));
+    if (mode === "default" || mode === "compact" || mode === "hidden")
+      untrack(() => sidebar.adoptMode(mode));
   });
 
   $effect(() => {
@@ -118,6 +120,26 @@
   $effect(() => {
     if (extensionProfile) void webext.refresh();
   });
+  // The listing in front shows the browser's own install button in the page.
+  let frontTab = $derived(tabs.activeTab()?.id);
+  let frontListing = $derived(
+    webext.isAvailable() && browserPage.currentPage() === null
+      ? extensions.chromeStoreListingId(tabs.activeTab()?.url ?? "")
+      : null,
+  );
+  // Again as loading ends: a view replaced under the tab starts with none.
+  let frontLoading = $derived(tabs.activeTab()?.loading ?? false);
+  $effect(() => {
+    void frontLoading;
+    if (frontTab === undefined || frontListing === null) return;
+    webext.showStoreButton(frontTab, frontListing, (state) =>
+      state === "remove"
+        ? m.webext_store_remove()
+        : state === "adding"
+          ? m.webext_store_adding()
+          : m.webext_store_install(),
+    );
+  });
   onMount(() => {
     let disposed = false;
 
@@ -140,6 +162,7 @@
     const extensionsReady = extensions.init();
     void webext.refresh();
     const stopAccess = webext.listenForAccess();
+    const stopStoreClicks = webext.listenForStoreClicks();
     const stopDrops = webext.listenForDrops(() => browserPage.currentPage() !== "work");
     const pagePermissionsReady = pagePermissions.init();
 
@@ -209,6 +232,7 @@
       extensions.dispose();
       pagePermissions.dispose();
       void stopAccess.then((stop) => stop());
+      void stopStoreClicks.then((stop) => stop());
       void stopDrops.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();

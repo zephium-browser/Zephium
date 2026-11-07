@@ -750,6 +750,32 @@ fn changing_active_tab_cancels_visible_request_without_resurrecting_a_view() {
 }
 
 #[test]
+fn a_profile_that_needs_a_restart_takes_its_visible_prompt_with_it() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .page_permission_load_outcomes
+        .lock()
+        .unwrap()
+        .push_back(PagePermissionCatalogLoadOutcome::Loaded(empty_catalog()));
+    let (mut shell, engine, _screen, queue, profile, item) = ready_shell(store);
+    let request = camera(21);
+    ask(&mut shell, profile, item, &request);
+    shell.handle(queue.recv().unwrap());
+    assert!(shell.page_permissions.is_visible());
+
+    shell.handle(Command::Engine(EngineEvent::ProfileRestartRequired {
+        profile,
+    }));
+
+    assert!(!shell.page_permissions.has_pending());
+    assert!(!shell.page_permissions.is_visible());
+    assert_eq!(
+        settled(&engine),
+        vec![(21, PagePermissionRequestSettlement::Deny)]
+    );
+}
+
+#[test]
 fn background_request_denies_without_store_or_view_work() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, _screen, _queue, profile, background) = ready_shell(store.clone());
@@ -1156,6 +1182,7 @@ fn changing_the_site_setting_forgets_a_one_time_answer() {
             origin: PageOrigin::parse_exact("https://media.example").unwrap(),
             kind: zephium_core::permissions::SitePermissionKind::Camera,
             decision: None,
+            scheme: None,
         }),
     });
     while let Some(command) = queue.try_recv() {
@@ -1254,6 +1281,18 @@ fn a_prompt_in_the_sidebar_leaves_the_page_on_screen() {
         settled(&engine),
         [(271, PagePermissionRequestSettlement::Allow)]
     );
+}
+
+#[test]
+fn a_dialog_of_the_browser_s_own_takes_the_page_off_screen_while_it_is_open() {
+    let (mut shell, engine, _screen, _queue, _profile, _item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    assert!(page_on_screen(&engine));
+    // Pages sit above the chrome, so a dialog drawn by it would be hidden.
+    shell.handle(Command::SetChromeModal(true));
+    assert!(!page_on_screen(&engine));
+    shell.handle(Command::SetChromeModal(false));
+    assert!(page_on_screen(&engine));
 }
 
 #[test]

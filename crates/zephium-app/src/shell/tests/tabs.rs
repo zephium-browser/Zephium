@@ -558,19 +558,21 @@ fn native_download_cleanup_survives_a_space_switch() {
 fn closing_an_essential_ends_its_page_and_keeps_it_in_place() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     let site = |url: &str| crate::ImportedSite {
         url: url.into(),
         title: url.into(),
     };
+    let destination = shell.import_destination().unwrap();
     shell.handle(Command::Import {
+        destination,
         work: Box::new(crate::ImportWork::Essentials(vec![
             site("https://mail.example/"),
             site("https://board.example/"),
         ])),
         done: crate::ImportCompletion::new(|_| {}),
     });
-    let kept = |shell: &Shell| shell.items.roots(Placement::Favorites { profile }).to_vec();
+    let kept = |shell: &Shell| shell.items.roots(Placement::Favorites { space }).to_vec();
     let mail = kept(&shell)[0];
     shell.handle(Command::Activate(mail));
     assert!(shell.items.tab(mail).unwrap().has_view());
@@ -950,7 +952,7 @@ fn previously_active_mode_does_not_loop_back_through_the_essentials() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     shell.operation_set_app_setting("tabs.after-close".into(), "recent".into());
-    let (profile, space) = focused_scope(&shell);
+    let (_, space) = focused_scope(&shell);
     let home = active_id(&screen);
     navigate_and_commit(&mut shell, home, "home.example");
     let essential = open_page(&mut shell, &screen, "mail.example");
@@ -959,7 +961,7 @@ fn previously_active_mode_does_not_loop_back_through_the_essentials() {
     let b = open_page(&mut shell, &screen, "b.example");
     shell.handle(Command::Activate(essential));
     shell.handle(Command::Activate(b));
-    let essentials = shell.items.roots(Placement::Favorites { profile }).to_vec();
+    let essentials = shell.items.roots(Placement::Favorites { space }).to_vec();
 
     for closing in [b, a, home] {
         shell.handle(Command::Close(closing));
@@ -970,7 +972,7 @@ fn previously_active_mode_does_not_loop_back_through_the_essentials() {
     let remaining = today_of(&shell, space);
     assert_eq!(remaining.len(), 1);
     assert!(shell.items.tab(remaining[0]).unwrap().url.is_none());
-    assert_eq!(shell.items.roots(Placement::Favorites { profile }).len(), 1);
+    assert_eq!(shell.items.roots(Placement::Favorites { space }).len(), 1);
 }
 
 #[test]
@@ -1004,7 +1006,7 @@ fn closing_the_front_essential_or_pinned_tab_follows_the_open_tabs() {
 fn closing_the_front_essential_with_no_open_tab_opens_a_new_tab_and_keeps_the_essential() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
-    let (profile, space) = focused_scope(&shell);
+    let (_, space) = focused_scope(&shell);
     let blank = active_id(&screen);
     navigate_and_commit(&mut shell, blank, "mail.example/inbox");
     make_essential(&mut shell, blank);
@@ -1015,7 +1017,7 @@ fn closing_the_front_essential_with_no_open_tab_opens_a_new_tab_and_keeps_the_es
     let fresh = active_id(&screen);
     assert_eq!(today_of(&shell, space), vec![fresh]);
     assert!(shell.items.tab(fresh).unwrap().url.is_none());
-    let kept = shell.items.roots(Placement::Favorites { profile }).to_vec();
+    let kept = shell.items.roots(Placement::Favorites { space }).to_vec();
     assert_eq!(kept.len(), 1);
     assert!(!shell.items.tab(kept[0]).unwrap().has_view());
 }

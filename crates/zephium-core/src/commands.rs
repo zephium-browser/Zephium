@@ -218,7 +218,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     ),
     command(
         "sidebar.toggleCompact",
-        "Compact Mode",
+        "Toggle Sidebar",
         Keys::same("CmdOrCtrl+Shift+S"),
         Group::View,
     ),
@@ -1002,9 +1002,10 @@ mod tests {
     }
 
     #[test]
-    fn compact_sidebar_is_a_registered_view_command() {
-        let command = get("sidebar.toggleCompact").expect("compact sidebar command");
-        assert_eq!(command.title, "Compact Mode");
+    fn the_sidebar_toggle_is_a_registered_view_command() {
+        // The id predates hiding the sidebar; shortcuts people saved name it.
+        let command = get("sidebar.toggleCompact").expect("sidebar toggle command");
+        assert_eq!(command.title, "Toggle Sidebar");
         assert_eq!(command.group, Group::View);
     }
 

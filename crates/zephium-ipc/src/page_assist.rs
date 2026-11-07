@@ -405,6 +405,11 @@ pub enum PageAssistBlockV1 {
     Steps {
         steps: Vec<PageAssistStepV1>,
     },
+    Search {
+        destination: String,
+        query: String,
+        state: PageAssistStepStateV1,
+    },
     Paused {
         reason: PageAssistPauseV1,
     },

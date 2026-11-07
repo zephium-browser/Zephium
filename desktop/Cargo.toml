@@ -1,7 +1,7 @@
 [package]
 name = "zephium-desktop"
 default-run = "zephium-desktop"
-version = "1.0.3"
+version = "1.0.4"
 edition.workspace = true
 license.workspace = true
 
@@ -53,8 +53,9 @@ macos-work-retained-notion-write-probe = [
     "macos-work-retained-product-probe",
     "zephium-work-composition/retained-notion-write-qualification",
 ]
-# Isolated actual-product protection QA; never a shipping application.
-adblock-qa = ["tauri/custom-protocol"]
+# Isolated actual-product protection QA; never a shipping application. It
+# also carries the stdin/stdout benchmark driver and its page-script seam.
+adblock-qa = ["tauri/custom-protocol", "zephium-engine/blocker-bench", "zephium-blocker/qa-test-hosts"]
 # Isolated actual-product file workflow verification, never a shipping app.
 file-workflows-qa = ["tauri/custom-protocol"]
 # Isolated user-resource UI verification; never a shipping application.
@@ -118,7 +119,7 @@ json-patch = "3"
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "ico", "bmp"] }
 tokio = { workspace = true, features = ["time", "fs", "io-util"] }
-getrandom = "=0.3.4"
+getrandom = "=0.4.3"
 tauri.workspace = true
 zephium-core.workspace = true
 zephium-ipc.workspace = true
@@ -163,10 +164,10 @@ windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
-zephium-blocker = { workspace = true, features = ["runtime"] }
+zephium-blocker = { workspace = true, features = ["runtime", "runtime-exact"] }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_System_LibraryLoader", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_Globalization"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_UI_Input", "Win32_System_LibraryLoader", "Win32_Media_Audio", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_Globalization"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }
@@ -187,7 +188,7 @@ rfd = { version = "=0.16.0", default-features = false, features = ["common-contr
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
 zephium-webext-macos = { path = "../crates/zephium-webext-macos", version = "=0.1.0" }
-zephium-blocker = { workspace = true, features = ["webkit"] }
+zephium-blocker = { workspace = true, features = ["webkit", "runtime", "runtime-exact"] }
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 libc = "0.2"

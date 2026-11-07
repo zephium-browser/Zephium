@@ -1883,6 +1883,9 @@ where
         builder = builder.with_profile_name(name.clone());
     }
 
+    builder =
+        builder.with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
+
     if extensions_enabled {
         if !matches!(&profile, AgentOwnedProfile::Automation { .. }) {
             return Err(AgentOwnedViewConstructionError::ExtensionIsolation);

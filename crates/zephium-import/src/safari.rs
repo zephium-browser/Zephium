@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use plist::Value;
 
-use crate::{snapshot, ImportError, ImportNode, ImportedVisit, Locations, Profile, Source};
+use crate::{snapshot, ImportError, ImportNode, ImportedVisit, Locations, Os, Profile, Source};
 
 /// Seconds between 1970-01-01 and 2001-01-01, Core Foundation's epoch.
 const EPOCH_OFFSET_SECONDS: f64 = 978_307_200.0;
@@ -19,8 +19,8 @@ fn root(locations: &Locations) -> PathBuf {
 /// imports from it: touching them while listing sources makes macOS warn that
 /// Zephium tried to read another app's data. Missing access surfaces then, as
 /// `ImportError::Permission`.
-pub(crate) fn source(_locations: &Locations) -> Option<Source> {
-    if !cfg!(target_os = "macos") {
+pub(crate) fn source(locations: &Locations) -> Option<Source> {
+    if locations.os != Os::Mac {
         return None;
     }
     Some(Source {

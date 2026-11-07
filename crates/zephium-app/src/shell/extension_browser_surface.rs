@@ -304,19 +304,10 @@ impl Shell {
             .and_then(|surface| surface.windows().first())
             .map_or(&[][..], ExtensionBrowserWindow::tabs);
         let mut previous_index = 0_usize;
-        self.append_extension_placement_tabs(
-            Placement::Favorites { profile },
-            previous_tabs,
-            &mut previous_index,
-            &mut tabs,
-        )?;
         for space in self.spaces.iter().filter(|space| space.profile == profile) {
-            for section in [SpaceSection::Pinned, SpaceSection::Today] {
+            for placement in zephium_core::session::space_placements(space.id) {
                 self.append_extension_placement_tabs(
-                    Placement::Space {
-                        space: space.id,
-                        section,
-                    },
+                    placement,
                     previous_tabs,
                     &mut previous_index,
                     &mut tabs,
@@ -422,7 +413,8 @@ impl Shell {
                         tab.loading,
                         pinned,
                     )
-                    .map_err(|_| "extension browser tab metadata failed validation")?,
+                    .map_err(|_| "extension browser tab metadata failed validation")?
+                    .with_audio(tab.audio.muted, tab.audio.shown()),
                 );
             }
             ItemKind::Folder { .. } => {

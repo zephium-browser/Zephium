@@ -9,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
@@ -257,7 +257,7 @@ pub enum SpaceCommand {
 pub enum PageRequestDecision {
     Allow,
     /// Allow, and let this site open the same kind of link without asking
-    /// again until Zephium quits.
+    /// again; kept with the profile's other site settings.
     AlwaysAllow,
     Dismiss,
 }
@@ -348,9 +348,14 @@ pub enum Command {
     FocusWake,
     /// A quiet tab's speaker is due to go.
     AudioWake,
-    /// Writes what was read from another browser into the focused profile,
-    /// restoring the session first when it has not been yet (onboarding).
+    /// Captures one persistent destination before any source reads begin,
+    /// restoring the session first for onboarding.
+    ImportDestination {
+        done: ImportDestinationCompletion,
+    },
+    /// Writes one kind into the destination admitted for the whole job.
     Import {
+        destination: ImportDestination,
         work: Box<crate::store_reads::ImportWork>,
         done: ImportCompletion,
     },
@@ -425,6 +430,8 @@ pub enum Command {
     /// The person's answer to what the tab's page asked for.
     AnswerPageRequest {
         id: ItemId,
+        /// The serial of the request the person was shown.
+        request: u32,
         decision: PageRequestDecision,
     },
     /// The person's answer to the tab's sign-in prompt: credentials, or
@@ -437,6 +444,14 @@ pub enum Command {
     /// The person chose to continue past the certificate the tab refused,
     /// on a host on their own network, and to load it again.
     ContinuePastCertificate(ItemId),
+    /// The person chose to open the page the filter lists refused anyway:
+    /// the address they were shown, so a refusal they never saw is not lifted.
+    ContinuePastBlock {
+        id: ItemId,
+        url: String,
+    },
+    /// The person left the page the filter lists refused.
+    LeaveBlockedPage(ItemId),
     GoBack(ItemId),
     GoForward(ItemId),
     SplitWith {
@@ -479,11 +494,23 @@ pub enum Command {
     /// shape — a toggle, a snap, a tool opening — that the content should
     /// travel with, rather than by a drag that it should simply follow.
     SetSidebarWidth(f64, bool),
+    /// The sidebar is put away, the page taking the window, or brought back.
+    SetSidebarHidden(bool),
+    /// A hidden sidebar comes over the page, or goes back beneath it, sliding
+    /// as the card does or at once.
+    PeekSidebar {
+        peek: bool,
+        slide: bool,
+    },
     /// Transient Windows resize feedback only; no width or layout mutation.
     SidebarResizeGuide(Option<f64>),
     /// Whether the expanded sidebar is on screen to show a page-permission
     /// prompt under its address field.
     SetPagePermissionCardHost(bool),
+    /// Whether one of the browser's own dialogs is open over the window.
+    /// Pages are native views above chrome, so they leave the stage while
+    /// it shows.
+    SetChromeModal(bool),
     ShowBrowserPage(Option<BrowserPage>),
     /// Shows the transient Work browser pane over an existing Space tab or a
     /// fresh tab navigated to `Url`. `rect` is window-local and clamped.
@@ -532,6 +559,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
+        /// Opens the action's context menu rather than clicking it.
+        menu: bool,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
@@ -565,6 +594,9 @@ pub enum Command {
     SetWebExtensions {
         profile: ProfileId,
         extensions: Vec<zephium_core::ports::engine::WebExtensionLoad>,
+        /// Package preparation failures for this exact profile/install set.
+        failures: Vec<(zephium_core::ids::ExtensionInstallId, String)>,
+        retry: Option<zephium_core::ids::ExtensionInstallId>,
     },
     /// Opens an extension's options page in a tab.
     OpenWebExtensionOptions {
@@ -581,6 +613,11 @@ pub enum Command {
     RemoveWebExtension {
         profile: ProfileId,
         extension: Box<zephium_core::ports::engine::WebExtensionLoad>,
+    },
+    /// What the install button on the Web Store listing in `tab` shows.
+    ShowStoreButton {
+        tab: ItemId,
+        button: zephium_core::ports::engine::StoreButton,
     },
     /// The profile an installation from `tab` would go to.
     ResolveWebExtensionTarget {
@@ -613,6 +650,9 @@ pub enum Command {
     CancelSearch {
         session_id: String,
     },
+    /// The launcher's page has just loaded, so it holds none of the icon
+    /// rasters it was sent before.
+    PanelLoaded,
     RunSearchAction {
         context: Box<zephium_ipc::SearchContext>,
         action: zephium_ipc::SearchAction,
@@ -685,6 +725,8 @@ pub enum Command {
         origin: zephium_core::permissions::PageOrigin,
         kind: zephium_core::permissions::SitePermissionKind,
         decision: Option<zephium_core::permissions::RememberedPagePermission>,
+        /// The application link scheme, for app link grants.
+        scheme: Option<String>,
     },
     SitePermissionCatalogLoaded {
         operation_id: String,
@@ -819,6 +861,12 @@ pub enum Command {
         profile: ProfileId,
         token: u64,
     },
+    /// The startup protection deadline for one profile: views held for its
+    /// enabled policy open without it from here on.
+    BlockerStartupDeadline {
+        profile: ProfileId,
+        token: u64,
+    },
     /// Bounded follow-up for an exact user-requested refresh or the reserved
     /// internal activation token. Ordinary refresh scheduling remains on the
     /// low-frequency maintenance heartbeat.
@@ -826,6 +874,9 @@ pub enum Command {
         operation: u64,
         attempt: u8,
     },
+    /// The catalog's update worker published a new status, such as a finished
+    /// download, so the catalog is maintained now rather than at the next tick.
+    BlockerCatalogChanged,
     /// One bounded-backoff retry for journal reconciliation, native erasure,
     /// or local SQLite finalization.
     ProfileDeletionRetry {
@@ -1139,6 +1190,34 @@ impl ExportCompletion {
 impl fmt::Debug for ExportCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ExportCompletion")
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImportDestination {
+    pub profile: ProfileId,
+    pub space: SpaceId,
+}
+
+#[derive(Clone)]
+pub struct ImportDestinationCompletion(Completion<Option<ImportDestination>>);
+impl ImportDestinationCompletion {
+    pub fn new(done: impl FnOnce(Option<ImportDestination>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, profile: Option<ImportDestination>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(profile);
+        }
+    }
+}
+impl fmt::Debug for ImportDestinationCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ImportDestinationCompletion")
     }
 }
 #[derive(Clone)]

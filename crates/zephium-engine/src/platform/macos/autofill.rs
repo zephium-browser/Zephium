@@ -5,34 +5,98 @@
 //! process that takes the keyboard while it is open, so typing that follows a
 //! click into a field would go to the panel instead of the field.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashSet;
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{msg_send, sel, ClassType, MainThreadOnly};
 use objc2_foundation::{MainThreadMarker, NSString};
 use objc2_web_kit::{WKContentWorld, WKUserScript, WKUserScriptInjectionTime, WKWebView};
+use zephium_core::ids::ProfileId;
+
+thread_local! {
+    /// Profiles where a password manager turned the browser's own filling off.
+    static OFF: RefCell<HashSet<ProfileId>> = RefCell::new(HashSet::new());
+    static VIEWS: RefCell<Vec<(ProfileId, Weak<WKWebView>)>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Puts WebKit's AutoFill key in sign-in fields of `page`; a click on it
 /// opens the panel through the view's AutoFill button handler. It needs a
 /// content world allowed to drive AutoFill, new in macOS 27; before that the
 /// fields stay plain and Edit > AutoFill Password remains.
-pub(crate) fn show_key_in_sign_in_fields(page: &WKWebView) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
+pub(crate) fn show_key_in_sign_in_fields(page: &WKWebView, profile: ProfileId) {
     let Some(world) = autofill_world() else {
         return;
     };
-    let source = NSString::from_str(include_str!("autofill_key.js"));
+    add_script(page, &world, include_str!("autofill_key.js"));
+    if OFF.with(|off| off.borrow().contains(&profile)) {
+        add_script(page, &world, &state_script(false));
+    }
+    VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.retain(|(_, view)| view.load().is_some());
+        views.push((profile, Weak::from(page)));
+    });
+}
+
+/// A password manager extension turned the browser's own password filling
+/// on or off in `profile` (`chrome.privacy.services.passwordSavingEnabled`).
+/// Open pages follow at once and their later documents through a script that
+/// runs before the key's; WebKit can't remove one script, so a change adds
+/// another, which is rare.
+pub(crate) fn set_filling(profile: ProfileId, enabled: bool) {
+    let changed = OFF.with(|off| {
+        let mut off = off.borrow_mut();
+        if enabled {
+            off.remove(&profile)
+        } else {
+            off.insert(profile)
+        }
+    });
+    let Some(world) = autofill_world().filter(|_| changed) else {
+        return;
+    };
+    let script = state_script(enabled);
+    let views: Vec<Retained<WKWebView>> = VIEWS.with(|views| {
+        let mut views = views.borrow_mut();
+        views.retain(|(_, view)| view.load().is_some());
+        views
+            .iter()
+            .filter(|(owner, _)| *owner == profile)
+            .filter_map(|(_, view)| view.load())
+            .collect()
+    });
+    for view in views {
+        add_script(&view, &world, &script);
+        // SAFETY: main-thread WebKit call on a live view and world.
+        unsafe {
+            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str(&script),
+                None,
+                &world,
+                None,
+            )
+        };
+    }
+}
+
+fn state_script(enabled: bool) -> String {
+    format!("globalThis.__zephiumFillingOff = {};", !enabled)
+}
+
+fn add_script(page: &WKWebView, world: &WKContentWorld, source: &str) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     // SAFETY: main-thread WebKit calls on a live view and world.
     unsafe {
         let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
             WKUserScript::alloc(mtm),
-            &source,
-            WKUserScriptInjectionTime::AtDocumentEnd,
+            &NSString::from_str(source),
+            WKUserScriptInjectionTime::AtDocumentStart,
             false,
-            &world,
+            world,
         );
         page.configuration()
             .userContentController()

@@ -16,14 +16,19 @@
 
   $effect(() => {
     const asked = tab;
+    let active = true;
     source = undefined;
     copied = false;
     void commands
       .pageSource(asked)
       .catch(() => null)
       .then((found) => {
-        if (asked === tab) source = found;
+        if (active) source = found;
       });
+    return () => {
+      active = false;
+      clearTimeout(reset);
+    };
   });
 
   let lines = $derived(source ? sourceLines(source.text) : null);

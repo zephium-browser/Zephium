@@ -1,5 +1,7 @@
 //! Pure window layout in top-left logical coordinates. Chrome and content tile
-//! without overlap, so the two webviews never contend for the cursor.
+//! without overlap, so the two webviews never contend for the cursor, except
+//! while the sidebar is hidden: then the page takes the window and the chrome
+//! keeps the column's width beneath it, ready to come over it.
 
 use crate::geometry::{Rect, Size};
 
@@ -15,6 +17,8 @@ pub struct Metrics {
     pub gap: f64,
     /// Optional reserved title band. Native overlay controls reserve no space.
     pub caption: f64,
+    /// The column is put away until the pointer asks for it.
+    pub sidebar_hidden: bool,
 }
 
 impl Default for Metrics {
@@ -24,6 +28,7 @@ impl Default for Metrics {
             padding: 8.0,
             gap: 8.0,
             caption: 0.0,
+            sidebar_hidden: false,
         }
     }
 }
@@ -85,6 +90,33 @@ pub struct Layout {
     pub content: Option<Rect>,
 }
 
+/// How far past the column a hidden sidebar's chrome reaches, so the shadow
+/// it casts over the page while it is shown is not cut off.
+pub const HIDDEN_SHADOW_REACH: f64 = 64.0;
+
+/// The gap a hidden sidebar's card keeps from the window's left, top and
+/// bottom, and the padding it keeps inside its own edge.
+pub const HIDDEN_CARD_INSET: f64 = 8.0;
+
+/// How far from the window's left the card ends, given the width of the
+/// chrome a hidden sidebar keeps beneath the page: the column and its
+/// gutter, the shadow's reach, and the card's padding beyond the column.
+pub fn hidden_card_edge(chrome_width: f64) -> f64 {
+    (chrome_width - HIDDEN_SHADOW_REACH + 2.0 * HIDDEN_CARD_INSET).max(0.0)
+}
+
+/// Where a hidden sidebar's card stands while it is over the page: the column
+/// with the inset all round it, as the frame draws it.
+pub fn hidden_card(window: Size, m: Metrics) -> Rect {
+    let inset = HIDDEN_CARD_INSET;
+    Rect::new(
+        inset,
+        inset,
+        (m.sidebar_width + 2.0 * inset).min((window.width - inset).max(0.0)),
+        (window.height - 2.0 * inset).max(0.0),
+    )
+}
+
 pub fn compute(window: Size, mode: Mode, m: Metrics, content_present: bool) -> Layout {
     match mode {
         Mode::Sidebar => sidebar(window, m, content_present),
@@ -106,8 +138,19 @@ fn sidebar(win: Size, m: Metrics, content_present: bool) -> Layout {
         };
     }
 
-    let chrome = Rect::new(0.0, 0.0, p + m.sidebar_width, win.height);
-    let content_x = p + m.sidebar_width + m.gap;
+    // Hidden, the column keeps its width beneath the page, so it can come
+    // over it without laying out again, and the page starts at the gutter.
+    let chrome_width = if m.sidebar_hidden {
+        (p + m.sidebar_width + HIDDEN_SHADOW_REACH).min(win.width)
+    } else {
+        p + m.sidebar_width
+    };
+    let chrome = Rect::new(0.0, 0.0, chrome_width, win.height);
+    let content_x = if m.sidebar_hidden {
+        p
+    } else {
+        p + m.sidebar_width + m.gap
+    };
     let content = Rect::new(
         content_x,
         p + m.caption,
@@ -139,7 +182,52 @@ mod tests {
         padding: 8.0,
         gap: 8.0,
         caption: 0.0,
+        sidebar_hidden: false,
     };
+
+    #[test]
+    fn a_hidden_sidebar_gives_the_page_the_window_and_waits_beneath_it() {
+        let m = Metrics {
+            sidebar_hidden: true,
+            ..M
+        };
+        let l = compute(Size::new(1200.0, 800.0), Mode::Sidebar, m, true);
+        assert_eq!(l.content, Some(Rect::new(8.0, 8.0, 1184.0, 784.0)));
+        assert_eq!(
+            l.chrome,
+            Rect::new(0.0, 0.0, 248.0 + HIDDEN_SHADOW_REACH, 800.0)
+        );
+        // Without a page there is nothing to hide beneath.
+        let empty = compute(Size::new(1200.0, 800.0), Mode::Sidebar, m, false);
+        assert_eq!(empty.chrome, Rect::new(0.0, 0.0, 1200.0, 800.0));
+    }
+
+    #[test]
+    fn the_hidden_card_is_the_column_with_its_inset_and_stays_in_the_window() {
+        assert_eq!(
+            hidden_card(Size::new(1200.0, 800.0), M),
+            Rect::new(8.0, 8.0, 256.0, 784.0)
+        );
+        assert_eq!(
+            hidden_card(Size::new(200.0, 100.0), M),
+            Rect::new(8.0, 8.0, 192.0, 84.0)
+        );
+        // The chrome beneath a hidden 240 column is 8 + 240 + reach wide.
+        let chrome = compute(
+            Size::new(1200.0, 800.0),
+            Mode::Sidebar,
+            Metrics {
+                sidebar_hidden: true,
+                ..M
+            },
+            true,
+        )
+        .chrome;
+        let card = hidden_card(Size::new(1200.0, 800.0), M);
+        assert_eq!(hidden_card_edge(chrome.width), card.x + card.width);
+        let tiny = hidden_card(Size::new(4.0, 4.0), M);
+        assert_eq!((tiny.width, tiny.height), (0.0, 0.0));
+    }
 
     #[test]
     fn a_title_band_lowers_the_page_and_leaves_the_sidebar_full_height() {

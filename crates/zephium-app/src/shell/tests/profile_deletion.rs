@@ -413,6 +413,11 @@ fn delayed_authorization_proof_reschedules_newer_survivor_durability() {
 fn restart_resumes_journaled_native_erasure_before_creating_views() {
     let store = Arc::new(FakeStore::default());
     store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
+    store
         .authorize_outcomes
         .lock()
         .unwrap()
@@ -640,4 +645,170 @@ fn profile_deletion_policy_rejects_default_active_private_and_last_profile() {
     assert!(last_only
         .filtered_session_for_profile_deletion(only)
         .is_none());
+}
+
+#[derive(Default)]
+struct DelayedDeletionNotes {
+    release: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+impl zephium_core::ports::notes::Notes for DelayedDeletionNotes {
+    fn call(
+        &self,
+        _: ProfileId,
+        _: zephium_core::notes::NoteCall,
+        done: zephium_core::notes::NoteDone,
+    ) {
+        done(zephium_core::notes::NoteResponse::Done);
+    }
+    fn release(&self, _: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
+        *self.release.lock().unwrap() = Some(done);
+        true
+    }
+}
+
+#[test]
+fn data_safety_deletion_waits_for_notes_drain_before_native_erasure_and_finalization() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .authorize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionAuthorizeOutcome::Authorized);
+    store
+        .finalize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionFinalizeOutcome::Completed);
+    let (mut shell, engine, _screen, operations) =
+        setup_with_operation_log_and_failure(store.clone(), Box::new(|_| {}));
+    let notes = Arc::new(DelayedDeletionNotes::default());
+    shell.handle(Command::AttachNotes(crate::api::NotesAttachment(
+        notes.clone(),
+    )));
+    shell.handle(Command::Bootstrap);
+    store.events.lock().unwrap().clear();
+    let profile = add_inactive_named_profile(&mut shell, 89_100);
+    engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
+    shell.handle(delete_operation("wait-notes", profile));
+    assert!(engine.erasure_requests().is_empty());
+    assert!(operations.lock().unwrap().is_empty());
+    assert_eq!(
+        store.events.lock().unwrap().as_slice(),
+        ["authorize-delete"]
+    );
+    assert!(!store.pending_deletions.lock().unwrap().is_empty());
+    notes.release.lock().unwrap().take().unwrap()();
+    shell.handle(Command::ProfileDeletionReady(profile));
+    assert_eq!(engine.erasure_requests(), vec![profile]);
+    assert_eq!(
+        operations.lock().unwrap()[0].outcome,
+        OperationOutcome::Applied
+    );
+    assert!(store.pending_deletions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn missing_notes_drain_proof_expires_and_retries_without_erasing_data() {
+    for stale_first in [true, false] {
+        let store = Arc::new(FakeStore::default());
+        store
+            .authorize_outcomes
+            .lock()
+            .unwrap()
+            .push_back(ProfileDeletionAuthorizeOutcome::Authorized);
+        store
+            .finalize_outcomes
+            .lock()
+            .unwrap()
+            .push_back(ProfileDeletionFinalizeOutcome::Completed);
+        let (mut shell, engine, _screen, operations) =
+            setup_with_operation_log_and_failure(store.clone(), Box::new(|_| {}));
+        let notes = Arc::new(DelayedDeletionNotes::default());
+        shell.handle(Command::AttachNotes(crate::api::NotesAttachment(
+            notes.clone(),
+        )));
+        shell.handle(Command::Bootstrap);
+        let profile = add_inactive_named_profile(&mut shell, 89_200);
+        engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
+        shell.handle(delete_operation("expired-notes", profile));
+        let stale = notes.release.lock().unwrap().take().unwrap();
+        if let ProfileDeletionPhase::NotesInFlight { deadline, .. } = &mut shell
+            .profile_deletion
+            .states
+            .get_mut(&profile)
+            .unwrap()
+            .phase
+        {
+            *deadline = std::time::Instant::now();
+        } else {
+            panic!("deletion must wait for notes drain");
+        }
+        let generation = shell.profile_deletion.states[&profile].retry_generation;
+        shell.handle(Command::ProfileDeletionRetry {
+            profile,
+            generation,
+        });
+        // No drain proof leaves deletion pending, with both durable and native data intact.
+        assert!(operations.lock().unwrap().is_empty());
+        assert!(engine.erasure_requests().is_empty());
+        assert!(!store.pending_deletions.lock().unwrap().is_empty());
+        let generation = shell.profile_deletion.states[&profile].retry_generation;
+        shell.handle(Command::ProfileDeletionRetry {
+            profile,
+            generation,
+        });
+        let fresh = notes
+            .release
+            .lock()
+            .unwrap()
+            .take()
+            .expect("expired drain retries");
+        if stale_first {
+            stale();
+            shell.handle(Command::ProfileDeletionReady(profile));
+            assert!(engine.erasure_requests().is_empty());
+            fresh();
+        } else {
+            fresh();
+            stale();
+        }
+        shell.handle(Command::ProfileDeletionReady(profile));
+        assert_eq!(engine.erasure_requests(), vec![profile]);
+        assert_eq!(operations.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn restart_with_verified_native_erasure_still_requires_current_notes_release() {
+    let store = Arc::new(FakeStore::default());
+    let (mut initial, _, _) = setup_with(store.clone());
+    initial.handle(Command::Bootstrap);
+    initial.persist();
+    drop(initial);
+    let removed = ProfileId::from(89_300);
+    store
+        .pending_deletions
+        .lock()
+        .unwrap()
+        .push(PendingProfileDeletion {
+            profile: removed,
+            native_erasure_verified: true,
+        });
+    store
+        .finalize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionFinalizeOutcome::Completed);
+    let (mut shell, engine, _screen) = setup_with(store.clone());
+    let notes = Arc::new(DelayedDeletionNotes::default());
+    shell.handle(Command::AttachNotes(crate::api::NotesAttachment(
+        notes.clone(),
+    )));
+    shell.handle(Command::Bootstrap);
+    assert!(!store.pending_deletions.lock().unwrap().is_empty());
+    assert!(!store.events.lock().unwrap().contains(&"finalize-delete"));
+    notes.release.lock().unwrap().take().unwrap()();
+    shell.handle(Command::ProfileDeletionReady(removed));
+    assert!(engine.erasure_requests().is_empty());
+    assert!(store.pending_deletions.lock().unwrap().is_empty());
 }

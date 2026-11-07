@@ -595,19 +595,16 @@ impl Library {
             return Ok(error(NoteError::TooLarge));
         }
         let next = revision(&bytes);
-        let meta = self.folder.stat(&row.path)?;
-        let current = if unchanged(&row, &meta) {
-            row.revision.clone()
-        } else {
-            revision(&self.folder.read(&row.path)?.bytes)
-        };
+        // Metadata is an indexing hint, never proof of the version edited:
+        // equal-length external writes can share its timestamp and identity.
+        let contents = self.folder.read(&row.path)?;
+        let current = revision(&contents.bytes);
         let applied = |summary| NoteResponse::Applied {
             request_id: request_id.to_string(),
             summary,
         };
         if current == next {
             // Already saved, by this request's first attempt or an identical edit.
-            let contents = self.folder.read(&row.path)?;
             let stored = self.store(&row, &row.path.clone(), &contents, false, 0)?;
             let stored = if settle {
                 self.follow_title(&row, stored, changes)?
@@ -617,7 +614,6 @@ impl Library {
             return Ok(applied(stored.summary()));
         }
         if current != base {
-            let contents = self.folder.read(&row.path)?;
             let row = self.store(&row, &row.path.clone(), &contents, false, 0)?;
             changes.note(id);
             return Ok(NoteResponse::Conflict {
@@ -627,6 +623,9 @@ impl Library {
                 },
             });
         }
+        // This checks the current bounded bytes before atomic replacement.
+        // Filesystems provide no CAS against an unrelated editor writing
+        // between this read and publication; replacement prevents torn files.
         let meta = self.folder.replace(&row.path, &bytes)?;
         let contents = Contents { bytes, meta };
         let stored = self.store(&row, &row.path.clone(), &contents, false, 0)?;

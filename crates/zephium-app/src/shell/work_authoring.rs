@@ -111,16 +111,13 @@ impl crate::Shell {
                         },
                     ..
                 } => self.items.get(*tab).is_some_and(|item| {
+                    let (zephium_core::item::Placement::Favorites { space }
+                    | zephium_core::item::Placement::Space { space, .. }) = item.placement;
                     item.tab().is_some()
-                        && match item.placement {
-                            zephium_core::item::Placement::Favorites { profile: owner } => {
-                                owner == profile
-                            }
-                            zephium_core::item::Placement::Space { space, .. } => self
-                                .spaces
-                                .get(space)
-                                .is_some_and(|space| space.profile == profile),
-                        }
+                        && self
+                            .spaces
+                            .get(space)
+                            .is_some_and(|space| space.profile == profile)
                 }),
                 _ => false,
             };
@@ -553,9 +550,7 @@ mod tests {
         let foreign = zephium_core::ids::ItemId::from(998_u128);
         assert!(shell.items.insert_tab(
             foreign,
-            zephium_core::item::Placement::Favorites {
-                profile: 999.into()
-            }
+            zephium_core::item::Placement::Favorites { space: 999.into() }
         ));
         let attach = |tab, command| WorkEnvironmentCall::Command {
             command,

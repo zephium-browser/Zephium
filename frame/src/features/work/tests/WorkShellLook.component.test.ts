@@ -1,9 +1,15 @@
 import "$styles/global.css";
-import { expect, test, vi } from "vitest";
-import { render } from "vitest-browser-svelte";
+import { afterEach, expect, test, vi } from "vitest";
+import { cleanup, render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
+import { workSession } from "$domain/work";
+import { projection, snapshot } from "./environment-fixtures";
+// Prepare the lazy surfaces before each visual case starts its interaction budget.
+import "../components/WorkCanvas.svelte";
+import "../components/bar/ModelPicker.svelte";
+import "../components/AgentLine.svelte";
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -24,13 +30,24 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 const shots = "../../../../../target/work-shell";
-const settle = () => new Promise((done) => setTimeout(done, 450));
+let activeEnvironment: WorkEnvironmentSession | undefined;
+afterEach(() => {
+  cleanup();
+  if (activeEnvironment) {
+    activeEnvironment.composer = "";
+    activeEnvironment.dispose();
+    activeEnvironment = undefined;
+  }
+  workSession(snapshot.profile).back();
+  vi.restoreAllMocks();
+  document.documentElement.dataset.theme = "dark";
+});
 
-test("the Work screen's own chrome, at rest and in use, in both themes", async () => {
-  const { workSession } = await import("$domain/work");
-  const { projection, snapshot } = await import("./environment-fixtures");
+async function mount() {
   await page.viewport(1440, 900);
   const environment = new WorkEnvironmentSession(snapshot.profile, snapshot.space);
+  activeEnvironment = environment;
+  environment.composer = "";
   environment.snapshot = { ...structuredClone(snapshot), title: "YC trip from Warsaw" };
   environment.selected = snapshot.id;
   const hour = 3_600_000;
@@ -54,6 +71,7 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     empty: !request,
   }));
   const objective = workSession(snapshot.profile)!;
+  objective.back();
   vi.spyOn(objective, "start").mockResolvedValue();
   vi.spyOn(objective, "open").mockImplementation(async () => {
     objective.projection = structuredClone(projection);
@@ -70,55 +88,52 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "884px";
   root.style.width = "1376px";
-  const shoot = async (name: string) => {
-    for (const theme of ["dark", "light"]) {
+  return { screen, objective };
+}
+
+for (const theme of ["dark", "light"]) {
+  for (const state of ["rest", "hint", "typing", "works", "note", "island"] as const) {
+    test(`the Work chrome at ${state}, ${theme}`, async () => {
       document.documentElement.dataset.theme = theme;
-      await settle();
-      await page.screenshot({ path: `${shots}/${name}-${theme}.png` });
-    }
-    document.documentElement.dataset.theme = "dark";
-  };
-  await shoot("rest");
-  await screen.getByRole("button", { name: "Hand", exact: true }).hover();
-  await new Promise((done) => setTimeout(done, 900));
-  await shoot("hint");
-  await screen.getByRole("button", { name: "Works" }).hover();
-  const field = screen.getByRole("textbox", { name: "What do you want to do?" });
-  await field.click();
-  await userEvent.keyboard("Plan my trip to the next YC batch from Warsaw");
-  await expect
-    .poll(() => screen.container.querySelector<HTMLButtonElement>(".model-trigger")?.disabled)
-    .toBe(false);
-  await shoot("typing");
-  await field.fill("");
-  (document.activeElement as HTMLElement | null)?.blur();
-  await screen.getByRole("button", { name: "Works" }).click();
-  await expect.element(screen.getByRole("searchbox", { name: "Search works" })).toBeVisible();
-  await shoot("works");
-  await userEvent.keyboard("{Escape}");
-  expect(screen.container.querySelector('[aria-label="Account"]')).toBeNull();
-  await screen.getByRole("button", { name: "Blocks", exact: true }).click();
-  await page.getByRole("button", { name: /^Note/u }).click();
-  await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
-  await shoot("note");
-  await userEvent.keyboard("{Escape}");
-  const live = structuredClone(projection);
-  const execution = live.executions[0]!;
-  execution.status = "running";
-  execution.authorization = "user_directed_agent";
-  execution.attempts = [{ id: "attempt", node: "node", status: "running", usage: null }];
-  execution.steps = [
-    {
-      id: "read-1",
-      turn: 1,
-      kind: { kind: "read", url: "https://www.airbnb.com/s/San-Francisco" },
-      status: "running",
-    },
-  ];
-  objective.selected = "objective";
-  objective.projection = live;
-  await expect.poll(() => screen.container.querySelector(".island")).not.toBeNull();
-  await shoot("island");
-  await screen.unmount();
-  environment.dispose();
-});
+      const { screen, objective } = await mount();
+      if (state === "hint") {
+        await screen.getByRole("button", { name: "Hand", exact: true }).hover();
+        await new Promise((done) => setTimeout(done, 900));
+      } else if (state === "typing") {
+        const field = screen.getByRole("textbox", { name: "What do you want to do?" });
+        await field.click();
+        await userEvent.keyboard("Plan my trip to the next YC batch from Warsaw");
+        await expect
+          .poll(() => screen.container.querySelector<HTMLButtonElement>(".model-trigger")?.disabled)
+          .toBe(false);
+      } else if (state === "works") {
+        await screen.getByRole("button", { name: "Works" }).click();
+        await expect.element(screen.getByRole("searchbox", { name: "Search works" })).toBeVisible();
+        expect(screen.container.querySelector('[aria-label="Account"]')).toBeNull();
+      } else if (state === "note") {
+        await screen.getByRole("button", { name: "Blocks", exact: true }).click();
+        await page.getByRole("button", { name: /^Note/u }).click();
+        await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
+      } else if (state === "island") {
+        const live = structuredClone(projection);
+        const execution = live.executions[0]!;
+        execution.status = "running";
+        execution.authorization = "user_directed_agent";
+        execution.attempts = [{ id: "attempt", node: "node", status: "running", usage: null }];
+        execution.steps = [
+          {
+            id: "read-1",
+            turn: 1,
+            kind: { kind: "read", url: "https://www.airbnb.com/s/San-Francisco" },
+            status: "running",
+          },
+        ];
+        objective.selected = "objective";
+        objective.projection = live;
+        await expect.poll(() => screen.container.querySelector(".island")).not.toBeNull();
+      }
+      await new Promise((done) => setTimeout(done, 450));
+      await page.screenshot({ path: `${shots}/${state}-${theme}.png` });
+    });
+  }
+}

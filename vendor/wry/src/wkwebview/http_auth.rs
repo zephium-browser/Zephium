@@ -61,7 +61,8 @@ pub(crate) fn challenge(
     0 => None,
     port => Some(u16::try_from(port).ok()?),
   };
-  let previous_failures = u32::try_from(challenge.previousFailureCount().max(0)).unwrap_or(u32::MAX);
+  let previous_failures =
+    u32::try_from(challenge.previousFailureCount().max(0)).unwrap_or(u32::MAX);
   // SAFETY: called on WebKit's main thread with a live web view.
   let main_frame_url = unsafe { webview.URL() }
     .and_then(|url| url.absoluteString())

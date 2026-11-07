@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400" viewBox="0 0 640 400">
+  <rect width="640" height="400" fill="#d6e2f0"/>
+  <rect x="24" y="24" width="592" height="352" rx="14" fill="#fff"/>
+  <g font-family="sans-serif" fill="#263340">
+    <text x="48" y="60" font-size="14">Synthetic reservation frame</text>
+    <text x="48" y="98" font-size="24">Your monthly stay</text>
+    <rect x="48" y="120" width="544" height="112" rx="8" fill="#a9c0cd"/>
+    <text x="48" y="270" font-size="18">Jan 5 – Feb 2, 2027 · 1 adult</text>
+    <path d="M48 294h544" stroke="#d6e2f0"/>
+    <text x="48" y="330" font-size="18">Total (USD)</text>
+    <text x="500" y="330" font-size="20">$4,212</text>
+  </g>
+</svg>

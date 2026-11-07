@@ -158,17 +158,9 @@ impl Shell {
         if !self.search_context_current(&context) {
             return;
         }
-        // A launcher panel is created fresh each time it opens, so a new
-        // session id means its raster cache is empty again.
-        let reopened = !context.session_id.starts_with("newtab:")
-            && self
-                .search
-                .context
-                .as_ref()
-                .is_none_or(|current| current.session_id != context.session_id);
-        if reopened {
-            self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
-        }
+        // The launcher's page stays mounted between presentations and keeps
+        // the rasters it was sent, so a new session needs none of them again.
+        // Only a page that has been loaded afresh starts empty (`PanelLoaded`).
         self.search.supplementary_pending = !query.trim().is_empty();
         self.search.query = query.to_owned();
         self.search.context = Some(context);
@@ -337,7 +329,7 @@ impl Shell {
         let needle = q.to_lowercase();
         let mut stack = Vec::new();
         for placement in [
-            Placement::Favorites { profile },
+            Placement::Favorites { space },
             Placement::Space {
                 space,
                 section: SpaceSection::Pinned,

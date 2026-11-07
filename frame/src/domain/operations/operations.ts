@@ -148,6 +148,32 @@ export function dispose() {
 
 export const result = (operationId: string) => recent.get(operationId);
 
+/** Observes a terminal ledger result without starting another poll or owning a surface. */
+export function onDisposition(
+  operationId: string,
+  receive: (disposition: OperationDisposition) => void,
+): () => void {
+  const signal = () => {
+    const disposition = recent.get(operationId);
+    if (disposition) {
+      try {
+        receive(disposition);
+      } catch {
+        // A failed observer must not interrupt native ledger acknowledgement.
+      }
+    }
+  };
+  const signals = settlementSignals.get(operationId) ?? new Set<() => void>();
+  signals.add(signal);
+  settlementSignals.set(operationId, signals);
+  signal();
+  return () => {
+    signals.delete(signal);
+    if (signals.size === 0 && settlementSignals.get(operationId) === signals)
+      settlementSignals.delete(operationId);
+  };
+}
+
 export type OperationResolution =
   | { state: "processed"; disposition: OperationDisposition }
   | { state: "pending"; operation_id: string }

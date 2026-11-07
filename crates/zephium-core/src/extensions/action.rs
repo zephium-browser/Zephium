@@ -14,7 +14,9 @@ use crate::ids::ItemId;
 use super::{ExtensionBrowserSurfaceGeneration, ExtensionRuntimeInstance};
 
 /// One snapshot carries at most one action per installed extension.
-pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 8;
+pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 64;
+/// Each running extension on Windows keeps a hidden WebView2 page of its own.
+pub const WINDOWS_RUNNING_EXTENSIONS: usize = 8;
 /// Stable settlement reason used to retry Windows admission after a slot opens.
 pub const WINDOWS_EXTENSION_CAPACITY_MESSAGE: &str =
     "This Windows build supports eight running extensions.";
@@ -296,6 +298,7 @@ pub struct ExtensionActionRequest {
     surface_generation: ExtensionBrowserSurfaceGeneration,
     action_revision: ExtensionActionRevision,
     anchor: ExtensionPopupAnchor,
+    menu: bool,
 }
 
 impl ExtensionActionRequest {
@@ -314,7 +317,20 @@ impl ExtensionActionRequest {
             surface_generation,
             action_revision,
             anchor,
+            menu: false,
         }
+    }
+
+    /// Shows the action's context menu (its `contexts: ["action"]` items)
+    /// at the anchor instead of clicking it.
+    #[must_use]
+    pub const fn for_menu(mut self) -> Self {
+        self.menu = true;
+        self
+    }
+
+    pub const fn is_menu(self) -> bool {
+        self.menu
     }
 
     pub const fn id(self) -> ExtensionActionRequestId {

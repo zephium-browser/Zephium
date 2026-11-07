@@ -199,10 +199,8 @@ impl Shell {
             native_erasure_verified,
         } in pending_deletions
         {
-            let phase = if native_erasure_verified {
-                ProfileDeletionPhase::FinalizeReady
-            } else {
-                ProfileDeletionPhase::NativeReady
+            let phase = ProfileDeletionPhase::NotesReady {
+                native_erasure_verified,
             };
             self.profile_deletion.states.insert(
                 profile,
@@ -278,8 +276,7 @@ impl Shell {
         let pages = self.tab_preferences.opens_pages() && self.pending_external.is_empty();
         let start_fresh = (self.tab_preferences.start_with_new_tab || pages)
             && self.pending_external.is_empty()
-            && active_item
-                .is_some_and(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some()));
+            && active_item.is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some()));
         let mut fx = Vec::new();
         if let Some(tree) = splits {
             if !start_fresh {
@@ -299,7 +296,15 @@ impl Shell {
         };
         match restored {
             Some(item) => fx.extend(self.focus_tab(item)),
-            None => fx.extend(self.open_tab()),
+            None => {
+                if let Some((_, effects)) = self.open_tab_with_id() {
+                    fx.extend(effects);
+                } else if let Some(item) =
+                    active_item.or_else(|| self.today_tabs(space).first().copied())
+                {
+                    fx.extend(self.focus_tab(item));
+                }
+            }
         }
         // Restored/hibernated tabs may not create a native view and therefore
         // have no URL/load callback to trigger favicon hydration. Load the

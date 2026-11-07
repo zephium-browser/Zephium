@@ -38,6 +38,8 @@ vi.mock("$shared/ipc/bindings", async () => {
     profilesGet: native.profiles,
     profilesSwitch: native.switchTo,
     settingGet: async () => null,
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: vi.fn(async () => undefined),
   });
 });

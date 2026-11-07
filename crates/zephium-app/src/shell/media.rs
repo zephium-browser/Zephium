@@ -27,9 +27,11 @@ impl Shell {
             .tab(id)
             .is_some_and(|tab| tab.content == TabContent::Web && tab.has_view());
         let media = media.filter(|_| live);
+        let was_running = self.keeps_running(id);
         if self.media.observe(id, media, std::time::Instant::now()) {
             self.project_media_player();
         }
+        self.follow_running(id, was_running);
     }
 
     /// The tab closed, or its page went away with its media.
@@ -134,7 +136,8 @@ impl Shell {
         if self.item_in_focused_scope(id) {
             return self.operation_activate(id);
         }
-        let Some(&Placement::Space { space, .. }) = self.items.get(id).map(|item| &item.placement)
+        let Some(&(Placement::Favorites { space } | Placement::Space { space, .. })) =
+            self.items.get(id).map(|item| &item.placement)
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };

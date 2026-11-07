@@ -21,8 +21,107 @@ fn first_run_profile_is_persisted_before_profile_scoped_management_is_exposed() 
 }
 
 #[test]
+fn default_startup_opens_a_new_tab_without_losing_or_loading_restored_pages() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let previous = active_id(&screen);
+    navigate_and_commit(&mut shell, previous, "example.com");
+
+    let (mut restarted, engine, screen) = setup_with(store.clone());
+    restarted.handle(Command::Bootstrap);
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, previous);
+    let state = last(&screen);
+    assert_eq!(state.tabs.len(), 2);
+    assert!(state
+        .tabs
+        .iter()
+        .any(|tab| tab.id == previous.to_string()
+            && tab.url.as_deref() == Some("https://example.com/")));
+    assert_eq!(restarted.items.tab(fresh).unwrap().url, None);
+    assert!(engine
+        .calls()
+        .iter()
+        .all(|call| !call.contains(&previous.to_string())));
+
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(active_id(&screen), fresh);
+    assert_eq!(last(&screen).tabs.len(), 2);
+    restarted.persist();
+
+    let (mut again, _, screen) = setup_with(store);
+    again.handle(Command::Bootstrap);
+    assert_eq!(again.items.tab(active_id(&screen)).unwrap().url, None);
+    assert_eq!(last(&screen).tabs.len(), 2);
+}
+
+#[test]
+fn new_tab_startup_restores_split_views_when_a_member_is_selected() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "github.com");
+    shell.handle(Command::SplitWith {
+        other: first,
+        axis: Axis::Row,
+    });
+    shell.persist();
+
+    let (mut restarted, engine, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+    assert_ne!(active_id(&screen), second);
+    assert!(!restarted.items.tab(first).unwrap().has_view());
+    assert!(!restarted.items.tab(second).unwrap().has_view());
+    restarted.handle(Command::Activate(second));
+    let panes = engine.last_layout();
+    assert_eq!(panes.len(), 2);
+    assert!(panes.contains(&first.to_string()) && panes.contains(&second.to_string()));
+}
+
+#[test]
+fn new_tab_startup_at_the_item_limit_keeps_the_restored_active_tab() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let previous = active_id(&screen);
+    navigate_and_commit(&mut shell, previous, "example.com");
+    let space = shell.windows.focused().unwrap().space;
+    for _ in 1..zephium_core::session::MAX_SESSION_ITEMS {
+        assert!(shell.items.insert_unloaded_tab(
+            ItemId::generate(),
+            Placement::Space {
+                space,
+                section: SpaceSection::Today
+            },
+            url::Url::parse("https://example.com/").unwrap(),
+            "Example",
+        ));
+    }
+    shell.persist();
+
+    let (mut restarted, _, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(active_id(&screen), previous);
+    assert_eq!(
+        last(&screen).tabs.len(),
+        zephium_core::session::MAX_SESSION_ITEMS
+    );
+    assert!(restarted.items.tab(previous).unwrap().has_view());
+}
+
+#[test]
 fn restart_preserves_ids_actives_and_splits() {
     let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
     let (mut shell, _engine, screen) = setup_with(store.clone());
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
@@ -310,6 +409,11 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
         ..Default::default()
     });
 
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
     let (mut shell, engine, screen) = setup_with(store);
     shell.handle(Command::Bootstrap);
 
@@ -335,6 +439,11 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
 #[test]
 fn restart_discards_oversized_split_before_creating_views() {
     let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
     let (mut shell, _engine, screen) = setup_with(store.clone());
     shell.handle(Command::Bootstrap);
     let mut ids = vec![active_id(&screen)];

@@ -16,11 +16,13 @@ pub enum Material {
 /// install: a choice it cannot honour falls back down the same ladder.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Preference {
+    /// The system's best glass.
     #[default]
     Auto,
     LiquidGlass,
     Vibrancy,
     Acrylic,
+    Mica,
     None,
 }
 
@@ -30,6 +32,7 @@ impl Preference {
             "liquid_glass" => Self::LiquidGlass,
             "vibrancy" => Self::Vibrancy,
             "acrylic" => Self::Acrylic,
+            "mica" => Self::Mica,
             "none" => Self::None,
             _ => Self::Auto,
         }
@@ -195,7 +198,6 @@ mod macos {
         }
     }
     thread_local! { static OBSERVERS: RefCell<HashMap<String, Observer>> = RefCell::new(HashMap::new()); }
-
     /// Solid paints the window itself. The chrome covers only the sidebar, so
     /// with no material the gutters around the page showed the desktop. The
     /// colour is the theme's chrome rung, so the sidebar and its surround are

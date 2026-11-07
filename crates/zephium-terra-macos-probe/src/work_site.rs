@@ -1500,6 +1500,7 @@ impl Context<'_> {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                no_usage_charge: false,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -1696,6 +1697,7 @@ impl Context<'_> {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                no_usage_charge: false,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),

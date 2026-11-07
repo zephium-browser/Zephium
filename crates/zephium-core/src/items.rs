@@ -347,21 +347,19 @@ impl Items {
         effects
     }
 
-    /// Removes items whose ownership is directly proven by a profile's
-    /// favorites placement or by the exact `Spaces` aggregate removal proof.
-    /// A space absent from that proof is never inferred to belong to the
-    /// profile. Returns at most `MAX_SESSION_ITEMS` native close effects.
+    /// Removes items whose ownership is directly proven by the exact `Spaces`
+    /// aggregate removal proof. A space absent from that proof is never
+    /// inferred to belong to the profile. Returns at most `MAX_SESSION_ITEMS`
+    /// native close effects.
     pub fn remove_for_profile(&mut self, spaces: &RemovedProfileSpaces) -> Vec<Effect> {
         let removed_spaces: HashSet<_> = spaces.ids().iter().copied().collect();
         let owned: HashSet<ItemId> = self
             .items
             .iter()
             .filter_map(|(id, item)| {
-                let owned = match item.placement {
-                    Placement::Favorites { profile } => profile == spaces.profile(),
-                    Placement::Space { space, .. } => removed_spaces.contains(&space),
-                };
-                owned.then_some(*id)
+                let (Placement::Favorites { space } | Placement::Space { space, .. }) =
+                    item.placement;
+                removed_spaces.contains(&space).then_some(*id)
             })
             .collect();
         if owned.is_empty() {
@@ -631,6 +629,7 @@ impl Items {
                         url,
                         reason: crate::ports::engine::NavigationFailureReason::Other,
                         covers_page: false,
+                        can_continue: false,
                     }));
                 }
             }
@@ -679,6 +678,7 @@ impl Items {
                         )) =>
             {
                 tab.page_request = Some(Box::new(request));
+                tab.page_request_serial = tab.page_request_serial.wrapping_add(1);
                 true
             }
             _ => false,
@@ -707,7 +707,30 @@ impl Items {
             _ => false,
         }
     }
+    /// Whether `url` is the blank page a refused first page is built on,
+    /// which never replaces the explanation.
+    pub fn is_refused_stand_in(&self, id: ItemId, url: &Url) -> bool {
+        url.as_str() == "about:blank"
+            // A blank page the person asked for is theirs, and commits.
+            && self
+                .pending_navigations
+                .get(&id)
+                .is_none_or(|pending| pending.url.as_ref() != Some(url))
+            && self
+                .tab(id)
+                .and_then(|tab| tab.failure.as_deref())
+                .is_some_and(|failure| {
+                    matches!(
+                        failure.reason,
+                        crate::ports::engine::NavigationFailureReason::Blocked(_)
+                    )
+                })
+    }
+
     pub fn set_committed_url(&mut self, id: ItemId, url: Url) -> bool {
+        if self.is_refused_stand_in(id, &url) {
+            return false;
+        }
         if let Some(tab) = self.tab_mut(id) {
             if tab.content != TabContent::Web {
                 return false;
@@ -721,6 +744,23 @@ impl Items {
         } else {
             false
         }
+    }
+
+    /// A tab whose only page was refused before it loaded keeps neither its
+    /// address nor its title, as a new tab would.
+    pub fn forget_unloaded_page(&mut self, id: ItemId) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.url = None;
+        tab.title = TabState::new().title;
+        true
+    }
+
+    /// Drops the tab's failure, so the page under it, if any, shows again.
+    pub fn clear_navigation_failure(&mut self, id: ItemId) -> bool {
+        self.tab_mut(id)
+            .is_some_and(|tab| tab.failure.take().is_some())
     }
 
     /// Clears only the still-current intent. A delayed failure from an older
@@ -754,7 +794,14 @@ impl Items {
             .get(&id)
             .and_then(|pending| pending.url.clone())
             .or_else(|| self.opening.get(&id).cloned());
-        let covers_page = replaced_page && self.tab(id).is_some_and(TabState::has_view);
+        // A refused page requested nothing, and a tab's first one may be
+        // refused before its view is counted; it covers either way.
+        let refused = matches!(
+            reason,
+            crate::ports::engine::NavigationFailureReason::Blocked(_)
+        );
+        let covers_page =
+            replaced_page && (refused || self.tab(id).is_some_and(TabState::has_view));
         if asked.is_none() && !covers_page {
             return false;
         }
@@ -768,7 +815,69 @@ impl Items {
             url,
             reason,
             covers_page,
+            can_continue: false,
         }));
+        true
+    }
+
+    /// A failure of `url` the tab no longer waits on, such as an https try
+    /// whose http load could not be sent: it shows as any failed load does.
+    pub fn record_failure_at(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationFailureReason,
+        url: Url,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        tab.failure = Some(Box::new(crate::item::NavigationFailure {
+            url,
+            reason,
+            covers_page: false,
+            can_continue: false,
+        }));
+        true
+    }
+
+    /// A page the lists refused covers the tab. A refusal is dropped when the
+    /// person has since asked for something else: it must name the pending
+    /// request, or, unattributed, the very address that request is for.
+    pub fn record_refusal(
+        &mut self,
+        id: ItemId,
+        reason: crate::ports::engine::NavigationBlockReason,
+        url: Url,
+        request: Option<NavigationRequestId>,
+        can_continue: bool,
+    ) -> bool {
+        if let Some(pending) = self.pending_navigations.get(&id) {
+            let current = match request {
+                Some(request) => request == pending.request,
+                // A view's first load reaches the engine without a request,
+                // so a refusal where it redirects names none and is still it.
+                None => {
+                    pending.url.as_ref() == Some(&url)
+                        || (pending.url.is_some() && self.opening.get(&id) == pending.url.as_ref())
+                }
+            };
+            if !current {
+                return false;
+            }
+        }
+        if !self.record_navigation_failure(
+            id,
+            crate::ports::engine::NavigationFailureReason::Blocked(reason),
+            Some(url),
+            true,
+        ) {
+            return false;
+        }
+        // The refused navigation is over; nothing else waits on it.
+        self.pending_navigations.remove(&id);
+        if let Some(failure) = self.tab_mut(id).and_then(|tab| tab.failure.as_mut()) {
+            failure.can_continue = can_continue;
+        }
         true
     }
 
@@ -870,7 +979,12 @@ mod tests {
         let target_folder = id(5);
         let structurally_foreign_child = id(6);
         let mut items = Items::default();
-        assert!(items.insert_tab(target_favorite, Placement::Favorites { profile: target },));
+        assert!(items.insert_tab(
+            target_favorite,
+            Placement::Favorites {
+                space: target_space
+            },
+        ));
         assert!(items.insert_tab(
             target_tab,
             Placement::Space {
@@ -895,12 +1009,14 @@ mod tests {
         assert!(items.insert(Item {
             id: target_folder,
             parent: None,
-            placement: Placement::Favorites { profile: target },
+            placement: Placement::Favorites {
+                space: target_space,
+            },
             kind: ItemKind::Folder { name: "F".into() },
         }));
         assert!(items.insert_tab(
             structurally_foreign_child,
-            Placement::Favorites { profile: other },
+            Placement::Favorites { space: other_space },
         ));
 
         for tab in [target_favorite, target_tab, other_tab, unknown_tab] {
@@ -911,7 +1027,7 @@ mod tests {
         // not ancestry, must decide whether the child is deleted.
         items
             .roots
-            .get_mut(&Placement::Favorites { profile: other })
+            .get_mut(&Placement::Favorites { space: other_space })
             .unwrap()
             .retain(|id| *id != structurally_foreign_child);
         items
@@ -944,7 +1060,7 @@ mod tests {
         }
         assert_eq!(items.get(structurally_foreign_child).unwrap().parent, None);
         assert_eq!(
-            items.roots(Placement::Favorites { profile: other }),
+            items.roots(Placement::Favorites { space: other_space }),
             &[structurally_foreign_child]
         );
     }
@@ -1114,7 +1230,7 @@ mod tests {
     fn an_unloaded_tab_knows_its_page_without_a_view() {
         let mut items = Items::default();
         let kept = Placement::Favorites {
-            profile: ProfileId::from(1),
+            space: SpaceId::from(1),
         };
         let url = Url::parse("https://app.slack.com/client").unwrap();
         assert!(items.insert_unloaded_tab(id(1), kept, url, "Slack\u{202e}"));
@@ -1178,6 +1294,42 @@ mod tests {
         assert!(items.navigation_failed(id(1), request));
         assert_eq!(items.pending_navigation(id(1)), None);
         assert!(items.tab(id(1)).unwrap().url.is_none());
+    }
+
+    #[test]
+    fn a_refused_first_page_s_blank_stand_in_is_expected_and_never_commits() {
+        let mut items = Items::default();
+        assert!(items.insert_tab(id(1), today()));
+        let blank = Url::parse("about:blank").unwrap();
+        // Before any refusal a blank page is an ordinary commit.
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        assert!(items.is_refused_stand_in(id(1), &blank));
+        assert!(!items.set_committed_url(id(1), blank.clone()));
+        assert!(items.tab(id(1)).unwrap().failure.is_some());
+        // A blank page the person asks for themselves commits over it.
+        items.navigate(id(1), "about:blank");
+        assert!(!items.is_refused_stand_in(id(1), &blank));
+        assert!(items.set_committed_url(id(1), blank));
+        assert!(items.record_navigation_failure(
+            id(1),
+            crate::ports::engine::NavigationFailureReason::Blocked(
+                crate::ports::engine::NavigationBlockReason::Badware,
+            ),
+            Some(Url::parse("https://scam.example/").unwrap()),
+            true,
+        ));
+        // A real page the person then opens commits as usual.
+        let page = Url::parse("https://news.example/").unwrap();
+        assert!(!items.is_refused_stand_in(id(1), &page));
+        assert!(items.set_committed_url(id(1), page));
     }
 
     #[test]

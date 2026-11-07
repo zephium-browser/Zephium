@@ -358,6 +358,8 @@ mod native_admission;
 mod native_bounds;
 #[cfg(any(target_os = "windows", test))]
 mod native_cleanup;
+#[cfg(any(target_os = "windows", test))]
+mod native_controller_init;
 mod permissions;
 #[cfg(target_os = "macos")]
 pub use file_upload::{FileUploadRequest, FileUploadResponder};
@@ -408,6 +410,8 @@ pub(crate) mod wkwebview;
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use wkwebview::{PrintMargin, PrintOptions, WryWebView};
+#[cfg(target_os = "macos")]
+pub use wkwebview::context_menu_download_in_progress;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod webview2;
@@ -1924,9 +1928,22 @@ impl<'a> WebViewBuilder<'a> {
   }
 }
 
+/// How a top-level `http` navigation is upgraded to `https` (macOS 15.2 and
+/// later; ignored before).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleHttpsUpgrade {
+  /// Try https, and load over http when that fails.
+  AutomaticFallback,
+  /// Try https, and show WebKit's warning before falling back to http.
+  UserMediatedFallback,
+}
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) struct PlatformSpecificWebViewAttributes {
   data_store_identifier: Option<[u8; 16]>,
+  #[cfg(target_os = "macos")]
+  https_upgrade: Option<AppleHttpsUpgrade>,
   traffic_light_inset: Option<dpi::Position>,
   allow_link_preview: bool,
   on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
@@ -1967,6 +1984,8 @@ impl Default for PlatformSpecificWebViewAttributes {
   fn default() -> Self {
     Self {
       data_store_identifier: None,
+      #[cfg(target_os = "macos")]
+      https_upgrade: None,
       traffic_light_inset: None,
       // platform default for this is true
       allow_link_preview: true,
@@ -2049,6 +2068,9 @@ impl WebViewBuilderExtDarwin for WebViewBuilder<'_> {
 
 #[cfg(target_os = "macos")]
 pub trait WebViewBuilderExtMacos {
+  /// Upgrades top-level `http` navigations to `https` as `policy` says,
+  /// where WebKit can (macOS 15.2 and later).
+  fn with_https_upgrade(self, policy: AppleHttpsUpgrade) -> Self;
   /// Set the webview configuration that must be used to create the new webview.
   fn with_webview_configuration(
     self,
@@ -2123,6 +2145,11 @@ pub trait WebViewBuilderExtMacos {
 
 #[cfg(target_os = "macos")]
 impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
+  fn with_https_upgrade(mut self, policy: AppleHttpsUpgrade) -> Self {
+    self.platform_specific.https_upgrade = Some(policy);
+    self
+  }
+
   fn with_webview_configuration(
     mut self,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
@@ -2282,6 +2309,11 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
       dyn Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
     >,
   >,
+  controller_initialization_hook: Option<
+    std::sync::Arc<
+      dyn Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+    >,
+  >,
   extension_path: Option<PathBuf>,
   default_context_menus: bool,
   environment: Option<ICoreWebView2Environment>,
@@ -2290,6 +2322,7 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   native_context_menu_handler: Option<
     Rc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool>,
   >,
+  native_resource_save_handler: Option<Rc<dyn Fn(&ICoreWebView2Controller) -> bool>>,
   native_download_handler: Option<
     std::sync::Arc<dyn Fn(&ICoreWebView2Controller, &ICoreWebView2DownloadStartingEventArgs)>,
   >,
@@ -2308,11 +2341,13 @@ impl Default for PlatformSpecificWebViewAttributes {
       scroll_bar_style: ScrollBarStyle::default(),
       browser_extensions_enabled: false,
       browser_extension_startup_gate: None,
+      controller_initialization_hook: None,
       extension_path: None,
       environment: None,
       environment_created_handler: None,
       profile_name: None,
       native_context_menu_handler: None,
+      native_resource_save_handler: None,
       native_download_handler: None,
       permission_decisions_saved: false,
     }
@@ -2327,6 +2362,14 @@ pub trait WebViewBuilderExtWindows {
     self,
     handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
       + 'static,
+  ) -> Self;
+  /// Authorizes a context-menu resource save before it enters DownloadStarting.
+  /// The host must validate the menu's document and resource kind. A true return
+  /// suppresses the runtime's picker; the native download handler must choose
+  /// the destination. Requires a native menu, native downloads and UseHandlers.
+  fn with_native_resource_save_handler(
+    self,
+    handler: impl Fn(&ICoreWebView2Controller) -> bool + 'static,
   ) -> Self;
   /// Hands the original native download event to the host. Cancellation is
   /// set before invocation; the host must retain a deferral to resolve later.
@@ -2435,6 +2478,17 @@ pub trait WebViewBuilderExtWindows {
     gate: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
   ) -> Self;
 
+  /// Configures the retained controller before WebView initialization or navigation.
+  ///
+  /// This hook preserves the existing browser-extension enablement setting. It
+  /// does not admit extensions or replace their authenticated startup gate. When
+  /// both are present, the extension gate runs first. An error aborts construction
+  /// through the owned controller-cleanup path.
+  fn with_controller_initialization_hook(
+    self,
+    hook: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self;
+
   /// Retains an unpacked-extension path for source compatibility.
   ///
   /// On Windows, construction with a configured path fails with
@@ -2484,6 +2538,13 @@ pub trait WebViewBuilderExtWindows {
 
 #[cfg(windows)]
 impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
+  fn with_native_resource_save_handler(
+    mut self,
+    handler: impl Fn(&ICoreWebView2Controller) -> bool + 'static,
+  ) -> Self {
+    self.platform_specific.native_resource_save_handler = Some(Rc::new(handler));
+    self
+  }
   fn with_native_context_menu_handler(
     mut self,
     handler: impl Fn(&ICoreWebView2Controller, &ICoreWebView2ContextMenuRequestedEventArgs) -> bool
@@ -2547,6 +2608,14 @@ impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
   ) -> Self {
     self.platform_specific.browser_extensions_enabled = true;
     self.platform_specific.browser_extension_startup_gate = Some(std::sync::Arc::new(gate));
+    self
+  }
+
+  fn with_controller_initialization_hook(
+    mut self,
+    hook: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self {
+    self.platform_specific.controller_initialization_hook = Some(std::sync::Arc::new(hook));
     self
   }
 
@@ -3431,6 +3500,8 @@ pub enum NavigationFailure {
   /// The server's certificate was refused, and what the engine could tell
   /// about why.
   Certificate(CertificateProblem),
+  /// macOS: the view's content rules refused the page.
+  Blocked,
   /// Any other failure.
   Other,
 }
@@ -3444,6 +3515,9 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
+  /// macOS: a content rule refused the navigation to `url`, taken from the
+  /// error itself; the document shown before is still there.
+  Refused { url: String },
 }
 
 /// Why a server certificate was refused, as a category; never native text.
@@ -3500,9 +3574,21 @@ pub enum AppleNavigationType {
   Other,
 }
 
+/// The frame a navigation came from, as WebKit's security origin names it.
+/// Scheme and host are empty when WebKit's origin does not fit.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppleNavigationSource {
+  pub is_main_frame: bool,
+  pub scheme: String,
+  pub host: String,
+  /// Zero when the scheme's default.
+  pub port: u16,
+}
+
 /// Bounded native provenance accompanying an Apple navigation policy request.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppleNavigationAction {
   /// Native navigation cause.
   pub navigation_type: AppleNavigationType,
@@ -3511,6 +3597,8 @@ pub struct AppleNavigationAction {
   /// Whether WebKit identified the target as the main frame. `None` denotes a
   /// target-less/new-window action and must not be treated as main-frame work.
   pub target_is_main_frame: Option<bool>,
+  /// The frame that asked, when WebKit names one.
+  pub source: Option<AppleNavigationSource>,
 }
 
 /// Background throttling policy
@@ -3547,6 +3635,168 @@ pub struct InitializationScript {
 mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
+
+  #[cfg(windows)]
+  #[test]
+  fn controller_initialization_hook_preserves_extension_enablement() {
+    for private in [false, true] {
+      let builder = WebViewBuilder::new()
+        .with_incognito(private)
+        .with_browser_extensions_enabled(false)
+        .with_controller_initialization_hook(|_, _| Ok(()));
+      assert!(!builder.platform_specific.browser_extensions_enabled);
+      assert!(builder
+        .platform_specific
+        .browser_extension_startup_gate
+        .is_none());
+      assert!(builder
+        .platform_specific
+        .controller_initialization_hook
+        .is_some());
+    }
+    let enabled = WebViewBuilder::new()
+      .with_browser_extension_startup_gate(|_, _| Ok(()))
+      .with_controller_initialization_hook(|_, _| Ok(()));
+    assert!(enabled.platform_specific.browser_extensions_enabled);
+    assert!(enabled
+      .platform_specific
+      .browser_extension_startup_gate
+      .is_some());
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn native_controller_hook_applies_reputation_with_extensions_disabled() {
+    use tao::event_loop::EventLoopBuilder;
+    use tao::platform::windows::EventLoopBuilderExtWindows;
+    use tao::window::WindowBuilder;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings8, ICoreWebView2_13};
+    use windows_core::Interface;
+
+    // WebView2 exposes the environment option during creation, not a readback
+    // on the resulting environment. An inert local install distinguishes actual
+    // disabled profiles from an empty-but-enabled environment; an enabled
+    // control proves the package and runtime's extension API are operational.
+    fn install(core: &ICoreWebView2, package: &std::path::Path) -> bool {
+      use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile7;
+      let profile = unsafe { core.cast::<ICoreWebView2_13>().unwrap().Profile().unwrap() }
+        .cast::<ICoreWebView2Profile7>()
+        .unwrap();
+      let (send, receive) = std::sync::mpsc::channel();
+      let handler = webview2_com::ProfileAddBrowserExtensionCompletedHandler::create(Box::new(
+        move |status, extension| {
+          let _ = send.send(status.is_ok() && extension.is_some());
+          Ok(())
+        },
+      ));
+      let package = windows::core::HSTRING::from(package.to_string_lossy().as_ref());
+      if unsafe { profile.AddBrowserExtension(&package, &handler) }.is_err() {
+        return false;
+      }
+      let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+      loop {
+        if let Ok(allowed) = receive.try_recv() {
+          return allowed;
+        }
+        assert!(
+          std::time::Instant::now() < deadline,
+          "extension control did not settle"
+        );
+        unsafe {
+          use windows::Win32::UI::WindowsAndMessaging::*;
+          let mut message = MSG::default();
+          while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+          }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+    }
+
+    let event_loop = EventLoopBuilder::<()>::new().with_any_thread(true).build();
+    let window = WindowBuilder::new()
+      .with_visible(false)
+      .build(&event_loop)
+      .unwrap();
+    let unique = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+      "wry-controller-init-{}-{unique}",
+      std::process::id()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    struct OwnedDirectory(PathBuf);
+    impl Drop for OwnedDirectory {
+      fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+      }
+    }
+    let owned = OwnedDirectory(directory);
+    let package = owned.0.join("inert-extension");
+    std::fs::create_dir(&package).unwrap();
+    std::fs::write(
+      package.join("manifest.json"),
+      r#"{"manifest_version":3,"name":"Controller init control","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    for (label, private, profile, extensions) in [
+      ("enabled-control", false, None, true),
+      ("default", false, None, false),
+      ("private", true, None, false),
+      ("agent-shaped", false, Some("automation"), false),
+    ] {
+      let mut context = WebContext::new(Some(owned.0.join(label)));
+      let configured = Rc::new(std::cell::Cell::new(false));
+      let observed = configured.clone();
+      let mut builder = WebViewBuilder::new_with_web_context(&mut context)
+        .with_incognito(private)
+        .with_visible(false)
+        .with_browser_extensions_enabled(false)
+        .with_controller_initialization_hook(move |_, core| {
+          let settings = unsafe { core.Settings()? }.cast::<ICoreWebView2Settings8>()?;
+          unsafe { settings.SetIsReputationCheckingRequired(false)? };
+          let mut actual = windows_core::BOOL::default();
+          unsafe { settings.IsReputationCheckingRequired(&mut actual)? };
+          if actual.as_bool() {
+            return Err(windows::Win32::Foundation::E_ACCESSDENIED.into());
+          }
+          observed.set(true);
+          Ok(())
+        });
+      if extensions {
+        builder = builder.with_browser_extension_startup_gate(|_, _| Ok(()));
+      }
+      if let Some(profile) = profile {
+        builder = builder.with_profile_name(profile.to_owned());
+      }
+      assert_eq!(
+        builder.platform_specific.browser_extensions_enabled,
+        extensions
+      );
+      assert_eq!(
+        builder
+          .platform_specific
+          .browser_extension_startup_gate
+          .is_some(),
+        extensions
+      );
+      let view = builder.build(&window).unwrap();
+      assert!(
+        configured.get(),
+        "{label} did not apply reputation configuration"
+      );
+      assert_eq!(
+        install(&view.webview(), &package),
+        extensions,
+        "{label}: native extension admission did not match the requested mode"
+      );
+      eprintln!("{label}: extensions_enabled={extensions} controller_hook_applied=true reputation_required=false");
+      drop(view);
+    }
+  }
 
   #[cfg(target_os = "macos")]
   #[test]

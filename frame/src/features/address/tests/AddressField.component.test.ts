@@ -4,9 +4,15 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import { preferences } from "$domain/preferences";
+import { uiCommands } from "$domain/ui-commands";
 import AddressFieldHost from "./AddressFieldHost.svelte";
 
-const native = vi.hoisted(() => ({ defaultZoom: "100", page: null as string | null }));
+const native = vi.hoisted(() => ({
+  defaultZoom: "100",
+  page: null as string | null,
+  edit: vi.fn(async () => true),
+  answer: vi.fn(async () => ({ accepted: true, operation_id: null })),
+}));
 
 vi.mock("$domain/surface", () => ({ surface: { currentPage: () => native.page } }));
 vi.mock("$domain/permissions", () => ({
@@ -25,6 +31,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     tabsBootstrap: async () => {},
     runCommand: async () => ({ accepted: true, operation_id: null }),
+    launcherEdit: native.edit,
+    tabsAnswerPageRequest: native.answer as never,
     settingGet: async (key: string) => (key === "zoom.default" ? native.defaultZoom : null),
   });
 });
@@ -39,13 +47,18 @@ afterEach(() => {
   preferences.dispose();
   native.defaultZoom = "100";
   native.page = null;
+  native.edit.mockClear();
 });
 
-async function field(props: { compact?: boolean } = {}) {
+async function field(
+  props: { compact?: boolean } = {},
+  overrides: Partial<Parameters<typeof tabFixture>[0]> = {},
+) {
   await tabs.init();
   const tab = tabFixture({
     projection_revision: stamp(),
     url: "https://www.wikipedia.org/wiki/Premium",
+    ...overrides,
   });
   emitNativeEvent("itemsChanged", {
     projection_revision: stamp(),
@@ -61,6 +74,66 @@ async function field(props: { compact?: boolean } = {}) {
   const input = screen.container.querySelector<HTMLInputElement>("[data-zephium-address]")!;
   return { screen, input };
 }
+
+test("a click on a page's address edits it here, and only the shortcut opens the launcher", async () => {
+  const { screen, input } = await field();
+  await screen.getByRole("textbox", { name: /address/iu }).click();
+  expect(document.activeElement).toBe(input);
+  await expect.poll(() => input.value).toBe("https://www.wikipedia.org/wiki/Premium");
+  expect(native.edit).not.toHaveBeenCalled();
+});
+
+test("a refused page over the last one shows its own address, without the last page's lock", async () => {
+  const { screen, input } = await field(
+    {},
+    {
+      failure: {
+        url: "https://blocked-badware.test/win",
+        reason: "blocked",
+        can_continue: false,
+        certificate: null,
+        blocked: "badware",
+        covers_page: true,
+      },
+    },
+  );
+  expect(input.value).toBe("blocked-badware.test");
+  // No site to describe: the lock and site details belong to a loaded page.
+  expect(screen.container.querySelector("[data-trailing]")?.textContent).toBe("null");
+  input.focus();
+  await expect.poll(() => input.value).toBe("https://blocked-badware.test/win");
+});
+
+test("a first page that could not open keeps its address in the field", async () => {
+  const { input } = await field(
+    {},
+    { url: null, failure: { url: "http://localtest.me/", reason: "unreachable" } },
+  );
+  expect(input.value).toBe("localtest.me");
+  input.focus();
+  await expect.poll(() => input.value).toBe("http://localtest.me/");
+});
+
+test("the location shortcut on a refused page edits the refused address", async () => {
+  await uiCommands.init();
+  await field(
+    {},
+    {
+      failure: {
+        url: "https://blocked-badware.test/win",
+        reason: "blocked",
+        can_continue: true,
+        certificate: null,
+        blocked: "badware",
+        covers_page: true,
+      },
+    },
+  );
+  emitNativeEvent("uiCommand", "url.focus");
+  await expect.poll(() => native.edit.mock.calls.length).toBe(1);
+  expect(native.edit).toHaveBeenCalledWith(tabs.activeId(), "https://blocked-badware.test/win");
+  uiCommands.dispose();
+});
 
 test("editing shows the whole address and rests on the host", async () => {
   const { input } = await field();
@@ -114,11 +187,13 @@ test("a page's link for another app asks before it opens", async () => {
     ...tab,
     projection_revision: stamp(),
     page_request: { kind: "external_app", site: "zoom.us", scheme: "zoommtg", app: "zoom.us" },
+    page_request_serial: 4,
   });
   const card = screen.getByRole("alertdialog");
   await expect.element(card).toHaveTextContent("Open zoom.us?");
   await expect.element(card.getByRole("checkbox")).not.toBeChecked();
-  await expect.element(card.getByRole("button", { name: "Cancel" })).toBeVisible();
+  await card.getByRole("button", { name: "Cancel" }).click();
+  expect(native.answer).toHaveBeenLastCalledWith(tab.id, 4, "dismiss");
 });
 
 test("a page that stopped responding offers to wait or reload", async () => {

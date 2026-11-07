@@ -26,6 +26,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -42,26 +44,31 @@ afterEach(() => {
   document.getElementById("wallpaper")?.remove();
 });
 
-// Windows acrylic without our layer is the system's own milky frost; the
-// window's colour is the body wash in Shell.svelte.
-const ACRYLIC = { light: "rgb(250 250 250 / 45%)", dark: "rgb(44 44 44 / 45%)" };
+// Windows acrylic without our layer is the system's own milky frost; Mica Alt
+// is near-opaque, keeping only the wallpaper's hue. The window's colour is the
+// body wash in material.css.
+const BACKDROPS = {
+  acrylic: { light: "rgb(250 250 250 / 45%)", dark: "rgb(44 44 44 / 45%)" },
+  mica: { light: "rgb(238 238 240 / 86%)", dark: "rgb(30 30 34 / 86%)" },
+};
 
-for (const theme of ["dark", "light"] as const) {
-  test(`windows over acrylic, ${theme}`, async () => {
-    await page.viewport(1100, 760);
-    native.settings = { appearance: theme };
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.dataset.material = "acrylic";
-    await paint();
-    const screen = await render(Shell);
-    wallpaper("violet", theme, theme === "light" ? "#ffffff" : "#0d1117", {
-      glass: ACRYLIC[theme],
-      inset: "40px 8px 8px 256px",
+for (const [material, glass] of Object.entries(BACKDROPS))
+  for (const theme of ["dark", "light"] as const) {
+    test(`windows over ${material}, ${theme}`, async () => {
+      await page.viewport(1100, 760);
+      native.settings = { appearance: theme };
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.material = material;
+      await paint();
+      const screen = await render(Shell);
+      wallpaper("violet", theme, theme === "light" ? "#ffffff" : "#0d1117", {
+        glass: glass[theme],
+        inset: "40px 8px 8px 256px",
+      });
+      await settle();
+      await shot(material === "acrylic" ? `windows-${theme}` : `windows-${material}-${theme}`);
+      // Windows draws its own caption buttons over the window's corner; the
+      // chrome draws none of its own there.
+      expect(screen.container.querySelector('[aria-label="Close"]')).toBeNull();
     });
-    await settle();
-    await shot(`windows-${theme}`);
-    // Windows draws its own caption buttons over the window's corner; the
-    // chrome draws none of its own there.
-    expect(screen.container.querySelector('[aria-label="Close"]')).toBeNull();
-  });
-}
+  }

@@ -222,7 +222,7 @@ fn a_clear_of_nothing_is_refused() {
 #[test]
 fn another_profile_is_never_addressed() {
     let store = Arc::new(FakeStore::default());
-    let (mut shell, engine, _screen, _queue) = browsed(store);
+    let (mut shell, engine, _screen, _queue) = browsed(store.clone());
     let other = ProfileId::from(9_001);
     assert_ne!(other, focused_profile(&shell));
 
@@ -247,12 +247,13 @@ fn another_profile_is_never_addressed() {
     let fake = &engine;
     assert!(fake.data_calls.lock().unwrap().is_empty());
     assert!(fake.download_calls.lock().unwrap().is_empty());
+    assert!(store.backup_clears.lock().unwrap().is_empty());
 }
 
 #[test]
 fn a_private_window_has_nothing_to_clear_and_reaches_no_store() {
     let store = Arc::new(FakeStore::default());
-    let (mut shell, engine, _screen, _queue) = browsed(store);
+    let (mut shell, engine, _screen, _queue) = browsed(store.clone());
     shell.handle(Command::Run("window.newPrivate".into()));
     let private = focused_profile(&shell);
     assert!(shell.incognito_profile(private));
@@ -278,6 +279,7 @@ fn a_private_window_has_nothing_to_clear_and_reaches_no_store() {
     let fake = &engine;
     assert!(fake.data_calls.lock().unwrap().is_empty());
     assert!(fake.download_calls.lock().unwrap().is_empty());
+    assert!(store.backup_clears.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -497,4 +499,111 @@ fn clearing_history_takes_the_closed_tabs_of_the_range_out_of_recently_closed() 
         .iter()
         .all(|entry| entry.profile != profile));
     assert_eq!(shell.recently_closed.len(), 1, "another profile's stays");
+}
+
+#[test]
+fn site_data_erasure_disposes_the_focused_profiles_session_backup() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, _queue) = browsed(store.clone());
+    let profile = focused_profile(&shell);
+    for call in [
+        clear(Range::Hour, [false, true, false, false]),
+        BrowsingDataCall::ForgetSite {
+            site: "example.test".into(),
+        },
+        BrowsingDataCall::ForgetPage {
+            origin: "https://example.test".into(),
+        },
+    ] {
+        assert_eq!(
+            answered(&dispatch(&mut shell, profile, call)),
+            BrowsingDataResponse::Cleared
+        );
+    }
+    assert_eq!(*store.backup_clears.lock().unwrap(), vec![profile; 3]);
+    for flags in [[false, false, true, false], [false, false, false, true]] {
+        assert_eq!(
+            answered(&dispatch(
+                &mut shell,
+                profile,
+                clear(Range::Everything, flags)
+            )),
+            BrowsingDataResponse::Cleared
+        );
+    }
+    assert_eq!(*store.backup_clears.lock().unwrap(), vec![profile; 3]);
+}
+
+#[test]
+fn site_data_clear_reports_backup_write_failure_and_queue_refusal() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, _queue) = browsed(store.clone());
+    let profile = focused_profile(&shell);
+    for refused in [false, true] {
+        *store.backup_clear_result.lock().unwrap() = Some(false);
+        store
+            .reject_backup_clears
+            .store(refused, std::sync::atomic::Ordering::Relaxed);
+        for call in [
+            clear(Range::Everything, [false, true, false, false]),
+            BrowsingDataCall::ForgetSite {
+                site: "example.test".into(),
+            },
+            BrowsingDataCall::ForgetPage {
+                origin: "https://example.test".into(),
+            },
+        ] {
+            assert_eq!(
+                answered(&dispatch(&mut shell, profile, call)),
+                BrowsingDataResponse::Error {
+                    error: BrowsingDataError::Failed
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn site_data_clear_waits_for_backup_disposal_and_preserves_engine_failures() {
+    let store = Arc::new(FakeStore::default());
+    *store.held_backup_clears.lock().unwrap() = Some(Vec::new());
+    let (mut shell, engine, _screen, _queue) = browsed(store.clone());
+    let profile = focused_profile(&shell);
+    for call in [
+        clear(Range::Everything, [false, true, false, false]),
+        BrowsingDataCall::ForgetPage {
+            origin: "https://example.test".into(),
+        },
+    ] {
+        let answer = dispatch(&mut shell, profile, call);
+        assert!(answer.lock().unwrap().is_none());
+        let done = store
+            .held_backup_clears
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .pop()
+            .unwrap();
+        done(true);
+        assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
+    }
+    *store.held_backup_clears.lock().unwrap() = None;
+    set_reply(
+        &engine,
+        EngineDataReply::Failed(EngineDataFailure::Unavailable),
+    );
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        BrowsingDataCall::ForgetSite {
+            site: "example.test".into(),
+        },
+    );
+    assert_eq!(
+        answered(&answer),
+        BrowsingDataResponse::Error {
+            error: BrowsingDataError::Unavailable
+        }
+    );
 }

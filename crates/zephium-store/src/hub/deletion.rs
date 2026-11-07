@@ -225,9 +225,28 @@ impl Hub {
             ));
         }
 
+        // Retire backup WAL frames while the durable deletion obligations
+        // still exist. A busy checkpoint leaves all journal rows retryable.
+        let tx = self.meta.transaction()?;
+        for (profile, _, absent) in &resolutions {
+            if *absent {
+                session::discard_profile_backup(&tx, *profile)?;
+            }
+        }
+        tx.commit()?;
+        let checkpoint_complete = match session::checkpoint_session_backup(&self.meta) {
+            Ok(()) => true,
+            Err(error) => {
+                // Keep startup available while the existing deletion recovery
+                // queue retries local cleanup with native proof intact. Only
+                // checkpoint errors take this path; journal writes still fail.
+                eprintln!("store: session backup checkpoint deferred: {error}");
+                false
+            }
+        };
         let tx = self.meta.transaction()?;
         for (profile, prior_process, absent) in resolutions {
-            let changed = if absent {
+            let changed = if absent && checkpoint_complete {
                 tx.execute(
                     "DELETE FROM profile_deletion_journal
                      WHERE profile_id = ?1
@@ -236,9 +255,9 @@ impl Hub {
                     params![profile.to_string(), prior_process.to_string()],
                 )?
             } else {
-                // The filesystem did not preserve the prior unlink across
-                // restart. Keep native proof, reopen only the idempotent local
-                // phase, and retain the original deletion authorization.
+                // Either the filesystem did not preserve the prior unlink,
+                // or old recovery bytes remain pinned in the WAL. Keep native
+                // proof and reopen only the idempotent local cleanup phase.
                 tx.execute(
                     "UPDATE profile_deletion_journal
                      SET local_unlink_process = NULL
@@ -405,8 +424,13 @@ impl Hub {
             return Err(invalid_data("injected failure after local profile purge"));
         }
 
+        let tx = self.meta.transaction()?;
+        session::discard_profile_backup(&tx, profile)?;
+        tx.commit()?;
+        session::checkpoint_session_backup(&self.meta)?;
+        let tx = self.meta.transaction()?;
         let changed = if require_restart_confirmation {
-            self.meta.execute(
+            tx.execute(
                 "UPDATE profile_deletion_journal
                  SET local_unlink_process = ?2
                  WHERE profile_id = ?1
@@ -418,7 +442,7 @@ impl Hub {
                 ],
             )?
         } else {
-            self.meta.execute(
+            tx.execute(
                 "DELETE FROM profile_deletion_journal
                  WHERE profile_id = ?1 AND native_erasure_verified = 1",
                 [profile.to_string()],
@@ -429,6 +453,7 @@ impl Hub {
                 "profile deletion journal changed during completion",
             ));
         }
+        tx.commit()?;
         self.degraded_profiles.remove(&profile);
         Ok(true)
     }
@@ -459,6 +484,7 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     // authorization remain and the whole cleanup is retried.
     remove_notes_directory(dir, profile)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    remove_extension_profile_artifacts(dir, profile)?;
     let path = dir.join(format!("profile-{profile}.sqlite"));
     if regular_file_exists(&path)? {
         let scrub = scrub_profile_database(&path);
@@ -489,6 +515,41 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     #[cfg(unix)]
     sync_directory(dir)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    Ok(())
+}
+
+fn remove_extension_profile_artifacts(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
+    let [registry, temporary, staged] =
+        super::filesystem::extension_profile_artifacts(dir, profile)?;
+    {
+        let mut registry_io = zephium_core::extensions::REGISTRY_IO.lock().map_err(|_| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                "Extension registry state is unavailable.",
+            )))
+        })?;
+        registry_io.cancel(registry.parent().unwrap().parent().unwrap(), profile);
+        remove_file_if_present(&temporary)?;
+        remove_file_if_present(&registry)?;
+    }
+    match std::fs::symlink_metadata(&staged) {
+        Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(&staged),
+        Ok(_) => std::fs::remove_file(&staged),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    #[cfg(unix)]
+    for parent in [
+        registry.parent().unwrap(),
+        staged.parent().unwrap(),
+        registry.parent().unwrap().parent().unwrap(),
+    ] {
+        match sync_directory(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+        }
+    }
     Ok(())
 }
 
@@ -545,6 +606,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
          DELETE FROM popup_sites;
+         DELETE FROM download_sites;
+         DELETE FROM app_link_sites;
          DELETE FROM task_list_receipts;
          DELETE FROM task_lists;
          DELETE FROM user_resource_receipts;
@@ -672,6 +735,16 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO download_sites(origin, allowed) VALUES ('https://private.example', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_link_sites(origin, scheme) VALUES ('https://private.example', 'zoommtg')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', ?1, 1, 1, 'active', 1, 1, 'user')", [PROFILE_SCRUB_MARKER]).unwrap();
         conn.execute("INSERT INTO work_plans(work_id, revision, plan_id, author, basis_revision) VALUES ('00000000000000000000000001', 2, '00000000000000000000000002', 'user', 1)", []).unwrap();
         conn.execute("INSERT INTO work_executions(work_id, execution_id, plan_revision, owner_session, approved_unix_ms, expires_unix_ms, body) VALUES ('00000000000000000000000001', '00000000000000000000000003', 2, '00000000000000000000000004', 1, 2, ?1)", [PROFILE_SCRUB_MARKER]).unwrap();
@@ -751,11 +824,13 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "app_link_sites",
             "blocker_statistics",
             "bookmarks",
             "chats",
             "download_cleanup",
             "download_preferences",
+            "download_sites",
             "downloads",
             "favicons",
             "focus",
@@ -846,6 +921,8 @@ mod tests {
             "page_permission_catalog",
             "page_permission_grants",
             "popup_sites",
+            "download_sites",
+            "app_link_sites",
             "works",
             "work_payload_usage",
             "work_plans",

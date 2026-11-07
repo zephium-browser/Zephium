@@ -244,14 +244,14 @@ impl Shell {
     }
 
     /// Every origin the sidebar is about to draw for this window, then the
-    /// pages among them: Favourites, Pinned and Today, folder contents
+    /// pages among them: Essentials, Pinned and Today, folder contents
     /// included.
     fn sidebar_origins(&self, profile: ProfileId, space: SpaceId) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
         let mut origins = Vec::new();
         let mut pages = Vec::new();
         let mut frontier: Vec<ItemId> = [
-            Placement::Favorites { profile },
+            Placement::Favorites { space },
             Placement::Space {
                 space,
                 section: SpaceSection::Pinned,
@@ -449,7 +449,7 @@ impl Shell {
         // nothing would ever bring its icon; ask for the ones the store lacks.
         let unmarked: Vec<String> = self
             .items
-            .roots(Placement::Favorites { profile })
+            .roots(Placement::Favorites { space })
             .iter()
             .filter_map(|id| self.items.tab(*id)?.url.as_ref().map(url::Url::to_string))
             .filter(|url| {

@@ -1810,6 +1810,19 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 28,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE session_snapshot_backup (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     saved_at INTEGER NOT NULL,
+                     schema_version INTEGER NOT NULL,
+                     data BLOB NOT NULL
+                 ) STRICT;",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
@@ -2737,6 +2750,41 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 40,
+        up: |tx| {
+            // Whether each site may save files, 1 to allow and 0 to block; a
+            // site without a row is asked. Bounds as popup_sites; the row cap
+            // is held by the write.
+            tx.execute_batch(
+                "CREATE TABLE download_sites (
+                     origin TEXT PRIMARY KEY NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0),
+                     allowed INTEGER NOT NULL CHECK (allowed IN (0, 1))
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
+    Migration {
+        version: 41,
+        up: |tx| {
+            // Kinds of application link a site may open without asking. The
+            // scheme bound mirrors zephium_core::navigation::app_link_scheme;
+            // the row cap is held by the write.
+            tx.execute_batch(
+                "CREATE TABLE app_link_sites (
+                     origin TEXT NOT NULL
+                         CHECK (length(CAST(origin AS BLOB)) BETWEEN 1 AND 512
+                                AND instr(CAST(origin AS BLOB), X'00') = 0),
+                     scheme TEXT NOT NULL
+                         CHECK (length(CAST(scheme AS BLOB)) BETWEEN 1 AND 64
+                                AND instr(CAST(scheme AS BLOB), X'00') = 0),
+                     PRIMARY KEY (origin, scheme)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2792,6 +2840,7 @@ mod tests {
         (25, 0xdd0b59247509897e),
         (26, 0x8cf0e4639f17eb73),
         (27, 0x6c555aa33142ef81),
+        (28, 0xdce79131820ba8c9),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2833,6 +2882,8 @@ mod tests {
         (37, 0xf0c5b1fc2e38c27c),
         (38, 0xdd557da59b6d8285),
         (39, 0xd1ea23938fb85e46),
+        (40, 0x7ff9aa66128d00ab),
+        (41, 0x98234ca2f9d7e6bb),
     ];
 
     #[test]
@@ -3053,7 +3104,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 39);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -3192,7 +3243,7 @@ mod tests {
         .unwrap();
         apply(&mut conn, PROFILE).unwrap();
         apply(&mut conn, PROFILE).unwrap();
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 39);
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
         let count = |table: &str| -> i64 {
             conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
                 row.get(0)
@@ -3235,7 +3286,7 @@ mod tests {
         .unwrap();
         apply(&mut conn, PROFILE).unwrap();
         apply(&mut conn, PROFILE).unwrap();
-        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 39);
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 41);
         assert_eq!(
             conn.query_row("SELECT title FROM history", [], |row| row
                 .get::<_, String>(0))
@@ -4559,7 +4610,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(39));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(41));
     }
 
     #[test]

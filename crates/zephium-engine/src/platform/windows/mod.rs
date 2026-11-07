@@ -29,6 +29,10 @@ mod cdp;
 mod certificates;
 mod content_filter;
 mod find;
+mod leftover_processes;
+pub use leftover_processes::{
+    browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
+};
 mod http_auth;
 pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
@@ -56,6 +60,7 @@ mod cookie_transfer;
 pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
+mod page_layer;
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -63,6 +68,7 @@ mod semantic_action;
 // physical Windows isolated-world qualifier promotes the support claim.
 #[allow(dead_code)]
 mod semantic_runtime;
+mod sidebar_card;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
 mod apps;
@@ -70,6 +76,7 @@ mod native_paths;
 pub(crate) use apps::{external_app_name, open_external_app};
 mod page_memory;
 mod paint;
+mod refused_frames;
 pub(crate) use page_memory::{main_frame_id, sample_renderers};
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
@@ -138,10 +145,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment10,
-    ICoreWebView2Environment5, ICoreWebView2Environment7, ICoreWebView2Environment8,
-    ICoreWebView2Profile2, ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10,
-    ICoreWebView2_13, ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
+    ICoreWebView2, ICoreWebView2AcceleratorKeyPressedEventArgs, ICoreWebView2Controller,
+    ICoreWebView2Environment, ICoreWebView2Environment10, ICoreWebView2Environment5,
+    ICoreWebView2Environment7, ICoreWebView2Environment8, ICoreWebView2Profile2,
+    ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10, ICoreWebView2_13,
+    ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
     COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
@@ -307,6 +315,8 @@ fn configure_with_credential_denied(
         core5: core5.clone(),
         core14: core14.clone(),
         frame_token: None,
+        judged_frame_token: None,
+        refused_frame_requests: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
@@ -383,6 +393,7 @@ fn configure_with_credential_denied(
     // Raw content views never use host objects or web messages. Disable the
     // mechanisms in the runtime too, so a future accidental handler cannot
     // silently turn into a bridge.
+    crate::reputation::configure(&core)?;
     let settings = unsafe { core.Settings()? };
     // The PDF viewer has its own Save, Save As and Print surfaces. They do not
     // reliably pass through DownloadStarting, so Settings7 is mandatory for
@@ -426,6 +437,8 @@ fn configure_with_credential_denied(
     // separate event for frames; cancel first so URI extraction or policy
     // evaluation failure cannot accidentally authorize the navigation.
     let frame_navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
+        // A frame navigating keeps list-update work waiting for quiet pages.
+        zephium_core::blocker::PageActivity::shared().note_navigation();
         let Some(args) = args else {
             return Ok(());
         };
@@ -433,10 +446,14 @@ fn configure_with_credential_denied(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
+            // An app link goes on only so WebView2 raises
+            // LaunchingExternalUriScheme, whose handlers always cancel it and
+            // ask the person first; cancelled here, a frame's link is lost.
             if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
                 |uri| {
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
+                        || zephium_core::navigation::external_app_link(&uri).is_some()
                 },
             ) {
                 args.SetCancel(false)?;
@@ -475,6 +492,8 @@ pub struct SecurityPolicy {
     core5: ICoreWebView2_5,
     core14: ICoreWebView2_14,
     frame_token: Option<i64>,
+    judged_frame_token: Option<i64>,
+    refused_frame_requests: Option<refused_frames::RefusedFrameRequests>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
@@ -486,7 +505,7 @@ impl SecurityPolicy {
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str, bool) + 'static,
+        request: impl Fn(&str, bool, Option<&str>) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -498,10 +517,19 @@ impl SecurityPolicy {
                 args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
+                let mut origin = PWSTR::null();
+                // The origin of the frame that asked; an empty one is unknown.
+                let origin = args
+                    .InitiatingOrigin(&mut origin)
+                    .ok()
+                    .and_then(|_| {
+                        take_pwstr_bounded(origin, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                    })
+                    .filter(|origin| !origin.is_empty());
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri, user_gesture.as_bool());
+                    request(&uri, user_gesture.as_bool(), origin.as_deref());
                 }
             }
             Ok(())
@@ -518,6 +546,65 @@ impl SecurityPolicy {
         }
         Ok(())
     }
+
+    /// Cancels each frame navigation `blocks` refuses. The security handler
+    /// runs first, so a frame it cancelled stays cancelled.
+    ///
+    /// WebView2 sends the frame's request without waiting for this answer,
+    /// so each refused address is also held by the view, which answers that
+    /// request itself before it leaves. A redirect hop is judged and held the
+    /// same way.
+    pub fn judge_frame_navigations(
+        &mut self,
+        blocks: impl Fn(&str) -> bool + 'static,
+    ) -> windows_core::Result<()> {
+        if self.refused_frame_requests.is_none() {
+            // Without it a refused frame is still never shown; only its
+            // request goes out, as it did before.
+            match refused_frames::RefusedFrameRequests::hold(&self.core) {
+                Ok(held) => self.refused_frame_requests = Some(held),
+                Err(error) => {
+                    eprintln!("content blocker: refused frame requests are not held: {error}")
+                }
+            }
+        }
+        let held = self
+            .refused_frame_requests
+            .as_ref()
+            .map(refused_frames::RefusedFrameRequests::handle);
+        let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            unsafe {
+                let mut uri = PWSTR::null();
+                let uri = args.Uri(&mut uri).ok().and_then(|()| {
+                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                });
+                if frame_refused(uri.as_deref(), &blocks) {
+                    args.SetCancel(true)?;
+                    if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {
+                        held.refuse(uri);
+                    }
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        unsafe {
+            self.core
+                .add_FrameNavigationStarting(&handler, &mut token)?
+        };
+        if let Some(previous) = self.judged_frame_token.replace(token) {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
+        }
+        Ok(())
+    }
+}
+
+/// A frame whose address cannot be read is refused, never let through.
+fn frame_refused(uri: Option<&str>, blocks: impl Fn(&str) -> bool) -> bool {
+    uri.is_none_or(blocks)
 }
 
 impl Drop for SecurityPolicy {
@@ -525,6 +612,10 @@ impl Drop for SecurityPolicy {
         if let Some(token) = self.frame_token.take() {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
         }
+        if let Some(token) = self.judged_frame_token.take() {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
+        }
+        self.refused_frame_requests = None;
         if let Some(token) = self.external_token.take() {
             let _ = unsafe { self.core18.remove_LaunchingExternalUriScheme(token) };
         }
@@ -538,6 +629,16 @@ impl Drop for SecurityPolicy {
             let _ = unsafe { self.core14.remove_ServerCertificateErrorDetected(token) };
         }
     }
+}
+
+pub(crate) fn environment_user_data_folder(
+    environment: &ICoreWebView2Environment,
+) -> Option<std::path::PathBuf> {
+    let environment7 = environment.cast::<ICoreWebView2Environment7>().ok()?;
+    let mut folder = PWSTR::null();
+    unsafe { environment7.UserDataFolder(&mut folder) }.ok()?;
+    take_pwstr_bounded(folder, WINDOWS_PATH_UTF16_LIMIT, WINDOWS_PATH_UTF8_LIMIT)
+        .map(std::path::PathBuf::from)
 }
 
 /// Verify properties of the environment WebView2 actually created. Loader
@@ -742,6 +843,12 @@ fn install_process_failure_handler(
                 }
             }
             // A subframe, GPU or utility process WebView2 brings back itself.
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => {
+                if let Some(core) = sender.as_ref() {
+                    page_memory::gpu_process_exited(core);
+                }
+                log_ignored_process_failure(kind)
+            }
             other => log_ignored_process_failure(other),
         }
         Ok(())
@@ -1932,6 +2039,83 @@ impl Drop for AcceleratorRegistration {
     }
 }
 
+/// F10 and Alt+Space belong to the window's caption, yet WebView2 takes them
+/// before the window sees them. They reach the parent as the messages Windows
+/// itself would have produced.
+fn forward_caption_key(
+    controller: Option<&ICoreWebView2Controller>,
+    args: &ICoreWebView2AcceleratorKeyPressedEventArgs,
+    key: u32,
+    modifiers: (bool, bool, bool),
+) -> windows_core::Result<()> {
+    use crate::caption_keys::{classify, CaptionKey};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_F10;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, SC_KEYMENU, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    };
+
+    let (ctrl, shift, alt) = modifiers;
+    let (Some(controller), Some(caption_key)) = (controller, classify(key, ctrl, shift, alt))
+    else {
+        return Ok(());
+    };
+    // SAFETY: the arguments and controller are live for this callback.
+    unsafe {
+        args.SetHandled(true)?;
+        let mut lparam = 0i32;
+        args.KeyEventLParam(&mut lparam)?;
+        // Holding the key must not repeat what its first press did.
+        if lparam & (1 << 30) != 0 {
+            return Ok(());
+        }
+        let mut parent = HWND::default();
+        controller.ParentWindow(&mut parent)?;
+        match caption_key {
+            CaptionKey::Buttons => PostMessageW(
+                Some(parent),
+                WM_SYSKEYDOWN,
+                WPARAM(usize::from(VK_F10.0)),
+                LPARAM(lparam as u32 as isize),
+            ),
+            CaptionKey::SystemMenu => PostMessageW(
+                Some(parent),
+                WM_SYSCOMMAND,
+                WPARAM(SC_KEYMENU as usize),
+                LPARAM(' ' as isize),
+            ),
+        }
+    }
+}
+
+/// Lets the caption hear its keys from a WebView that is not one of the
+/// engine's own, such as the browser chrome. Lives as long as the controller.
+pub fn bridge_caption_keys(controller: &ICoreWebView2Controller) -> windows_core::Result<()> {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |controller, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+        unsafe { args.KeyEventKind(&mut kind)? };
+        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+        {
+            return Ok(());
+        }
+        let mut key = 0u32;
+        unsafe { args.VirtualKey(&mut key)? };
+        let down = |vk: i32| unsafe { (GetKeyState(vk) as u16 & 0x8000) != 0 };
+        let modifiers = (
+            down(VK_CONTROL.0 as i32),
+            down(VK_SHIFT.0 as i32),
+            down(VK_MENU.0 as i32),
+        );
+        forward_caption_key(controller.as_ref(), &args, key, modifiers)
+    }));
+    let mut token = Default::default();
+    unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
+}
+
 pub fn install_accelerators(
     view: &wry::WebView,
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
@@ -1981,8 +2165,9 @@ pub fn install_accelerators(
                 item: item(),
                 command,
             });
+            return Ok(());
         }
-        Ok(())
+        forward_caption_key(controller.as_ref(), &args, key, (ctrl, shift, alt))
     }));
     let mut token = Default::default();
     unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token)? };
@@ -2482,5 +2667,18 @@ mod bootstrap_history_tests {
             &["https://a.test/", "https://b.test/"]
         )));
         assert!(!blank_bootstrap_only("not json"));
+    }
+}
+
+#[cfg(test)]
+mod frame_judge_tests {
+    use super::frame_refused;
+
+    #[test]
+    fn a_frame_whose_address_cannot_be_read_is_refused() {
+        let blocks = |uri: &str| uri.contains("scam");
+        assert!(frame_refused(None, blocks));
+        assert!(frame_refused(Some("https://scam.example/"), blocks));
+        assert!(!frame_refused(Some("https://fine.example/"), blocks));
     }
 }

@@ -1,203 +1,209 @@
 # Contributing to Zephium
 
-Zephium is a solo-maintained project with a strong product direction. Contributions are welcome, but **alignment matters more than volume**.
+Zephium is a native Rust browser with a Tauri + Svelte interface. Windows and
+macOS are supported with equal priority. Linux is not supported; Linux CI
+runners handle platform-neutral checks, not browser builds.
 
-This document is about *whether* and *how* to contribute in a way that's likely to get merged, so neither of us wastes time. It's intentionally about principles, not internals - for how the code is actually laid out, read [docs/architecture.md](docs/architecture.md).
+Keep a contribution focused on one problem. Small fixes and documentation
+changes can go straight to a PR. Discuss larger features, default changes,
+new dependencies and architectural changes in an issue first. Read the
+[architecture](docs/architecture.md) and the guide for the subsystem you touch.
+Coding agents also follow [AGENTS.md](AGENTS.md).
 
-## How this project is run
+## Setup
 
-- Zephium has one active maintainer ([@crynta](https://github.com/crynta)).
-- Review bandwidth is limited.
-- Not every contribution can be accepted, even if it's technically correct. Alignment with project direction matters as much as code quality.
-- For scope and direction, read [docs/product-system.md](docs/product-system.md) before opening anything non-trivial.
+Use the versions recorded in [rust-toolchain.toml](rust-toolchain.toml),
+[.node-version](.node-version) and the root
+[packageManager field](package.json). Install Rust through rustup with the
+pinned rustfmt and Clippy components, Node.js, and that exact pnpm version.
+The native CI jobs also install cargo-nextest; policy checks use cargo-deny.
+Their versions are pinned in [ci.yml](.github/workflows/ci.yml).
 
-This is normal for a solo maintained project. A "no" on a PR is not personal.
+| Host | Native prerequisites |
+| --- | --- |
+| Windows | Windows 10/11, MSVC C++ Build Tools with the Desktop development with C++ workload and Windows SDK, and the Evergreen WebView2 runtime. Use a normal user session for native storage qualification. |
+| macOS | Xcode Command Line Tools and a supported macOS/Safari combination. Published macOS releases currently target Apple Silicon. Startup checks both the OS and the installed system WebKit; see [macOS admission policy](crates/zephium-core/src/macos.rs). |
 
-## What Zephium is
+Keep supported systems and engines updated. The
+[WebView2 admission policy](crates/zephium-core/src/webview2.rs) distinguishes
+unsupported runtimes from update recommendations. Do not override these checks
+to make a development build start.
 
-A lightweight, FOSS, zero-telemetry browser on the OS-native webview, Rust-heavy. Supported platforms are macOS (Apple Silicon) and Windows; Linux is not supported yet.
-
-The priorities, in order:
-
-1. **Security** - a browser is a hostile environment; security is designed in, not bolted on.
-2. **Performance & resource use** - RAM, CPU, GPU, battery. We measure overhead, not vibes.
-3. **UX** - best-in-class, plus our own ideas.
-4. **Code & architecture quality** - production-grade everywhere.
-
-If a change trades any of these away for convenience, it probably won't land. When you're unsure whether something fits, that's a question for discussion, not a surprise PR.
-
-## Getting set up
-
-### Prerequisites
-
-Supported development platforms are macOS (Apple Silicon) and Windows 10/11. Linux development is not supported yet; the app refuses to start there.
-
-- **Rust**: install [rustup](https://rustup.rs). The pinned toolchain in `rust-toolchain.toml` (with `rustfmt` and `clippy`) is installed automatically on first use.
-- **Node.js**: the version in `.node-version` (`engines` in `package.json` allows `>=24.18.0 <25`).
-- **pnpm**: enable it through Corepack (`corepack enable`); the exact version comes from `packageManager` in `package.json`.
-- **Tauri platform requirements**: on macOS, the Xcode Command Line Tools (`xcode-select --install`). On Windows, the Microsoft C++ Build Tools (the "Desktop development with C++" workload) and the WebView2 runtime, which ships with current Windows 10 and 11. See the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for details.
-
-An outdated OS or WebView2 runtime starts with an update notice; only an unsupported one stops startup, with an explanation and exit status 78.
-
-### Build and run
+Run commands below from the repository root, unless a directory is stated:
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm dev
 ```
 
-### Checks
+## Build and run
 
-Before opening a PR, run the checks CI runs for the area you touched:
+The root [package scripts](package.json) delegate native builds to
+[desktop/package.json](desktop/package.json):
 
 ```sh
-cargo fmt --all --check
+pnpm dev
+pnpm build
+```
+
+`dev` launches a development browser using `desktop/tauri.dev.conf.json`
+(`app.zephium.dev`). `build` packages the browser; it is not a frontend check.
+Signing and publication belong to the maintainer's
+[release procedure](.github/RELEASE.md). The macOS Cargo runner can sign selected
+native development executables; inspect [the runner](scripts/dev-sign-run.sh)
+before using it in unattended work.
+
+For interface assets without launching the native browser:
+
+```sh
+pnpm --dir frame run build
+```
+
+Do not test against an installed Zephium application or its personal profile.
+Native tests must identify their own checkout, executable and isolated data.
+Do not change system settings, sign into accounts or trigger password prompts
+as part of routine automated checks.
+
+## Checks matching CI
+
+[ci.yml](.github/workflows/ci.yml) is the executable source for the commands,
+hosts and exclusions below. PR jobs are selected by changed paths; main runs
+the complete matrix. A skipped job is not evidence that its tests passed.
+Use targeted tests while iterating, then cover the affected host jobs before
+calling a behavior change complete. Never suppress lints to obtain a pass.
+
+### Frontend
+
+The frontend CI job runs these commands after dependency installation:
+
+```sh
+node --test scripts/ci/audit-dependencies.test.mjs
+node scripts/ci/audit-dependencies.mjs
+pnpm --dir frame run check
+node scripts/test-semantic-cdp-action.mjs
+pnpm --dir frame run build
+pnpm --dir frame run check:styles
+```
+
+`check` runs i18n generation, Svelte/TypeScript checks, ESLint, Stylelint,
+Prettier, Knip and unit tests. Build precedes emitted-style checks.
+See [frontend ownership and testing](docs/frontend.md).
+
+Browser-component tests are separate. On macOS, the
+[component workflow](.github/workflows/components.yml) installs WebKit and runs
+`pnpm --dir frame run test:component --retry=1 --shard=1/8`, repeated for shards
+2 through 8. Its setup is:
+
+```sh
+pnpm --dir frame run i18n
+pnpm --dir frame exec playwright install webkit
+```
+
+For a local Windows component run, install `chromium` instead of `webkit`, then
+run `pnpm --dir frame run test:component`. The
+[Vitest configuration](frame/vitest.config.ts) selects WebKit on macOS and
+Chromium on Windows; `ZEPHIUM_COMPONENT_BROWSER` can override the choice.
+Hosted component CI currently covers macOS WebKit only and runs for the
+`full-ui-tests` label, manual invocation and releases. Neither browser engine
+in this suite substitutes for native WKWebView/WebView2 qualification.
+
+### Shared Rust policy
+
+CI runs these platform-neutral checks on Ubuntu:
+
+```sh
+cargo fmt --all -- --check
+node scripts/blocker-scriptlets/library.test.mjs
+cargo xtask check-engine-floors
+cargo xtask check-advisory-exceptions
+cargo fetch --locked
+cargo fetch --locked --manifest-path vendor/adblock/Cargo.toml
+cargo fetch --locked --manifest-path vendor/tauri/Cargo.toml
+cargo fetch --locked --manifest-path vendor/tauri-runtime-wry/Cargo.toml
+cargo fetch --locked --manifest-path vendor/wry/Cargo.toml
+cargo xtask check-security-fork-locks
+cargo xtask check-agentic-probe-boundary
+cargo deny --locked check
+```
+
+The fetches populate every target graph needed by the offline fork check.
+Engine/advisory review deadlines warn in ordinary CI; the
+[security-review workflow](.github/workflows/security-review.yml) uses strict
+checks. Release gates are separate. Do not weaken policy or change evidence to
+silence a deadline.
+
+### Native Rust: both platforms
+
+Run on Windows and on macOS:
+
+```sh
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test -p <crate> --locked        # the crates you changed
-pnpm --dir frame check                # frontend changes
+cargo test -p tauri-plugin-updater --lib --locked
 ```
 
-`cargo xtask ci` runs the complete gate; it is slow and memory hungry, so prefer the targeted commands while iterating.
+macOS additionally runs:
 
-For frontend work, start with [the frame guide](frame/README.md) and
-[the frontend contract](docs/frontend.md). They define ownership, import boundaries,
-colocated tests, native presentation rules, and the active migration gates.
-The [documentation index](docs/README.md) lists the rest.
-
-## Where to start
-
-- **Small fixes and improvements** (a bug fix, a typo, a small UX polish): open a PR directly. No issue needed.
-- **A bigger feature or change**: please open an issue first, with the feature template, so we can agree on the approach before you put time into it. Then open the PR and link the issue in its description (`Closes #123`).
-- **Questions and ideas** ("should I work on X?", design or scope questions): start a [Discussion](https://github.com/zephium-browser/Zephium/discussions).
-
-## What makes a good contribution
-
-These get merged fast:
-
-- **Bug fixes** with clear reproduction steps.
-- **Docs / typos / small UX fixes** - open a PR directly.
-- **Pre-discussed features** - alignment in an issue or discussion first.
-- **Small, focused changes** - easy to review, low risk.
-
-If your change is small and obvious, open a PR directly. No issue required.
-
-## Keep changes focused
-
-**Only change what's needed to accomplish your stated goal.** Don't also reformat other files, clean up unrelated code, fix lint in files you didn't need to touch, or bundle several unrelated fixes together. Even when those are real improvements, they make review harder and slow everything down. Open a separate PR for cleanup after discussion.
-
-**One PR = one logical change.** Multi-concern PRs will be asked to split.
-
-## Discuss bigger changes first
-
-For anything beyond a small fix, **please discuss it in an issue before opening a PR**. This includes new features, UI/UX changes or changes to default behavior, refactors and "cleanup", performance rewrites, architectural changes, anything touching many systems, and anything that ships to everyone by default (default search engines, default filter lists, default settings).
-
-A large PR that arrives without that conversation may be closed if it doesn't fit the direction. This isn't to discourage you - a 10-minute conversation saves a 500-line PR that doesn't fit the roadmap.
-
-## Respect the architecture
-
-Zephium's boundaries are enforced by CI, not by review vigilance - a PR that violates them won't pass. The ones to know:
-
-- The core stays pure: no I/O, no platform coupling, no `unsafe`. Side effects live at the edges, behind narrow interfaces.
-- Network access is centralized and tightly limited. This is how the **zero-telemetry guarantee is enforced structurally**, not by policy - nothing outside that one path may reach the network.
-- `unsafe` / FFI is confined to a single, clearly marked place, and every `unsafe` block is justified.
-- Generated code (such as the typed frontend↔backend contract) is generated, never hand-edited; CI fails on drift.
-- Abstractions are added when they earn their keep, not preemptively.
-
-If your change needs to bend one of these, that's a design discussion before it's a PR.
-
-## Quality bar
-
-Zephium positions itself as **lightweight, fast, secure, production-grade**. Every PR is reviewed against:
-
-- Type-checks, lints, and formatters are clean.
-- All tests pass.
-- Dependency policy is clean: FOSS licenses only, no banned crates, no known advisories.
-- **No performance regressions in hot paths** - startup time, idle memory footprint, the render/compositing path, the frontend↔core message path, content blocking. Being light is the whole point; a regression here is a real bug, not a nitpick.
-- No new heavy dependencies without justification (rough guide: >50KB gzipped in the frontend bundle, >5MB compiled on the Rust side).
-- Platform parity preserved: macOS and Windows both still build and work.
-- Security review for anything touching a sensitive surface (see below).
-
-If you're not sure how to measure perf or what counts as a hot path, ask first. Better to confirm than get bounced.
-
-## Load-bearing changes need a test
-
-A test - not a second reviewer - is what catches the most dangerous class of bug: a **local fix with global blast radius**. The diff solves one reported case, reads fine, passes every check, and silently breaks the same subsystem in every other case. Review alone does not catch these.
-
-So if your change alters behavior in a load-bearing path, the PR must add or extend a test that locks the invariant you're relying on. Load-bearing means:
-
-- **A security or trust boundary** - what web content or code is allowed to do, what a profile may access, what the frontend or an automation may invoke. Test the deny side, not just the happy path.
-- **Data isolation and privacy guarantees** - profile separation, and ephemeral/private state never touching disk.
-- **Persistence and migrations** - no data loss on partial failure, forward-only, and the identity of saved records.
-- **Pure logic with wide reach** - the transforms and state that many features depend on.
-
-The bar is real coverage of the contract - the edge, the deny path, the malformed input - not a placeholder. If you can't see how to test it, ask before opening the PR. That conversation is shorter than the revert.
-
-Pure UI, themes, and anything the type-checker already guarantees don't need tests.
-
-## What Zephium is not
-
-- Not aiming for pixel-perfect rendering parity with Chrome/Firefox. We use the system webview **by design**; rendering fidelity is a known, accepted tradeoff.
-- **No telemetry, no analytics, no account requirement, no data collection - ever.** Any change that phones home will be closed.
-- Not Electron. We don't bundle an engine. Weight and resource use are features, not afterthoughts.
-- Not a kitchen-sink browser. It's opinionated and focused.
-- Mechanical refactors, broad style changes, and drive-by rewrites are not helpful.
-- AI-assisted contributions are okay (not vibe-coded), but the PR must reflect understanding of the existing patterns. Low-effort AI-generated code that the author clearly didn't read will be closed.
-
-## Branches
-
-Branch off `main`. Use these kebab-case prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `perf/`, `security/`. Examples: `feat/vertical-tabs`, `fix/omnibox-focus`, `security/scheme-gate`. Don't open PRs from your fork's `main` - work on a feature branch.
-
-## Commits & PRs
-
-The **PR title becomes the squash commit** for most PRs. Multi-commit PRs with well-crafted atomic commits may be merged with a merge commit at the maintainer's discretion. Titles follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat(tabs): add vertical tab sidebar
-fix(omnibox): keep focus when suggestions open
-security(navigation): tighten top-level scheme gate
+```sh
+cargo clippy --workspace --lib --locked -- -D warnings
+cargo nextest run --workspace --locked --profile ci --retries 2
+git diff --exit-code frame/src/shared/ipc/bindings.ts
 ```
 
-Types: `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`, `test`, `build`, `ci`, `security`. Scope is just the area you're touching - keep it accurate, don't invent broad ones.
+Its remaining CI steps compile and exercise the bundled seed through native
+WebKit, run `scripts/blocker-scriptlets/run.sh`, and run
+`scripts/blocker-corpus/test-record.sh`. Use the exact seed materialization and
+Swift compilation recipe in `ci.yml`; a Rust-only pass cannot replace it.
+These steps open native test views, so require an appropriate isolated test host.
 
-**Fill out the [PR template](.github/PULL_REQUEST_TEMPLATE.md):** what changed, why, and how you tested. "Tested manually by ..." is the bare minimum; add screenshots/GIFs for UI changes. Open a **draft PR early** if you want feedback mid-flight.
+Windows uses this test selection, followed by the standalone logging tests:
 
-Ready PRs get an automated review from CodeRabbit focused on correctness, performance and security, followed by a maintainer review; drafts are reviewed once they're marked ready. Address its findings or reply with why they don't apply.
+```powershell
+cargo nextest run --workspace --exclude zephium-desktop --locked --profile ci --retries 2 --no-fail-fast -E 'not (test(/^platform::windows::native_storage::work::tests::/) or (package(zephium-store) and test(/^(hub::agent_work|actor::tests::work_journal_|hub::work_document::runtime_store::tests::approved_deadline_)/)))'
+cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
+```
 
-### What gets merged faster
-Clear problem statement · small, focused diff · follows existing patterns (read 2-3 nearby files first) · all checks pass · real testing notes.
+The workflow excludes the desktop binary because its runner lacks the runtime
+loader, and selected storage/journal tests because of native ownership and
+runner constraints. Those cases require the Windows QA environment. Preserve
+the documented exceptions; do not add exclusions to hide a failure. Native
+behavior changes need checks on both hosts, including affected excluded paths.
+Record any platform not exercised explicitly.
 
-### What gets bounced back
-Mixed-concern PRs · large architectural PRs without prior discussion · new dependencies without justification · breaking changes without migration notes · incidental reformatting · AI code that obviously wasn't read.
+### Local aggregate and specialized gates
 
-## Code style
+`cargo xtask ci` is a larger local aggregate implemented in
+[xtask/src/main.rs](xtask/src/main.rs). It includes boundary checks, fork and
+blocker checks, selected feature/release builds, adapter Clippy/tests, native
+macOS probes and frontend checks. It uses workspace `cargo test`; it does not
+reproduce hosted nextest selection, dependency audits or component CI.
 
-- Follow existing patterns. Read 2-3 adjacent files before adding new ones.
-- TypeScript: no `any` unless you really mean it. Strict mode is on.
-- Rust: `fmt` and `clippy` clean.
-- Comments explain *why*, not *what*. Code should explain itself. No multi-paragraph docstrings.
-- No emojis in code or commit messages.
-- American English in user-facing strings.
+Use the public xtask dispatcher for available gates. For example,
+`check-agentic-probe-boundary` includes Work composition, persistence and
+resource checks; those modules are not separate CLI subcommands.
+For changes to workflow tooling, follow the Workflows job in `ci.yml`, including
+its scope, action-pin, release-policy and actionlint checks. For generated assets
+and vendor changes, follow [AGENTS.md](AGENTS.md#generated-files-and-forks) and
+the owning runbook rather than copying a partial release procedure.
 
-## FAQ
+## Branches, commits and review
 
-**Should I ask before fixing a typo or obvious bug?** No, open a PR directly.
+- Work on a task branch from current main, such as `docs/engineering-guide` or
+  `fix/tab-focus`. Preserve other worktrees and unrelated changes. Never commit
+  directly to main or use stash/reset to rearrange someone else's work.
+- Use scoped conventional commits and PR titles: `docs(architecture): clarify
+  native view ownership`. Keep commits focused. Add no authorship trailers,
+  generated-by notices or tool attribution.
+- Follow the [PR template](.github/PULL_REQUEST_TEMPLATE.md): problem, change,
+  reason and actual validation. Link the agreed issue for a larger change;
+  attach screenshots for visual changes. Add regression coverage for changed
+  behavior, including failure/deny paths at trust boundaries.
+- Draft PRs can collect early feedback. Ready PRs receive automated review and
+  maintainer review. Resolve findings or explain why they do not apply. Most
+  PRs are squash-merged; a maintainer may merge curated atomic commits.
+- Merge updated main into your branch before opening the PR and recheck affected
+  work. Do not rebase, amend pushed commits or force-push.
+- Report commands, host and outcomes accurately. Separate executed checks from
+  commands verified against CI. A known failure still needs reporting; complete
+  independent checks and do not claim skipped/native tests passed.
 
-**I have an idea for a new feature.** Start a Discussion if you'd like to explore it, then open an issue before the PR so we can agree on the approach before you build it.
-
-**My PR was closed without detailed feedback.** Usually it didn't align with direction, or scope was too large to review responsibly. Normal for a solo project. Reopen with a smaller scope is welcome.
-
-**Can I work on an open issue?** Comment first to confirm it's still relevant and nobody else is on it. For non-trivial work, discuss the approach first.
-
-**I noticed cleaner code I could write while fixing my bug.** Focus on your stated goal. Submit cleanup as a separate PR after discussion.
-
-**Can I change a default?** Defaults ship to everyone, so they're a product decision - discuss first. What users opt into themselves is a different matter.
-
-**My PR conflicts after main moved.** If it's still relevant and reasonably small, rebase. Large stale PRs may be closed with an offer to reopen after rebase. Rotting velocity is real, not personal.
-
-## Security issues
-
-Don't file them as public issues. See [SECURITY.md](SECURITY.md) or use [private vulnerability reporting](https://github.com/zephium-browser/Zephium/security/advisories/new).
-
-## License
-
-By contributing you agree your work is licensed under [MPL-2.0](LICENSE). No CLA required.
+Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
+Contributions use the project's [MPL-2.0 license](LICENSE).

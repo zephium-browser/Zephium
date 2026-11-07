@@ -1,5 +1,7 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
+  import { IS_WINDOWS } from "$shared/platform";
+  import WindowsPrivacy from "../WindowsPrivacy.svelte";
   import { showPreviews } from "../../lib/settings-model";
   import PreviewNotice from "../PreviewNotice.svelte";
   import ProtectionControls from "../ProtectionControls.svelte";
@@ -14,6 +16,7 @@
 </script>
 
 <ProtectionControls />
+{#if IS_WINDOWS}<WindowsPrivacy />{/if}
 <PasskeysGroup />
 <SettingsGroup title={m.site_settings_title()} description={m.site_settings_help()}>
   <SiteSettings />

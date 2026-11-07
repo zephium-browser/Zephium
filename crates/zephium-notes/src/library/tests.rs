@@ -161,6 +161,51 @@ fn writes_prove_the_version_they_edited() {
 }
 
 #[test]
+fn writes_compare_current_bytes_when_external_edits_keep_compared_metadata() {
+    let (_base, mut library) = library();
+    let note = create(&mut library, 1, "# Plans\n\nOne");
+    let path = library.root().join(&note.path);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, "# Plans\n\nTwo").unwrap();
+    // Model an ordinary editor on a filesystem whose timestamp resolution
+    // cannot distinguish this equal-length edit from the previous write.
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let row = library.index.get(&note.id).unwrap().unwrap();
+    assert!(unchanged(&row, &library.folder.stat(&note.path).unwrap()));
+    match write(&mut library, 2, &note, "# Plans\n\nNew").0 {
+        NoteResponse::Conflict { current } => assert_eq!(current.markdown, "# Plans\n\nTwo"),
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert_eq!(on_disk(&library, &note.path), "# Plans\n\nTwo");
+}
+
+#[test]
+fn rapid_external_editor_writes_are_never_accepted_against_a_stale_revision() {
+    let (_base, mut library) = library();
+    for n in 1..=50 {
+        let note = create(&mut library, n * 2, &format!("# Note {n}\n\nOne"));
+        let external = format!("# Note {n}\n\nTwo");
+        fs::write(library.root().join(&note.path), &external).unwrap();
+        assert!(matches!(
+            write(
+                &mut library,
+                n * 2 + 1,
+                &note,
+                &format!("# Note {n}\n\nNew")
+            )
+            .0,
+            NoteResponse::Conflict { .. }
+        ));
+        assert_eq!(on_disk(&library, &note.path), external);
+    }
+}
+
+#[test]
 fn only_a_new_title_is_news_beyond_the_note_itself() {
     let (_base, mut library) = library();
     let note = create(&mut library, 1, "# Plans\n\nOne");

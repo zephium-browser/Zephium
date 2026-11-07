@@ -7,13 +7,13 @@ mod download;
 mod drag_drop;
 #[cfg(target_os = "macos")]
 pub(crate) mod http_auth;
-#[cfg(target_os = "macos")]
-pub(crate) mod server_trust;
 mod navigation;
-#[cfg(target_os = "macos")]
-mod script_dialog;
 #[cfg(feature = "mac-proxy")]
 mod proxy;
+#[cfg(target_os = "macos")]
+mod script_dialog;
+#[cfg(target_os = "macos")]
+pub(crate) mod server_trust;
 #[cfg(target_os = "macos")]
 mod synthetic_mouse_events;
 mod util;
@@ -615,6 +615,20 @@ impl InnerWebView {
         )),
         ns_string!("allowsPictureInPictureMediaPlayback"),
       );
+
+      #[cfg(target_os = "macos")]
+      if let Some(policy) = pl_attrs.https_upgrade {
+        use objc2_web_kit::WKWebpagePreferencesUpgradeToHTTPSPolicy as Policy;
+        let preferences = config.defaultWebpagePreferences();
+        // WebKit names this policy from macOS 15.2; earlier systems keep
+        // upgrading only the hosts it knows support https.
+        if preferences.respondsToSelector(objc2::sel!(setPreferredHTTPSNavigationPolicy:)) {
+          preferences.setPreferredHTTPSNavigationPolicy(match policy {
+            crate::AppleHttpsUpgrade::AutomaticFallback => Policy::AutomaticFallbackToHTTP,
+            crate::AppleHttpsUpgrade::UserMediatedFallback => Policy::UserMediatedFallbackToHTTP,
+          });
+        }
+      }
 
       if attributes.javascript_disabled {
         // <https://developer.apple.com/documentation/webkit/wkwebviewconfiguration/defaultwebpagepreferences>
@@ -1277,7 +1291,10 @@ impl InnerWebView {
         let shared = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
         let print_info: Retained<objc2_app_kit::NSPrintInfo> = objc2::msg_send![&shared, copy];
         let margins = &_options.margins;
-        if margins.top != 0.0 || margins.right != 0.0 || margins.bottom != 0.0 || margins.left != 0.0
+        if margins.top != 0.0
+          || margins.right != 0.0
+          || margins.bottom != 0.0
+          || margins.left != 0.0
         {
           print_info.setTopMargin(margins.top.into());
           print_info.setRightMargin(margins.right.into());
@@ -1780,6 +1797,37 @@ impl InnerWebView {
       WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(&identifier, &block, mtm);
     }
   }
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+  static CONTEXT_MENU_DOWNLOAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the native download handler's call for a download the person
+/// started from WebKit's own context menu.
+#[cfg(target_os = "macos")]
+pub(crate) struct ContextMenuDownload(bool);
+
+#[cfg(target_os = "macos")]
+impl ContextMenuDownload {
+  pub(crate) fn begin() -> Self {
+    Self(CONTEXT_MENU_DOWNLOAD.with(|flag| flag.replace(true)))
+  }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ContextMenuDownload {
+  fn drop(&mut self) {
+    CONTEXT_MENU_DOWNLOAD.with(|flag| flag.set(self.0));
+  }
+}
+
+/// Whether the native download handler is running for a download the person
+/// started from WebKit's context menu rather than one a page started.
+#[cfg(target_os = "macos")]
+pub fn context_menu_download_in_progress() -> bool {
+  CONTEXT_MENU_DOWNLOAD.with(|flag| flag.get())
 }
 
 pub fn url_from_webview(webview: &WKWebView) -> Result<String> {

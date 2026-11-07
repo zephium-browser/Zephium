@@ -490,6 +490,20 @@ impl EngineHost {
                 || !environment_matches
                 || !self.browser_version_observers.contains_key(&profile)
             {
+                eprintln!(
+                    "engine: warning: WebView2 profile provenance failed: {}",
+                    failed_provenance(ProvenanceCheck {
+                        same_process: existing.id() == process_id,
+                        observer_for_process:
+                            observer.is_some_and(
+                                |observer| observer.expected_process_id() == existing.id()
+                            ),
+                        exit_unobserved: observer.is_some_and(|observer| observer.is_pending()),
+                        process_running: existing.is_running(),
+                        same_environment: environment_matches,
+                        version_observed: self.browser_version_observers.contains_key(&profile),
+                    })
+                );
                 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                 eprintln!("windows-work-construction: stage=process_reuse observer_matches={observer_matches} environment_matches={environment_matches} retained_pid={} observer_pid={:?} returned_pid={process_id} observer_generation={:?} version_observer={} retained_running={} exit_observer_pending={}; content=redacted", existing.id(), observer.map(|observer| observer.expected_process_id()), observer.map(|observer| observer.generation()), self.browser_version_observers.contains_key(&profile),existing.is_running(), observer.is_some_and(|observer|observer.is_pending()));
                 self.unproven_environments
@@ -586,11 +600,45 @@ impl EngineHost {
             };
         self.browser_version_observers
             .insert(profile, version_observer);
+        self.record_private_browser_process(&environment, process_id);
         self.environments.insert(profile, environment);
         self.browser_processes.insert(profile, process);
         self.browser_process_exit_observers
             .insert(profile, observer);
         Ok((process_id, generation))
+    }
+
+    /// A private window's browser process goes into this run's private
+    /// generation, so the next launch can wipe that data even if this run
+    /// never proves the process gone.
+    #[cfg(target_os = "windows")]
+    fn record_private_browser_process(
+        &self,
+        environment: &ICoreWebView2Environment,
+        process_id: u32,
+    ) {
+        let folder = crate::platform::imp::environment_user_data_folder(environment)
+            .ok_or_else(|| std::io::Error::other("its user data folder could not be read"))
+            .and_then(|folder| zephium_core::webview2::canonical_user_data_directory(&folder));
+        let recorded = match folder {
+            Ok(folder) if !folder.starts_with(self.private_runtime.root()) => return,
+            Ok(_) => crate::platform::imp::browser_process_record(process_id)
+                .ok_or_else(|| std::io::Error::other("the browser process could not be read"))
+                .and_then(|record| self.private_runtime.record_browser_process(record)),
+            Err(error) => Err(error),
+        };
+        // A browser that may be private and is not recorded leaves the
+        // record incomplete, so this generation keeps the reboot-only rule.
+        if let Err(error) = recorded {
+            let invalidated = self.private_runtime.invalidate_process_record();
+            eprintln!(
+                "privacy: a WebView2 browser process was not recorded for private cleanup after an unclean quit: {error}"
+            );
+            // Its expectation is still pending, which keeps the generation.
+            if let Err(error) = invalidated {
+                eprintln!("privacy: the private cleanup record could not be invalidated: {error}");
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -762,11 +810,12 @@ impl EngineHost {
             .or_default()
             .push(debt);
 
-        let newly_quarantined = self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
-        if newly_quarantined {
+        if let Some(events) = announcement {
             let ids = self.retire_profile_process_views(profile);
             self.remember_profile_recovery_ids(profile, ids);
+            self.announce(events);
         }
     }
 
@@ -1220,10 +1269,20 @@ impl EngineHost {
     /// that its own process group exited.
     #[cfg(target_os = "windows")]
     pub(super) fn quarantine_unverifiable_windows_profile(&mut self, profile: ProfileId) {
-        self.unverifiable_browser_processes.insert(profile);
+        let announcement = quarantine(&mut self.unverifiable_browser_processes, profile);
         self.exiting_browser_processes.insert(profile);
         let ids = self.retire_profile_process_views(profile);
         self.remember_profile_recovery_ids(profile, ids);
+        if let Some(events) = announcement {
+            self.announce(events);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn announce(&self, events: [EngineEvent; 2]) {
+        for event in events {
+            self.sink.emit(event);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1338,5 +1397,99 @@ impl EngineHost {
     }
 }
 
+/// What a new WebView2 controller had to share with the profile's retained
+/// browser process for the profile to keep browsing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) struct ProvenanceCheck {
+    pub(super) same_process: bool,
+    pub(super) observer_for_process: bool,
+    pub(super) exit_unobserved: bool,
+    pub(super) process_running: bool,
+    pub(super) same_environment: bool,
+    pub(super) version_observed: bool,
+}
+
+/// The checks that failed, for a log line a person can share: it names
+/// conditions only, never a process, path or page.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn failed_provenance(check: ProvenanceCheck) -> String {
+    let failed: Vec<&str> = [
+        (check.same_process, "the browser process changed"),
+        (
+            check.observer_for_process,
+            "the exit observer watches another process",
+        ),
+        (
+            check.exit_unobserved,
+            "the browser process exit was already observed",
+        ),
+        (
+            check.process_running,
+            "the browser process is no longer running",
+        ),
+        (check.same_environment, "the environment changed"),
+        (check.version_observed, "no runtime version observer"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| (!held).then_some(name))
+    .collect();
+    if failed.is_empty() {
+        "no single check failed".to_owned()
+    } else {
+        failed.join(", ")
+    }
+}
+
+/// Marks `profile` quarantined. Only a new process can browse it again, so
+/// the first time chrome is told why its tabs stopped and offered a restart.
+#[cfg(target_os = "windows")]
+fn quarantine(
+    quarantined: &mut HashSet<ProfileId>,
+    profile: ProfileId,
+) -> Option<[EngineEvent; 2]> {
+    quarantined.insert(profile).then_some([
+        EngineEvent::RuntimeRestartRequired,
+        EngineEvent::ProfileRestartRequired { profile },
+    ])
+}
+
 #[cfg(test)]
 mod tests;
+
+/// Before anything that may start a browser process in `folder`: one in the
+/// private generation is expected there first, so a run that ends before
+/// recording it leaves the generation for a reboot. False when that browser
+/// must not start. It takes the runtime alone, for callers that hold other
+/// parts of the host mutably.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub(super) fn expect_private_browser(
+    private_runtime: &zephium_core::webview2::RuntimeGeneration,
+    folder: &std::path::Path,
+) -> bool {
+    if !folder.starts_with(private_runtime.root()) {
+        return true;
+    }
+    match private_runtime.expect_browser() {
+        Ok(()) => true,
+        Err(error) if error.is_covered() => {
+            eprintln!(
+                "privacy: a private WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "privacy: a private WebView2 browser was not started, since its data could be cleared while it runs: {error}"
+            );
+            false
+        }
+    }
+}
+
+/// Whether a profile environment's bootstrap starts a browser process: a new
+/// environment always does, and so does one whose browser has exited.
+#[cfg(target_os = "windows")]
+pub(super) fn bootstrap_starts_browser(existing_environment: bool, browser_running: bool) -> bool {
+    !existing_environment || !browser_running
+}

@@ -163,8 +163,98 @@ impl<R: AsyncRead + Unpin> AsyncRead for Bounded<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Bounded;
-    use tokio::io::AsyncReadExt;
+    use super::{Bounded, ChildStdout, Process, StdioServer};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    const FIXTURE_TEST: &str = "stdio::tests::process_tree_fixture";
+    const FIXTURE_ROLE: &str = "ZEPHIUM_MCP_PROCESS_TREE_FIXTURE";
+    const DESCENDANT: &str = "mcp-fixture-descendant=";
+
+    #[test]
+    #[ignore = "invoked by the process-tree parent test"]
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the fixture parent must exit before its owned descendant"
+    )]
+    fn process_tree_fixture() {
+        let Some(role) = std::env::var_os(FIXTURE_ROLE) else {
+            return;
+        };
+        if role == "descendant" {
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        assert_eq!(role, "parent");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", FIXTURE_TEST, "--ignored", "--nocapture"])
+            .env(FIXTURE_ROLE, "descendant")
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        println!("{DESCENDANT}{}", child.id());
+        std::io::stdout().flush().unwrap();
+    }
+
+    pub(super) async fn orphaned_descendant() -> (Process, u32, BufReader<Bounded<ChildStdout>>) {
+        let server = StdioServer {
+            program: std::env::current_exe().unwrap(),
+            args: ["--exact", FIXTURE_TEST, "--ignored", "--nocapture"]
+                .map(str::to_owned)
+                .to_vec(),
+            env: vec![(FIXTURE_ROLE.into(), "parent".into())],
+            cwd: None,
+        };
+        let (mut process, stdout, stdin) = server.spawn().unwrap();
+        drop(stdin);
+        let mut output = BufReader::new(stdout).lines();
+        let descendant = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = output
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("fixture exited without a descendant");
+                // Libtest may prefix the marker with the test name on this line.
+                if let Some((_, pid)) = line.split_once(DESCENDANT) {
+                    break pid.trim().parse::<u32>().unwrap();
+                }
+            }
+        })
+        .await
+        .expect("fixture did not report its descendant");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), process.child.wait())
+                .await
+                .expect("fixture parent did not exit")
+                .unwrap()
+                .success()
+        );
+        (process, descendant, output.into_inner())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_server_ends_a_descendant_even_after_parent_exits() {
+        let (process, descendant, mut stdout) = orphaned_descendant().await;
+        assert_eq!(
+            unsafe { libc::kill(i32::try_from(descendant).unwrap(), 0) },
+            0
+        );
+        drop(process);
+        // The sleeping descendant retains stdout until its process exits.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await
+        .expect("descendant survived after Process was dropped")
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn a_newline_cannot_hide_an_overlong_message_in_one_read_or_across_reads() {

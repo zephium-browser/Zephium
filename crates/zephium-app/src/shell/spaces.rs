@@ -1,6 +1,6 @@
 //! The focused profile's spaces: making, editing, ordering, deleting and
-//! switching them, and moving a tab from one to another. Favorites belong to
-//! the profile and stay put; pinned and open tabs belong to their space.
+//! switching them, and moving a tab from one to another. A space owns its
+//! Essentials, pinned tabs and open tabs alike.
 
 use super::*;
 use crate::SpaceCommand;
@@ -401,7 +401,11 @@ impl Shell {
                 self.close_in_any_space(blank);
             }
         }
-        for root in self.space_roots(id) {
+        let essentials = self
+            .items
+            .roots(Placement::Favorites { space: id })
+            .to_vec();
+        for root in self.space_roots(id).into_iter().chain(essentials) {
             self.close_in_any_space(root);
         }
         self.recently_closed.retain(|entry| entry.space != id);
@@ -423,9 +427,19 @@ impl Shell {
         if !self.owned_space(profile, target) || !self.item_in_focused_scope(tab) {
             return rejected(OperationReason::InvalidScope);
         }
-        let Some(Placement::Space { space, section }) = self.items.get(tab).map(|i| i.placement)
-        else {
+        let Some(placement) = self.items.get(tab).map(|i| i.placement) else {
             return rejected(OperationReason::InvalidScope);
+        };
+        // An Essential stays an Essential, now of the other space.
+        let (space, destination) = match placement {
+            Placement::Space { space, section } => (
+                space,
+                Placement::Space {
+                    space: target,
+                    section,
+                },
+            ),
+            Placement::Favorites { space } => (space, Placement::Favorites { space: target }),
         };
         if space == target {
             return unchanged();
@@ -434,14 +448,7 @@ impl Shell {
             .successor_pool(profile, space)
             .iter()
             .position(|id| *id == tab);
-        if !self.items.move_tab_to_root(
-            tab,
-            Placement::Space {
-                space: target,
-                section,
-            },
-            None,
-        ) {
+        if !self.items.move_tab_to_root(tab, destination, None) {
             return rejected(OperationReason::InvalidInput);
         }
         let was_active = self.windows.focused().and_then(|w| w.active) == Some(tab);

@@ -143,13 +143,6 @@ pub fn snapshot_with_recently_closed(
             name: profile.name.clone(),
             kind: profile.kind,
         });
-        collect(
-            items,
-            Placement::Favorites {
-                profile: profile.id,
-            },
-            &mut state.items,
-        );
     }
     for space in spaces.iter() {
         if !state.profiles.iter().any(|p| p.id == space.profile) {
@@ -161,18 +154,8 @@ pub fn snapshot_with_recently_closed(
             name: space.name.clone(),
             look: space.look.clone(),
         });
-        for section in [
-            crate::item::SpaceSection::Pinned,
-            crate::item::SpaceSection::Today,
-        ] {
-            collect(
-                items,
-                Placement::Space {
-                    space: space.id,
-                    section,
-                },
-                &mut state.items,
-            );
+        for placement in space_placements(space.id) {
+            collect(items, placement, &mut state.items);
         }
     }
 
@@ -201,6 +184,21 @@ pub fn snapshot_with_recently_closed(
                 .any(|space| space.id == entry.space && space.profile == entry.profile)
         });
     state
+}
+
+/// A space's containers in the order a snapshot lists them.
+pub fn space_placements(space: SpaceId) -> [Placement; 3] {
+    [
+        Placement::Favorites { space },
+        Placement::Space {
+            space,
+            section: crate::item::SpaceSection::Pinned,
+        },
+        Placement::Space {
+            space,
+            section: crate::item::SpaceSection::Today,
+        },
+    ]
 }
 
 fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
@@ -296,11 +294,8 @@ pub fn restore(state: SessionState) -> Restored {
     let mut items = Items::default();
     let mut browser_tabs = HashSet::new();
     for i in state.items.into_iter().take(MAX_SESSION_ITEMS) {
-        let placement_ok = match i.placement {
-            Placement::Favorites { profile } => profiles.get(profile).is_some(),
-            Placement::Space { space, .. } => spaces.get(space).is_some(),
-        };
-        if !placement_ok {
+        let (Placement::Favorites { space } | Placement::Space { space, .. }) = i.placement;
+        if spaces.get(space).is_none() {
             continue;
         }
         let kind = match i.kind {
@@ -430,18 +425,17 @@ fn canonical_recently_closed(
 }
 
 fn item_in_space_scope(items: &Items, spaces: &Spaces, id: ItemId, space: SpaceId) -> bool {
-    let Some(active_space) = spaces.get(space) else {
+    if spaces.get(space).is_none() {
         return false;
-    };
+    }
     let Some(item) = items.get(id).filter(|item| item.tab().is_some()) else {
         return false;
     };
-    match item.placement {
-        Placement::Favorites { profile } => profile == active_space.profile,
-        Placement::Space {
-            space: item_space, ..
-        } => item_space == space,
-    }
+    let (Placement::Favorites { space: item_space }
+    | Placement::Space {
+        space: item_space, ..
+    }) = item.placement;
+    item_space == space
 }
 
 fn valid_split_tree(tree: &Pane, items: &Items, spaces: &Spaces, space: SpaceId) -> bool {
@@ -562,6 +556,84 @@ mod tests {
         assert_eq!(restored.active_space, Some(space));
         assert_eq!(restored.splits, Some(tree));
         assert!(!restored.items.tab(a).unwrap().has_view());
+    }
+
+    #[test]
+    fn each_space_snapshots_and_restores_its_own_essentials_before_its_tabs() {
+        let (profiles, mut spaces, mut items, profile, first) = seed();
+        let second = SpaceId::from(3);
+        spaces.insert(Space {
+            id: second,
+            profile,
+            name: "Second".into(),
+            look: Default::default(),
+        });
+        let (kept_first, open_first, kept_second) =
+            (ItemId::from(10), ItemId::from(11), ItemId::from(12));
+        for (id, placement, url) in [
+            (open_first, today(first), "open.example"),
+            (
+                kept_second,
+                Placement::Favorites { space: second },
+                "board.example",
+            ),
+            (
+                kept_first,
+                Placement::Favorites { space: first },
+                "mail.example",
+            ),
+        ] {
+            assert!(items.insert_tab(id, placement));
+            navigate_and_commit(&mut items, id, url);
+        }
+
+        let state = snapshot(
+            &profiles,
+            &spaces,
+            &items,
+            Some(first),
+            Some(kept_first),
+            None,
+        );
+        assert_eq!(
+            state.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [kept_first, open_first, kept_second],
+            "a space lists its Essentials before its tabs"
+        );
+        assert_eq!(state.active_item, Some(kept_first));
+
+        let restored = restore(state.clone());
+        assert_eq!(
+            restored.items.roots(Placement::Favorites { space: first }),
+            &[kept_first]
+        );
+        assert_eq!(
+            restored.items.roots(Placement::Favorites { space: second }),
+            &[kept_second]
+        );
+        assert_eq!(restored.active_item, Some(kept_first));
+        assert_eq!(canonicalize(state.clone()), state);
+    }
+
+    #[test]
+    fn essentials_of_a_space_that_is_gone_are_dropped_on_restore() {
+        let (profiles, spaces, items, _profile, space) = seed();
+        let mut state = snapshot(&profiles, &spaces, &items, Some(space), None, None);
+        state.items.push(PersistedItem {
+            id: ItemId::from(40),
+            parent: None,
+            placement: Placement::Favorites {
+                space: SpaceId::from(99),
+            },
+            kind: PersistedKind::Tab {
+                url: "https://mail.example/".into(),
+                title: "Mail".into(),
+                zoom: 1.0,
+                last_active_ms: None,
+            },
+        });
+
+        assert!(restore(state).items.get(ItemId::from(40)).is_none());
     }
 
     #[test]
@@ -699,15 +771,27 @@ mod tests {
 
     #[test]
     fn snapshot_skips_incognito_and_urlless_tabs() {
-        let (mut profiles, spaces, mut items, _profile, space) = seed();
+        let (mut profiles, mut spaces, mut items, _profile, space) = seed();
         let incognito = ProfileId::from(9);
+        let incognito_space = SpaceId::from(19);
         profiles.insert(Profile {
             id: incognito,
             name: "Incognito".into(),
             kind: ProfileKind::Incognito,
         });
+        spaces.insert(Space {
+            id: incognito_space,
+            profile: incognito,
+            name: "Private".into(),
+            look: Default::default(),
+        });
         let fav = ItemId::from(20);
-        items.insert_tab(fav, Placement::Favorites { profile: incognito });
+        items.insert_tab(
+            fav,
+            Placement::Favorites {
+                space: incognito_space,
+            },
+        );
         navigate_and_commit(&mut items, fav, "example.com");
         let empty = ItemId::from(21);
         items.insert_tab(empty, today(space));
@@ -1048,19 +1132,29 @@ mod tests {
         let foreign = ItemId::from(12);
         let favorite = ItemId::from(13);
         let foreign_favorite = ItemId::from(14);
+        let sibling_favorite = ItemId::from(15);
         for (id, placement, url) in [
             (local, today(active_space), "local.example"),
             (sibling, today(sibling_space), "sibling.example"),
             (foreign, today(foreign_space), "foreign.example"),
             (
                 favorite,
-                Placement::Favorites { profile },
+                Placement::Favorites {
+                    space: active_space,
+                },
                 "favorite.example",
+            ),
+            (
+                sibling_favorite,
+                Placement::Favorites {
+                    space: sibling_space,
+                },
+                "sibling-favorite.example",
             ),
             (
                 foreign_favorite,
                 Placement::Favorites {
-                    profile: foreign_profile,
+                    space: foreign_space,
                 },
                 "foreign-favorite.example",
             ),
@@ -1069,8 +1163,7 @@ mod tests {
             navigate_and_commit(&mut items, id, url);
         }
 
-        // A same-profile favorite is intentionally available from every
-        // space in that profile, but a tab from a sibling space is not.
+        // A space's own Essentials are in its scope, a sibling space's are not.
         let favorite_state = snapshot(
             &profiles,
             &spaces,
@@ -1082,7 +1175,7 @@ mod tests {
         assert_eq!(favorite_state.active_item, Some(favorite));
         assert_eq!(favorite_state.splits, Some(Pane::Leaf(favorite)));
 
-        for attacker in [sibling, foreign, foreign_favorite] {
+        for attacker in [sibling, foreign, sibling_favorite, foreign_favorite] {
             let state = snapshot(
                 &profiles,
                 &spaces,

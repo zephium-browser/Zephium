@@ -126,24 +126,9 @@ fn history_leaves_as_a_csv_with_every_visit_across_pages() {
     }
     assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
 
-    // A machine running the whole suite at once can outlast the store's
-    // bounded wait mid-file; the export is asked for again, as a person would.
-    let mut csv = String::new();
-    for attempt in 0..4 {
-        let queue = if attempt == 0 {
-            queue.clone()
-        } else {
-            let fresh = crate::store_reads::StoreReadQueue::new();
-            shell.store_reads = Some(fresh.clone());
-            fresh
-        };
-        let reply = exporting(&mut shell, ExportKind::History);
-        drive(&mut shell, &store, &queue);
-        csv = reply.recv().unwrap().unwrap();
-        if csv.matches("\r\n").count() == 451 {
-            break;
-        }
-    }
+    let reply = exporting(&mut shell, ExportKind::History);
+    drive(&mut shell, &store, &queue);
+    let csv = reply.recv().unwrap().unwrap();
     let lines: Vec<&str> = csv.split("\r\n").filter(|line| !line.is_empty()).collect();
     assert_eq!(lines[0], "date,title,url");
     assert_eq!(lines.len(), 451, "every visit, beyond one page of 200");
@@ -180,4 +165,22 @@ fn only_one_export_runs_at_a_time_and_a_shutdown_answers_the_one_waiting() {
 
     shell.fail_pending_bookmark_calls();
     assert_eq!(first.recv().unwrap(), Err(ExportRefusal::Unavailable));
+}
+
+#[test]
+fn a_history_read_failure_refuses_export_instead_of_claiming_an_empty_backup() {
+    let (mut shell, store, queue, _directory) = shell_over_real_store();
+    shell.persist();
+    assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
+    // A missing profile becomes an unavailable read, never successful EOF.
+    let removed = ProfileId::from(999_999);
+    shell.profiles.insert(zephium_core::profiles::Profile {
+        id: removed,
+        name: "Unavailable".into(),
+        kind: ProfileKind::Named,
+    });
+    shell.windows.focused_mut().unwrap().profile = removed;
+    let reply = exporting(&mut shell, ExportKind::History);
+    drive(&mut shell, &store, &queue);
+    assert_eq!(reply.recv().unwrap(), Err(ExportRefusal::Unavailable));
 }

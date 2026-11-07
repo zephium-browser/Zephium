@@ -17,6 +17,12 @@ const defaults = {
   "ui.newtab-clock": "true",
   "ui.newtab-clock-format": "system",
   "ui.newtab-tasks": "true",
+  "ui.newtab-background": "sky",
+  "ui.newtab-image": "",
+  "ui.newtab-dim": "false",
+  "ui.newtab-wordmark": "true",
+  "ui.newtab-trackers": "true",
+  "ui.newtab-focus": "true",
   "ui.tab-layout": "vertical",
   "ai.enabled": "true",
   "work.enabled": "true",
@@ -29,7 +35,7 @@ const defaults = {
   "tabs.after-close": "next",
   "tabs.switch-to-open": "true",
   "tabs.automatic-pip": "true",
-  "tabs.startup": "continue",
+  "tabs.startup": "new-tab",
   "tabs.startup-pages": "",
   "tabs.home": "",
   "network.proxy": "system",
@@ -41,7 +47,7 @@ const defaults = {
   "focus.goal": "120",
   "focus.blocked": "",
   "performance.sleep": "true",
-  "performance.after": "15",
+  "performance.after": "30",
   "performance.memory": "balanced",
   "performance.exceptions": "",
   "updates.auto-check": "true",
@@ -60,6 +66,7 @@ const defaults = {
   "time.enabled": "true",
   "work.favourite-models": "",
   "zoom.default": "100",
+  "privacy.smartscreen": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
@@ -217,6 +224,16 @@ export async function set(key: PreferenceKey, next: string) {
 export async function resetAll(): Promise<boolean> {
   for (const key of Object.keys(defaults) as PreferenceKey[]) {
     if (values[key] === defaults[key]) continue;
+    await set(key, defaults[key]);
+    if (failed || values[key] !== defaults[key]) return false;
+  }
+  return true;
+}
+
+/** Reset just this page, including choices whose feature is currently off. */
+export async function resetNewTab(): Promise<boolean> {
+  for (const key of Object.keys(defaults) as PreferenceKey[]) {
+    if (!key.startsWith("ui.newtab-") || values[key] === defaults[key]) continue;
     await set(key, defaults[key]);
     if (failed || values[key] !== defaults[key]) return false;
   }

@@ -70,7 +70,7 @@ impl Default for TabPreferences {
             after_close: AfterClose::default(),
             switch_to_open: true,
             automatic_pip: true,
-            start_with_new_tab: false,
+            start_with_new_tab: true,
             start_with_pages: false,
             startup_pages: Vec::new(),
             home: None,
@@ -235,7 +235,19 @@ impl Shell {
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
-        self.items.ensure_view(id)
+        let panes = self
+            .windows
+            .focused()
+            .and_then(|window| window.splits.as_ref())
+            .filter(|tree| tree.contains(id) && self.pane_in_scope(tree, profile, space))
+            .map(|tree| tree.tabs())
+            .unwrap_or_default();
+        let mut effects = self.items.ensure_view(id);
+        for pane in panes.into_iter().filter(|pane| *pane != id) {
+            self.touch(pane);
+            effects.extend(self.items.ensure_view(pane));
+        }
+        effects
     }
 
     pub(super) fn close(&mut self, id: ItemId) -> NativeWork {
@@ -351,7 +363,7 @@ impl Shell {
     /// private window has no such sections and keeps walking every tab.
     pub(super) fn successor_pool(&self, profile: ProfileId, space: SpaceId) -> Vec<ItemId> {
         if self.incognito_profile(profile) {
-            self.keyboard_tabs(profile, space)
+            self.keyboard_tabs(space)
         } else {
             self.regular_tabs(space)
         }
@@ -425,14 +437,12 @@ impl Shell {
     /// The tab in this space already showing exactly `url`, if any.
     pub(super) fn open_tab_for(&self, url: &str) -> Option<ItemId> {
         let window = self.windows.focused()?;
-        self.keyboard_tabs(window.profile, window.space)
-            .into_iter()
-            .find(|id| {
-                self.items.tab(*id).is_some_and(|tab| {
-                    tab.content == zephium_core::item::TabContent::Web
-                        && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
-                })
+        self.keyboard_tabs(window.space).into_iter().find(|id| {
+            self.items.tab(*id).is_some_and(|tab| {
+                tab.content == zephium_core::item::TabContent::Web
+                    && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
             })
+        })
     }
 
     /// Folds a trusted native guest teardown back into the logical tab tree.
@@ -561,7 +571,9 @@ impl Shell {
         if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
             self.recently_closed.remove(0);
         }
+        let profile = record.profile;
         self.recently_closed.push(record);
+        self.extension_sessions_changed(profile);
     }
 
     /// Reopens a closed tab of `profile`: the one named, else the newest, from
@@ -607,6 +619,7 @@ impl Shell {
         }
         self.items.set_title(id, entry.title.clone());
         self.recently_closed.remove(position);
+        self.extension_sessions_changed(profile);
         if let Some(before) = entry
             .position
             .and_then(|at| self.items.roots(today).get(at as usize).copied())

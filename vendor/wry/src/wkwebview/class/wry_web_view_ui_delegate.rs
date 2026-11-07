@@ -250,7 +250,13 @@ define_class!(
       completion_handler: &Block<dyn Fn(*mut objc2_foundation::NSString)>,
     ) {
       let completion = completion_handler.copy();
-      let default = default_text.map(|text| text.to_string()).unwrap_or_default();
+      let default = match default_text {
+        Some(text) => match super::super::script_dialog::dialog_text(text) {
+          Some(text) => text,
+          None => return completion.call((null_mut(),)),
+        },
+        None => String::new(),
+      };
       self.ivars().script_dialogs.present(
         webview,
         frame,

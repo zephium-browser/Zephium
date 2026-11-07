@@ -62,7 +62,7 @@ impl Shell {
     /// The tabs of the private window while one exists, shown or set aside.
     pub(super) fn private_tab_count(&self) -> Option<u32> {
         let session = self.private.as_ref()?;
-        let tabs = self.keyboard_tabs(session.profile, session.space).len();
+        let tabs = self.keyboard_tabs(session.space).len();
         Some(u32::try_from(tabs).unwrap_or(u32::MAX))
     }
 
@@ -253,11 +253,7 @@ impl Shell {
     /// The last private tab closed: end the session once its space is empty.
     pub(super) fn end_private_session_if_empty(&mut self) -> Option<NativeWork> {
         let session = self.private.as_ref()?;
-        if !session.shown
-            || !self
-                .keyboard_tabs(session.profile, session.space)
-                .is_empty()
-        {
+        if !session.shown || !self.keyboard_tabs(session.space).is_empty() {
             return None;
         }
         Some(self.end_private_session())

@@ -10,6 +10,12 @@ import { tabs } from "$domain/tabs";
 import Shell from "../Shell.svelte";
 
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
+// The new tab's own figures read the blocker's stats; only the panel's
+// requests are under test here.
+vi.mock(
+  "$features/newtab/components/NewTab.svelte",
+  async () => await import("./StageStub.svelte"),
+);
 
 const native = vi.hoisted(() => ({
   list: vi.fn<(origin?: string) => Promise<SitePermissionsView | null>>(),
@@ -70,7 +76,7 @@ beforeEach(() => {
     private: false,
     complete: true,
     kinds: ["camera", "microphone", "geolocation", "popups"],
-    entries: [{ origin: "https://meet.example", kind: "camera", decision: "allow" }],
+    entries: [{ origin: "https://meet.example", kind: "camera", decision: "allow", scheme: null }],
   });
 });
 afterEach(() => {

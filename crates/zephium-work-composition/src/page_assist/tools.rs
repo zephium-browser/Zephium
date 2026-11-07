@@ -122,7 +122,7 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "go_to",
-            "Moves the tab you are working in to one page, as following a link does, and reads it so you can keep working there. The target is a link passage reference such as a12, an address the person wrote or a tab listed by list_tabs, or `search: words` to search the person's own search engine. new_tab only when the person asks for a new tab or the current page must stay.",
+            "Moves the tab you are working in to one page, as following a link does, and reads it so you can keep working there. The target is a link passage reference such as a12, an address the person wrote or a tab listed by list_tabs, or `search: words` to propose a search on the person's own search engine. Every search needs the person's approval of its exact query and destination; a refusal must not be worked around. new_tab only when the person asks for a new tab or the current page must stay.",
             json!({
                 "type": "object",
                 "properties": {"target": {"type": "string"}, "new_tab": {"type": "boolean"}},
@@ -274,7 +274,16 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Option<Call> {
             Call::ShowItems { items }
         }
         "go_to" => Call::GoTo {
-            target: bounded(arguments, "target", 2048)?,
+            target: {
+                let target = arguments.get("target")?.as_str()?.trim();
+                if target.is_empty()
+                    || target.chars().count() > 2048
+                    || target != zephium_page_assist::text::clean(target)
+                {
+                    return None;
+                }
+                target.to_owned()
+            },
             new_tab: arguments
                 .get("new_tab")
                 .and_then(Value::as_bool)

@@ -8,7 +8,7 @@ use std::sync::Once;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, Message};
 use objc2_foundation::{NSArray, NSError, NSSet, NSString, NSURL, NSUUID};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
@@ -44,6 +44,11 @@ pub struct ExtensionSpec {
     /// A prepared package directory.
     pub root: PathBuf,
     pub grants: Grants,
+    /// External hosts are separate from the compatibility native transport.
+    pub external_native_messaging: bool,
+    /// May ask for external hosts at run time when the manifest declares
+    /// `nativeMessaging` optional.
+    pub native_messaging_grantable: bool,
     pub inspectable: bool,
 }
 
@@ -57,6 +62,10 @@ pub struct LoadedExtension {
 
 pub(crate) struct Loaded {
     pub(crate) context: Retained<WKWebExtensionContext>,
+    pub(crate) external_native_messaging: std::cell::Cell<bool>,
+    pub(crate) native_messaging_grantable: bool,
+    /// Granted permissions of the APIs the browser implements itself.
+    pub(crate) browser_permissions: RefCell<std::collections::BTreeSet<String>>,
 }
 
 /// One profile's state. WebKit gives an extension the same identifier in
@@ -69,6 +78,15 @@ pub(crate) struct Shared {
     pub(crate) offscreen: crate::offscreen::Documents,
     pub(crate) workers: crate::lifetime::Workers,
     pub(crate) access: crate::access::Batches,
+    pub(crate) events: crate::events::Hub,
+    pub(crate) privacy: crate::privacy::Overrides,
+    pub(crate) cookies: crate::cookies::Watch,
+    pub(crate) downloads_seen: crate::downloads::Seen,
+    /// Tabs each extension opened as windows of their own, which it may close
+    /// again as windows.
+    pub(crate) popouts: RefCell<HashMap<String, Vec<u64>>>,
+    pub(crate) data_interest: std::cell::Cell<zephium_core::extension_data::ExtensionDataInterest>,
+    pub(crate) store: Retained<WKWebsiteDataStore>,
     pub(crate) mtm: MainThreadMarker,
 }
 
@@ -134,6 +152,13 @@ impl Runtime {
             offscreen: Default::default(),
             workers: Default::default(),
             access: Default::default(),
+            events: Default::default(),
+            privacy: Default::default(),
+            cookies: Default::default(),
+            downloads_seen: Default::default(),
+            popouts: Default::default(),
+            data_interest: Default::default(),
+            store: store.retain(),
             mtm,
         });
         let delegate = Delegate::new(mtm, Rc::downgrade(&shared));
@@ -143,6 +168,23 @@ impl Runtime {
             _delegate: delegate,
             shared,
         }
+    }
+
+    /// Exercises native-open admission in the standalone main-thread lab.
+    #[cfg(feature = "lab")]
+    pub fn verify_native_open_admission(&self, id: &str) -> Result<(), String> {
+        crate::native::verify_open_admission(&self.shared, id)
+    }
+
+    /// Exercises offscreen origin admission in the standalone main-thread lab.
+    #[cfg(feature = "lab")]
+    pub fn verify_offscreen_origin(&self, id: &str) -> Result<(), String> {
+        let loaded = self.shared.loaded.borrow();
+        let context = &loaded
+            .get(id)
+            .ok_or("fixture extension was not loaded")?
+            .context;
+        crate::offscreen::verify_origin(context)
     }
 
     pub fn controller(&self) -> &WKWebExtensionController {
@@ -203,6 +245,9 @@ impl Runtime {
                     Some(extension) => activate(&shared, &controller, extension, spec),
                     None => Err(describe(unsafe { error.as_ref() })),
                 };
+                if let Ok(loaded) = &result {
+                    crate::privacy::restore(&shared, &loaded.id);
+                }
                 done(result);
             });
         unsafe {
@@ -227,6 +272,7 @@ impl Runtime {
         let target = id.to_string();
         let finish = move || {
             unload(&shared, &controller, &target);
+            crate::privacy::erase(&shared, &target);
             erase_storage(&controller, &shared.host, &target);
             done();
         };
@@ -267,6 +313,63 @@ impl Runtime {
             }
         });
         unsafe { context.loadBackgroundContentWithCompletionHandler(&completion) };
+    }
+
+    /// Wakes an extension's background, then runs `then`. A popup opened the
+    /// moment a cold background finishes starting comes up empty when no web
+    /// page is open yet (a fresh new tab), so after a real start `then` waits
+    /// a beat; an already running background goes straight on.
+    pub fn wake_then(&self, id: &str, then: impl FnOnce() + 'static) {
+        const STARTED_MS: u128 = 30;
+        const SETTLE_SECONDS: f64 = 0.15;
+        let asked = std::time::Instant::now();
+        self.start_background(id, move |_| {
+            if asked.elapsed().as_millis() < STARTED_MS {
+                return then();
+            }
+            let then = RefCell::new(Some(then));
+            let fire = RcBlock::new(
+                move |_timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+                    if let Some(then) = then.take() {
+                        then();
+                    }
+                },
+            );
+            unsafe {
+                objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                    SETTLE_SECONDS,
+                    false,
+                    &fire,
+                )
+            };
+        });
+    }
+
+    /// Offers a site's sign-in challenge to extensions that answer them;
+    /// `None` when none did and the person should be asked.
+    pub fn auth_required(
+        &self,
+        details: crate::AuthDetails,
+        done: impl FnOnce(Option<crate::AuthAnswer>) + 'static,
+    ) {
+        crate::auth::ask(&self.shared, details, Box::new(done));
+    }
+
+    /// The profile's history, bookmarks or closed tabs changed; extensions
+    /// listening with the permission hear it.
+    pub fn data_changed(&self, change: zephium_core::extension_data::ExtensionDataChange) {
+        crate::data::changed(&self.shared, change);
+    }
+
+    /// Whether any extension listens to downloads; only then does the host
+    /// report them through [`Self::downloads_changed`].
+    pub fn hears_downloads(&self) -> bool {
+        self.shared.downloads_seen.listening()
+    }
+
+    /// The profile's downloads now, and those forgotten since the last call.
+    pub fn downloads_changed(&self, items: Vec<crate::DownloadItem>, erased: Vec<u64>) {
+        crate::downloads::changed(&self.shared, items, erased);
     }
 
     /// Runs an extension's toolbar action as a user click on `tab`: WebKit
@@ -441,6 +544,37 @@ impl Runtime {
         }
     }
 
+    /// The tab's mute and whether it is playing sound, as the browser shows
+    /// them; `tabs.onUpdated` hears of a change.
+    pub fn set_audio(&self, tab: u64, muted: bool, audible: bool) {
+        let Some(tab) = self.shared.graph.borrow().tab(tab) else {
+            return;
+        };
+        use objc2_web_kit::WKWebExtensionTabChangedProperties as Properties;
+        let mut properties = Properties::empty();
+        let (muted, audible) = tab.set_audio(muted, audible);
+        if muted {
+            properties |= Properties::Muted;
+        }
+        if audible {
+            properties |= Properties::PlayingAudio;
+        }
+        if !properties.is_empty() {
+            unsafe {
+                self.controller
+                    .didChangeTabProperties_forTab(properties, ProtocolObject::from_ref(&*tab))
+            };
+        }
+    }
+
+    /// The native window showing one of the published windows, through which
+    /// extensions read and change its frame and state.
+    pub fn bind_window(&self, window: u64, native: Option<&objc2_app_kit::NSWindow>) {
+        if let Some(window) = self.shared.graph.borrow().window(window) {
+            window.set_native(native);
+        }
+    }
+
     /// Associates a tab with the web view currently showing it.
     pub fn bind_view(&self, tab: u64, view: Option<&WKWebView>) {
         if let Some(tab) = self.shared.graph.borrow().tab(tab) {
@@ -553,6 +687,7 @@ fn activate(
         context.setInspectable(spec.inspectable);
     }
     apply_grants(shared.mtm, &context, extension, &spec.grants);
+    let browser_permissions = RefCell::new(crate::api::initial(extension, &spec.grants));
     unsafe { controller.loadExtensionContext_error(&context) }
         .map_err(|error| describe(Some(&error)))?;
 
@@ -570,10 +705,15 @@ fn activate(
     for error in unsafe { context.errors() }.iter() {
         shared.log(&context, LogLevel::Warning, &describe(Some(&error)));
     }
-    shared
-        .loaded
-        .borrow_mut()
-        .insert(spec.id, Loaded { context });
+    shared.loaded.borrow_mut().insert(
+        spec.id,
+        Loaded {
+            context,
+            external_native_messaging: std::cell::Cell::new(spec.external_native_messaging),
+            native_messaging_grantable: spec.native_messaging_grantable,
+            browser_permissions,
+        },
+    );
     Ok(loaded)
 }
 
@@ -614,8 +754,8 @@ fn apply_grants(
                 }
             }
         }
-        // The internal bridge and native hosts are reached through native
-        // messaging, which the browser authorizes itself.
+        // This grant is transport for the browser's reserved bridges only.
+        // The external-host broker checks separate original reviewed authority.
         context.setPermissionStatus_forPermission(granted, &NSString::from_str("nativeMessaging"));
         // With a custom scheme registered, WebKit counts other extensions'
         // pages as part of <all_urls>; Chrome never does.
@@ -684,13 +824,21 @@ pub(crate) fn describe(error: Option<&NSError>) -> String {
     }
 }
 
-fn unload(shared: &Shared, controller: &WKWebExtensionController, id: &str) -> bool {
+fn unload(shared: &Rc<Shared>, controller: &WKWebExtensionController, id: &str) -> bool {
     let Some(loaded) = shared.loaded.borrow_mut().remove(id) else {
         return false;
     };
     crate::offscreen::close(shared, id);
     crate::worker_gone(shared, id);
     crate::lifetime::forget(shared, id);
+    crate::events::forget(shared, id);
+    crate::data::refresh_interest(shared);
+    crate::idle::forget(shared, id);
+    crate::privacy::forget(shared, id);
+    crate::notifications::forget(shared, id);
+    shared.popouts.borrow_mut().remove(id);
+    crate::api::forget(id);
+    crate::cookies::refresh(shared);
     unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
 }
 

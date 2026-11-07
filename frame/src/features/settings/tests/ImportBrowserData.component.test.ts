@@ -64,8 +64,33 @@ test("an import shows each kind as it goes and what it brought", async () => {
   fake.emit(job(true, { kind: "history", state: "failed", done: 0, total: null, problem: "busy" }));
   await expect.element(screen.getByText("Imported from Zen")).toBeVisible();
   await expect.element(screen.getByText(/Quit Zen first/u)).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Allow access" }))
+    .not.toBeInTheDocument();
   await screen.getByRole("button", { name: "Done" }).click();
   await expect.element(screen.getByRole("button", { name: "Import" })).toBeVisible();
+});
+
+test("a refusal by macOS says what to turn on and offers the setting", async () => {
+  const fake = importer();
+  const opened: string[] = [];
+  fake.adapter.openPermissionSettings = async (source) => {
+    opened.push(source);
+  };
+  browserImport.provide(fake.adapter);
+  const screen = await render(ImportBrowserData);
+  await screen.getByRole("button", { name: "Import" }).click();
+
+  fake.emit({
+    source: "zen",
+    profile: "p",
+    finished: true,
+    cancelled: false,
+    kinds: [{ kind: "bookmarks", state: "failed", done: 0, total: null, problem: "permission" }],
+  });
+  await expect.element(screen.getByText(/Full Disk Access to read Zen/u)).toBeVisible();
+  await screen.getByRole("button", { name: "Allow access" }).click();
+  expect(opened).toEqual(["zen"]);
 });
 
 test("a source with nothing to bring says so instead of claiming it is already here", async () => {

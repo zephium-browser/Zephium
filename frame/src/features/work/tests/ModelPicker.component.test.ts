@@ -162,6 +162,54 @@ test("a provider whose key is refused says so", async () => {
   await expect.element(page.getByText("Google refused the key", { exact: false })).toBeVisible();
 });
 
+test("deferred opening autofocus preserves a provider already reached from the rail", async () => {
+  await page.viewport(1200, 800);
+  native.ready.mockImplementation(ready(true));
+  native.read.mockResolvedValue(view("anthropic/claude-opus-5-5"));
+  const screen = await render(ModelPicker, { profile: PROFILE, onsettings: vi.fn() });
+  let moved = false;
+  let scopesAtNavigation = 0;
+  const scopes = new Set<Event>();
+  const originalPreventDefault = Event.prototype.preventDefault;
+  const prevent = vi.spyOn(Event.prototype, "preventDefault").mockImplementation(function (
+    this: Event,
+  ) {
+    if (this.type === "focusScope.onOpenAutoFocus") scopes.add(this);
+    originalPreventDefault.call(this);
+  });
+  const navigate = (event: FocusEvent) => {
+    const target = event.target;
+    if (moved || !(target instanceof HTMLElement) || target.getAttribute("role") !== "listbox")
+      return;
+    moved = true;
+    const tab = target
+      .closest(".model-menu")
+      ?.querySelector<HTMLButtonElement>('[role="tab"][data-provider="anthropic"]');
+    queueMicrotask(() => {
+      scopesAtNavigation = scopes.size;
+      tab?.focus();
+      tab?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      );
+    });
+  };
+  document.addEventListener("focusin", navigate, true);
+  try {
+    await screen.getByRole("button", { name: /Model: Claude Opus 5\.5/u }).click();
+    const selected = page.getByRole("tab", { name: "OpenAI" });
+    await expect.element(selected).toHaveAttribute("aria-selected", "true");
+    // Observe the actual second scope callback rather than racing its deferred focus.
+    await expect.poll(() => scopes.size).toBeGreaterThanOrEqual(2);
+    expect(moved).toBe(true);
+    expect(scopesAtNavigation).toBe(1);
+    expect(document.activeElement).toBe(selected.element());
+  } finally {
+    document.removeEventListener("focusin", navigate, true);
+    prevent.mockRestore();
+    await screen.unmount();
+  }
+});
+
 test("the rail moves with the arrow keys, and arrowing the list moves the row Enter takes", async () => {
   await page.viewport(1200, 800);
   native.choose.mockClear();
