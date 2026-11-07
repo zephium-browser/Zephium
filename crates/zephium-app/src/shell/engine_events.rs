@@ -905,19 +905,32 @@ impl Shell {
     /// replace it while that visit is still within its 60-second amend window.
     pub(super) fn flush_visit_titles(&mut self) {
         for id in std::mem::take(&mut self.pending_visit_titles) {
-            if let Some(tab) = self.items.tab(id) {
-                let title = tab.title.clone();
-                self.amend_recorded_visit_title(id, &title);
+            let Some(title) = self.items.tab(id).map(|tab| tab.title.clone()) else {
+                continue;
+            };
+            if !self.amend_recorded_visit_title(id, &title)
+                && self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                })
+            {
+                self.pending_visit_titles.insert(id);
+            }
+        }
+        if !self.pending_visit_titles.is_empty() {
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_visit_titles(
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                );
             }
         }
     }
 
-    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) {
+    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) -> bool {
         let Some((recorded_url, recorded)) = self.last_visits.get(&id) else {
-            return;
+            return true;
         };
         if recorded.elapsed() >= std::time::Duration::from_secs(60) {
-            return;
+            return true;
         }
         let recorded_url = recorded_url.clone();
         if self
@@ -926,17 +939,17 @@ impl Shell {
             .and_then(|tab| tab.url.as_ref())
             .is_none_or(|url| url.as_str() != recorded_url)
         {
-            return;
+            return true;
         }
         let Some(profile) = self.profile_of_item(id).filter(|profile| {
             self.profiles
                 .get(*profile)
                 .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
         }) else {
-            return;
+            return true;
         };
         self.store
-            .amend_visit_title(profile, recorded_url, title.to_owned());
+            .amend_visit_title(profile, recorded_url, title.to_owned())
     }
 
     fn should_record_visit(&mut self, id: ItemId, url: &str) -> bool {

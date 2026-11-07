@@ -843,6 +843,44 @@ fn expired_visit_titles_never_reach_the_store_even_if_expiry_happens_while_pendi
 }
 
 #[test]
+fn refused_visit_title_amendments_retry_until_the_window_expires() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, screen, _queue) = browsed(store.clone());
+    let id = visit(&mut shell, &screen, "first.example");
+    store
+        .amend_title_fails
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id,
+        title: "Retry me".into(),
+    }));
+    shell.handle(Command::VisitTitlesWake);
+    assert!(shell.pending_visit_titles.contains(&id));
+    assert!(store.amended_titles.lock().unwrap().is_empty());
+    store
+        .amend_title_fails
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::VisitTitlesWake);
+    assert_eq!(
+        *store.amended_titles.lock().unwrap(),
+        [("https://first.example/".into(), "Retry me".into())]
+    );
+    assert!(shell.pending_visit_titles.is_empty());
+
+    store
+        .amend_title_fails
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Engine(EngineEvent::TitleChanged {
+        id,
+        title: "Expires".into(),
+    }));
+    shell.last_visits.get_mut(&id).unwrap().1 =
+        std::time::Instant::now() - std::time::Duration::from_secs(61);
+    shell.handle(Command::VisitTitlesWake);
+    assert!(shell.pending_visit_titles.is_empty());
+}
+
+#[test]
 fn pending_visit_titles_do_not_follow_navigation_or_closed_tabs() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, screen, _queue) = browsed(store.clone());

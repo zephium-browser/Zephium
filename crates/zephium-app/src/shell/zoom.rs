@@ -236,6 +236,7 @@ impl Shell {
                 .store
                 .save_zoom_level(profile, site.clone(), saved, now)
         {
+            crate::diagnostic!("store: site zoom level was not saved");
             return false;
         }
         let levels = self.site_levels(profile);
@@ -312,9 +313,7 @@ impl Shell {
             return;
         }
         if let (ZoomOrigin::Person, Some((profile, site))) = (pending.origin, pending.owner) {
-            if !self.remember_zoom(profile, site, applied_scale) {
-                return;
-            }
+            self.remember_zoom(profile, site, applied_scale);
         }
         // Whatever changed while this was in flight, such as a navigation to
         // another site, is caught up with now.
@@ -344,9 +343,7 @@ impl Shell {
         }
         self.project_tab(id);
         if let Some((profile, site)) = self.zoom_owner(id) {
-            if !self.remember_zoom(profile, site, applied_scale) {
-                return;
-            }
+            self.remember_zoom(profile, site, applied_scale);
         }
         // A level outside the range the page may hold is brought inside it.
         self.reconcile_zoom(id);
@@ -384,7 +381,10 @@ impl Shell {
         };
         let target = zoom::scale(percent);
         if same_scale(target, current) {
-            if let Some((profile, site)) = self.zoom_owner(active) {
+            if let Some((profile, site)) = self
+                .zoom_owner(active)
+                .filter(|_| !self.zoom.pending.contains_key(&active))
+            {
                 self.remember_zoom(profile, site, current);
             }
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
@@ -428,18 +428,26 @@ impl Shell {
             });
             return;
         }
+        let mut failed = false;
         match call {
             ZoomCall::Levels => {}
             ZoomCall::Forget { site } => {
-                self.forget_zoom_level(expected_profile, &site);
+                failed = self.site_levels(expected_profile).contains_key(&site)
+                    && !self.forget_zoom_level(expected_profile, &site);
             }
             ZoomCall::ForgetAll => {
                 let sites: Vec<String> =
                     self.site_levels(expected_profile).keys().cloned().collect();
                 for site in sites {
-                    self.forget_zoom_level(expected_profile, &site);
+                    failed |= !self.forget_zoom_level(expected_profile, &site);
                 }
             }
+        }
+        if failed {
+            done.finish(ZoomResponse::Error {
+                error: ZoomError::Unavailable,
+            });
+            return;
         }
         let mut levels: Vec<ZoomLevelView> = self
             .site_levels(expected_profile)

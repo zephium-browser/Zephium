@@ -3038,6 +3038,7 @@
   "command_tool_bookmarks": "Show bookmarks",
   "find_placeholder": "Find on page",
   "find_none": "No results",
+  "find_step_failed": "Step failed",
   "find_position": "{at} of {of}",
   "find_previous": "Previous match",
   "find_next": "Next match",

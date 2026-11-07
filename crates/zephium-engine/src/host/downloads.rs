@@ -118,6 +118,9 @@ impl DecisionDeadline {
     fn expired(self, now: Instant) -> bool {
         self.expires.is_some_and(|expires| now > expires)
     }
+    fn pause_expired(self, now: Instant, source_available: bool) -> bool {
+        self.expired(now) || !source_available
+    }
     fn prepared(
         self,
         state: DownloadState,
@@ -720,10 +723,22 @@ impl Downloads {
                         && !transfer.source.as_ref().is_some_and(Source::live)))
             {
                 cancel.push((*id, DownloadError::Unavailable));
-            } else if transfer.record.state == DownloadState::Paused
-                && transfer.deadline.expired(Instant::now())
-            {
-                cancel.push((*id, transfer.record.error.unwrap_or(DownloadError::Timeout)));
+            } else if transfer.record.state == DownloadState::Paused {
+                #[cfg(target_os = "macos")]
+                let source_available = unsafe { transfer.native.webView() }.is_some();
+                #[cfg(target_os = "windows")]
+                let source_available = true;
+                if transfer
+                    .deadline
+                    .pause_expired(Instant::now(), source_available)
+                {
+                    let error = if source_available {
+                        transfer.record.error.unwrap_or(DownloadError::Timeout)
+                    } else {
+                        DownloadError::Unavailable
+                    };
+                    cancel.push((*id, error));
+                }
             }
         }
         for (id, error) in cancel {
@@ -1288,6 +1303,21 @@ mod state_tests {
         let deadline = DecisionDeadline::new(DecisionPhase::ResumableInterruption, now);
         assert!(!deadline.expired(now + Duration::from_secs(299)));
         assert!(deadline.expired(now + Duration::from_secs(301)));
+    }
+
+    #[test]
+    fn a_pause_ends_when_its_source_is_gone_but_a_live_user_pause_has_no_deadline() {
+        let now = Instant::now();
+        for phase in [
+            DecisionPhase::UserPaused,
+            DecisionPhase::ResumableInterruption,
+        ] {
+            let deadline = DecisionDeadline::new(phase, now);
+            assert!(!deadline.pause_expired(now, true));
+            assert!(deadline.pause_expired(now, false));
+        }
+        let deadline = DecisionDeadline::new(DecisionPhase::UserPaused, now);
+        assert!(!deadline.pause_expired(now + Duration::from_secs(365 * 24 * 60 * 60), true));
     }
 
     #[test]

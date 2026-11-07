@@ -125,6 +125,42 @@ const action = rustScript('MEDIA_ACTION_JS').replace('__CHOOSE__', choose);
 function mediaContext(doc) {
   return { document: doc, navigator: {}, window: { setTimeout, clearTimeout } };
 }
+
+test('media watch and actions find frames after the shadow node budget is exhausted', async () => {
+  const parent = fixture();
+  const child = fixture();
+  parent.doc.nodes = [
+    ...Array.from({ length: 4096 }, () => ({ localName: 'div' })),
+    { localName: 'iframe', contentDocument: child.doc },
+  ];
+  assert.equal(JSON.parse(await runInNewContext(watch, mediaContext(parent.doc))).m.s, 1);
+  assert.equal(await runInNewContext(action, mediaContext(parent.doc))('pause', 0), true);
+  assert.equal(child.video.paused, true);
+});
+
+test('automatic PiP finds frames after the shadow node budget is exhausted', async () => {
+  const parent = fixture();
+  const child = fixture();
+  parent.doc.nodes = [
+    ...Array.from({ length: 4096 }, () => ({ localName: 'div' })),
+    { localName: 'iframe', contentDocument: child.doc },
+  ];
+  assert.equal(await parent.run('leave', 1), true);
+  assert.equal(child.doc.pictureInPictureElement, child.video);
+});
+
+test('frame discovery stays bounded when frames are inaccessible or numerous', async () => {
+  for (const kind of ['inaccessible', 'documents']) {
+    const parent = fixture();
+    const child = fixture();
+    const frames = kind === 'inaccessible'
+      ? Array.from({ length: 64 }, () => ({ localName: 'iframe', get contentDocument() { throw new Error('cross origin'); } }))
+      : Array.from({ length: 7 }, () => ({ localName: 'iframe', contentDocument: { ...fixture().doc, nodes: [] } }));
+    parent.doc.nodes = [...frames, { localName: 'iframe', contentDocument: child.doc }];
+    assert.equal(await parent.run('leave', 1), false, kind);
+    assert.equal(await runInNewContext(action, mediaContext(parent.doc))('pause', 0), false, kind);
+  }
+});
 function shadow(doc, nodes = []) {
   return { ownerDocument: doc, nodes, querySelectorAll: doc.querySelectorAll,
     addEventListener() {}, removeEventListener() {} };

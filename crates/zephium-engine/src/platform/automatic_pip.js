@@ -39,13 +39,15 @@
       if (node.shadowRoot && depths[index] < 8 && documents.length < 64) {
         documents.push(node.shadowRoot); depths.push(depths[index] + 1);
       }
-      if ((node.localName === 'iframe' || node.localName === 'frame') && docCount < 8) {
-        try {
-          if (node.contentDocument && !documents.includes(node.contentDocument) && documents.length < 64) {
-            documents.push(node.contentDocument); depths.push(0); docCount++;
-          }
-        } catch {}
-      }
+    }
+    const frames = root.querySelectorAll('iframe,frame');
+    for (let frameIndex = 0; frameIndex < frames.length && frameIndex < 64 && docCount < 8; frameIndex++) {
+      const frame = frames[frameIndex];
+      try {
+        if (frame.contentDocument && !documents.includes(frame.contentDocument) && documents.length < 64) {
+          documents.push(frame.contentDocument); depths.push(0); docCount++;
+        }
+      } catch {}
     }
     if (doc.pictureInPictureElement) return false;
     if (doc.fullscreenElement) continue;

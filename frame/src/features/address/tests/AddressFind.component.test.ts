@@ -109,3 +109,17 @@ test("an older find refusal cannot answer a newer search", async () => {
   refuse(false);
   await expect.element(screen.getByText("1 of 2")).toBeVisible();
 });
+
+test("a refused step keeps the match count and buttons available for retry", async () => {
+  const { screen, tab } = await field();
+  find.show(tab.id);
+  find.setText("needle");
+  await vi.waitFor(() => expect(native.find).toHaveBeenCalledWith("needle", true));
+  emitNativeEvent("find", { query: "needle", matches: 4, active: 2 });
+  native.find.mockResolvedValueOnce(false);
+  await screen.getByRole("button", { name: "Next match" }).click();
+  await expect.element(screen.getByText("2 of 4")).toBeVisible();
+  await expect.element(screen.getByRole("alert")).toHaveTextContent("Step failed");
+  await expect.element(screen.getByRole("button", { name: "Next match" })).toBeEnabled();
+  await expect.element(screen.getByRole("button", { name: "Previous match" })).toBeEnabled();
+});

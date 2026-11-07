@@ -14,7 +14,7 @@
 const CHOOSE_JS: &str = r#"
   function documents() {
     var list = [document], depths = [0], docCount = 1, nodeCount = 0;
-    for (var i = 0; i < list.length && nodeCount < 4096; i++) {
+    for (var i = 0; i < list.length; i++) {
       var root = list[i], doc = root.ownerDocument || root;
       var walker = doc.createTreeWalker(root, 1), node;
       while (nodeCount < 4096 && (node = walker.nextNode())) {
@@ -22,13 +22,15 @@ const CHOOSE_JS: &str = r#"
         if (node.shadowRoot && depths[i] < 8 && list.length < 64) {
           list.push(node.shadowRoot); depths.push(depths[i] + 1);
         }
-        if ((node.localName === 'iframe' || node.localName === 'frame') && docCount < 8) {
-          try {
-            if (node.contentDocument && list.indexOf(node.contentDocument) < 0 && list.length < 64) {
-              list.push(node.contentDocument); depths.push(0); docCount++;
-            }
-          } catch (_) {}
-        }
+      }
+      var frames = root.querySelectorAll('iframe,frame');
+      for (var f = 0; f < frames.length && f < 64 && docCount < 8; f++) {
+        var frame = frames[f];
+        try {
+          if (frame.contentDocument && list.indexOf(frame.contentDocument) < 0 && list.length < 64) {
+            list.push(frame.contentDocument); depths.push(0); docCount++;
+          }
+        } catch (_) {}
       }
     }
     return list;
@@ -350,6 +352,23 @@ impl super::EngineHost {
 mod tests {
     use super::*;
     use zephium_core::ports::engine::MediaAction;
+
+    #[test]
+    fn media_and_automatic_pip_scripts_preserve_bounded_frame_discovery() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-automatic-pip.mjs");
+        let output = std::process::Command::new("node")
+            .arg("--test")
+            .arg(script)
+            .output()
+            .expect("Node runs the media script tests");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn the_watch_resumes_only_from_a_short_hex_token() {
