@@ -3539,6 +3539,8 @@
   "native_hide_elements_more": "Hide Elements…",
   "native_manage_extensions_more": "Manage Extensions…",
   "native_profile_more": "Profile…",
+  "native_next_profile": "Next Profile",
+  "native_previous_profile": "Previous Profile",
   "native_account_more": "Account…",
   "native_split_view_more": "Split View…",
   "native_extensions_more": "Extensions…",
