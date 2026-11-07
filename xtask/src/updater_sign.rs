@@ -67,6 +67,11 @@ fn check_assets(
     if manifest.get("version").and_then(|value| value.as_str()) != Some(version) {
         return Err("latest.json version does not match the tag");
     }
+    if let Some(date) = manifest.get("pub_date").filter(|date| !date.is_null()) {
+        let date = date.as_str().ok_or("invalid latest.json pub_date")?;
+        time::OffsetDateTime::parse(date, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| "invalid latest.json pub_date")?;
+    }
     let platforms = manifest
         .get("platforms")
         .and_then(|value| value.as_object())
@@ -266,6 +271,32 @@ mod tests {
         std::fs::write(directory.join("SHA256SUMS"), "fixture checksums").unwrap();
         std::fs::write(directory.join("Zephium-macOS-arm64.dmg"), "fixture DMG").unwrap();
         assert_eq!(check(&good), Ok(()));
+        for date in [
+            serde_json::Value::Null,
+            "2026-11-07T12:34:56Z".into(),
+            "2026-11-07T13:34:56+01:00".into(),
+        ] {
+            let mut dated = good.clone();
+            dated["pub_date"] = date;
+            assert_eq!(check(&dated), Ok(()));
+        }
+        for date in [
+            "not a date".into(),
+            "2026-02-30T12:34:56Z".into(),
+            "2026-11-07".into(),
+            123.into(),
+        ] {
+            let mut bad = good.clone();
+            bad["pub_date"] = date;
+            assert_eq!(check(&bad), Err("invalid latest.json pub_date"));
+        }
+        let extra = directory.join("unexpected.exe");
+        std::fs::write(&extra, "unexpected asset").unwrap();
+        assert_eq!(
+            check(&good),
+            Err("incomplete or unexpected release asset set")
+        );
+        std::fs::remove_file(extra).unwrap();
         for key in platforms.keys() {
             let mut bad = good.clone();
             bad["platforms"].as_object_mut().unwrap().remove(key);
@@ -297,12 +328,22 @@ mod tests {
             );
             std::fs::write(&asset, bytes).unwrap();
         }
-        // Keep a well-formed signature but change the downloaded bytes.
-        std::fs::write(directory.join("Zephium-Windows-x64-setup.exe"), "tampered").unwrap();
-        assert!(
-            check(&good).is_err(),
-            "signature must verify the downloaded bytes"
-        );
+        // Keep each original signature while changing only its downloaded bytes.
+        for asset in [
+            "Zephium-macOS-arm64.app.tar.gz",
+            "Zephium-Windows-x64-setup.exe",
+        ] {
+            let path = directory.join(asset);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, "tampered").unwrap();
+            assert_eq!(
+                check(&good),
+                Err("updater artifact signature verification failed"),
+                "tampered {asset}"
+            );
+            std::fs::write(path, bytes).unwrap();
+            assert_eq!(check(&good), Ok(()));
+        }
     }
 
     #[test]

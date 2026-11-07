@@ -133,7 +133,8 @@ it.each([true, false])(
   async (mac) => {
     vi.resetModules();
     vi.doMock("$shared/platform", () => ({ IS_MAC: mac, IS_WINDOWS: !mac }));
-    let reason: "previousInstallIncomplete" | "workNotSaved" = "previousInstallIncomplete";
+    let reason: "previousInstallIncomplete" | "workNotSaved" | "activityCheckFailed" =
+      "previousInstallIncomplete";
     vi.doMock("$domain/updates", () => ({
       updates: {
         status: () => ({ state: "ready", version: "1.0.5", retry_reason: reason }),
@@ -150,6 +151,7 @@ it.each([true, false])(
           "previousInstallIncomplete",
           "The previous update did not finish. Your downloaded update is still ready to install.",
         ],
+        ["activityCheckFailed", "Couldn’t check for active downloads. Try again."],
         [
           "workNotSaved",
           "Your work could not be saved. The update is still ready; try again after saving.",
@@ -159,14 +161,35 @@ it.each([true, false])(
         const html = render(AboutPage).body;
         expect(html).toContain(message);
         expect(html).toContain(
-          mac
-            ? "New versions download in the background and install when you relaunch or quit."
-            : "New versions download in the background and install when you relaunch.",
+          "New versions download in the background and install when you relaunch.",
         );
       }
     } finally {
       vi.doUnmock("$shared/platform");
       vi.doUnmock("$domain/updates");
+      vi.resetModules();
+    }
+  },
+);
+
+it.each([
+  ["macOS 26.1.0", true],
+  ["Windows 11", false],
+  [undefined, true],
+] as const)(
+  "update install timing uses native OS %s despite the user agent",
+  async (os, windows) => {
+    vi.resetModules();
+    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows, IS_MAC: !windows }));
+    try {
+      const { fields } = await import("../lib/catalog");
+      expect(fields["updates.auto-check"].description(os)).toBe(
+        os?.startsWith("macOS")
+          ? "New versions download in the background and install when you relaunch or quit."
+          : "New versions download in the background and install when you relaunch.",
+      );
+    } finally {
+      vi.doUnmock("$shared/platform");
       vi.resetModules();
     }
   },

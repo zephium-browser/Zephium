@@ -97,31 +97,44 @@ pub(super) fn request_with_result(app: tauri::AppHandle, done: impl FnOnce(bool)
     request_inner(app, false, done);
 }
 
+async fn update_download_activity(
+    dispatch: impl FnOnce(tokio::sync::oneshot::Sender<bool>) -> Result<(), tauri::Error>,
+    timeout: std::time::Duration,
+) -> Result<bool, super::updates::UpdateRetryReason> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    dispatch(send).map_err(|_| super::updates::UpdateRetryReason::ActivityCheckFailed)?;
+    tokio::time::timeout(timeout, receive)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .ok_or(super::updates::UpdateRetryReason::ActivityCheckFailed)
+}
+
 pub(super) fn confirm_update_relaunch(
     app: tauri::AppHandle,
-    done: impl FnOnce(bool) + Send + 'static,
+    done: impl FnOnce(Result<bool, super::updates::UpdateRetryReason>) + Send + 'static,
 ) {
-    let (send, receive) = tokio::sync::oneshot::channel();
-    if app
-        .run_on_main_thread(move || {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            zephium_engine::downloads_in_progress(move |active| {
-                let _ = send.send(active);
-            });
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let _ = send.send(false);
-        })
-        .is_err()
-    {
-        done(false);
-        return;
-    }
     tauri::async_runtime::spawn(async move {
-        let Ok(Ok(downloads)) =
-            tokio::time::timeout(std::time::Duration::from_secs(15), receive).await
-        else {
-            done(false);
-            return;
+        let downloads = update_download_activity(
+            |send| {
+                app.run_on_main_thread(move || {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    zephium_engine::downloads_in_progress(move |active| {
+                        let _ = send.send(active);
+                    });
+                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                    let _ = send.send(false);
+                })
+            },
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        let downloads = match downloads {
+            Ok(downloads) => downloads,
+            Err(reason) => {
+                done(Err(reason));
+                return;
+            }
         };
         #[cfg(feature = "work-product")]
         let work = app
@@ -144,7 +157,7 @@ pub(super) fn confirm_update_relaunch(
                     ))
                     .show(answer);
             },
-            done,
+            move |confirmed| done(Ok(confirmed)),
         );
     });
 }
@@ -330,6 +343,52 @@ pub(super) fn is_closing() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn update_activity_query_failures_are_retryable_and_distinct_from_cancel() {
+        use super::super::updates::UpdateRetryReason::ActivityCheckFailed;
+        let timeout = std::time::Duration::from_millis(1);
+        assert_eq!(
+            update_download_activity(
+                |_| Err(tauri::Error::Io(std::io::Error::other("dispatch failed"))),
+                timeout
+            )
+            .await,
+            Err(ActivityCheckFailed),
+            "dispatch failure is not a user cancel",
+        );
+        assert_eq!(
+            update_download_activity(|_| Ok(()), timeout).await,
+            Err(ActivityCheckFailed),
+            "a dropped reply is not a user cancel",
+        );
+        let mut pending = None;
+        assert_eq!(
+            update_download_activity(
+                |send| {
+                    pending = Some(send);
+                    Ok(())
+                },
+                timeout
+            )
+            .await,
+            Err(ActivityCheckFailed),
+            "timeout is not a user cancel",
+        );
+        for active in [true, false] {
+            assert_eq!(
+                update_download_activity(
+                    |send| {
+                        send.send(active).unwrap();
+                        Ok(())
+                    },
+                    timeout
+                )
+                .await,
+                Ok(active),
+            );
+        }
+    }
+
     #[test]
     fn update_relaunch_requires_confirmation_only_for_active_downloads_or_work() {
         for (downloads, work, expected) in [

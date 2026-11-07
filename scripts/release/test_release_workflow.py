@@ -29,6 +29,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(command, publish)
         self.assertLess(publish.index('gh release download'), publish.index(command))
         self.assertLess(publish.index(command), publish.index('gh release edit'))
+        validation = '      - name: Verify the complete draft and updater manifest\n'
+        publication = '      - name: Publish the verified draft\n'
+        step = publish.split(validation, 1)[1].split('\n      - ', 1)[0]
+        self.assertIn(command, step)
+        self.assertNotIn('continue-on-error:', step)
+        self.assertLess(publish.index(validation), publish.index(publication))
 
     def test_components_have_one_retry_and_an_explicit_emergency_opt_out(self):
         workflow = WORKFLOW.read_text()

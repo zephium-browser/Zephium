@@ -14,6 +14,7 @@
   import ZephiumTile from "$shared/ui/ZephiumTile";
   import AboutLinks from "../about/AboutLinks.svelte";
   import { WEBSITE } from "../../lib/links";
+  import { fields } from "../../lib/catalog";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let about = $state<AboutInfo | null>(null);
@@ -59,6 +60,8 @@
         if (update.retry_reason === "previousInstallIncomplete")
           return m.update_retry_previous_install_incomplete();
         if (update.retry_reason === "workNotSaved") return m.update_retry_work_not_saved();
+        if (update.retry_reason === "activityCheckFailed")
+          return m.update_retry_activity_check_failed();
         return m.update_status_ready({ version: update.version });
       case "manualInstall":
         return m.update_status_manual({ version: update.version });
@@ -211,7 +214,11 @@
       >
     </SettingsRow>
   {/if}
-  {#if updatable}<PreferenceSwitch id="updates.auto-check" preference="updates.auto-check" />{/if}
+  {#if updatable}<PreferenceSwitch
+      id="updates.auto-check"
+      preference="updates.auto-check"
+      description={fields["updates.auto-check"].description(about?.os)}
+    />{/if}
   {#if security}
     <SettingsRow
       title={security === "browser_runtime"

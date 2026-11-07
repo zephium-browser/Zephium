@@ -40,6 +40,7 @@ pub(crate) enum UpdateStatus {
 pub(crate) enum UpdateRetryReason {
     PreviousInstallIncomplete,
     WorkNotSaved,
+    ActivityCheckFailed,
 }
 
 struct Parked {
@@ -366,10 +367,10 @@ pub(crate) fn update_relaunch(caller: WebviewWindow, app: tauri::AppHandle) -> b
     updates.staged.store(false, Ordering::Release);
     let install_app = app.clone();
     resource_close::confirm_update_relaunch(app, move |confirmed| {
-        if !confirmed || shutdown_started(&install_app) {
+        if confirmed != Ok(true) || shutdown_started(&install_app) {
             install_app.state::<Updates>().set(UpdateStatus::Ready {
                 version,
-                retry_reason,
+                retry_reason: confirmed.err().or(retry_reason),
             });
             return;
         }
@@ -671,6 +672,10 @@ mod tests {
                 "previousInstallIncomplete",
             ),
             (UpdateRetryReason::WorkNotSaved, "workNotSaved"),
+            (
+                UpdateRetryReason::ActivityCheckFailed,
+                "activityCheckFailed",
+            ),
         ] {
             let status = UpdateStatus::Ready {
                 version: "1.0.5".into(),

@@ -3464,7 +3464,7 @@ export type UpdateHighlights = {
 	items: string[],
 };
 
-export type UpdateRetryReason = "previousInstallIncomplete" | "workNotSaved";
+export type UpdateRetryReason = "previousInstallIncomplete" | "workNotSaved" | "activityCheckFailed";
 
 export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 

@@ -13,6 +13,7 @@ import AboutPage from "../components/sections/AboutPage.svelte";
 const REPORT = vi.hoisted(() => "Zephium diagnostics\nApp: Zephium 1.0.1\nLog: 2 lines");
 
 const native = vi.hoisted(() => ({
+  os: "macOS 26.1.0" as string | null,
   status: { state: "upToDate" } as UpdateStatus,
   check: vi.fn(async (): Promise<UpdateStatus> => ({ state: "ready", version: "1.0.2" })),
   relaunch: vi.fn(async () => true),
@@ -26,7 +27,8 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
-    aboutInfo: async () => ({ version: "1.0.1", os: "macOS 26.1.0", arch: "aarch64" }),
+    aboutInfo: async () =>
+      native.os === null ? null : { version: "1.0.1", os: native.os, arch: "aarch64" },
     updateStatus: async () => native.status,
     updateCheck: native.check,
     updateRelaunch: native.relaunch,
@@ -51,6 +53,7 @@ vi.mock("$domain/preferences", () => ({
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  native.os = "macOS 26.1.0";
   await runtime.init();
 });
 afterEach(() => {
@@ -141,6 +144,7 @@ test("manual installation opens the exact release instead of retrying an impossi
 });
 
 test.each([
+  ["activityCheckFailed", "Couldn’t check for active downloads. Try again."],
   [
     "previousInstallIncomplete",
     "The previous update did not finish. Your downloaded update is still ready to install.",
@@ -160,19 +164,23 @@ test.each([
   await expect.element(screen.getByRole("button", { name: "Relaunch to update" })).toBeEnabled();
 });
 
-test("automatic update installation explains when this platform installs", async () => {
-  native.status = { state: "upToDate" };
-  const screen = await render(AboutPage);
-  await expect
-    .element(
-      screen.getByText(
-        IS_MAC
-          ? "New versions download in the background and install when you relaunch or quit."
-          : "New versions download in the background and install when you relaunch.",
-      ),
-    )
-    .toBeVisible();
-});
+test.each(["macOS 26.1.0", "Windows 11", null])(
+  "automatic update installation uses native OS %s instead of the user agent",
+  async (os) => {
+    native.status = { state: "upToDate" };
+    native.os = os;
+    const screen = await render(AboutPage);
+    await expect
+      .element(
+        screen.getByText(
+          os?.startsWith("macOS")
+            ? "New versions download in the background and install when you relaunch or quit."
+            : "New versions download in the background and install when you relaunch.",
+        ),
+      )
+      .toBeVisible();
+  },
+);
 
 test("the links open Zephium's own pages in a tab", async () => {
   native.status = { state: "upToDate" };

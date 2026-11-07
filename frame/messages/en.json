@@ -3288,6 +3288,7 @@
   "download_resume_help": "Retry Download can resume this interrupted transfer for up to five minutes while its tab stays open.",
   "download_resume_file_busy": "Close other applications using this file or folder, then use Retry Download. The interrupted transfer expires after five minutes or when its tab closes.",
   "update_retry_previous_install_incomplete": "The previous update did not finish. Your downloaded update is still ready to install.",
+  "update_retry_activity_check_failed": "Couldn’t check for active downloads. Try again.",
   "update_retry_work_not_saved": "Your work could not be saved. The update is still ready; try again after saving.",
   "pref_updates_auto_help_mac": "New versions download in the background and install when you relaunch or quit.",
   "update_status_manual": "Version {version} needs to be installed manually from its release page.",

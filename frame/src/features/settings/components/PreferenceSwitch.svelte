@@ -5,11 +5,15 @@
   import Switch from "$shared/ui/Switch";
 
   /** `id` names the row (labels, search); `preference` is what it changes. */
-  let { id, preference }: { id: FieldId; preference: PreferenceKey } = $props();
+  let {
+    id,
+    preference,
+    description,
+  }: { id: FieldId; preference: PreferenceKey; description?: string } = $props();
   let field = $derived(fields[id]);
 </script>
 
-<SettingsRow settingId={id} title={field.label()} description={field.description()}
+<SettingsRow settingId={id} title={field.label()} description={description ?? field.description()}
   ><Switch
     label={field.label()}
     labelHidden
