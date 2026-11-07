@@ -117,13 +117,13 @@ fn keep_awake() {
                 |(shared, extension)| (shared.as_ptr() as usize, extension.clone()),
             )
         });
-        if open.is_empty() {
+        let Some(open) = open else {
             // SAFETY: WebKit passes the live timer that is firing, on the main
             // thread that scheduled it; invalidating it there is permitted.
             unsafe { timer.as_ref().invalidate() };
             KEEP_AWAKE.with(|timer| timer.borrow_mut().take());
             return;
-        }
+        };
         for (shared, extension) in open {
             let Some(shared) = shared.upgrade() else {
                 continue;
@@ -153,19 +153,20 @@ fn keep_awake() {
     KEEP_AWAKE.with(|slot| *slot.borrow_mut() = Some(timer));
 }
 
-/// One entry per extension and profile with a port open; one-off messages
-/// keep nothing awake.
+/// One entry per extension and profile with a port open; `None` stops the
+/// timer. One-off messages keep nothing awake.
 fn awake<T>(
     connections: impl IntoIterator<Item = (T, bool)>,
     key: impl Fn(&T) -> (usize, String),
-) -> Vec<T> {
+) -> Option<Vec<T>> {
     let mut seen = HashSet::new();
-    connections
+    let open: Vec<_> = connections
         .into_iter()
         .filter(|(_, port)| *port)
         .map(|(item, _)| item)
         .filter(|item| seen.insert(key(item)))
-        .collect()
+        .collect();
+    (!open.is_empty()).then_some(open)
 }
 
 /// Sends one message for `runtime.sendNativeMessage` and replies with the
@@ -841,9 +842,68 @@ mod tests {
             ],
             key,
         );
-        assert_eq!(open, [(1, "bitwarden"), (2, "bitwarden")]);
-        assert!(awake([((1, "proton"), false)], key).is_empty());
-        assert!(awake(Vec::<((usize, &str), bool)>::new(), key).is_empty());
+        assert_eq!(open, Some(vec![(1, "bitwarden"), (2, "bitwarden")]));
+        assert!(awake([((1, "proton"), false)], key).is_none());
+        assert!(awake(Vec::<((usize, &str), bool)>::new(), key).is_none());
+    }
+
+    #[test]
+    fn keep_awake_follows_native_port_lifecycle() {
+        let tick = |connections: &[((usize, &'static str), bool)]| {
+            awake(connections.iter().copied(), |(profile, extension)| {
+                (*profile, extension.to_string())
+            })
+            .map(|mut open| {
+                open.sort_unstable();
+                open
+            })
+        };
+        let mut connections = vec![((1, "bitwarden"), true)];
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden")]),
+            "the first port starts keeping its background awake"
+        );
+
+        connections.extend([
+            ((1, "bitwarden"), true),
+            ((2, "bitwarden"), true),
+            ((2, "proton"), true),
+            ((3, "proton"), false),
+        ]);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden"), (2, "bitwarden"), (2, "proton")]),
+            "a tick wakes each profile-extension pair once, ignoring one-off messages"
+        );
+
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden"), (2, "bitwarden"), (2, "proton")]),
+            "closing one of several ports to the same background keeps it awake"
+        );
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(2, "bitwarden"), (2, "proton")])
+        );
+        connections.remove(0);
+        assert_eq!(tick(&connections), Some(vec![(2, "proton")]));
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            None,
+            "the tick after the last port closes stops even with a one-off message pending"
+        );
+
+        connections.clear();
+        connections.push(((1, "bitwarden"), false));
+        assert_eq!(
+            tick(&connections),
+            None,
+            "a one-off never starts keep-awake"
+        );
     }
     use serde_json::json;
 
