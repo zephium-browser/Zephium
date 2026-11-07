@@ -43,6 +43,7 @@ pub use rules::{
     ArtifactDigest, CompiledRules, MatchError, NetworkAction, NetworkDecision, NetworkRequest,
     PolicyDigest, RequestMethod, ResourceType, WebKitRules,
 };
+pub use scriptlets::ScriptletTrust;
 #[doc(hidden)]
 pub use sha256::Sha256;
 #[cfg(feature = "webkit")]
@@ -57,7 +58,7 @@ pub use zephium_core::ports::blocker::BlockerCompileFailure;
 ///
 /// Increment this whenever the accepted rule subset, canonicalization, digest
 /// construction, or WebKit serialization changes.
-pub const POLICY_FORMAT_VERSION: u32 = 6;
+pub const POLICY_FORMAT_VERSION: u32 = 8;
 
 /// Exact canonical WebKit JSON schema owned by Zephium.
 pub use zephium_core::blocker::WEBKIT_ARTIFACT_FORMAT_VERSION;
@@ -72,10 +73,14 @@ pub const ADBLOCK_ENGINE_VERSION: &str = "0.13.2";
 /// parser, native target, limits, or embedded engine changed can safely retry
 /// the same signed repository revision without weakening rollback protection.
 pub fn compiler_policy_fingerprint() -> [u8; 32] {
+    policy_fingerprint(POLICY_FORMAT_VERSION)
+}
+
+pub(crate) fn policy_fingerprint(policy_format_version: u32) -> [u8; 32] {
     let values = CompileLimitValues::default();
     let mut digest = Sha256::new();
     digest.update(b"zephium-blocker-compiler-policy-v1");
-    digest.update(POLICY_FORMAT_VERSION.to_be_bytes());
+    digest.update(policy_format_version.to_be_bytes());
     digest.update(WEBKIT_ARTIFACT_FORMAT_VERSION.to_be_bytes());
     digest.update(ADBLOCK_ENGINE_VERSION.as_bytes());
     digest.update(std::env::consts::OS.as_bytes());

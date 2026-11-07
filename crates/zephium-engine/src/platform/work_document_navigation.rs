@@ -1151,6 +1151,7 @@ impl WorkDocumentNavigation {
                     navigation_type: AppleNavigationType::Other,
                     is_get: true,
                     target_is_main_frame: Some(true),
+                    source: None,
                 })
         {
             state.bootstrap_available = false;
@@ -1825,6 +1826,7 @@ mod tests {
             navigation_type,
             is_get,
             target_is_main_frame: Some(true),
+            source: None,
         }
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]

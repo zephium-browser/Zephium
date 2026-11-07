@@ -7,7 +7,18 @@ use crate::{CompileTarget, FilterSource, SourceFormat, SourceId};
 
 /// Reserved: no catalog source may use it.
 pub(crate) const ID: &str = "zephium";
+#[cfg(not(feature = "qa-test-hosts"))]
 const RULES: &str = include_str!("zephium_rules.txt");
+#[cfg(feature = "qa-test-hosts")]
+const RULES: &str = concat!(
+    include_str!("zephium_rules.txt"),
+    "||blocked-ads.test^$document\n"
+);
+/// Protection QA builds only: judged as uBlock Origin's badware list is. The
+/// plain rule gives the matcher a request rule, which every policy needs.
+#[cfg(feature = "qa-test-hosts")]
+pub(crate) const QA_BADWARE_RULES: &str =
+    "||blocked-badware.test^$document\n||blocked-badware.test^\n";
 
 pub(crate) fn source() -> FilterSource {
     FilterSource::new(
@@ -15,6 +26,7 @@ pub(crate) fn source() -> FilterSource {
         SourceFormat::Standard,
         RULES.to_owned(),
     )
+    .zephium_rules()
 }
 
 /// Whether these rules compile for `target`. They are per-site exceptions,
@@ -43,5 +55,16 @@ pub(crate) fn fingerprint() -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"zephium-builtin-rules-v1");
     digest.update(RULES);
+    #[cfg(feature = "qa-test-hosts")]
+    digest.update(QA_BADWARE_RULES);
     digest.finalize()
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(not(feature = "qa-test-hosts"))]
+    #[test]
+    fn shipped_rules_name_no_qa_test_host() {
+        assert!(!super::RULES.contains(".test^"));
+    }
 }

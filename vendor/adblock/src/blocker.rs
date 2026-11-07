@@ -9,7 +9,7 @@ use crate::filters::fb_network::FlatNetworkFilter;
 use crate::filters::fb_network_builder::NetworkFilterListId;
 use crate::filters::filter_data_context::FilterDataContextRef;
 use crate::filters::network::{NetworkFilterMask, NetworkFilterMaskHelper};
-use crate::network_filter_list::{NetworkFilterList, UnknownAttributionExceptionMatch};
+use crate::network_filter_list::NetworkFilterList;
 use crate::regex_manager::{RegexManager, RegexManagerDiscardPolicy};
 use crate::request::Request;
 use crate::resources::ResourceStorage;
@@ -420,24 +420,17 @@ impl Blocker {
             return Some(BlockerResult::default());
         };
 
-        let exception = self
-            .exceptions()
-            .check_unknown_attribution_exception_bounded(
-                request,
-                &self.tags_enabled,
-                regex_manager,
-                &mut remaining_checks,
-            )?;
-        let exception = match exception {
-            UnknownAttributionExceptionMatch::None => None,
-            UnknownAttributionExceptionMatch::Exact(exception) => Some(exception),
-            UnknownAttributionExceptionMatch::PotentialAttributionSensitive => {
-                // The exact initiating frame could activate this exception. Native
-                // callbacks without exact attribution must fail open, never turn
-                // missing context into a broader block.
-                return Some(BlockerResult::default());
-            }
-        };
+        // Without the initiating document, an exception that depends on it
+        // (`domain=`, first or third party) cannot be known to apply, so it
+        // does not: the generic block stands. Source-independent exceptions
+        // still apply.
+        let exception = self.exceptions().check_with_attribution_bounded(
+            request,
+            &self.tags_enabled,
+            regex_manager,
+            true,
+            &mut remaining_checks,
+        )?;
 
         Some(BlockerResult {
             filter: Some(filter.debug_data.unwrap_or_default()),

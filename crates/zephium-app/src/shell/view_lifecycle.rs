@@ -28,6 +28,10 @@ const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2
 // the most recent hidden page stays for instant back-and-forth.
 const HEAVY_PAGE: (u64, std::time::Duration) = (256 << 20, std::time::Duration::from_secs(3 * 60));
 const MEMORY_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+// The warm spare saves about 150 ms on the next page a person opens, at the
+// cost of a renderer process. Once browsing has been quiet this long it is let
+// go; the next completed load warms another.
+pub(super) const SPARE_IDLE: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 pub(super) const DISCARD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub(super) const DISCARD_PROTECTED_RETRY: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
@@ -83,6 +87,8 @@ pub(super) struct ResidencyState {
     pub(super) next_discard_probe: u64,
     pub(super) discard_probes: std::collections::HashMap<ItemId, PendingDiscardProbe>,
     pub(super) discard_protected_until: std::collections::HashMap<ItemId, std::time::Instant>,
+    /// While a warm spare may be waiting, the last browsing activity.
+    pub(super) spare_activity: Option<std::time::Instant>,
 }
 
 impl Default for ResidencyState {
@@ -113,6 +119,7 @@ impl Default for ResidencyState {
             next_discard_probe: 0,
             discard_probes: std::collections::HashMap::new(),
             discard_protected_until: std::collections::HashMap::new(),
+            spare_activity: None,
         }
     }
 }
@@ -222,9 +229,37 @@ impl Shell {
         }
     }
 
+    /// A completed load in `id`'s partition: warm a spare for the next page.
+    pub(super) fn warm_spare_after_load(&mut self, id: ItemId) {
+        self.engine.warm_spare(self.partition_of(id));
+        self.residency.spare_activity = Some(std::time::Instant::now());
+    }
+
+    pub(super) fn note_browsing_activity(&mut self) {
+        if let Some(at) = self.residency.spare_activity.as_mut() {
+            *at = std::time::Instant::now();
+        }
+    }
+
+    /// Lets a waiting spare go once browsing has been quiet for SPARE_IDLE.
+    pub(super) fn release_idle_spare(&mut self) {
+        if self
+            .residency
+            .spare_activity
+            .is_some_and(|at| at.elapsed() >= SPARE_IDLE)
+        {
+            self.residency.spare_activity = None;
+            self.engine.release_spare();
+        }
+    }
+
     pub(super) fn on_memory_pressure(&mut self, pressure: MemoryPressure) {
         if self.residency.memory_pressure != pressure {
             self.residency.memory_pressure = pressure;
+            // The engine closes its spare itself under pressure.
+            if pressure != MemoryPressure::Normal {
+                self.residency.spare_activity = None;
+            }
             self.engine.set_memory_pressure(pressure);
             self.residency.update_limits();
             self.maintain_views();
@@ -398,6 +433,11 @@ impl Shell {
         self.cancel_pending_presentation(id);
         self.clear_discard_after_retirement(id);
         self.items.view_creation_failed(id);
+        if self.https_first_reopen(id) {
+            let _ = self.relayout();
+            self.project_tab(id);
+            return;
+        }
         let split_collapsed = self.collapse_failed_split_leaf(id);
         if split_collapsed {
             self.schedule_persist();

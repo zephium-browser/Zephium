@@ -16,6 +16,7 @@ const native = vi.hoisted(() => ({
   status: { state: "upToDate" } as UpdateStatus,
   check: vi.fn(async (): Promise<UpdateStatus> => ({ state: "ready", version: "1.0.2" })),
   relaunch: vi.fn(async () => true),
+  appRelaunch: vi.fn(async () => true),
   openUrl: vi.fn(async () => ({ accepted: true, operation_id: null })),
   softwareUpdate: vi.fn(async () => true),
   report: vi.fn(async (): Promise<string | null> => REPORT),
@@ -29,6 +30,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     updateStatus: async () => native.status,
     updateCheck: native.check,
     updateRelaunch: native.relaunch,
+    appRelaunch: native.appRelaunch,
     browserOpenUrl: native.openUrl,
     openSoftwareUpdate: native.softwareUpdate,
     diagnosticsReport: native.report,
@@ -106,6 +108,7 @@ test("a system behind on security updates is explained where the rail sends peop
   native.status = { state: "upToDate" };
   emitNativeEvent("runtimeStatusChanged", {
     restart_required: false,
+    restart_reason: null,
     session_set_aside: false,
     user_content_degraded_scope_count: 0,
     security_advisories: [
@@ -249,4 +252,23 @@ test("the log folder opens from About, and settings search finds both actions", 
   expect(searchSettings("bug report").map((result) => result.target)).toContain(
     "about.diagnostics",
   );
+});
+
+test("a restart the runtime waits on is offered in About, even without updates", async () => {
+  native.status = { state: "unavailable" };
+  emitNativeEvent("runtimeStatusChanged", {
+    restart_required: true,
+    restart_reason: "runtime_update",
+    session_set_aside: false,
+    user_content_degraded_scope_count: 0,
+    security_advisories: [],
+  });
+  const screen = await render(AboutPage);
+  await expect.element(screen.getByText("Restart needed")).toBeVisible();
+  await expect
+    .element(screen.getByText("A newer WebView2 is installed.", { exact: false }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Restart to finish updating" }).click();
+  expect(native.appRelaunch).toHaveBeenCalledOnce();
+  expect(native.relaunch).not.toHaveBeenCalled();
 });

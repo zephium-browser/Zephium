@@ -2,6 +2,7 @@
 
 mod archive;
 mod audio;
+mod blocked;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -21,6 +22,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod https_first;
 mod media;
 mod network;
 mod operations;
@@ -150,6 +152,22 @@ use zephium_ipc::{
 pub(crate) const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A person opening, switching, closing or navigating tabs, or a page
+/// changing address or loading: what keeps a warm spare worth holding.
+fn browsing_activity(cmd: &Command) -> bool {
+    match cmd {
+        Command::Open
+        | Command::Activate(_)
+        | Command::Close(_)
+        | Command::Navigate { .. }
+        | Command::Reload(_)
+        | Command::Engine(EngineEvent::UrlChanged { .. })
+        | Command::Engine(EngineEvent::LoadingChanged { .. }) => true,
+        Command::Operation { command, .. } => browsing_activity(command),
+        _ => false,
+    }
+}
 #[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume
@@ -249,19 +267,31 @@ pub struct Shell {
     closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
     roster: profile_roster::RosterState,
     space_memory: spaces::SpaceMemory,
-    /// Sites allowed to open a kind of application link without asking,
-    /// for this run only.
-    external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
+    /// Kinds of application link each profile's sites may open without
+    /// asking, as (site, scheme). Saved profiles read theirs from the store;
+    /// a private profile keeps them only until the session ends.
+    app_link_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<(zephium_core::permissions::PageOrigin, String)>,
+    >,
     /// Sites each saved profile lets open new tabs without a click, as read
     /// from the store; a profile is absent until its list has been read.
     popup_sites: std::collections::HashMap<
         ProfileId,
         std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
     >,
+    /// Whether each site may save files, per profile: true to allow, false to
+    /// block. Saved profiles read theirs from the store; a private profile
+    /// keeps what the person answers only until the session ends.
+    download_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeMap<zephium_core::permissions::PageOrigin, bool>,
+    >,
     /// Local https origins whose refused certificate the person continued
     /// past, for this run only; their pages never look secure.
     continued_certificates:
         std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
+    https_first: https_first::HttpsFirst,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
     time: time::TimeState,
@@ -278,10 +308,14 @@ pub struct Shell {
     browser_return_ready: bool,
     /// Set while the window lays out for a return that a queued command is about to change.
     browser_return_hidden: bool,
+    /// One of the browser's own dialogs is open over the window.
+    chrome_modal: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// Profiles whose browser engine only a restart can trust again.
+    restart_profiles: std::collections::HashSet<ProfileId>,
     /// The saved session could not be restored this launch and was set aside.
     session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
@@ -503,9 +537,11 @@ impl Shell {
             closed_projected: Vec::new(),
             roster: profile_roster::RosterState::default(),
             space_memory: spaces::SpaceMemory::default(),
-            external_apps_allowed: std::collections::HashSet::new(),
+            app_link_sites: std::collections::HashMap::new(),
             popup_sites: std::collections::HashMap::new(),
+            download_sites: std::collections::HashMap::new(),
             continued_certificates: std::collections::HashSet::new(),
+            https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
             window_visible: true,
@@ -518,10 +554,12 @@ impl Shell {
             browser_after_return: None,
             browser_return_ready: false,
             browser_return_hidden: false,
+            chrome_modal: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            restart_profiles: std::collections::HashSet::new(),
             session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -607,6 +645,9 @@ impl Shell {
                 let _ = ack.send(outcome);
             }
             return;
+        }
+        if browsing_activity(&cmd) {
+            self.note_browsing_activity();
         }
         match cmd {
             Command::WorkDocument(submission) => self.work_document(submission),
@@ -741,6 +782,7 @@ impl Shell {
                     origin,
                     kind,
                     decision,
+                    scheme,
                 } = &command
                 {
                     if let Some(mut completion) = self.begin_site_permission_change(
@@ -748,6 +790,7 @@ impl Shell {
                         origin.clone(),
                         *kind,
                         *decision,
+                        scheme.clone(),
                     ) {
                         completion.operation_id = operation_id;
                         (self.emit)(Projection::OperationProcessed(completion));
@@ -867,8 +910,12 @@ impl Shell {
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
             }
-            Command::AnswerPageRequest { id, decision } => {
-                let _ = self.operation_answer_page_request(id, decision);
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => {
+                let _ = self.operation_answer_page_request(id, request, decision);
             }
             Command::AnswerHttpAuth {
                 id,
@@ -879,6 +926,12 @@ impl Shell {
             }
             Command::ContinuePastCertificate(id) => {
                 let _ = self.operation_continue_past_certificate(id);
+            }
+            Command::ContinuePastBlock { id, url } => {
+                let _ = self.operation_continue_past_block(id, &url);
+            }
+            Command::LeaveBlockedPage(id) => {
+                let _ = self.operation_leave_blocked_page(id);
             }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);
@@ -992,6 +1045,12 @@ impl Shell {
             }
             Command::SetPagePermissionCardHost(available) => {
                 self.set_page_permission_card_host(available)
+            }
+            Command::SetChromeModal(open) => {
+                if self.chrome_modal != open {
+                    self.chrome_modal = open;
+                    let _ = self.relayout();
+                }
             }
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {
@@ -1427,6 +1486,7 @@ impl Shell {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
                 self.archive_idle_tabs();
+                self.release_idle_spare();
                 if self.maintain_views() {
                     self.project_items();
                 }

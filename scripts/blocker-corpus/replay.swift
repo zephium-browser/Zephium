@@ -9,7 +9,37 @@ import AppKit
 import Network
 import WebKit
 
-final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+/// The key WebKit wraps a page's stored CryptoKeys with, for this run only. Unanswered, WebKit keeps
+/// one in the login keychain, which prompts for every new build of a tool.
+let runKey: NSData = {
+    var bytes = [UInt8](repeating: 0, count: 32)
+    guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+        FileHandle.standardError.write("no random bytes for the WebCrypto key\n".data(using: .utf8)!)
+        exit(3)
+    }
+    return Data(bytes) as NSData
+}()
+
+/// Answers WebKit's requests for that key: a page's, through its navigation delegate, and a
+/// worker's, through its data store's delegate.
+class KeyedDelegate: NSObject {
+    @objc(_webCryptoMasterKeyForWebView:)
+    func webCryptoMasterKey(_ webView: WKWebView) -> NSData { asked("page"); return runKey }
+    @objc(_webCryptoMasterKeyForWebView:completionHandler:)
+    func webCryptoMasterKey(_ webView: WKWebView, completionHandler: @escaping (NSData?) -> Void) { asked("page"); completionHandler(runKey) }
+    @objc(webCryptoMasterKey:)
+    func webCryptoMasterKey(_ completionHandler: @escaping (NSData?) -> Void) { asked("data store"); completionHandler(runKey) }
+    func asked(_ by: String) { FileHandle.standardError.write("webcrypto key: in memory, for the \(by)\n".data(using: .utf8)!) }
+}
+
+/// `store`, with `delegate` answering its workers' requests for the key.
+func keyed(_ store: WKWebsiteDataStore, by delegate: KeyedDelegate) -> WKWebsiteDataStore {
+    let setter = Selector(("set_delegate:"))
+    if store.responds(to: setter) { _ = store.perform(setter, with: delegate) }
+    return store
+}
+
+final class Probe: KeyedDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var blocked = Set<String>()
     var seen: [String: Set<String>] = [:]
     var done = false
@@ -24,6 +54,14 @@ final class Probe: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         if (action.value(forKey: "blockedLoad") as? Bool) == true { blocked.insert(url) }
         for note in (action.value(forKey: "notifications") as? [String]) ?? [] { seen[url, default: []].insert(note) }
     }
+}
+
+/// Tells a view its window is never occluded, so its page runs as in view off screen.
+func unoccluded(_ view: WKWebView) {
+    let setter = Selector(("_setWindowOcclusionDetectionEnabled:"))
+    guard view.responds(to: setter) else { return }
+    typealias Set = @convention(c) (AnyObject, Selector, Bool) -> Void
+    unsafeBitCast(view.method(for: setter), to: Set.self)(view, setter, false)
 }
 
 @MainActor func spin(_ timeout: TimeInterval, until done: () -> Bool) {
@@ -61,11 +99,12 @@ func request(_ type: String) -> String {
         listener.newConnectionHandler = { connection in connection.cancel() }
         listener.start(queue: .main)
         _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         NSApp.finishLaunching()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
-        window.level = .floating
-        window.makeKeyAndOrderFront(nil)
+        // Off every screen and never activated, so nothing shows in front of the user; each view is
+        // told its window is not occluded, so pages run as in view.
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.orderBack(nil)
         var lists: [WKContentRuleList] = []
         let ruleStore = WKContentRuleListStore(url: FileManager.default.temporaryDirectory.appendingPathComponent("verdict-store"))!
         for path in args[3...] {
@@ -78,6 +117,7 @@ func request(_ type: String) -> String {
         let proxy = NWEndpoint.hostPort(host: "127.0.0.1", port: listener.port!)
         store.proxyConfigurations = [ProxyConfiguration(httpCONNECTProxy: proxy), ProxyConfiguration(socksv5Proxy: proxy)]
         let probe = Probe()
+        _ = keyed(store, by: probe)
         // One configuration for every view: each fresh configuration starts its own process pool,
         // and thousands of pools exhaust the system's power-notification registrations.
         let config = WKWebViewConfiguration()
@@ -86,6 +126,7 @@ func request(_ type: String) -> String {
         config.userContentController.add(probe, name: "done")
         func view() -> WKWebView {
             let v = WKWebView(frame: window.contentView!.bounds, configuration: config)
+            unoccluded(v)
             v.navigationDelegate = probe
             window.contentView!.addSubview(v)
             return v

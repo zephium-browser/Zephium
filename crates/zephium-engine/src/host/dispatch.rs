@@ -456,7 +456,10 @@ pub(crate) fn install(
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            blocker_navigation: HashMap::new(),
             popup_sites: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_tab_download_ask: None,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificate_exceptions: HashMap::new(),
             page_styles: HashMap::new(),
@@ -610,6 +613,7 @@ pub(super) fn try_open_native_tab(
     activity: crate::navigation_epoch::NavigationActivity,
     url: &str,
     features: wry::NewWindowFeatures,
+    clicked: bool,
 ) -> wry::NewWindowResponse {
     if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
         return wry::NewWindowResponse::Deny;
@@ -621,7 +625,7 @@ pub(super) fn try_open_native_tab(
         let Some(host) = slot.as_mut() else {
             return wry::NewWindowResponse::Deny;
         };
-        host.open_native_tab(source, permit, activity, url, features)
+        host.open_native_tab(source, permit, activity, url, features, clicked)
     })
 }
 

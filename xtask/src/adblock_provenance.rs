@@ -61,7 +61,7 @@ const EXCLUDED_COMPONENTS: [&str; 11] = [
     "rust-toolchain.toml",
     "all upstream data fixtures",
 ];
-const PATCH_SET_NAMES: [&str; 9] = [
+const PATCH_SET_NAMES: [&str; 10] = [
     "bounded prepared runtime matcher",
     "source-independent request construction",
     "conservative unknown-attribution matching",
@@ -71,6 +71,7 @@ const PATCH_SET_NAMES: [&str; 9] = [
     "strict request test compatibility",
     "fork regression tests",
     "fixture-free test surface",
+    "lazy-DFA prepared regexes",
 ];
 const PATCH_PATHS: [&str; 21] = [
     "Cargo.toml",
@@ -81,7 +82,6 @@ const PATCH_PATHS: [&str; 21] = [
     "src/filters/fb_network.rs",
     "src/filters/fb_network_builder.rs",
     "src/filters/network.rs",
-    "src/filters/network_matchers.rs",
     "src/network_filter_list.rs",
     "src/regex_manager.rs",
     "src/request.rs",
@@ -92,6 +92,7 @@ const PATCH_PATHS: [&str; 21] = [
     "tests/unit/content_blocking.rs",
     "tests/unit/engine.rs",
     "tests/unit/filters/network_matchers.rs",
+    "tests/unit/optimizer.rs",
     "tests/unit/request.rs",
     "tests/unit/resources/resource_assembler.rs",
 ];
@@ -640,6 +641,7 @@ fn validate_manifests(repository: &Path, fork_root: &Path) -> Result<(), String>
             "percent-encoding",
             "precomputed-hash",
             "regex",
+            "regex-automata",
             "rustc-hash",
             "seahash",
             "selectors",
@@ -655,10 +657,30 @@ fn validate_manifests(repository: &Path, fork_root: &Path) -> Result<(), String>
     let dev_dependencies = require_table(&manifest, "dev-dependencies")?;
     require_key_set(
         dev_dependencies,
-        &["addr", "criterion", "mock_instant", "sha2"],
+        &[
+            "addr",
+            "criterion",
+            "mock_instant",
+            "regex-automata",
+            "sha2",
+        ],
         "adblock dev-dependency table",
     )?;
     validate_dependency_sources(dev_dependencies, "dev-dependency")?;
+    // Fork tests see the regex engine features the desktop graph unifies.
+    let test_regex = dev_dependencies
+        .get("regex-automata")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            "adblock manifest must build tests with the shipped regex engine".to_owned()
+        })?;
+    require_key_set(
+        test_regex,
+        &["features", "version"],
+        "adblock test regex-automata dependency",
+    )?;
+    require_string(test_regex, "version", "=0.4.18")?;
+    require_string_array(test_regex, "features", &["dfa-build"])?;
     let test_resolver = dev_dependencies
         .get("addr")
         .and_then(toml::Value::as_table)
@@ -763,9 +785,18 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     let blocker_features = require_table(&blocker, "features")?;
     require_key_set(
         blocker_features,
-        &["default", "runtime", "runtime-exact", "webkit"],
+        &[
+            "default",
+            "qa-test-hosts",
+            "runtime",
+            "runtime-exact",
+            "webkit",
+        ],
         "zephium-blocker feature table",
     )?;
+    // Protection QA builds only; the desktop feature graphs below prove no
+    // release build resolves it.
+    require_string_array(blocker_features, "qa-test-hosts", &[])?;
     require_string_array(
         blocker_features,
         "default",
@@ -885,7 +916,12 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "cfg(all(unix, not(target_os = \"macos\")))",
             ["webkit"].as_slice(),
         ),
-        ("cfg(target_os = \"macos\")", ["webkit"].as_slice()),
+        // The runtime matcher judges each page and frame against the badware
+        // list before it loads; WebKit applies the network rules.
+        (
+            "cfg(target_os = \"macos\")",
+            ["webkit", "runtime", "runtime-exact"].as_slice(),
+        ),
     ] {
         let dependency = targets
             .get(target)
@@ -2052,7 +2088,7 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         ),
         (
             "x86_64-apple-darwin",
-            &["webkit"],
+            &["runtime", "runtime-exact", "webkit"],
             &[
                 "content-blocking",
                 "addr",
@@ -2065,7 +2101,7 @@ fn verify_desktop_feature_graphs(repository: &Path) -> Result<(), String> {
         ),
         (
             "aarch64-apple-darwin",
-            &["webkit"],
+            &["runtime", "runtime-exact", "webkit"],
             &[
                 "content-blocking",
                 "addr",

@@ -388,7 +388,13 @@ fn build(
         return Err("no replayed load was exercised; check the replay".into());
     }
     let rows = loads.len();
-    let (mut kept_untested, mut kept_unloaded) = (0usize, 0usize);
+    let mut reached = loaded.clone();
+    reached.extend(
+        loads
+            .keys()
+            .filter_map(|(_, url, _)| url_host(url).map(str::to_owned)),
+    );
+    let (mut kept_untested, mut kept_unloaded, mut kept_unreached) = (0usize, 0usize, 0usize);
     for ((_, rule), count) in rules.iter().zip(&mut hits) {
         if *count > 0 || !is_wildcard_block(rule) {
             continue;
@@ -399,6 +405,11 @@ fn build(
         } else if !applies_on_a_loaded_site(rule, &loaded) {
             *count += 1;
             kept_unloaded += 1;
+        } else if rule["trigger"]["if-domain"].is_null()
+            && rule_host(rule).is_some_and(|host| !reaches(&reached, &host))
+        {
+            *count += 1;
+            kept_unreached += 1;
         }
     }
     let wildcard_blocks = rules
@@ -434,6 +445,10 @@ fn build(
     );
     let _ = writeln!(
         text,
+        "# Hosts: {kept_unreached} rules kept whose host no recorded load or visit reached."
+    );
+    let _ = writeln!(
+        text,
         "# Artifact: {} rules, sha256 {}.",
         rules.len(),
         hex(&Sha256::digest(&artifact))
@@ -452,6 +467,19 @@ fn build(
         digests.len()
     );
     Ok(())
+}
+
+/// Whether a recorded host is `host` or one of its subdomains. A rule that
+/// applies on any page, for a host the corpus never reached, is untested, not
+/// unneeded: its sites are not recorded, and their blocking must not depend on
+/// them being recorded.
+fn reaches(recorded: &BTreeSet<String>, host: &str) -> bool {
+    recorded.iter().any(|seen| {
+        seen == host
+            || seen
+                .strip_suffix(host)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
 }
 
 /// How many visits there were and how many loaded, and the hosts of those
@@ -609,6 +637,31 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_for_a_host_no_load_or_visit_reached_is_kept() {
+        let artifact = concat!(
+            r#"[{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?a\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?c\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"^[^:]+:(//)?([^/]+\\.)?d\\.example/x.*y"}},"#,
+            r#"{"action":{"type":"block"},"trigger":{"url-filter":"/x.*y"}}]"#
+        );
+        // c.example was only requested from another page; d.example never.
+        let (listed, written) = listed(
+            artifact,
+            &[concat!(
+                r#"{"page":"https://a.example/","top":"t","url":"https://cdn.c.example/z","type":"image","seen":"image"}"#,
+                "\n"
+            )],
+            LOADED,
+        );
+        let mut listed = listed;
+        listed.sort_unstable();
+        assert_eq!(listed, [0, 1, 3]);
+        assert!(
+            written.contains("# Hosts: 1 rules kept whose host no recorded load or visit reached.")
+        );
+    }
+
+    #[test]
     fn the_corpus_never_records_below_the_engine_security_floor() {
         assert!(meets_host_floor("26.6.2", "26.6.2").is_err());
         assert!(meets_host_floor("26.7.2", "26.7.2").is_ok());
@@ -703,8 +756,10 @@ mod tests {
             &[r#"{"page":"p","top":"t","url":"https://c.example/","type":"image","seen":"image"}"#],
             visits,
         );
-        assert_eq!(listed, [2, 3]);
+        // The last rule applies anywhere, but nothing reached a.example.
+        assert_eq!(listed, [2]);
         assert!(written.contains("# Visits: 1 of 2 loaded; 2 rules kept"));
+        assert!(written.contains("# Hosts: 1 rules kept"));
     }
 
     #[test]

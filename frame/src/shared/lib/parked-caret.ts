@@ -4,16 +4,18 @@ import { reducedMotion } from "./motion";
 const IDLE_MS = 4000;
 
 /**
- * WebKit on macOS fades its text caret, and every step of the fade redraws
- * the interface: an empty field left focused on an idle page keeps the
- * window drawing at the display's rate. WebView2 blinks its caret instead,
- * but each blink keeps it drawing for a stretch of frames, about twenty a
- * second. After a quiet spell the field lets go of focus and shows a caret
- * drawn here instead. On macOS it blinks through an opacity animation the
- * system compositor runs without waking the page; elsewhere it stands still,
- * since any animation, even a compositor one, keeps Chromium drawing every
- * frame. The next key the window receives gives the field its focus back
- * before the text arrives.
+ * Replaces a focused empty field's native caret after an idle interval to
+ * reduce caret-driven drawing. The field loses focus and an aria-hidden
+ * caret takes its place. On macOS it animates opacity unless reduced motion
+ * is enabled; elsewhere it remains still.
+ *
+ * After modifier filtering, `wake` accepts keys of one UTF-16 code unit,
+ * keys in `STARTS_TEXT`, or events with `isComposing`. Other multi-unit text
+ * keys do not restore focus. Ctrl shortcuts without AltGraph are ignored,
+ * including Ctrl+V; Windows paste therefore does not wake a parked field
+ * through this handler.
+ * Focus and pointer interaction release the parked caret. Actual idle
+ * rendering behavior depends on the native engine and needs measurement.
  */
 export function parkCaret(input: HTMLInputElement): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -70,8 +72,8 @@ export function parkCaret(input: HTMLInputElement): () => void {
     input.blur();
   }
 
-  // Anything that can start text brings focus back: characters, AltGr and
-  // dead keys, input methods, deletion and paste; other shortcuts don't.
+  // After modifier filtering, accept one-code-unit keys, this explicit set,
+  // or active composition. Other multi-unit text keys do not wake the field.
   const STARTS_TEXT = new Set(["Backspace", "Delete", "Dead", "Process", "Unidentified"]);
   function wake(event: KeyboardEvent) {
     const altGraph = event.getModifierState("AltGraph");

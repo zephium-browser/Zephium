@@ -188,14 +188,15 @@ class Chromium extends Driver {
     return sessionId;
   }
 
-  async open(url, timeoutMs) {
-    const { targetId } = await this.rpc.send("Target.createTarget", { url: "about:blank" });
+  async open(url, timeoutMs, background = false) {
+    const { targetId } = await this.rpc.send("Target.createTarget", { url: "about:blank", background });
     const { sessionId } = await this.rpc.send("Target.attachToTarget", { targetId, flatten: true });
     this.sessions.set(targetId, sessionId);
     await this.rpc.send("Page.enable", {}, sessionId);
     await this.rpc.send("Page.setLifecycleEventsEnabled", { enabled: true }, sessionId);
-    // A background tab is throttled and loads differently.
-    await this.rpc.send("Page.bringToFront", {}, sessionId);
+    // A background tab is throttled and loads differently, so only a tab
+    // asked for behind the current one stays there.
+    if (!background) await this.rpc.send("Page.bringToFront", {}, sessionId);
     for (const source of this.preloads) await this.rpc.send("Page.addScriptToEvaluateOnNewDocument", { source }, sessionId);
     return this.loadNew(targetId, url, timeoutMs);
   }
@@ -208,24 +209,35 @@ class Chromium extends Driver {
   }
 
   // The lifecycle "load" event fires alongside Page.loadEventFired, and its loaderId keeps a late event of the
-  // previous document, or of a subframe, from ending the wait early.
+  // previous document, or of a subframe, from ending the wait early. A navigation the browser restarts commits
+  // under another loaderId, so the main frame's documents committed after Page.navigate replied count too, and
+  // the reply says how many did. A commit seen before that reply may belong to an earlier navigation.
   async load(tab, url, timeoutMs) {
     const sessionId = this.session(tab);
     const loaded = new Set();
+    const committed = new Set();
+    let navigated;
     let wake = () => {};
     const stop = this.rpc.listen(message => {
-      if (message.sessionId !== sessionId || message.method !== "Page.lifecycleEvent" || message.params.name !== "load") return;
-      loaded.add(message.params.loaderId);
+      if (message.sessionId !== sessionId) return;
+      if (message.method === "Page.frameNavigated" && !message.params.frame.parentId) {
+        if (navigated) committed.add(message.params.frame.loaderId);
+      } else if (message.method === "Page.lifecycleEvent" && message.params.name === "load") loaded.add(message.params.loaderId);
+      else return;
       wake();
     });
     const start = performance.now();
+    const done = () => navigated.loaderId && (loaded.has(navigated.loaderId) || [...committed].some(id => loaded.has(id)));
     try {
       const timedOut = await raceTimeout((async () => {
-        const result = await this.rpc.send("Page.navigate", { url }, sessionId);
-        if (result.errorText) throw new Error(result.errorText);
-        while (result.loaderId && !loaded.has(result.loaderId)) await new Promise(done => { wake = done; });
+        navigated = await this.rpc.send("Page.navigate", { url }, sessionId);
+        if (navigated.errorText) throw new Error(navigated.errorText);
+        while (navigated.loaderId && !done()) await new Promise(resolve => { wake = resolve; });
       })(), timeoutMs);
-      return { loadMs: elapsed(start), ...(timedOut && { timedOut: true }) };
+      const restarted = [...committed].filter(id => id !== navigated?.loaderId).length;
+      const loadWait = { committed: committed.size, restarted, loads: loaded.size };
+      if (!timedOut) return restarted > 0 ? { loadMs: elapsed(start), loadWait } : { loadMs: elapsed(start) };
+      return { loadMs: elapsed(start), timedOut: true, loadWait };
     } finally {
       stop();
     }
@@ -251,9 +263,9 @@ class Chromium extends Driver {
 }
 
 class Firefox extends Driver {
-  async open(url, timeoutMs) {
-    const { context } = await this.rpc.send("browsingContext.create", { type: "tab" });
-    await this.rpc.send("browsingContext.activate", { context });
+  async open(url, timeoutMs, background = false) {
+    const { context } = await this.rpc.send("browsingContext.create", { type: "tab", background });
+    if (!background) await this.rpc.send("browsingContext.activate", { context });
     return this.loadNew(context, url, timeoutMs);
   }
 
@@ -387,7 +399,7 @@ async function run(driver, command) {
   const timeoutMs = toolTimeout(command);
   switch (command.op) {
     case "open":
-      return driver.open(command.url, timeoutMs);
+      return driver.open(command.url, timeoutMs, command.background === true);
     case "navigate":
       return driver.load(command.tab, command.url, timeoutMs);
     case "eval": {

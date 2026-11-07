@@ -46,8 +46,11 @@ const DIGEST_DOMAIN: &[u8] = b"zephium-blocker-policy";
 const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
+/// Its wildcard rules never reach WebKit or its pruning.
+#[cfg(feature = "webkit")]
+const NAVIGATION_CHECKED_SOURCE: &str = "ublock-badware";
 #[cfg(feature = "runtime")]
-const MAX_RUNTIME_REGEXES: usize = 1_536;
+const MAX_RUNTIME_REGEXES: usize = 4_096;
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_PATTERN_BYTES: usize = 2 * 1024 * 1024;
 #[cfg(feature = "runtime")]
@@ -176,7 +179,16 @@ impl SourceFormat {
 /// Origin's own lists, which are written for them. User filters and every
 /// other list never may.
 pub fn official_source_trusts_scriptlets(id: &SourceId) -> bool {
-    matches!(id.as_str(), "ublock-filters" | "ublock-quick-fixes")
+    matches!(
+        id.as_str(),
+        "ublock-filters"
+            | "ublock-quick-fixes"
+            | "ublock-link-shorteners"
+            | "ublock-privacy"
+            | "ublock-resource-abuse"
+            | "ublock-unbreak"
+            | "ublock-badware"
+    )
 }
 
 /// Owned input list consumed by [`Compiler::compile`].
@@ -186,6 +198,7 @@ pub struct FilterSource {
     format: SourceFormat,
     contents: String,
     trusted: bool,
+    zephium: bool,
 }
 
 impl FilterSource {
@@ -196,7 +209,14 @@ impl FilterSource {
             format,
             contents,
             trusted: false,
+            zephium: false,
         }
+    }
+
+    /// Zephium's built-in rules: they may call Zephium's own scriptlets.
+    pub(crate) const fn zephium_rules(mut self) -> Self {
+        self.zephium = true;
+        self
     }
 
     /// Lets this source's `trusted-*` scriptlet rules run.
@@ -235,6 +255,8 @@ pub struct Compiler {
     webkit_pruned: Option<&'static crate::webkit_prune::PrunedRules>,
     #[cfg(feature = "webkit")]
     webkit_pruning: bool,
+    #[cfg(feature = "webkit")]
+    navigation_checked: bool,
 }
 
 impl Compiler {
@@ -246,7 +268,20 @@ impl Compiler {
             webkit_pruned: None,
             #[cfg(feature = "webkit")]
             webkit_pruning: true,
+            #[cfg(feature = "webkit")]
+            navigation_checked: cfg!(feature = "runtime"),
         }
+    }
+
+    /// Whether the badware list's page and frame wildcard rules are judged
+    /// by the navigation check, which only a build with the runtime matcher
+    /// has, and so left out of WebKit. A build without it keeps them, or
+    /// nothing would refuse those loads. Release tooling that compiles for a
+    /// platform other than its own build says which.
+    #[cfg(feature = "webkit")]
+    pub const fn with_navigation_check(mut self, built: bool) -> Self {
+        self.navigation_checked = built;
+        self
     }
 
     /// Keeps every WebKit rule, for release tooling that measures which
@@ -341,7 +376,7 @@ impl Compiler {
         let cosmetic_policy = crate::CosmeticPolicy::compile_with_trust(
             prepared
                 .iter()
-                .map(|source| (source.cosmetics.as_str(), source.trusted)),
+                .map(|source| (source.cosmetics.as_str(), source.trust)),
         )
         .map_err(CompileError::Cosmetics)?;
         // A policy with only scriptlets still has a program to run.
@@ -387,8 +422,13 @@ impl Compiler {
                         } else {
                             crate::webkit_prune::PrunedRules::none()
                         };
-                        let (rules, coverage) =
-                            compile_webkit(&mut prepared, accepted_rules, self.limits, pruned)?;
+                        let (rules, coverage) = compile_webkit(
+                            &mut prepared,
+                            accepted_rules,
+                            self.limits,
+                            pruned,
+                            self.navigation_checked,
+                        )?;
                         let blocking_entries = coverage.blocking_rule_entries;
                         (None, None, Some(rules), Some(coverage), blocking_entries)
                     }
@@ -440,7 +480,7 @@ struct AcceptedRule {
 struct PreparedSource {
     id: SourceId,
     format: SourceFormat,
-    trusted: bool,
+    trust: crate::ScriptletTrust,
     rules: String,
     cosmetics: String,
     #[cfg(feature = "webkit")]
@@ -630,7 +670,13 @@ fn prepare_source(
     Ok(PreparedSource {
         id: source.id,
         format: source.format,
-        trusted: source.trusted,
+        trust: if source.zephium {
+            crate::ScriptletTrust::Zephium
+        } else if source.trusted {
+            crate::ScriptletTrust::Trusted
+        } else {
+            crate::ScriptletTrust::Plain
+        },
         rules,
         cosmetics,
         #[cfg(feature = "webkit")]
@@ -1086,12 +1132,23 @@ fn compile_webkit(
     accepted_rules: usize,
     limits: CompileLimits,
     pruned: &crate::webkit_prune::PrunedRules,
+    navigation_checked: bool,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     // Splitting separator ends is an optimization: a list that fits WebKit's
     // limits only unsplit is compiled unsplit, every rule of it.
-    match compile_webkit_with(prepared, accepted_rules, limits, pruned, true) {
+    let mut compile = |split| {
+        compile_webkit_with(
+            prepared,
+            accepted_rules,
+            limits,
+            pruned,
+            split,
+            navigation_checked,
+        )
+    };
+    match compile(true) {
         Err(CompileError::TooManyWebKitRules { .. } | CompileError::WebKitJsonTooLarge { .. }) => {
-            compile_webkit_with(prepared, accepted_rules, limits, pruned, false)
+            compile(false)
         }
         result => result,
     }
@@ -1104,6 +1161,7 @@ fn compile_webkit_with(
     limits: CompileLimits,
     pruned: &crate::webkit_prune::PrunedRules,
     split_separator_ends: bool,
+    navigation_checked: bool,
 ) -> Result<(WebKitRules, WebKitCoverage), CompileError> {
     let mut bad_filter_ids = HashSet::new();
     for source in &*prepared {
@@ -1186,6 +1244,25 @@ fn compile_webkit_with(
             } else {
                 unsplit
             };
+            // The navigation check judges only page and frame loads, so only a
+            // rule for those alone may leave WebKit for it; any other type keeps
+            // its blocking here.
+            if navigation_checked
+                && source.id.as_str() == NAVIGATION_CHECKED_SOURCE
+                && resource_types.iter().all(|resource| {
+                    matches!(
+                        resource,
+                        WebKitResourceType::TopDocument | WebKitResourceType::ChildDocument
+                    )
+                })
+                && natives.iter().any(|native| {
+                    matches!(native.action.typ, CbType::Block)
+                        && native.trigger.url_filter.contains(".*")
+                })
+            {
+                increment(&mut drops, WebKitDropReason::NavigationChecked);
+                continue;
+            }
             let Some(kept) = retain_for_webkit(natives, &resource_types, pruned)? else {
                 increment(&mut drops, WebKitDropReason::UrlFilterTooLarge);
                 continue;

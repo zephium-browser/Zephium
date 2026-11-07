@@ -31,6 +31,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub page_request: Option<PageRequestView>,
+    /// Names the request shown, for its answer.
+    #[serde(default)]
+    #[specta(optional)]
+    pub page_request_serial: Option<u32>,
     /// Transient native residency state. It never replaces the committed URL
     /// or title, and an explicit retry remains a fresh navigation intent.
     #[serde(default)]
@@ -137,6 +141,18 @@ pub enum PageRequestView {
         /// The last username or password was wrong.
         retry: bool,
     },
+    /// The site wants to save a file. `allowed` says the site may already
+    /// download and only this unclicked download is asked about.
+    Download {
+        request: u32,
+        site: String,
+        filename: String,
+        allowed: bool,
+        unclicked: bool,
+    },
+    /// AutoFill was asked for on a page that is not encrypted; `host` is the
+    /// page's host.
+    InsecureAutofill { host: String },
     /// The page stopped responding: wait for it, or reload it.
     Unresponsive,
 }
@@ -184,6 +200,10 @@ pub struct TabFailure {
     /// they may continue past it. Never true for a public name.
     #[serde(default)]
     pub can_continue: bool,
+    /// For a page the filter lists refused, why.
+    #[serde(default)]
+    #[specta(optional)]
+    pub blocked: Option<TabBlockReason>,
     /// The page that was showing is gone; the failure stands in its place
     /// until another page opens, even while one loads.
     #[serde(default)]
@@ -212,7 +232,21 @@ pub enum TabFailureReason {
     Insecure,
     /// The page's process ended and it could not be brought back on its own.
     Crashed,
+    /// The profile's browser engine can be trusted again only after Zephium
+    /// restarts; every tab in it says so.
+    RestartRequired,
+    /// The filter lists refused the page; `blocked` says why.
+    Blocked,
     Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TabBlockReason {
+    /// A known scam or malware site, from uBlock Origin's badware list.
+    Badware,
+    /// A known ad or tracking redirect.
+    FilterLists,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -414,6 +448,8 @@ pub enum SitePermissionKindView {
     LocalFonts,
     AutomaticDownloads,
     Popups,
+    Downloads,
+    AppLinks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -429,6 +465,8 @@ pub struct SitePermissionView {
     pub origin: String,
     pub kind: SitePermissionKindView,
     pub decision: SitePermissionDecisionView,
+    /// The kind of application link, for `app_links`.
+    pub scheme: Option<String>,
 }
 
 /// The focused profile's saved site decisions.
@@ -1315,6 +1353,8 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct RuntimeStatus {
     pub restart_required: bool,
+    /// Why a restart is required; none while it is not.
+    pub restart_reason: Option<RuntimeRestartReason>,
     /// The saved session could not be restored this launch: its bytes were
     /// kept in a file and the browser started with fresh tabs.
     pub session_set_aside: bool,
@@ -1327,6 +1367,15 @@ pub struct RuntimeStatus {
     /// Canonically ordered closed-vocabulary set. Rust emits at most six
     /// entries and privileged chrome must replace, never append, projections.
     pub security_advisories: Vec<RuntimeSecurityAdvisory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRestartReason {
+    /// A newer browser runtime is installed; only a restart adopts it.
+    RuntimeUpdate,
+    /// A profile's browser engine can be trusted again only after a restart.
+    Profile,
 }
 
 /// Non-fatal, process-local classification produced before native WebView

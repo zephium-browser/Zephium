@@ -26,10 +26,11 @@
   import { reducedMotion } from "$shared/lib/motion";
   import {
     decode,
+    decodedFor,
     FROSTS,
     placeSky,
     placeSkyInWindow,
-    SCENES,
+    skyImage,
     scene as skyScene,
     seen,
     type Scene,
@@ -195,17 +196,43 @@
   // The sky arrives once a session, as the first new tab opens, and is simply
   // there on every one after.
   const arriving = !seen(untrack(() => scene));
-  let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
+  // Only a decoded picture is ever drawn. A later new tab starts from one this
+  // session already decoded, and a resize or a new scene keeps the last one
+  // until its replacement has decoded.
+  type Shown = { scene: Scene; url: string | null };
+  const held = (scene: Scene, width: number): Shown | null => {
+    const picture = decodedFor(scene, width);
+    return picture && { scene, url: picture.url };
+  };
+  let shown = $state<Shown | null>(
+    held(
+      untrack(() => scene),
+      0,
+    ),
+  );
   $effect(() => {
-    if (!useSky) return;
-    const wanted = scene;
+    // Nothing is decoded before the page is measured, so no picture is
+    // decoded for a width the page never has.
+    if (!useSky || !measured) return;
+    const wantedScene = scene;
+    const wanted = skyPicture;
+    const ready = decodedFor(
+      wantedScene,
+      untrack(() => sky.w),
+    );
+    if (ready) shown = { scene: wantedScene, url: ready.url };
+    if (ready?.covers) return;
     let live = true;
     // A sky that cannot be decoded leaves the page its own colour; it never
     // keeps the name and the controls hidden.
-    const reveal = () => {
-      if (live) shown = wanted;
-    };
-    void decode(wanted).then(reveal, reveal);
+    void decode(wantedScene, wanted).then(
+      () => {
+        if (live) shown = { scene: wantedScene, url: wanted };
+      },
+      () => {
+        if (live) shown = { scene: wantedScene, url: ready?.url ?? null };
+      },
+    );
     return () => {
       live = false;
     };
@@ -215,6 +242,8 @@
   // page is cut by the notch the field hangs in, so the window's own glass
   // reaches down into it around the field.
   let sky = $derived(placeSky(width, page.horizon));
+  let skyPicture = $derived(skyImage(scene, sky.w));
+  let measured = $derived(width > 0);
   // The glass beside the page is lit from the picture's left edge, so it is
   // told where the picture lies in the window whenever either moves.
   let section = $state<HTMLElement>();
@@ -317,7 +346,7 @@
   class:entering={useSky && !arriving}
   class:custom={!useSky}
   data-scene={scene}
-  data-ready={!useSky || shown === scene}
+  data-ready={!useSky || shown?.scene === scene}
   aria-label={m.new_tab()}
   style:--sky-frost={useSky ? `url("${FROSTS[scene]}")` : undefined}
   style:--sky-frost-size={`${sky.w}px ${sky.h}px`}
@@ -345,7 +374,7 @@
         {/key}
       {:else if useSky}<div
           class="sky"
-          style:background-image={`url("${SCENES[scene]}")`}
+          style:background-image={shown?.url ? `url("${shown.url}")` : null}
           style:background-size={`${sky.w}px ${sky.h}px`}
           style:background-position={`${sky.x}px ${sky.y}px`}
         ></div>{/if}
