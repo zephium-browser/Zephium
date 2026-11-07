@@ -90,7 +90,7 @@ impl EngineHost {
         let done = if temporary {
             EngineDataCompletion::new(move |reply| {
                 done.finish(reply);
-                let _ = super::try_with(move |host| host.close_idle_spare(profile));
+                super::lifecycle::release_temporary_spare(profile);
             })
         } else {
             done

@@ -30,6 +30,15 @@ fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> Rende
     }
 }
 
+/// Closes the page `reach_durable_profile` opened for one call, once that
+/// call has answered, unless a page of the profile is open by then.
+#[cfg(target_os = "windows")]
+pub(super) fn release_temporary_spare(profile: ProfileId) {
+    let _ = super::dispatch::with_temporary_spare_release(profile, move |host| {
+        host.close_idle_spare(profile)
+    });
+}
+
 /// Whether a page of `owner` holds `profile`'s durable store.
 #[cfg(any(test, target_os = "windows"))]
 fn durable_partition_of(owner: zephium_core::ports::engine::Partition, profile: ProfileId) -> bool {

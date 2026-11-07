@@ -257,6 +257,10 @@ enum HostTaskKey {
     // of ordinary work cannot drop it and leave a hidden page awake.
     #[cfg(target_os = "windows")]
     SuspendRetry(ItemId),
+    // Closing a page opened only to reach a profile, once its call answered:
+    // a full queue of ordinary work must not leave it running.
+    #[cfg(target_os = "windows")]
+    TemporarySpare(ProfileId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
     #[cfg(target_os = "macos")]
@@ -1250,6 +1254,18 @@ where
 }
 
 #[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
+pub(super) fn with_temporary_spare_release<F>(profile: ProfileId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::TemporarySpare(profile)),
+        f,
+    )
+}
+
 pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
