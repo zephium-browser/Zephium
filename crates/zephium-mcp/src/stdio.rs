@@ -44,6 +44,22 @@ impl Drop for Process {
             unsafe {
                 libc::kill(-group, libc::SIGTERM);
             }
+            if std::thread::Builder::new()
+                .name("mcp-stop".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    // SAFETY: this is the child's process group, as above.
+                    unsafe {
+                        libc::kill(-group, libc::SIGKILL);
+                    }
+                })
+                .is_err()
+            {
+                // SAFETY: if no worker can run, end the same group now.
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
         }
         #[cfg(not(unix))]
         let _ = self.group;
@@ -254,6 +270,53 @@ mod tests {
         .await
         .expect("descendant survived after Process was dropped")
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_server_kills_a_group_ignoring_sigterm() {
+        let server = StdioServer {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "trap '' TERM; /bin/sleep 60 & echo $!; wait".into(),
+            ],
+            env: vec![],
+            cwd: None,
+        };
+        let (process, stdout, stdin) = server.spawn().unwrap();
+        drop(stdin);
+        let group = process.group.unwrap();
+        let mut stdout = BufReader::new(stdout);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let descendant: i32 = line.trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+        let started = std::time::Instant::now();
+        drop(process);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let ended = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await;
+        // Also clean up the fixture when exercising the unfixed implementation.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+        ended
+            .expect("SIGTERM-ignoring descendant survived drop")
+            .unwrap();
+        for _ in 0..100 {
+            if unsafe { libc::kill(descendant, 0) } != 0 && unsafe { libc::kill(group, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("server or descendant still exists");
     }
 
     #[tokio::test]
