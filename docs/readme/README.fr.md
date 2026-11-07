@@ -132,8 +132,8 @@ conversation, **Continue in Work** l'emmène sur le canevas, avec la page.
 - Les onglets inactifs se mettent en veille et se réveillent à votre retour, si
   bien que la mémoire reste basse même avec de nombreux onglets ouverts.
 - Un bloqueur natif de publicités et de traqueurs, activé par défaut, bâti sur
-  [adblock-rust](https://github.com/brave/adblock-rust) de Brave avec EasyList
-  et EasyPrivacy. Les requêtes sont stoppées avant qu'une page puisse les
+  [adblock-rust](https://github.com/brave/adblock-rust) de Brave avec EasyList,
+  EasyPrivacy et les filtres d'uBlock Origin. Les requêtes sont stoppées avant qu'une page puisse les
   émettre, et vous pouvez masquer d'un clic tout autre élément d'une page.
 
 ### Pensé pour y vivre

@@ -92,6 +92,9 @@ struct Entry {
     /// CRX publisher possession was verified for this exact source package.
     #[serde(default)]
     publisher_verified: bool,
+    /// The person allowed native-app access the extension declares optional.
+    #[serde(default)]
+    native_messaging_granted: bool,
     hosts: Vec<String>,
     #[serde(default)]
     icon: Option<String>,
@@ -104,6 +107,9 @@ struct Entry {
     /// the store, so a developer's own build stays as it is.
     #[serde(default)]
     sideloaded: bool,
+    /// Its button sits in the address field rather than in the tray.
+    #[serde(default)]
+    pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize, specta::Type)]
@@ -115,6 +121,8 @@ pub(crate) struct WebExtensionReview {
     version: String,
     description: String,
     warnings: Vec<String>,
+    /// What this browser can't do for the extension, apart from its access.
+    limitations: Vec<String>,
     icon: Option<String>,
     update: bool,
     /// Installed from a file, so not checked against the Web Store.
@@ -135,6 +143,7 @@ pub(crate) struct WebExtensionView {
     state: String,
     error: Option<String>,
     warnings: Vec<String>,
+    limitations: Vec<String>,
     /// `all`, `click` or `sites`; meaningful only when `site_scoped`.
     access: String,
     sites: Vec<String>,
@@ -143,6 +152,7 @@ pub(crate) struct WebExtensionView {
     has_options: bool,
     held_update: Option<String>,
     sideloaded: bool,
+    pinned: bool,
 }
 
 impl WebExtensions {
@@ -298,21 +308,6 @@ fn take_pending_for_publication<'a>(
     Ok((slot, pending))
 }
 
-/// A recommended extension's icon as a data URL, or `None` while the store
-/// can't be reached.
-#[tauri::command]
-#[specta::specta]
-pub(crate) async fn web_extension_catalog_icon(
-    caller: WebviewWindow,
-    extensions: State<'_, WebExtensions>,
-    token: String,
-) -> Result<Option<String>, String> {
-    if !authorize(&caller, CallerPolicy::Main, "web_extension_catalog_icon") {
-        return Err(UNAVAILABLE.into());
-    }
-    Ok(store_icon::icon(&extensions.root, &token).await)
-}
-
 /// Downloads and verifies the extension on the active store page, and
 /// returns what the user is asked to approve.
 #[tauri::command]
@@ -335,6 +330,55 @@ pub(crate) async fn web_extension_prepare(
         let _ = (shell, extensions, tab_id);
         Err(UNAVAILABLE.into())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WebExtensionStoreButtonState {
+    Add,
+    Adding,
+    Remove,
+}
+
+/// What the install button on the Web Store listing in `tab_id` shows. A
+/// click on it arrives as `zephium:web-extension-store-click`.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn web_extension_store_button(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    tab_id: String,
+    extension_id: String,
+    state: WebExtensionStoreButtonState,
+    label: String,
+) -> bool {
+    use zephium_core::ports::engine::{StoreButton, StoreButtonState};
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_store_button") {
+        return false;
+    }
+    let Some(tab) = zephium_core::ids::ItemId::parse(&tab_id) else {
+        return false;
+    };
+    if zephium_webext::ExtensionId::parse(&extension_id).is_none() {
+        return false;
+    }
+    let label_chars = label.chars().count();
+    if label_chars == 0 || label_chars > zephium_core::ports::engine::MAX_STORE_BUTTON_LABEL_CHARS {
+        return false;
+    }
+    let state = match state {
+        WebExtensionStoreButtonState::Add => StoreButtonState::Add,
+        WebExtensionStoreButtonState::Adding => StoreButtonState::Adding,
+        WebExtensionStoreButtonState::Remove => StoreButtonState::Remove,
+    };
+    shell.dispatch(zephium_app::Command::ShowStoreButton {
+        tab,
+        button: StoreButton {
+            extension: extension_id,
+            state,
+            label,
+        },
+    })
 }
 
 #[tauri::command]
@@ -467,6 +511,28 @@ pub(crate) async fn web_extension_set_enabled(
     }
 }
 
+/// Puts the extension's button in the address field, or back in the tray.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn web_extension_set_pinned(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    extensions: State<'_, WebExtensions>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    if !authorize(&caller, CallerPolicy::Main, "web_extension_set_pinned") {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    return imp::set_pinned(&shell, &extensions, &id, pinned).await;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (shell, extensions, id, pinned);
+        Err(UNAVAILABLE.into())
+    }
+}
+
 /// Retries only the exact installation displayed in the Extensions page.
 #[tauri::command]
 #[specta::specta]
@@ -495,6 +561,30 @@ pub(crate) async fn web_extension_retry(
         let _ = (shell, extensions, profile_id, install_id);
         Err(UNAVAILABLE.into())
     }
+}
+
+/// Forgets access an extension gave up itself, so the next launch doesn't
+/// grant it again.
+pub(crate) fn access_removed(
+    app: &tauri::AppHandle,
+    removal: zephium_ipc::WebExtensionAccessRemovalView,
+) {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = publication(move || {
+                let extensions = app.state::<WebExtensions>();
+                imp::access_removed(&extensions, removal)
+            })
+            .await;
+            if let Err(error) = result {
+                eprintln!("webext: could not record removed access: {error}");
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = (app, removal);
 }
 
 /// Answers an extension's run-time request for access; granted access is
@@ -677,7 +767,6 @@ pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod imp;
-mod store_icon;
 
 #[cfg(all(test, unix))]
 mod tests {

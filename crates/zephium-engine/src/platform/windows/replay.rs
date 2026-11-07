@@ -173,6 +173,10 @@ impl RequestWitness {
     pub(crate) fn taint(&self) {
         self.state.unsafe_history.store(true, Ordering::Release);
     }
+
+    pub(crate) fn tainted(&self) -> bool {
+        self.state.unsafe_history.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for RequestWitness {

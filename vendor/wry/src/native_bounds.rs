@@ -111,6 +111,13 @@ impl CustomProtocolRequestBudget {
 
 // A destination component is restricted more tightly than a URL or title.
 #[cfg(target_vendor = "apple")]
+// A security origin's scheme and host: a DNS name is at most 253 bytes, so
+// 512 covers any host WebKit can name.
+pub(crate) const ORIGIN_PART_LIMIT: NativeStringLimit = NativeStringLimit {
+  max_utf16_units: 512,
+  max_utf8_bytes: 512,
+};
+
 pub(crate) const DOWNLOAD_FILENAME_LIMIT: NativeStringLimit = NativeStringLimit {
   max_utf16_units: 240,
   max_utf8_bytes: 240,

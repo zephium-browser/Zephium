@@ -26,6 +26,7 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    chromeModal: async () => {},
     accountGet: native.get,
     accountSendCode: native.send,
     accountVerify: native.verify,
