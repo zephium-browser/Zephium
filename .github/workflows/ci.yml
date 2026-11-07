@@ -143,11 +143,13 @@ jobs:
           node-version-file: .node-version
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-deny@0.20.2
           fallback: none
       - run: cargo fmt --all -- --check
+      # The scriptlet library on synthetic payloads, outside any browser.
+      - run: node scripts/blocker-scriptlets/library.test.mjs
       - name: Security review deadlines (warn only)
         run: |
           cargo xtask check-engine-floors
@@ -176,7 +178,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest@0.9.137
           fallback: none
@@ -192,7 +194,7 @@ jobs:
       # The desktop tests regenerate the TypeScript IPC bindings.
       - name: Bindings drift
         run: git diff --exit-code frame/src/shared/ipc/bindings.ts
-      # Proves the bundled EasyList/EasyPrivacy seed compiles in the real
+      # Proves the bundled seed lists compile in the real
       # WKContentRuleListStore, which a seed refresh can break.
       - name: Prove the exact bundled blocker seed compiles in native WKContentRuleListStore
         timeout-minutes: 8
@@ -208,6 +210,18 @@ jobs:
             -framework WebKit scripts/ci/probe_macos_blocker_seed.swift -o "${probe}"
           "${probe}" --self-test
           "${probe}" "${artifact}"
+      # The scriptlet program rides in a built-in WebExtension (macOS 15.4+): it
+      # must run before page scripts in every frame, honour a paused host and
+      # swap programs without overlap.
+      - name: Check the built-in scriptlet extension in WebKit
+        timeout-minutes: 10
+        run: scripts/blocker-scriptlets/run.sh
+      # The page-corpus recorder against a loopback server: a redirect and a
+      # frame to a host off the reviewed list are refused, logged and never
+      # recorded.
+      - name: Check the page-corpus recorder refuses off-list hosts
+        timeout-minutes: 5
+        run: scripts/blocker-corpus/test-record.sh
 
   windows:
     name: Rust (Windows)
@@ -222,7 +236,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-nextest@0.9.137
           fallback: none

@@ -32,6 +32,29 @@ fn a_private_window_runs_in_its_own_ephemeral_profile() {
 }
 
 #[test]
+fn a_private_profile_is_prepared_as_private_before_its_first_policy() {
+    let (mut shell, engine, _screen, _store) = browsed();
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let private_profile = profile(&shell);
+
+    let calls = engine.calls();
+    let prepared = calls
+        .iter()
+        .position(|call| call == &format!("prepare-profile ephemeral {private_profile}"))
+        .expect("the private profile was prepared");
+    let installed = calls
+        .iter()
+        .position(|call| call.starts_with(&format!("install-content-rules {private_profile} ")))
+        .expect("the private profile got a policy");
+    assert!(prepared < installed);
+    assert!(
+        !calls.iter().any(|call| call.starts_with("prepare-profile ")
+            && call.ends_with(&format!(" {private_profile}"))
+            && !call.contains("ephemeral"))
+    );
+}
+
+#[test]
 fn private_pages_leave_no_history_and_the_session_names_the_regular_tabs() {
     let (mut shell, _engine, screen, store) = browsed();
     shell.handle(Command::Open);

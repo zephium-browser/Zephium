@@ -465,6 +465,7 @@ mod tests {
             filename: "report.pdf".into(),
             source: "https://files.example".into(),
             source_is_context: false,
+            insecure: false,
             state,
             received: "10".into(),
             total: Some("20".into()),

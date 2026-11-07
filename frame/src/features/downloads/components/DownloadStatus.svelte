@@ -84,7 +84,7 @@
       case "cancelled":
         return m.download_cancelled();
       case "held":
-        return m.download_held_prompt();
+        return current.insecure ? m.download_held_insecure_prompt() : m.download_held_prompt();
       case "paused":
         if (!current.error) return m.download_user_paused();
         return downloadReason(current.error, true);

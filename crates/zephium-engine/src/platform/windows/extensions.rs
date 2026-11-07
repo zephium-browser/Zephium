@@ -13,7 +13,8 @@ use webview2_com::{
 use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
+    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, TranslateMessage,
+    MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
 };
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
@@ -62,8 +63,16 @@ fn wait_within<T>(rx: mpsc::Receiver<windows::core::Result<T>>, budget: Duration
                     break;
                 }
             }
+            // The completion arrives as a message to this thread: sleep until
+            // one does instead of checking a thousand times a second.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            MsgWaitForMultipleObjectsEx(
+                None,
+                remaining.as_millis().min(u128::from(u32::MAX)) as u32,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
         }
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

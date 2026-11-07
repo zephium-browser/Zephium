@@ -19,17 +19,19 @@ export async function list(origin?: string): Promise<SitePermissionsView | null>
   }
 }
 
-/** Changes one decision; null forgets it so the site asks again. */
+/** Changes one decision; null forgets it so the site asks again. Links to apps
+ *  are kept per scheme, which no other kind takes. */
 export async function set(
   origin: string,
   kind: SitePermissionKindView,
   decision: SitePermissionDecisionView | null,
+  scheme: string | null = null,
 ): Promise<boolean> {
   try {
     await operations.init();
   } catch {
     // The admission still settles; only its disposition may be missed.
   }
-  const result = await settle(commands.sitePermissionSet(origin, kind, decision), 10_000);
+  const result = await settle(commands.sitePermissionSet(origin, kind, decision, scheme), 10_000);
   return result.outcome === "applied" || result.outcome === "no_op";
 }
