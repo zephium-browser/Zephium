@@ -1,4 +1,6 @@
 import { commands } from "$shared/ipc/bindings";
+import { settle } from "$domain/operations";
+import { observe } from "$shared/lib/observe";
 
 /** Compact is the rail that Work, Tasks and tools put the column into; the
  *  shape a person picks is expanded or hidden. */
@@ -20,6 +22,7 @@ export const MAX_EXPANDED_WIDTH = 460;
 export const SNAP_THRESHOLD = 140;
 
 const MODE_SETTING = "sidebar.mode";
+const WIDTH_SETTING = "sidebar.width";
 
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
@@ -77,6 +80,35 @@ function clampExpanded(value: number) {
   return Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, Math.round(value)));
 }
 
+let persistedWidth: number | null = null;
+let widthSaveRevision = 0;
+
+function rememberWidth(value: number) {
+  expandedWidth = value;
+  if (value === persistedWidth) return;
+  const revision = ++widthSaveRevision;
+  // An in-flight write may replace the last confirmed width, even if it fails
+  // to report back. Keep the displayed width retryable until storage confirms it.
+  persistedWidth = null;
+  void persistWidth(value, revision);
+}
+
+async function persistWidth(value: number, revision: number) {
+  try {
+    const result = await settle(commands.settingSet(WIDTH_SETTING, String(value)));
+    if (result.outcome === "failed" || result.outcome === "rejected") return;
+    const stored = await observe(commands.settingGet(WIDTH_SETTING), 1500);
+    if (
+      revision === widthSaveRevision &&
+      stored.state === "received" &&
+      stored.value === String(value)
+    )
+      persistedWidth = value;
+  } catch {
+    // A transport or readback failure leaves this width eligible for retry.
+  }
+}
+
 /** Resolves a raw drag width to whichever designed shape it lands in. */
 export function resolveDragWidth(value: number): { mode: SidebarMode; expanded: number } {
   if (!Number.isFinite(value) || value < SNAP_THRESHOLD) {
@@ -104,10 +136,13 @@ export function applyDragWidth(value: number) {
     return;
   }
   const next = resolveDragWidth(value);
-  if (next.mode === mode && next.expanded === expandedWidth) return;
+  if (next.mode === mode && next.expanded === expandedWidth) {
+    if (next.mode === "default") rememberWidth(next.expanded);
+    return;
+  }
   const modeChanged = next.mode !== mode;
   mode = next.mode;
-  expandedWidth = next.expanded;
+  if (next.mode === "default") rememberWidth(next.expanded);
   desiredMode = mode;
   publish(modeChanged);
   if (modeChanged) save(mode);
@@ -146,7 +181,7 @@ export function adoptResizeWidth(value: number, revision = resizeRevision) {
   const changed = next.mode !== mode;
   mode = next.mode;
   desiredMode = mode;
-  expandedWidth = next.expanded;
+  rememberWidth(next.expanded);
   resizeSettlement++;
   if (changed) save(mode);
 }
@@ -230,14 +265,27 @@ export function toggleMode() {
 }
 
 /**
- * Adopts the persisted mode. The width is published afterwards so native
+ * Adopts the persisted mode and expanded width. The width is published afterwards so native
  * layout matches the restored shape on the first paint rather than after the
  * first interaction.
  */
 export async function init(): Promise<void> {
   installResizeListener();
   try {
-    const stored = await commands.settingGet(MODE_SETTING);
+    const [stored, width] = await Promise.all([
+      commands.settingGet(MODE_SETTING).catch(() => null),
+      commands.settingGet(WIDTH_SETTING).catch(() => null),
+    ]);
+    const restored = Number(width);
+    if (
+      Number.isInteger(restored) &&
+      restored >= MIN_EXPANDED_WIDTH &&
+      restored <= MAX_EXPANDED_WIDTH &&
+      String(restored) === width
+    ) {
+      expandedWidth = restored;
+      persistedWidth = restored;
+    }
     if (stored === "compact" || stored === "hidden") {
       mode = chosen(stored);
       desiredMode = mode;

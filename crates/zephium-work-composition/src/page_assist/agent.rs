@@ -492,13 +492,19 @@ impl Reply {
 }
 
 fn add_usage(total: &mut WorkModelUsage, usage: &WorkModelUsage) {
-    total.input_tokens += usage.input_tokens;
-    total.cached_input_tokens += usage.cached_input_tokens;
-    total.cache_write_input_tokens += usage.cache_write_input_tokens;
-    total.output_tokens += usage.output_tokens;
-    total.reasoning_tokens += usage.reasoning_tokens;
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.cached_input_tokens = total
+        .cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
+    total.cache_write_input_tokens = total
+        .cache_write_input_tokens
+        .saturating_add(usage.cache_write_input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.reasoning_tokens = total
+        .reasoning_tokens
+        .saturating_add(usage.reasoning_tokens);
     total.cost_micros = match (total.cost_micros, usage.cost_micros) {
-        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
         (a, b) => a.or(b),
     };
 }
@@ -1749,4 +1755,24 @@ async fn take_over(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_counters_saturate_across_replies() {
+        let usage = WorkModelUsage {
+            input_tokens: u64::MAX,
+            cached_input_tokens: u64::MAX,
+            cache_write_input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+            cost_micros: Some(u64::MAX),
+        };
+        let mut total = usage;
+        add_usage(&mut total, &usage);
+        assert_eq!(total, usage);
+    }
 }

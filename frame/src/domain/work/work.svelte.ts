@@ -340,14 +340,26 @@ export class WorkSession {
   get canRelease() {
     return !this.pending && !this.selected && this.artifacts.size === 0 && this.queues.size === 0;
   }
-  artifactDraft(artifact: string) {
-    return this.artifacts.get(`${this.selected}:${artifact}`);
+  artifactDraft(artifact: string, work = this.selected) {
+    return this.artifacts.get(`${work}:${artifact}`);
   }
-  editArtifact(execution: string, artifact: string, data?: WorkArtifactDataV1) {
-    const work = this.projection?.work;
-    const fact = this.projection?.executions.find((item) => item.id === execution);
+  editArtifact(
+    execution: string,
+    artifact: string,
+    data?: WorkArtifactDataV1,
+    projection = this.projection,
+  ) {
+    const work = projection?.work;
+    const fact = projection?.executions.find((item) => item.id === execution);
     const original = fact?.artifacts.find((item) => item.id === artifact);
-    if (!work || !fact || !original || !["needs_review", "completed"].includes(fact.status)) return;
+    if (
+      !work ||
+      work.profile !== this.profile ||
+      !fact ||
+      !original ||
+      (original.data.kind !== "draft" && !["needs_review", "completed"].includes(fact.status))
+    )
+      return;
     const key = `${work.id}:${artifact}`;
     const previous = this.artifacts.get(key);
     const user = fact.user_artifacts?.find((item) => item.artifact === artifact);

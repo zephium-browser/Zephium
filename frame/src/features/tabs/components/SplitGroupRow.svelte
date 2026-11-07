@@ -5,6 +5,7 @@
   let {
     tabs,
     activeId,
+    selectedIds = [],
     splitting,
     closable = true,
     motionKey,
@@ -19,11 +20,12 @@
   }: {
     tabs: TabView[];
     activeId: string | null;
+    selectedIds?: readonly string[];
     splitting: boolean;
     closable?: boolean;
     motionKey?: string;
     class?: string;
-    onSelect: (id: string) => void;
+    onSelect: (id: string, event: MouseEvent) => void;
     onClose: (id: string) => void;
     onContextMenu: (event: MouseEvent, tab: TabView) => void;
     onPointerDown: (event: PointerEvent, tab: TabView) => void;
@@ -56,6 +58,8 @@
         {closable}
         class={index > 0 ? "border-s border-border" : ""}
         active={tab.id === activeId}
+        selected={selectedIds.includes(tab.id)}
+        multiSelecting={selectedIds.length >= 2}
         splitCandidate={splitting && tab.id !== activeId}
         {onSelect}
         {onClose}

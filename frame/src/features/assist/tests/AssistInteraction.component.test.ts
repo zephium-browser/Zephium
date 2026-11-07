@@ -130,6 +130,20 @@ test("Enter sends with the page in front; Shift+Enter only adds a line; × leave
   expect(native.ask).toHaveBeenLastCalledWith(expect.objectContaining({ attachments: [] }));
 });
 
+test("words typed while a question is on its way stay in the field", async () => {
+  let accept!: (value: { reply: number; fault: null }) => void;
+  native.ask.mockReturnValueOnce(new Promise((resolve) => (accept = resolve)));
+  const { field } = await open(status());
+  await field.fill("First question");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
+  await field.fill("A follow-up");
+  accept({ reply: 2, fault: null });
+  await expect.poll(() => native.ask.mock.results[0]?.type).toBe("return");
+  await new Promise(requestAnimationFrame);
+  await expect.element(field).toHaveValue("A follow-up");
+});
+
 test("a suggestion sends itself with the page", async () => {
   const { screen } = await open(status());
   await screen.getByRole("button", { name: "Worth opening" }).click();

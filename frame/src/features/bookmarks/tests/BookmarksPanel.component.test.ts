@@ -181,6 +181,67 @@ test("a new folder asked for from the header is made and named in place", async 
   expect(compose.requested()).toBeNull();
 });
 
+test("a folder created during a pending listing is named after the refresh", async () => {
+  let finish!: (response: BookmarkResponse) => void;
+  const initial = new Promise<BookmarkResponse>((resolve) => (finish = resolve));
+  native.call
+    .mockImplementation(async (_profile: string, call: BookmarkCall) => answer(call))
+    .mockReturnValueOnce(initial)
+    .mockResolvedValueOnce({ kind: "saved", id: "9" })
+    .mockResolvedValueOnce({
+      kind: "listing",
+      folder: null,
+      path: [],
+      items: [...top, view("9", "New Folder", null)],
+    });
+  const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+  await vi.waitFor(() => expect(native.call).toHaveBeenCalledOnce());
+  compose.request("folder");
+  await vi.waitFor(() => expect(native.call).toHaveBeenCalledTimes(2));
+  finish({ kind: "listing", folder: null, path: [], items: top });
+  const rename = screen.getByRole("textbox", { name: "Rename", exact: true });
+  await expect.element(rename).toHaveValue("New Folder");
+  await expect.element(rename).toHaveFocus();
+  await rename.fill("Research");
+  await userEvent.keyboard("{Enter}");
+  expect(native.call).toHaveBeenCalledWith("p", { kind: "rename", id: "9", title: "Research" });
+});
+
+test.each(["failure", "profile"] as const)(
+  "a deferred folder rename is discarded after %s",
+  async (change) => {
+    let finish!: (response: BookmarkResponse) => void;
+    native.call
+      .mockImplementation(
+        async (_profile: string, call: BookmarkCall): Promise<BookmarkResponse> =>
+          call.kind === "search"
+            ? { kind: "results", items: [view("9", "New Folder", null)] }
+            : { kind: "listing", folder: null, path: [], items: [view("9", "New Folder", null)] },
+      )
+      .mockReturnValueOnce(new Promise<BookmarkResponse>((resolve) => (finish = resolve)))
+      .mockResolvedValueOnce({ kind: "saved", id: "9" });
+    const screen = await render(BookmarksPanel, { profile: "p", query: "" });
+    await vi.waitFor(() => expect(native.call).toHaveBeenCalledOnce());
+    compose.request("folder");
+    await vi.waitFor(() => expect(native.call).toHaveBeenCalledTimes(2));
+    await new Promise(requestAnimationFrame);
+    if (change === "failure") {
+      finish({ kind: "error", error: "unavailable" });
+      await new Promise(requestAnimationFrame);
+      await screen.rerender({ query: "New" });
+    } else {
+      await screen.rerender({ profile: "other" });
+      finish({ kind: "listing", folder: null, path: [], items: [] });
+    }
+    await expect
+      .element(screen.getByRole("button", { name: "New Folder", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByRole("textbox", { name: "Rename", exact: true }))
+      .not.toBeInTheDocument();
+  },
+);
+
 test("submits a bookmark only once while the add is pending, and allows retry after refusal", async () => {
   let finish!: (response: BookmarkResponse) => void;
   native.call.mockImplementation((_profile: string, call: BookmarkCall) =>

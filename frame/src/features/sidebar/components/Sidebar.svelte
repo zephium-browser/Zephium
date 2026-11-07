@@ -259,9 +259,16 @@
    *  panel, a drag, or a question or download that brought it out. */
   const needed = () => {
     if (!aside || sidebarResizeActive() || attention.wanted()) return !!aside;
-    const typing =
-      document.activeElement instanceof HTMLInputElement && aside.contains(document.activeElement);
-    return typing || !!aside.querySelector('[data-open="true"]');
+    const active = document.activeElement;
+    const focused =
+      document.hasFocus() &&
+      active instanceof HTMLElement &&
+      aside.contains(active) &&
+      (active instanceof HTMLInputElement || active.matches(":focus-visible"));
+    const openPanel = !!aside.querySelector(
+      '.ui-disclosure-panel[data-open="true"], .capture[data-open="true"]',
+    );
+    return focused || openPanel;
   };
   function release() {
     clearTimeout(linger);
@@ -497,6 +504,11 @@
   onpointerleave={() => {
     pointerIn = false;
     if (away && peeking) release();
+  }}
+  onfocusout={(event: FocusEvent) => {
+    const next = event.relatedTarget;
+    if (!away || !peeking) return;
+    if (!(next instanceof Node) || !aside || !aside.contains(next)) release();
   }}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >

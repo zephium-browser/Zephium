@@ -3,6 +3,7 @@
 //! HTTP servers with OAuth. Every answer is capped, every wait has a limit,
 //! and failures are closed values: no server text crosses as an error.
 //! What a server returns is data for the agent, never instructions.
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOLS: usize = 128;
 pub const MAX_RESOURCES: usize = 256;
+const MAX_LISTING_PAGES: usize = 32;
 const MAX_DESCRIPTION_CHARS: usize = 1024;
 const MAX_INSTRUCTIONS_CHARS: usize = 2048;
 const HANDSHAKE: Duration = Duration::from_secs(30);
@@ -266,7 +268,32 @@ impl McpSession {
     }
 
     pub async fn tools(&self) -> Result<Vec<McpTool>, McpError> {
-        let tools = within(LISTING, self.service.list_all_tools()).await?;
+        let tools = within(LISTING, async {
+            let mut items = Vec::new();
+            let mut cursor = None;
+            let mut seen = HashSet::new();
+            for _ in 0..MAX_LISTING_PAGES {
+                let page = self
+                    .service
+                    .list_tools(cursor.map(|cursor| {
+                        rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor))
+                    }))
+                    .await?;
+                items.extend(page.tools.into_iter().take(MAX_TOOLS - items.len()));
+                if items.len() == MAX_TOOLS {
+                    break;
+                }
+                let Some(next) = page.next_cursor.filter(|cursor| !cursor.is_empty()) else {
+                    break;
+                };
+                if !seen.insert(next.clone()) {
+                    break;
+                }
+                cursor = Some(next);
+            }
+            Ok::<_, rmcp::ServiceError>(items)
+        })
+        .await?;
         Ok(tools
             .into_iter()
             .take(MAX_TOOLS)
@@ -317,7 +344,32 @@ impl McpSession {
     }
 
     pub async fn resources(&self) -> Result<Vec<McpResource>, McpError> {
-        let resources = within(LISTING, self.service.list_all_resources()).await?;
+        let resources = within(LISTING, async {
+            let mut items = Vec::new();
+            let mut cursor = None;
+            let mut seen = HashSet::new();
+            for _ in 0..MAX_LISTING_PAGES {
+                let page = self
+                    .service
+                    .list_resources(cursor.map(|cursor| {
+                        rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor))
+                    }))
+                    .await?;
+                items.extend(page.resources.into_iter().take(MAX_RESOURCES - items.len()));
+                if items.len() == MAX_RESOURCES {
+                    break;
+                }
+                let Some(next) = page.next_cursor.filter(|cursor| !cursor.is_empty()) else {
+                    break;
+                };
+                if !seen.insert(next.clone()) {
+                    break;
+                }
+                cursor = Some(next);
+            }
+            Ok::<_, rmcp::ServiceError>(items)
+        })
+        .await?;
         Ok(resources
             .into_iter()
             .take(MAX_RESOURCES)

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::{oneshot, Notify};
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::store::{MAX_CHAT_BODY_BYTES, MAX_CHAT_TITLE_BYTES};
 use zephium_core::work::model::WorkModelReasoning;
 use zephium_ipc::page_assist::*;
 use zephium_page_assist::citations::CitationBook;
@@ -666,6 +667,11 @@ impl PageAssist {
             .map(suggest::request_text);
         let (reply, events) = {
             let mut state = self.state();
+            // The Space may have moved on while the model and attachments
+            // were looked up.
+            if state.current.get(&space) != Some(&conversation) {
+                return Err(PageAssistFaultV1::Invalid);
+            }
             if state.running.contains_key(&conversation) {
                 return Err(PageAssistFaultV1::Busy);
             }
@@ -1179,22 +1185,27 @@ impl PageAssist {
                 return;
             }
             let view = live.conversation.view();
-            let Ok(body) = serde_json::to_string(view) else {
-                return;
-            };
+            let body = stored_body(view, MAX_CHAT_BODY_BYTES);
             (
                 live.profile,
                 StoredConversation {
                     id: view.id.clone(),
                     space: live.conversation.space().to_owned(),
-                    title: view.title.clone().unwrap_or_default(),
+                    title: stored_title(view.title.as_deref().unwrap_or_default()),
                     updated_ms: self.ports().clock.unix_ms(),
                 },
                 body,
             )
         };
         let (profile, entry, body) = stored;
-        self.ports().conversations.save(&profile, &entry, body);
+        let saved =
+            body.is_some_and(|body| self.ports().conversations.save(&profile, &entry, body));
+        if !saved {
+            self.ports().diagnostics.note(format_args!(
+                "page assist: conversation {} was not stored",
+                entry.id
+            ));
+        }
     }
 
     /// The person starts picking an element on `tab`.
@@ -1592,4 +1603,51 @@ impl PageAssist {
             .map(|style| style.css.as_str())
             .collect()
     }
+}
+
+/// The stored form of `view`, at most `limit` bytes. A conversation that
+/// outgrew it keeps its newest messages: older ones leave as they do past the
+/// message limit, so the stored copy still opens on the person's turn. None
+/// when not even the latest exchange fits.
+fn stored_body(view: &PageAssistConversationV1, limit: usize) -> Option<String> {
+    let whole = serde_json::to_string(view).ok()?;
+    if whole.len() <= limit {
+        return Some(whole);
+    }
+    let sizes = view
+        .messages
+        .iter()
+        .map(|message| serde_json::to_vec(message).map(|bytes| bytes.len()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let tail = |start: usize| PageAssistConversationV1 {
+        id: view.id.clone(),
+        title: view.title.clone(),
+        messages: view.messages[start..].to_vec(),
+        seq: view.seq,
+    };
+    let frame = serde_json::to_string(&tail(view.messages.len()))
+        .ok()?
+        .len();
+    // The messages' bytes and the commas between them.
+    let mut kept = sizes.iter().sum::<usize>() + sizes.len().saturating_sub(1);
+    for start in 1..view.messages.len() {
+        kept -= sizes[start - 1] + 1;
+        if frame + kept <= limit
+            && matches!(view.messages[start], PageAssistMessageV1::Person { .. })
+        {
+            let body = serde_json::to_string(&tail(start)).ok()?;
+            return (body.len() <= limit).then_some(body);
+        }
+    }
+    None
+}
+
+/// `title` cut to whole characters within the store's byte limit.
+fn stored_title(title: &str) -> String {
+    let mut end = title.len().min(MAX_CHAT_TITLE_BYTES);
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    title[..end].to_owned()
 }
