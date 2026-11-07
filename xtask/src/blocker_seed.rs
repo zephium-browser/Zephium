@@ -440,6 +440,20 @@ struct RuntimeGolden {
     regex_dfa_size_limit_bytes: usize,
     max_filter_checks_per_request: usize,
     badware_shadowed_rules: usize,
+    /// The badware list's own matcher, under the same limits; the fields
+    /// above describe the lists' matcher.
+    badware_matcher: Option<MatcherGolden>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MatcherGolden {
+    regexes: usize,
+    omitted_regexes: usize,
+    pattern_bytes: usize,
+    largest_regex_patterns: usize,
+    largest_regex_pattern_bytes: usize,
+    blocking_rule_entries: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1954,6 +1968,14 @@ pub(crate) fn compile_hidden(
         regex_dfa_size_limit_bytes: coverage.regex_dfa_size_limit_bytes(),
         max_filter_checks_per_request: coverage.max_filter_checks_per_request(),
         badware_shadowed_rules: coverage.badware_shadowed_rules(),
+        badware_matcher: badware.report().runtime().map(|own| MatcherGolden {
+            regexes: own.regexes(),
+            omitted_regexes: own.omitted_regexes(),
+            pattern_bytes: own.pattern_bytes(),
+            largest_regex_patterns: own.largest_regex_patterns(),
+            largest_regex_pattern_bytes: own.largest_regex_pattern_bytes(),
+            blocking_rule_entries: badware_blocking_entries,
+        }),
     });
     #[cfg(not(feature = "blocker-seed-runtime"))]
     let runtime = None;
