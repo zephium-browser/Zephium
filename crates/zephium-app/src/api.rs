@@ -348,6 +348,8 @@ pub enum Command {
     FocusWake,
     /// A quiet tab's speaker is due to go.
     AudioWake,
+    /// Pending visit titles reached the end of their coalescing window.
+    VisitTitlesWake,
     /// Captures one persistent destination before any source reads begin,
     /// restoring the session first for onboarding.
     ImportDestination {
