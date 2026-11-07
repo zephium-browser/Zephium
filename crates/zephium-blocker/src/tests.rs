@@ -1881,14 +1881,18 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
 #[test]
 fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
     use std::fmt::Write as _;
-    // Many blocks and exceptions on one host, on disjoint paths, and one
-    // exception for a path inside a blocked one.
+    // Many blocks and exceptions on one host, on disjoint paths, one
+    // exception for a path inside a blocked one, and two long exception paths
+    // against the short blocked ones: one inside a blocked path, one not.
     let (mut blocks, mut exceptions) = (String::new(), String::new());
     for n in 0..10_000 {
         writeln!(blocks, "||crowded.example/block-{n}/$script").unwrap();
         writeln!(exceptions, "@@||crowded.example/allow-{n}/$script").unwrap();
     }
     exceptions.push_str("@@||crowded.example/block-7/ok.js$script\n");
+    let long = "x".repeat(50_000);
+    writeln!(exceptions, "@@||crowded.example/block-3/{long}$script").unwrap();
+    writeln!(exceptions, "@@||crowded.example/elsewhere/{long}$script").unwrap();
     let compiled = Compiler::default()
         .compile(
             CompileTarget::Runtime,
@@ -1904,6 +1908,6 @@ fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
             .runtime()
             .unwrap()
             .badware_shadowed_rules(),
-        1
+        2
     );
 }

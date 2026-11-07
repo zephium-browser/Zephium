@@ -1006,17 +1006,29 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
             below.entry(&host[dot + 1..]).or_default().push(&block.path);
         }
     }
-    for paths in by_host.values_mut().chain(below.values_mut()) {
-        paths.sort_unstable();
-        paths.dedup();
+    // Each bucket's paths, sorted, with the length of its longest.
+    fn sorted<'a>(
+        buckets: std::collections::HashMap<&'a str, Vec<&'a str>>,
+    ) -> std::collections::HashMap<&'a str, (Vec<&'a str>, usize)> {
+        buckets
+            .into_iter()
+            .map(|(host, mut paths)| {
+                paths.sort_unstable();
+                paths.dedup();
+                let longest = paths.iter().map(|path| path.len()).max().unwrap_or(0);
+                (host, (paths, longest))
+            })
+            .collect()
     }
-    // A path in `paths` that starts with `path`, or that `path` starts with.
-    let may_overlap = |paths: &Vec<&str>, path: &str| {
+    let (by_host, below) = (sorted(by_host), sorted(below));
+    // A path in `paths` that starts with `path`, or that `path` starts with;
+    // no prefix of `path` longer than the longest path can be one.
+    let may_overlap = |(paths, longest): &(Vec<&str>, usize), path: &str| {
         let longer = paths.partition_point(|block| *block < path);
         paths
             .get(longer)
             .is_some_and(|block| block.starts_with(path))
-            || (0..=path.len())
+            || (0..=path.len().min(*longest))
                 .filter(|&end| path.is_char_boundary(end))
                 .any(|end| paths.binary_search(&&path[..end]).is_ok())
     };
