@@ -24,7 +24,15 @@ Procedural cosmetics, resource replacement, response-CSP mutation and
 URL-parameter rewriting are out of scope. On macOS 15.4+ and Windows,
 `##+js(...)` rules run scriptlets from a library built into the app, never
 fetched; lists only choose the scriptlet and its arguments, and only uBlock
-Origin's own lists may call `trusted-*` ones.
+Origin's own lists may call `trusted-*` ones. The two that replace response
+text, `trusted-replace-fetch-response` and `trusted-replace-xhr-response`, and
+`trusted-edit-inbound-object`, which edits what YouTube's player sends, run
+only on YouTube's hosts; their rules for any other site are dropped. The edit
+reads the query language of uBlock Origin's wiki ("uBO flavored JSONPath", v2
+without `call()`) and the older form today's YouTube rules use; a query
+outside it is counted as unsupported and never runs. Zephium's own scriptlets
+need a permission only its built-in rules hold, and those rules never hold the
+one `trusted-*` scriptlets need.
 There is no proxy, TLS interception, local root certificate, or replacement
 HTTP stack. Supported syntax and losses are reported, not advertised as complete
 uBlock/Safari parity. The pinned adblock-rust fork is documented in
@@ -319,9 +327,9 @@ own, reviewed and shipped with the app, compiled after every catalog's lists;
 its digest is part of the artifact's cache key. On Windows its site-scoped
 exceptions are judged against the view's main document, like every rule there
 (see above); before a view's first HTTP(S) commit they do not apply, as no
-site-scoped exception does there. It holds exceptions only, never
-blocks (a test enforces this), for breakage the downloaded lists do not fix
-yet. Each rule has a comment naming its site, the evidence and the date, and is
+site-scoped exception does there. It never blocks (a test enforces this):
+it holds exceptions for breakage the downloaded lists do not fix yet, and
+calls to Zephium's own scriptlets. Each rule has a comment naming its site, the evidence and the date, and is
 reported upstream when it applies there.
 
 - Ad recovery: some sites (allrecipes, simplyrecipes, people, bild, mirror,
@@ -338,6 +346,49 @@ reported upstream when it applies there.
   same recovery: 36 to 58 requests to the proxy hosts in 16 seconds of the home
   page in Zephium on Windows, against 2 or 3 with the exception. The exception
   allows only that fetch on those two sites; the tag never loads as a script.
+- YouTube start: with its ads blocked, YouTube holds a video with no buffer
+  before it starts, unless the player's client carries one of the markers
+  uBlock Origin's quick fixes key their player-request edits on (macOS,
+  2026-11-06, 5 videos x 5 runs: Brave marked 18/18 not held and unmarked 7/7
+  held; Zephium 25/25 held, stall median 8.5 s). `zephium-player-marker` sets
+  that marker and moves to the next on a hold; the edits themselves come from
+  the quick fixes. Markers, hold signature and Premium check are arguments,
+  and a marker no admitted quick-fix rule both edits on and strips from
+  comment requests is dropped when compiling, so a renamed marker is never
+  sent and the worst case is the hold. A hold moves to the next marker only
+  when the held data came from a request the quick fixes edited, which their
+  `#reloadxhr` tag in the response's tracking URL shows; data inlined in the
+  page or fetched ahead of a click is reloaded with the same marker, at most
+  twice per video, and never moves it. While a reload it asked for is still
+  unanswered, the player's wait is not counted as a hold. The player's own
+  `onSnackbarMessage` event, a scriptlet argument, ends the wait at once,
+  once per video, when the player's stats show the hold; the poll stays for
+  holds the listener misses. In a probe (macOS, 2026-11-06, 9 loads, every one
+  held) the event came at every hold the listener was attached for, 7 of 9,
+  about 1.5 s before the poll acted, and on none of the 8 loads that played;
+  the other 2 were raised before the listener attached. No global function is
+  wrapped: a wrapped `Map.prototype.has` would show in its `toString`.
+  With it (macOS, 2026-11-06, 5 videos x 5 runs and two in-page clicks per
+  run): no in-page video was held 1 s or more (0 of 10, against 10 of 10
+  before), and the event ended 10 of 25 direct-load holds, with a stall of
+  0 to 500 ms. YouTube often raises it within 2 ms of the player's API
+  appearing, before any listener can be attached, so the other 15 waited for
+  the poll (stall 1000 to 1750 ms) and the direct-load stall median stayed
+  1250 ms. Observing the player's container instead attached later: the
+  container appears after the player.
+  A navigation that never finishes stops guarding the player after 10 s, or
+  when playback is asked for again.
+  An unstarted player whose video was asked to play counts as held too: a
+  consent prompt answered on the watch page leaves the player that way:
+  without it a new visitor's first video was held 9.25 to 9.5 s (2 of 2), and
+  with it played 1.8 to 2.0 s after the answer (4 of 4), never reloaded while
+  the prompt showed. A
+  video in a playlist the player holds is reloaded through the playlist,
+  which keeps the player's list and place; a mix has no list in the player
+  and is reloaded as a video. In both, the next item played in order through
+  every kind of reload (2 runs, a mix and a playlist, 16 of 16), and loop and
+  shuffle were kept. In a later run, YouTube's mix once went on to a video
+  outside its panel with no request from Zephium.
 
 ## Budgets and evidence
 
@@ -373,25 +424,46 @@ No test result claims Windows runtime, installer, battery or broad-web coverage.
 ## YouTube
 
 uBlock Origin's `set` rules remove the pre-roll ad data from the watch page, so
-no pre-roll plays, but the video still starts later than in Brave. Measured on
-2026-11-04 with QA builds, 5 videos × 3 runs per browser, mean ± sd:
+no pre-roll plays. Without a marker (see `zephium-player-marker` above) YouTube
+then holds the video before it starts. Measured on macOS on 2026-11-06 with QA
+builds, 5 videos × 5 runs, medians:
 
-| | Zephium | Brave |
+| Zephium | before the marker | with the marker |
 | --- | --- | --- |
-| macOS start ms | 8871 ± 6078 | 3831 ± 5339 |
-| macOS stall ms | 7200 ± 5805 | 2083 ± 5245 |
-| Windows start ms | 11308 ± 5403 | 4036 ± 3764 |
-| Windows stall ms | 7650 ± 5438 | 1567 ± 3521 |
+| watch page start ms | 10380 | 3339 |
+| watch page stall ms | 8500 | 1250 |
 
-The stall is the player waiting for its first content media. Both browsers are
-served the ad data in the page and SABR streaming. On macOS, YouTube's client
-under WebKit requests neither of its ad probes
+- Watch pages: the first marker held 24 of 25 times and played; seeks that did
+  not play again within 15 s, 0 of 50; no blocker warning.
+- Related-video clicks without a page load: 10 of 10 held 1.25 s, then played
+  with the page's marker, which never changed.
+- The next video on a page behind another tab, after one played in view: 5 of
+  5 kept the marker and played, with no reload.
+- Every remaining hold is the marker's wait: 1 s of hold, then up to one 250 ms
+  sample before it reloads.
+- Known case: one watch page held on every marker in turn, played after 6.0 s
+  unmarked, and showed YouTube's "Experiencing interruptions?" notice.
+- The notice also showed on every related-video click in both browsers,
+  always after the player had requested the clicked video's data again.
+- Cost on a watch page, 30 s of playback, mean: CPU 12.6 s against Brave's
+  22.5 s; footprint 1024 MB against 879 MB.
+
+Brave 1.99.55 in the same runs, as context for these runs and not a claim about
+Brave in general: 15 of 25 watch pages carried a marker and were not held
+(start median 1847 ms), 10 were unmarked and held (stall median 13.75 s), and
+40 of 50 seeks did not play again within 15 s. Its marked/unmarked split
+changed from run to run with the same filter components. Brave's home-feed
+numbers are not comparable: in earlier runs its feed load never finished, and
+why is not yet recorded.
+
+The hold is timed by the server. On macOS, YouTube's client under WebKit
+requests neither of its ad probes
 (`static.doubleclick.net/instream/ad_status.js`,
 `googleads.g.doubleclick.net/pagead/id`) nor a second `/youtubei/v1/player`,
-with protection on or off, and the hold is timed by the server: with the ad
-left in, muted and played at 16×, content still arrived about the ad's length
-after it began. uBlock Origin's rule that rewrites YouTube's page script did not
-shorten the stall on either platform.
+with protection on or off; with the ad left in, muted and played at 16×,
+content still arrived about the ad's length after it began. uBlock Origin's
+rule that rewrites YouTube's page script did not shorten the stall. Windows was
+not measured with the marker.
 
 ## Rules WebKit never needed
 

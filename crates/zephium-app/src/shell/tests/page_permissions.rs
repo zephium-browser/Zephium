@@ -1284,6 +1284,18 @@ fn a_prompt_in_the_sidebar_leaves_the_page_on_screen() {
 }
 
 #[test]
+fn a_dialog_of_the_browser_s_own_takes_the_page_off_screen_while_it_is_open() {
+    let (mut shell, engine, _screen, _queue, _profile, _item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    assert!(page_on_screen(&engine));
+    // Pages sit above the chrome, so a dialog drawn by it would be hidden.
+    shell.handle(Command::SetChromeModal(true));
+    assert!(!page_on_screen(&engine));
+    shell.handle(Command::SetChromeModal(false));
+    assert!(page_on_screen(&engine));
+}
+
+#[test]
 fn opening_a_browser_page_dismisses_the_prompt_in_the_sidebar() {
     let (mut shell, engine, _screen, _queue, profile, item) =
         ready_shell(Arc::new(FakeStore::default()));

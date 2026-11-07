@@ -34,9 +34,16 @@ pub struct CosmeticReport {
     pub scriptlet_rules: usize,
     /// Admitted scriptlet rules naming a scriptlet the library lacks.
     pub unknown_scriptlet_rules: usize,
+    /// Admitted scriptlet rules that run with a stand-in for what they name:
+    /// `no-xhr-if` answers a `war:` resource the app does not ship with an
+    /// empty body, still keeping the request from leaving.
+    pub substituted_scriptlet_rules: usize,
     /// Scriptlet rules left out: generic, overlong, or a hostname form the
     /// program cannot key.
     pub unsupported_scriptlet_rules: usize,
+    /// Markers left out of Zephium's player-marker rules because no admitted
+    /// uBlock Origin rule both edits on and strips them.
+    pub dropped_player_markers: usize,
 }
 
 /// A cosmetic artifact could not be admitted or queried within its limits.
@@ -79,7 +86,7 @@ struct Data {
     report: CosmeticReport,
 }
 
-const DATA_VERSION: u32 = 2;
+const DATA_VERSION: u32 = 3;
 
 /// Immutable selector index shared by profiles and documents. Queries only
 /// inspect generic rules and rules indexed under the document's domain labels.
@@ -122,12 +129,16 @@ impl CosmeticPolicy {
     pub fn compile<'a>(
         sources: impl IntoIterator<Item = &'a str>,
     ) -> Result<Arc<Self>, CosmeticError> {
-        Self::compile_with_trust(sources.into_iter().map(|source| (source, false)))
+        Self::compile_with_trust(
+            sources
+                .into_iter()
+                .map(|source| (source, crate::ScriptletTrust::Plain)),
+        )
     }
 
     /// As [`Self::compile`], with each source's scriptlet trust.
     pub fn compile_with_trust<'a>(
-        sources: impl IntoIterator<Item = (&'a str, bool)>,
+        sources: impl IntoIterator<Item = (&'a str, crate::ScriptletTrust)>,
     ) -> Result<Arc<Self>, CosmeticError> {
         let mut data = Data {
             version: DATA_VERSION,
@@ -139,7 +150,7 @@ impl CosmeticPolicy {
         let mut bytes = 0usize;
         let mut lines = 0usize;
         let mut predicates = 0usize;
-        for (source_index, (source, trusted)) in sources.into_iter().enumerate() {
+        for (source_index, (source, trust)) in sources.into_iter().enumerate() {
             if source_index >= 32 {
                 return Err(CosmeticError::ResourceLimit);
             }
@@ -163,17 +174,21 @@ impl CosmeticPolicy {
                         data.report.unsupported_scriptlet_rules += 1;
                         continue;
                     }
-                    crate::scriptlets::Kind::Rule { unknown } => {
+                    crate::scriptlets::Kind::Rule {
+                        unknown,
+                        substituted,
+                    } => {
                         // A scriptlet the library lacks runs nowhere, so it
                         // is counted and never reaches the program.
                         if !unknown {
                             data.scriptlets.push(crate::scriptlets::ScriptletRule {
                                 line: line.to_owned(),
-                                trusted,
+                                trust,
                             });
                         }
                         data.report.scriptlet_rules += 1;
                         data.report.unknown_scriptlet_rules += usize::from(unknown);
+                        data.report.substituted_scriptlet_rules += usize::from(substituted);
                         continue;
                     }
                 }
@@ -219,6 +234,8 @@ impl CosmeticPolicy {
         data.rules.dedup();
         data.controls.sort();
         data.controls.dedup();
+        data.report.dropped_player_markers =
+            crate::scriptlets::keep_edited_markers(&mut data.scriptlets);
         data.scriptlets.sort();
         data.scriptlets.dedup();
         Self::from_data(data)
@@ -280,6 +297,12 @@ impl CosmeticPolicy {
             || data.rules.windows(2).any(|pair| pair[0] >= pair[1])
             || data.controls.windows(2).any(|pair| pair[0] >= pair[1])
         {
+            return Err(CosmeticError::InvalidPolicy);
+        }
+        // A stored policy holds only the markers its own edits support, as
+        // compiling leaves it.
+        let mut guarded = data.scriptlets.clone();
+        if crate::scriptlets::keep_edited_markers(&mut guarded) != 0 || guarded != data.scriptlets {
             return Err(CosmeticError::InvalidPolicy);
         }
         let mut generic = Vec::new();
@@ -935,6 +958,31 @@ mod tests {
         let mut data: Data = serde_json::from_slice(&bytes).unwrap();
         data.rules[0].selector = ".ad{}body{color:red}".into();
         assert!(CosmeticPolicy::decode(&serde_json::to_vec(&data).unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_stored_marker_without_its_edits_is_rejected() {
+        let edits = concat!(
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+            "\n",
+            r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (lactmilli)\b/"\,"replacement":""}))"#,
+            "\n",
+        );
+        let marker = r"www.youtube.com##+js(zephium-player-marker, lactmilli, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, a.b=c, support.google.com/x, a.b*=t)";
+        let policy = CosmeticPolicy::compile_with_trust([
+            (edits, crate::ScriptletTrust::Trusted),
+            (marker, crate::ScriptletTrust::Zephium),
+        ])
+        .unwrap();
+        let bytes = policy.encode().unwrap();
+        let data: Data = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data.scriptlets.len(), 3);
+        assert!(CosmeticPolicy::decode(&bytes).is_ok());
+        let mut stripped = data;
+        stripped
+            .scriptlets
+            .retain(|rule| !rule.line.contains("createCommentParams"));
+        assert!(CosmeticPolicy::decode(&serde_json::to_vec(&stripped).unwrap()).is_err());
     }
 
     #[test]

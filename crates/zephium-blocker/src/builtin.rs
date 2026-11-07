@@ -26,6 +26,7 @@ pub(crate) fn source() -> FilterSource {
         SourceFormat::Standard,
         RULES.to_owned(),
     )
+    .zephium_rules()
 }
 
 /// Whether these rules compile for `target`. They are per-site exceptions,

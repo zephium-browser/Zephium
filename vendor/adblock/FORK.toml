@@ -142,6 +142,16 @@ invariants = [
   "parser, serialization, resource-assembly, and scale coverage use deterministic Zephium-authored invalid-domain vectors",
 ]
 
+[[patch_sets]]
+name = "lazy-DFA prepared regexes"
+paths = ["Cargo.toml", "src/regex_manager.rs", "tests/unit/optimizer.rs"]
+invariants = [
+  "prepared regexes never build a fully compiled DFA, whatever regex-automata features the application graph unifies",
+  "prepared regexes keep no capture slots; matching only asks whether a regex matches",
+  "the size limits, match kinds, and byte-oriented non-Unicode syntax are those regex::bytes applies, so the same rules compile, fail, and match",
+  "fork tests build regex-automata with dfa-build, as the desktop graph does, and check the compiled regexes themselves",
+]
+
 [production_graphs]
 windows_runtime = "full-regex-handling,css-validation,embedded-domain-resolver"
 webkit_native = "full-regex-handling,css-validation,content-blocking,embedded-domain-resolver"

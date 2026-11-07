@@ -702,7 +702,7 @@ impl Shell {
                     // asynchronous image decode. Poll immediately at load
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
-                    self.engine.warm_spare(self.partition_of(id));
+                    self.warm_spare_after_load(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }

@@ -875,6 +875,12 @@ impl EngineHost {
         if pressure == zephium_core::ports::engine::MemoryPressure::Normal {
             return;
         }
+        self.release_spare();
+    }
+
+    /// Closes the warm spare view, if one is waiting; the next completed load
+    /// may build another.
+    pub(crate) fn release_spare(&mut self) {
         if let Some(spare) = self.spare.take() {
             #[cfg(target_os = "windows")]
             {
