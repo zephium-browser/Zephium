@@ -55,7 +55,9 @@ pub(crate) fn finish_after_cleanup(app: &tauri::AppHandle, cleanup_succeeded: bo
                 .args(env.args_os.iter().skip(1))
                 .spawn()
         }) {
-            diagnostic!("shutdown: could not relaunch Zephium: {error}");
+            write_diagnostic(format_args!(
+                "shutdown: could not relaunch Zephium: {error}"
+            ));
         }
     }
 }
@@ -99,6 +101,7 @@ mod tests {
             .next()
             .unwrap();
         assert!(restart.contains(".spawn()"));
+        assert!(restart.contains("write_diagnostic(format_args!("));
         assert!(!restart.contains("tauri::process::restart"));
         let exit_hook = lib.split("relaunch::finish_on_exit(app)").next().unwrap();
         assert!(exit_hook.trim_end().ends_with(
