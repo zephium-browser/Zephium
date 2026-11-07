@@ -1,10 +1,12 @@
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 const host = vi.hoisted(() => ({
   stored: new Map<string, string>(),
   set: vi.fn(),
   width: vi.fn(),
+  disposition: vi.fn(),
 }));
+vi.mock("$domain/operations/operations", () => ({ waitForDisposition: host.disposition }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
@@ -19,12 +21,14 @@ beforeEach(() => {
   vi.resetModules();
   host.stored.clear();
   host.width.mockReset();
+  host.disposition.mockReset();
   host.set.mockReset().mockImplementation(async (key: string, value: string) => {
     host.stored.set(key, value);
     return { operation_id: null, accepted: true };
   });
   vi.stubGlobal("window", new EventTarget());
 });
+afterEach(() => vi.useRealTimers());
 
 test("completed and keyboard resizes survive a new sidebar session", async () => {
   const sidebar = await import("../sidebar-mode.svelte");
@@ -78,5 +82,43 @@ test.each([null, "56", "NaN", "461", "240.5", " 300"])(
     await sidebar.init();
     expect(sidebar.expanded()).toBe(240);
     expect(host.width).toHaveBeenLastCalledWith(240, false, expect.any(Number));
+  },
+);
+
+test.each(["rejected", "failed", "transport", "unconfirmed"])(
+  "a %s save can retry the displayed width",
+  async (failure) => {
+    const sidebar = await import("../sidebar-mode.svelte");
+    await sidebar.init();
+    vi.useFakeTimers();
+    if (failure === "rejected")
+      host.set.mockResolvedValueOnce({ accepted: false, operation_id: null });
+    else if (failure === "transport") host.set.mockRejectedValueOnce(new Error("offline"));
+    else {
+      host.set.mockResolvedValueOnce({ accepted: true, operation_id: "0000000000000001" });
+      host.disposition.mockResolvedValueOnce(
+        failure === "failed"
+          ? { state: "timeout" }
+          : {
+              state: "processed",
+              disposition: {
+                operation_id: "0000000000000001",
+                outcome: "deferred",
+                reason: "native_work_pending",
+              },
+            },
+      );
+    }
+    sidebar.applyDragWidth(350);
+    expect(sidebar.expanded()).toBe(350);
+    await vi.advanceTimersByTimeAsync(0);
+    if (failure === "failed" || failure === "unconfirmed")
+      expect(host.disposition).toHaveBeenCalledOnce();
+    expect(host.stored.has("sidebar.width")).toBe(false);
+    sidebar.applyDragWidth(350);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.stored.get("sidebar.width")).toBe("350");
+    sidebar.applyDragWidth(350);
+    expect(host.set).toHaveBeenCalledTimes(2);
   },
 );
