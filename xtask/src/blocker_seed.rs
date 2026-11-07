@@ -440,6 +440,8 @@ struct RuntimeGolden {
     regex_dfa_size_limit_bytes: usize,
     max_filter_checks_per_request: usize,
     badware_shadowed_rules: usize,
+    badware_shadow_work: usize,
+    badware_shadow_count_truncated: bool,
     /// The badware list's own matcher, under the same limits; the fields
     /// above describe the lists' matcher.
     badware_matcher: Option<MatcherGolden>,
@@ -1968,6 +1970,8 @@ pub(crate) fn compile_hidden(
         regex_dfa_size_limit_bytes: coverage.regex_dfa_size_limit_bytes(),
         max_filter_checks_per_request: coverage.max_filter_checks_per_request(),
         badware_shadowed_rules: coverage.badware_shadowed_rules(),
+        badware_shadow_work: coverage.badware_shadow_work(),
+        badware_shadow_count_truncated: coverage.badware_shadow_count_truncated(),
         badware_matcher: badware.report().runtime().map(|own| MatcherGolden {
             regexes: own.regexes(),
             omitted_regexes: own.omitted_regexes(),
@@ -2141,6 +2145,28 @@ fn valid_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shipped_badware_shadow_count_is_exact_and_cheap() {
+        let report = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(ASSET_DIRECTORY)
+            .join(QUALITY_FILE);
+        let quality: QualityManifest =
+            serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+        let runtime = quality
+            .compilers
+            .iter()
+            .find_map(|compiler| compiler.runtime.as_ref())
+            .expect("a runtime report");
+        assert_eq!(runtime.badware_shadowed_rules, 34);
+        assert!(!runtime.badware_shadow_count_truncated);
+        assert!(
+            runtime.badware_shadow_work < 10_000,
+            "{}",
+            runtime.badware_shadow_work
+        );
+    }
 
     #[test]
     fn source_version_timestamp_is_exact() {

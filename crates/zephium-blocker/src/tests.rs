@@ -1878,22 +1878,8 @@ fn the_report_counts_other_lists_rules_a_badware_block_shadows() {
 }
 
 #[cfg(feature = "runtime")]
-#[test]
-fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
-    use std::fmt::Write as _;
-    // Many blocks and exceptions on one host, on disjoint paths, one
-    // exception for a path inside a blocked one, and two long exception paths
-    // against the short blocked ones: one inside a blocked path, one not.
-    let (mut blocks, mut exceptions) = (String::new(), String::new());
-    for n in 0..10_000 {
-        writeln!(blocks, "||crowded.example/block-{n}/$script").unwrap();
-        writeln!(exceptions, "@@||crowded.example/allow-{n}/$script").unwrap();
-    }
-    exceptions.push_str("@@||crowded.example/block-7/ok.js$script\n");
-    let long = "x".repeat(50_000);
-    writeln!(exceptions, "@@||crowded.example/block-3/{long}$script").unwrap();
-    writeln!(exceptions, "@@||crowded.example/elsewhere/{long}$script").unwrap();
-    let compiled = Compiler::default()
+fn shadow_count(blocks: String, exceptions: String) -> crate::RuntimeCoverage {
+    Compiler::default()
         .compile(
             CompileTarget::Runtime,
             vec![
@@ -1901,13 +1887,58 @@ fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
                 FilterSource::new(id("maintained"), SourceFormat::Standard, exceptions),
             ],
         )
-        .unwrap();
-    assert_eq!(
-        compiled
-            .report()
-            .runtime()
-            .unwrap()
-            .badware_shadowed_rules(),
-        2
+        .unwrap()
+        .report()
+        .runtime()
+        .unwrap()
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn the_badware_shadow_count_looks_up_paths_on_one_crowded_host() {
+    use std::fmt::Write as _;
+    // Blocks and exceptions on one host, on disjoint paths, one exception for
+    // a path inside a blocked one, and two long exception paths against the
+    // short blocked ones: one inside a blocked path, one not.
+    let (mut blocks, mut exceptions) = (String::new(), String::new());
+    for n in 0..500 {
+        writeln!(blocks, "||crowded.example/block-{n}/$script").unwrap();
+        writeln!(exceptions, "@@||crowded.example/allow-{n}/$script").unwrap();
+    }
+    exceptions.push_str("@@||crowded.example/block-7/ok.js$script\n");
+    let long = "x".repeat(50_000);
+    writeln!(exceptions, "@@||crowded.example/block-3/{long}$script").unwrap();
+    writeln!(exceptions, "@@||crowded.example/elsewhere/{long}$script").unwrap();
+    let coverage = shadow_count(blocks, exceptions);
+    assert_eq!(coverage.badware_shadowed_rules(), 2);
+    assert!(!coverage.badware_shadow_count_truncated());
+    // A few binary searches per exception, the long paths probed only up to
+    // the longest blocked path: a scan of the host's blocks, or of every
+    // prefix of the long paths, would take far more.
+    assert!(
+        coverage.badware_shadow_work() < 100_000,
+        "{}",
+        coverage.badware_shadow_work()
+    );
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn the_badware_shadow_count_stops_at_its_work_budget() {
+    use std::fmt::Write as _;
+    // Long paths that share a long prefix with every blocked path and never
+    // overlap one.
+    let prefix = "a".repeat(4_000);
+    let (mut blocks, mut exceptions) = (String::new(), String::new());
+    for n in 0..2_000 {
+        writeln!(blocks, "||adversary.example/{prefix}{n}/$script").unwrap();
+        writeln!(exceptions, "@@||adversary.example/{prefix}z{n}$script").unwrap();
+    }
+    let coverage = shadow_count(blocks, exceptions);
+    assert!(coverage.badware_shadow_count_truncated());
+    assert!(
+        coverage.badware_shadow_work() <= crate::compiler::BADWARE_SHADOW_WORK_BUDGET + 10_000,
+        "{}",
+        coverage.badware_shadow_work()
     );
 }

@@ -18,6 +18,8 @@ pub struct RuntimeCoverage {
     pub(crate) regex_dfa_size_limit_bytes: usize,
     pub(crate) max_filter_checks_per_request: usize,
     pub(crate) badware_shadowed_rules: usize,
+    pub(crate) badware_shadow_work: usize,
+    pub(crate) badware_shadow_count_truncated: bool,
 }
 
 impl RuntimeCoverage {
@@ -29,6 +31,18 @@ impl RuntimeCoverage {
     /// that name no host are not counted.
     pub const fn badware_shadowed_rules(self) -> usize {
         self.badware_shadowed_rules
+    }
+
+    /// Returns the work spent counting [`Self::badware_shadowed_rules`]:
+    /// string comparisons, one unit per 64 bytes each may read.
+    pub const fn badware_shadow_work(self) -> usize {
+        self.badware_shadow_work
+    }
+
+    /// Whether counting [`Self::badware_shadowed_rules`] stopped at its work
+    /// budget, so the count is a lower bound. Compilation is unaffected.
+    pub const fn badware_shadow_count_truncated(self) -> bool {
+        self.badware_shadow_count_truncated
     }
 
     /// Returns eagerly prepared regular-expression entries, the omitted ones

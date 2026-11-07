@@ -416,7 +416,7 @@ impl Compiler {
                 CompileTarget::Runtime => {
                     #[cfg(feature = "runtime")]
                     {
-                        let badware_shadowed_rules = badware_shadowed_rules(&prepared);
+                        let shadowed = badware_shadowed_rules(&prepared);
                         let badware_apart = self.badware_apart
                             && prepared
                                 .iter()
@@ -429,7 +429,9 @@ impl Compiler {
                         }
                         let (runtime, blocking_entries, mut coverage) =
                             compile_runtime(&mut prepared, self.limits, badware_apart)?;
-                        coverage.badware_shadowed_rules = badware_shadowed_rules;
+                        coverage.badware_shadowed_rules = shadowed.rules;
+                        coverage.badware_shadow_work = shadowed.work;
+                        coverage.badware_shadow_count_truncated = shadowed.truncated;
                         (Some(runtime), Some(coverage), None, None, blocking_entries)
                     }
                     #[cfg(not(feature = "runtime"))]
@@ -950,9 +952,25 @@ fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
     }
 }
 
+/// The work [`badware_shadowed_rules`] may spend: string comparisons, each
+/// charged one unit per 64 bytes it may read. The shipped lists take a few
+/// hundred.
+#[cfg(feature = "runtime")]
+pub(crate) const BADWARE_SHADOW_WORK_BUDGET: usize = 200_000;
+
 /// See [`RuntimeCoverage::badware_shadowed_rules`].
 #[cfg(feature = "runtime")]
-fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BadwareShadowCount {
+    pub(crate) rules: usize,
+    pub(crate) work: usize,
+    /// The budget ran out: `rules` counts only what was reached.
+    pub(crate) truncated: bool,
+}
+
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+fn badware_shadowed_rules(prepared: &[PreparedSource]) -> BadwareShadowCount {
     use adblock::filters::network::{FilterPart, NetworkFilter, NetworkFilterMaskHelper};
     // A rule for subresources: its host, if it names one, and the literal
     // start of its path, up to the first wildcard.
@@ -989,7 +1007,7 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
         .filter(|rule| !rule.exception && !rule.badfilter)
         .collect();
     if blocks.is_empty() {
-        return 0;
+        return BadwareShadowCount::default();
     }
     let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
     // Each block's path under its host and under every domain above it,
@@ -1021,16 +1039,32 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
             .collect()
     }
     let (by_host, below) = (sorted(by_host), sorted(below));
+    // A diagnostic count: past its budget it stops, as a lower bound, and the
+    // compile goes on.
+    let work = std::cell::Cell::new(0usize);
+    let charge = |one: &str, other: &str| {
+        let units = 1 + one.len().min(other.len()) / 64;
+        work.set(work.get().saturating_add(units));
+    };
+    let compare = |one: &str, other: &str| {
+        charge(one, other);
+        one.cmp(other)
+    };
     // A path in `paths` that starts with `path`, or that `path` starts with;
     // no prefix of `path` longer than the longest path can be one.
     let may_overlap = |(paths, longest): &(Vec<&str>, usize), path: &str| {
-        let longer = paths.partition_point(|block| *block < path);
-        paths
-            .get(longer)
-            .is_some_and(|block| block.starts_with(path))
-            || (0..=path.len().min(*longest))
-                .filter(|&end| path.is_char_boundary(end))
-                .any(|end| paths.binary_search(&&path[..end]).is_ok())
+        let longer = paths.partition_point(|block| compare(block, path).is_lt());
+        paths.get(longer).is_some_and(|block| {
+            charge(block, path);
+            block.starts_with(path)
+        }) || (0..=path.len().min(*longest))
+            .filter(|&end| path.is_char_boundary(end))
+            .take_while(|_| work.get() <= BADWARE_SHADOW_WORK_BUDGET)
+            .any(|end| {
+                paths
+                    .binary_search_by(|block| compare(block, &path[..end]))
+                    .is_ok()
+            })
     };
     // An exception that names a related host (the same, one above or one
     // below) on a path that may overlap.
@@ -1045,7 +1079,8 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
             .chain(below.get(host))
             .any(|paths| may_overlap(paths, &exception.path))
     };
-    prepared
+    let mut count = BadwareShadowCount::default();
+    let others = prepared
         .iter()
         .filter(|source| !badware(source))
         .flat_map(|source| {
@@ -1054,15 +1089,21 @@ fn badware_shadowed_rules(prepared: &[PreparedSource]) -> usize {
                 .lines()
                 .filter(|line| line.starts_with("@@") || line.contains("badfilter"))
                 .filter_map(|line| parse(source, line))
-        })
-        .filter(|rule| {
-            if rule.badfilter {
-                ids.contains(&rule.id)
-            } else {
-                rule.exception && overlaps(rule)
-            }
-        })
-        .count()
+        });
+    for rule in others {
+        let shadowed = if rule.badfilter {
+            ids.contains(&rule.id)
+        } else {
+            rule.exception && overlaps(&rule)
+        };
+        if work.get() > BADWARE_SHADOW_WORK_BUDGET {
+            count.truncated = true;
+            break;
+        }
+        count.rules += usize::from(shadowed);
+    }
+    count.work = work.get();
+    count
 }
 
 fn parse_options(format: SourceFormat) -> ParseOptions {
@@ -1256,6 +1297,8 @@ pub(crate) fn prepare_and_validate_runtime_engine(
             regex_dfa_size_limit_bytes: preparation.regex_dfa_size_limit_bytes,
             max_filter_checks_per_request: preparation.max_filter_checks_per_request,
             badware_shadowed_rules: 0,
+            badware_shadow_work: 0,
+            badware_shadow_count_truncated: false,
         },
     ))
 }

@@ -318,7 +318,9 @@ one the lists refuse:
   exceptions on shared content-delivery and hosting domains (jsDelivr,
   CloudFront, Azure, Amazon S3, GitHub Pages and the like) where badware
   blocks particular paths or subdomains. Exceptions that name no host are not
-  counted.
+  counted. The count is a diagnostic with a fixed work budget; past it, it
+  stops and `badware_shadow_count_truncated` marks it as a lower bound. The
+  shipped lists use 1,784 of 200,000 units.
 - On Windows the full runtime policy then judges the document against the
   lists' `$document` rules, which WebView2's request filter never sees. On
   macOS WebKit's content rules apply them, and their refusal is reported the
