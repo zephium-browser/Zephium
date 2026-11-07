@@ -1067,6 +1067,8 @@ mod action_barrier_tests {
             focus_timer: false,
             closed: false,
             suspending: false,
+            #[cfg(target_os = "windows")]
+            material_restored: false,
         }
     }
 
