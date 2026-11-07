@@ -241,9 +241,10 @@ A policy read from the cache is validated in full and its scriptlet program
 built before it is delivered, but its selector matcher and generic index are
 built by the compiler worker just after, so a page restored at startup waits
 for neither. A page that asks first builds them itself. If they cannot be
-built, the policy stays without cosmetics and the worker compiles it again
-from source, which replaces the cached record for the next generation and the
-next launch.
+built, the policy stays without cosmetics and the worker tries to compile it
+again from source. A compile that succeeds serves the next generation and,
+once written to the cache, the next launch; one that fails leaves the
+delivered policy in place.
 
 A bounded worker handles document lookup, hashing and script serialization.
 Completion returns through the existing main-thread dispatcher before native

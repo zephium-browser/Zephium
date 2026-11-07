@@ -1227,11 +1227,13 @@ impl ArtifactCache {
         if let Err(error) = built {
             eprintln!("content blocker: cached cosmetics refused ({error}); compiling from source");
             let delivered = self.artifact.take();
+            let recipe = self.catalog.clone();
             if let BlockerCompileOutcome::Failed(failure) =
                 self.resolve_with(compiler, persistent, false)
             {
                 eprintln!("content blocker: cosmetics recompile failed: {failure:?}");
                 self.artifact = delivered;
+                self.catalog = recipe;
             }
         }
         if !self
@@ -4273,16 +4275,20 @@ mod tests {
         else {
             panic!("the cached policy loads");
         };
+        assert_eq!(warm.persistent_hits, 1);
         // Both the cached styles and the recompile fail.
         crate::cosmetics::REFUSE_NEXT_STYLES.with(|refuse| refuse.set(2));
         warm.finish_styles(Compiler::default(), &mut persistent);
-        // The network rules delivered stay in force for the next generation.
+        // The network rules delivered stay in force for the next generation,
+        // even once nothing holds them and they must be loaded again.
+        let digest = delivered.digest();
+        drop(delivered);
         let BlockerCompileOutcome::Compiled(next) =
             warm.resolve(Compiler::default(), &mut persistent)
         else {
             panic!("the delivered policy stays");
         };
-        assert_eq!(next.digest(), delivered.digest());
+        assert_eq!(next.digest(), digest);
     }
 
     #[cfg(all(unix, feature = "webkit"))]
