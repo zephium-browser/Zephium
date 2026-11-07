@@ -256,6 +256,11 @@ pub trait BlockerCatalog {
     fn maintain(&self) -> BlockerCatalogSnapshot;
 
     fn request_refresh(&self) -> BlockerCatalogRefreshDispatch;
+
+    /// Registers `wake`, called from the update worker after each status it
+    /// publishes, such as a finished download, so the caller can `maintain`
+    /// at once instead of at its next routine check. It must only queue work.
+    fn set_change_waker(&self, _wake: Arc<dyn Fn() + Send + Sync>) {}
 }
 
 /// Bounded asynchronous compiler for browser-maintained filter material.

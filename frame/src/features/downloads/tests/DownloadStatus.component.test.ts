@@ -26,6 +26,7 @@ const entry: DownloadView = {
   received: "10",
   total: "100",
   error: null,
+  insecure: false,
 };
 
 function serving(initial: DownloadView, next: (call: DownloadCall) => DownloadView | null) {

@@ -112,6 +112,7 @@ impl Shell {
         // fullscreen window may take it from there.
         self.window_visible
             && !self.page_permissions.is_visible()
+            && !self.chrome_modal
             && !self.focus_covers()
             && self.blocker.native_policy_available(window.profile)
             && (self.active_browser_page().is_none() || !self.fills_host_window())

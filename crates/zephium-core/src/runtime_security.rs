@@ -16,6 +16,9 @@ pub enum RuntimeSecurityAdvisoryKind {
     /// A newer stable runtime passed every mandatory capability/provenance
     /// check but its release line postdates this Zephium build's review.
     UnreviewedRuntime,
+    /// Runtime data an earlier run left behind could not be cleared yet, so
+    /// it waits for an operating-system restart.
+    CleanupOverdue,
 }
 
 /// Fixed, non-page-derived destination of the recommended maintenance action.
@@ -60,6 +63,13 @@ impl RuntimeSecurityAdvisory {
         }
     }
 
+    pub const fn cleanup_overdue() -> Self {
+        Self {
+            kind: RuntimeSecurityAdvisoryKind::CleanupOverdue,
+            update_target: RuntimeSecurityUpdateTarget::OperatingSystem,
+        }
+    }
+
     pub const fn kind(self) -> RuntimeSecurityAdvisoryKind {
         self.kind
     }
@@ -71,8 +81,9 @@ impl RuntimeSecurityAdvisory {
 
 /// Canonical, allocation-free set of every process-lifetime advisory.
 ///
-/// The closed vocabulary has five valid values: review age, an unreviewed
-/// runtime, and an update recommendation for each fixed target. A bitset
+/// The closed vocabulary has six valid values: review age, an unreviewed
+/// runtime, overdue runtime cleanup, and an update recommendation for each
+/// fixed target. A bitset
 /// prevents duplicates and makes capacity exhaustion impossible without
 /// silently dropping a second independent security fact.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -86,12 +97,14 @@ impl RuntimeSecurityAdvisories {
     const UPDATE_OPERATING_SYSTEM: u8 = 1 << 2;
     const UPDATE_BROWSER_RUNTIME: u8 = 1 << 3;
     const UNREVIEWED_RUNTIME: u8 = 1 << 4;
-    const ORDERED: [RuntimeSecurityAdvisory; 5] = [
+    const CLEANUP_OVERDUE: u8 = 1 << 5;
+    const ORDERED: [RuntimeSecurityAdvisory; 6] = [
         RuntimeSecurityAdvisory::review_overdue(),
         RuntimeSecurityAdvisory::update_recommended(RuntimeSecurityUpdateTarget::Zephium),
         RuntimeSecurityAdvisory::update_recommended(RuntimeSecurityUpdateTarget::OperatingSystem),
         RuntimeSecurityAdvisory::update_recommended(RuntimeSecurityUpdateTarget::BrowserRuntime),
         RuntimeSecurityAdvisory::unreviewed_runtime(),
+        RuntimeSecurityAdvisory::cleanup_overdue(),
     ];
 
     pub const fn new() -> Self {
@@ -108,6 +121,7 @@ impl RuntimeSecurityAdvisories {
         self.bits |= match advisory.kind {
             RuntimeSecurityAdvisoryKind::ReviewOverdue => Self::REVIEW_OVERDUE,
             RuntimeSecurityAdvisoryKind::UnreviewedRuntime => Self::UNREVIEWED_RUNTIME,
+            RuntimeSecurityAdvisoryKind::CleanupOverdue => Self::CLEANUP_OVERDUE,
             RuntimeSecurityAdvisoryKind::UpdateRecommended => match advisory.update_target {
                 RuntimeSecurityUpdateTarget::Zephium => Self::UPDATE_ZEPHIUM,
                 RuntimeSecurityUpdateTarget::OperatingSystem => Self::UPDATE_OPERATING_SYSTEM,

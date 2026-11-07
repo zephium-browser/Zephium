@@ -48,3 +48,10 @@ export function filenameParts(filename: string): { stem: string; extension: stri
   if (dot <= 0 || filename.length - dot > 12) return { stem: filename, extension: "" };
   return { stem: filename.slice(0, dot), extension: filename.slice(dot) };
 }
+
+/** A folder as people write it: Windows' verbatim `\\?\` prefix dropped. */
+export function displayDirectory(path: string): string {
+  if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(path)) return path.slice(4);
+  return path;
+}

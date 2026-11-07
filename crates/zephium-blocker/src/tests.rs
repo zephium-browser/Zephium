@@ -20,6 +20,160 @@ fn source_independent_request(url: &str) -> NetworkRequest<'_> {
     NetworkRequest::source_independent(url, ResourceType::Script, RequestMethod::Get)
 }
 
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn a_regex_past_the_runtime_limits_is_left_out_and_the_rest_compiles() {
+    // One rule too large on its own is dropped at admission.
+    let alone = r"/^https?:\/\/big\.example\/[+\/0-9a-zA-Z]{400,1200}$/$script";
+    // Rules that each compile but that the optimizer merges into one regex
+    // set too large together; the merged set is prepared as never matching.
+    let merged: String = (0..8)
+        .map(|n| {
+            format!(
+                r"/^https?:\/\/ad{n}\.example\/[+\/0-9a-zA-Z]{{40,120}}$/$script{}",
+                "\n"
+            )
+        })
+        .collect();
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source(&format!("||ads.example^\n{alone}\n{merged}"))],
+        )
+        .unwrap();
+    let report = rules.report();
+    assert_eq!(
+        report.dropped_for(InputDropReason::UnsupportedRegularExpression),
+        1
+    );
+    assert!(report.runtime().unwrap().omitted_regexes() >= 1);
+    assert_eq!(
+        rules
+            .evaluate(request(
+                "https://ads.example/tracker.js",
+                "https://site.example/"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
+    );
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn a_catalog_with_scriptlets_and_no_hiding_rules_keeps_its_program() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source("||ads.example^\nexample.com##+js(set, a.b, true)")],
+        )
+        .unwrap();
+    let cosmetics = rules.cosmetic_policy().expect("a cosmetic policy");
+    assert_eq!(cosmetics.report().accepted, 0);
+    assert!(cosmetics
+        .scriptlet_program()
+        .unwrap()
+        .contains("zephiumSetConstant("));
+}
+
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_official_canary_refuses_lists_that_stop_blocking() {
+    let official = |easylist: &str| {
+        Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![
+                    FilterSource::new(id("easylist"), SourceFormat::Standard, easylist.to_owned()),
+                    FilterSource::new(
+                        id("easyprivacy"),
+                        SourceFormat::Standard,
+                        "||googletagmanager.com^".to_owned(),
+                    ),
+                ],
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        official("||doubleclick.com^").verify_official_canary(),
+        Ok(())
+    );
+    // The list's block is gone.
+    assert!(official("||unrelated.example^")
+        .verify_official_canary()
+        .is_err());
+    // A wildcard exception scoped to one site lifts nothing elsewhere, nor
+    // where no page is known.
+    assert_eq!(
+        official("||doubleclick.com^\n@@*$script,3p,from=elsewhere.example")
+            .verify_official_canary(),
+        Ok(())
+    );
+    // An exception that applies on every page is still refused.
+    assert!(official("||doubleclick.com^\n@@||doubleclick.com^$script")
+        .verify_official_canary()
+        .is_err());
+    // A list that blocks the harmless request is refused too.
+    assert!(official("||doubleclick.com^\n||example.com^")
+        .verify_official_canary()
+        .is_err());
+    // Lists that are not official are not held to it.
+    assert_eq!(
+        Compiler::default()
+            .compile(CompileTarget::Runtime, vec![source("||unrelated.example^")])
+            .unwrap()
+            .verify_official_canary(),
+        Ok(())
+    );
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn with_no_page_known_a_site_scoped_wildcard_exception_lifts_no_block() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![FilterSource::new(
+                id("easylist"),
+                SourceFormat::Standard,
+                "||doubleclick.com^\n@@*$script,3p,from=elsewhere.example".to_owned(),
+            )],
+        )
+        .unwrap();
+    assert_eq!(rules.verify_official_canary(), Ok(()));
+    assert_eq!(
+        rules
+            .evaluate_source_independent(source_independent_request(
+                "https://ad.doubleclick.com/activity;src=1"
+            ))
+            .unwrap()
+            .action(),
+        NetworkAction::Block
+    );
+}
+
+#[test]
+fn a_malformed_complete_regex_never_compiles_instead_of_panicking() {
+    use adblock::filters::network::NetworkFilterMask;
+    for pattern in ["", "/", "x", "/a", "a/", "/é", "é/"] {
+        assert!(
+            !adblock::regex_manager::regex_compiles_within(
+                NetworkFilterMask::IS_COMPLETE_REGEX,
+                &[pattern],
+                96 * 1024,
+                16 * 1024
+            ),
+            "{pattern}"
+        );
+    }
+    assert!(adblock::regex_manager::regex_compiles_within(
+        NetworkFilterMask::IS_COMPLETE_REGEX,
+        &["/ads?/"],
+        96 * 1024,
+        16 * 1024
+    ));
+}
+
 #[test]
 fn source_ids_are_canonical_and_bounded() {
     assert!(SourceId::new("easylist-default").is_ok());
@@ -155,7 +309,7 @@ fn approximate_attribution_never_evaluates_source_sensitive_rules() {
 
 #[cfg(feature = "runtime-exact")]
 #[test]
-fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
+fn unknown_attribution_never_lets_a_scoped_exception_lift_a_block() {
     let rules = Compiler::default()
         .compile(
             CompileTarget::Runtime,
@@ -186,13 +340,13 @@ fn unknown_attribution_never_bypasses_a_possible_scoped_exception() {
             ))
             .unwrap()
             .action(),
-        NetworkAction::Allow
+        NetworkAction::Block
     );
 }
 
 #[cfg(feature = "runtime")]
 #[test]
-fn source_independent_matching_preserves_target_semantics_and_fails_open_on_source_semantics() {
+fn source_independent_matching_preserves_target_semantics_and_fails_closed_on_source_semantics() {
     fn action(rules: &str, url: &str, method: RequestMethod) -> NetworkAction {
         Compiler::default()
             .compile(CompileTarget::Runtime, vec![source(rules)])
@@ -218,8 +372,8 @@ fn source_independent_matching_preserves_target_semantics_and_fails_open_on_sour
         let rules = format!("||tracker.example^\n{scoped_exception}");
         assert_eq!(
             action(&rules, target, RequestMethod::Get),
-            NetworkAction::Allow,
-            "unknown source attribution could activate {scoped_exception}"
+            NetworkAction::Block,
+            "{scoped_exception} needs the page, so it cannot lift a block without one"
         );
     }
 
@@ -1119,4 +1273,553 @@ proptest! {
             .unwrap();
         prop_assert_ne!(left.digest(), right.digest());
     }
+}
+
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn rules_inside_a_false_if_block_are_not_compiled() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![source(
+                "!#if env_firefox\n||firefox-only.example^\n!#else\n||elsewhere.example^\n!#endif",
+            )],
+        )
+        .unwrap();
+    let action = |url: &str| {
+        rules
+            .evaluate(request(url, "https://page.example/"))
+            .unwrap()
+            .action()
+    };
+    assert_ne!(
+        action("https://firefox-only.example/a.js"),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action("https://elsewhere.example/a.js"),
+        NetworkAction::Block
+    );
+    assert_eq!(rules.report().sources()[0].ignored_lines(), 4);
+}
+
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_built_in_rules_let_ad_recovery_sites_load_only_adsense_s_loader() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                source("||pagead2.googlesyndication.com^"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let action = |url: &str, page: &str| rules.evaluate(request(url, page)).unwrap().action();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    for page in [
+        "https://www.allrecipes.com/recipe/1/",
+        "https://simplyrecipes.com/",
+        "https://m.people.com/a/",
+    ] {
+        assert_ne!(action(loader, page), NetworkAction::Block, "{page}");
+    }
+    for page in ["https://news.example/", "https://notallrecipes.com/"] {
+        assert_eq!(action(loader, page), NetworkAction::Block, "{page}");
+    }
+    assert_eq!(
+        action(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.jsx",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+    assert_eq!(
+        action(
+            "https://pagead2.googlesyndication.com/pagead/managed/js/adsense/m1/show_ads_impl.js",
+            "https://www.allrecipes.com/recipe/1/"
+        ),
+        NetworkAction::Block
+    );
+}
+
+#[cfg(feature = "runtime-exact")]
+#[test]
+fn the_built_in_rules_let_two_ad_recovery_sites_fetch_criteo_s_probe() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::Runtime,
+            vec![
+                source("||ads.example^\n||criteo.net^$third-party"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let action = |url: &str, page: &str, resource_type| {
+        rules
+            .evaluate(NetworkRequest::new(
+                url,
+                page,
+                resource_type,
+                RequestMethod::Get,
+            ))
+            .unwrap()
+            .action()
+    };
+    let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
+    for page in [
+        "https://www.mirror.co.uk/",
+        "https://www.tomsguide.com/news/",
+    ] {
+        assert_ne!(
+            action(probe, page, ResourceType::XmlHttpRequest),
+            NetworkAction::Block,
+            "{page}"
+        );
+        assert_eq!(
+            action(probe, page, ResourceType::Script),
+            NetworkAction::Block,
+            "{page}"
+        );
+        assert_eq!(
+            action(
+                "https://static.criteo.net/js/ld/publishertag.js",
+                page,
+                ResourceType::XmlHttpRequest
+            ),
+            NetworkAction::Block,
+            "{page}"
+        );
+    }
+    assert_eq!(
+        action(
+            probe,
+            "https://www.allrecipes.com/",
+            ResourceType::XmlHttpRequest
+        ),
+        NetworkAction::Block
+    );
+}
+
+#[cfg(feature = "webkit")]
+fn pruned(text: String) -> &'static crate::webkit_prune::PrunedRules {
+    Box::leak(Box::new(crate::webkit_prune::PrunedRules::parse(&text)))
+}
+
+#[cfg(feature = "webkit")]
+fn webkit_with(input: &str, entries: &[String]) -> CompiledRules {
+    Compiler::default()
+        .with_webkit_pruned(pruned(entries.join("\n")))
+        .compile(CompileTarget::WebKit, vec![source(input)])
+        .unwrap()
+}
+
+/// The digest entry for the last rule `input` emits.
+#[cfg(feature = "webkit")]
+fn entry_for(input: &str) -> String {
+    let compiled = webkit_with(input, &[]);
+    let emitted: Vec<Box<serde_json::value::RawValue>> =
+        serde_json::from_str(compiled.webkit().unwrap().json()).unwrap();
+    crate::webkit_rule_digest(emitted.last().unwrap().get().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(feature = "webkit")]
+const PRUNABLE: &str = "||tracker.example/collect/*/beacon.gif$image";
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_listed_wildcard_block_is_pruned_and_counted_apart_from_unsupported_rules() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = webkit_with(&input, &[entry_for(PRUNABLE)]);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.accepted_input_rules(), 2);
+    assert_eq!(coverage.converted_input_rules(), 1);
+    assert_eq!(coverage.pruned_input_rules(), 1);
+    assert_eq!(coverage.omitted_input_rules(), 0);
+    assert!(coverage.dropped().is_empty());
+    let json = compiled.webkit().unwrap().json();
+    assert!(json.contains("kept") && !json.contains("tracker"));
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn the_built_in_rules_compile_for_webkit_after_the_lists() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![
+                source("||pagead2.googlesyndication.com^\n||criteo.net^$third-party"),
+                crate::builtin::source(),
+            ],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.omitted_input_rules(), 0);
+    let json = rules.webkit().unwrap().json();
+    let exception = json.find("ignore-previous-rules").unwrap();
+    assert!(json.find("\"block\"").unwrap() < exception);
+    let emitted: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+    let loader = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    let probe = "https://static.criteo.net/js/ld/publishertag.prebid.js";
+    let (mut loader_sites, mut probe_sites) = (Vec::new(), Vec::new());
+    // A trailing `^` emits a pair of rules, so each exception is judged by
+    // what its rules match together.
+    let (mut loader_filters, mut probe_filters) = (Vec::new(), Vec::new());
+    for rule in emitted
+        .iter()
+        .filter(|rule| rule["action"]["type"] == "ignore-previous-rules")
+    {
+        let pattern = rule["trigger"]["url-filter"].as_str().unwrap();
+        let filter = regex::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let sites = rule["trigger"]["if-domain"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|domain| domain.as_str().unwrap());
+        if pattern.contains("adsbygoogle") {
+            loader_filters.push(filter);
+            loader_sites.extend(sites);
+        } else {
+            // The probe's fetch, never the tag as a script.
+            let types = rule["trigger"]["resource-type"].as_array().unwrap();
+            assert_eq!(types, &["fetch"], "{types:?}");
+            probe_filters.push(filter);
+            probe_sites.extend(sites);
+        }
+    }
+    let any =
+        |filters: &[regex::Regex], url: &str| filters.iter().any(|filter| filter.is_match(url));
+    assert!(any(&loader_filters, loader));
+    assert!(any(&loader_filters, &format!("{loader}?client=ca-pub-1")));
+    assert!(!any(&loader_filters, &format!("{loader}x")));
+    assert!(any(&probe_filters, probe));
+    assert!(!any(&probe_filters, &format!("{probe}x")));
+    loader_sites.sort_unstable();
+    loader_sites.dedup();
+    probe_sites.sort_unstable();
+    probe_sites.dedup();
+    // A leading `*` makes WebKit apply the exception on every subdomain too.
+    assert_eq!(
+        loader_sites,
+        [
+            "*allrecipes.com",
+            "*bild.de",
+            "*mirror.co.uk",
+            "*people.com",
+            "*simplyrecipes.com",
+            "*tomsguide.com"
+        ]
+    );
+    assert_eq!(probe_sites, ["*mirror.co.uk", "*tomsguide.com"]);
+}
+
+/// The built-in list marks YouTube's client for the quick fixes' edits, and
+/// only when those edits are admitted from uBO's own list.
+#[test]
+fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
+    let edits = [
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="lactmilli"]+={"params":"8AUB"})"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|lactmilli|inline|yahi|eafg|yaf4/].playbackContext.contentPlaybackContext.lactMilliseconds="${now}")"#,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"#,
+    ]
+    .join("\n");
+    let targets = [
+        #[cfg(feature = "runtime-exact")]
+        CompileTarget::Runtime,
+        #[cfg(feature = "webkit")]
+        CompileTarget::WebKit,
+    ];
+    for target in targets {
+        let program = |trusted: bool| {
+            let quick_fixes = FilterSource::new(
+                id("ublock-quick-fixes"),
+                SourceFormat::Standard,
+                format!("||ads.example^\n{edits}"),
+            );
+            let quick_fixes = if trusted {
+                quick_fixes.trusting_scriptlets()
+            } else {
+                quick_fixes
+            };
+            let rules = Compiler::default()
+                .compile(target, vec![quick_fixes, crate::builtin::source()])
+                .unwrap();
+            rules
+                .cosmetic_policy()
+                .and_then(|policy| policy.scriptlet_program().map(str::to_owned))
+        };
+        let marked = program(true).unwrap();
+        assert!(
+            marked.contains(r#"zephiumPlayerMarker("lactmilli channel yahi inline", "#),
+            "{target:?}"
+        );
+        assert!(marked.contains(r#"baseUrl*=reloadxhr", "onSnackbarMessage")"#));
+        assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
+        assert!(program(false).is_none_or(|script| !script.contains("zephiumPlayerMarker(\"")));
+    }
+}
+
+#[test]
+fn the_built_in_rules_add_no_block() {
+    let rules = include_str!("zephium_rules.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('!'));
+    for rule in rules {
+        assert!(
+            rule.starts_with("@@") || rule.contains("##+js(zephium-"),
+            "{rule}"
+        );
+    }
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn only_kept_rules_count_against_the_webkit_rule_limit() {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules: 1,
+        max_webkit_json_bytes: 64 * 1024,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = Compiler::new(limits)
+        .with_webkit_pruned(pruned(entry_for(PRUNABLE)))
+        .compile(CompileTarget::WebKit, vec![source(&input)])
+        .unwrap();
+    assert_eq!(compiled.report().webkit().unwrap().pruned_input_rules(), 1);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn an_edited_rule_is_not_pruned() {
+    // Case changes emit the same rule, since url-filters are case-insensitive.
+    let edited = PRUNABLE.replace("beacon", "beacom");
+    let compiled = webkit_with(&edited, &[entry_for(PRUNABLE)]);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.pruned_input_rules(), 0);
+    assert_eq!(coverage.converted_input_rules(), 1);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn an_entry_that_matches_no_rule_changes_nothing() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let without = webkit_with(&input, &[]);
+    let stray = webkit_with(&input, &[entry_for("||elsewhere.example/a/*/b.gif$image")]);
+    assert_eq!(
+        without.webkit().unwrap().json(),
+        stray.webkit().unwrap().json()
+    );
+    assert_eq!(stray.report().webkit().unwrap().pruned_input_rules(), 0);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn listed_exceptions_and_rules_without_a_wildcard_are_never_pruned() {
+    let exception = "@@||tracker.example/collect/*/beacon.gif$image";
+    let plain = "||plain.example/beacon.gif$image";
+    let input = format!("{PRUNABLE}\n{exception}\n{plain}\n");
+    let entries = [
+        entry_for(&format!("{PRUNABLE}\n{exception}")),
+        entry_for(plain),
+    ];
+    let compiled = webkit_with(&input, &entries);
+    let coverage = compiled.report().webkit().unwrap();
+    assert_eq!(coverage.pruned_input_rules(), 0);
+    assert_eq!(coverage.converted_input_rules(), 3);
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn release_tooling_can_compile_every_rule() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compiled = Compiler::default()
+        .with_webkit_pruned(pruned(entry_for(PRUNABLE)))
+        .without_webkit_pruning()
+        .compile(CompileTarget::WebKit, vec![source(&input)])
+        .unwrap();
+    assert_eq!(compiled.report().webkit().unwrap().pruned_input_rules(), 0);
+    assert!(compiled.webkit().unwrap().json().contains("tracker"));
+}
+
+#[cfg(all(feature = "webkit", feature = "runtime"))]
+#[test]
+fn the_runtime_target_ignores_pruned_rules() {
+    let input = format!("||kept.example^$script\n{PRUNABLE}\n");
+    let compile = |entries: &[String]| {
+        Compiler::default()
+            .with_webkit_pruned(pruned(entries.join("\n")))
+            .compile(CompileTarget::Runtime, vec![source(&input)])
+            .unwrap()
+    };
+    let (with, without) = (compile(&[entry_for(PRUNABLE)]), compile(&[]));
+    assert_eq!(with.digest(), without.digest());
+    assert_eq!(with.report(), without.report());
+}
+
+#[cfg(all(feature = "webkit", feature = "runtime"))]
+#[test]
+fn badware_wildcard_rules_leave_webkit_only_for_page_and_frame_loads() {
+    let rules = concat!(
+        "||scam.example^$doc\n",
+        "||cdn.example/*/alarm.mp3\n",
+        "||lure.example/*/winpage$doc\n",
+        "||lure.example/*/framepage$subdocument\n",
+        "||scam.example/*/both$doc,script\n",
+        "/track/*/pixel$image,xhr\n",
+    );
+    let compile_for = |target: CompileTarget, id_text: &str| {
+        Compiler::default()
+            .compile(
+                target,
+                vec![FilterSource::new(
+                    id(id_text),
+                    SourceFormat::Standard,
+                    rules.to_owned(),
+                )],
+            )
+            .unwrap()
+    };
+    let compile = |id_text: &str| compile_for(CompileTarget::WebKit, id_text);
+    let badware = compile("ublock-badware");
+    let coverage = badware.report().webkit().unwrap();
+    // The navigation check judges only these two; every other type stays blocked here.
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 2);
+    assert_eq!(coverage.converted_input_rules(), 4);
+    let json = badware.webkit().unwrap().json();
+    assert!(json.contains("alarm") && json.contains("both") && json.contains("pixel"));
+    assert!(!json.contains("winpage") && !json.contains("framepage"));
+    #[cfg(feature = "runtime-exact")]
+    {
+        // The navigation check compiles the badware list for the runtime
+        // matcher and refuses both loads WebKit no longer sees.
+        let navigation = compile_for(CompileTarget::Runtime, "ublock-badware");
+        let decide = |url: &str, page: &str, resource| {
+            navigation
+                .evaluate(NetworkRequest::new(url, page, resource, RequestMethod::Get))
+                .unwrap()
+                .action()
+        };
+        let page = "https://lure.example/a/b/winpage";
+        assert_eq!(
+            decide(page, page, ResourceType::Document),
+            NetworkAction::Block
+        );
+        assert_eq!(
+            decide(
+                "https://lure.example/a/framepage",
+                "https://news.example/",
+                ResourceType::Subdocument
+            ),
+            NetworkAction::Block
+        );
+        let elsewhere = "https://news.example/a/winpage";
+        assert_eq!(
+            decide(elsewhere, elsewhere, ResourceType::Document),
+            NetworkAction::Allow
+        );
+    }
+    let other = compile("ublock-filters");
+    let coverage = other.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 6);
+}
+
+#[cfg(all(feature = "webkit", not(feature = "runtime")))]
+#[test]
+fn without_the_navigation_check_badware_page_rules_stay_in_webkit() {
+    let rules = Compiler::default()
+        .compile(
+            CompileTarget::WebKit,
+            vec![FilterSource::new(
+                id("ublock-badware"),
+                SourceFormat::Standard,
+                "||scam.example/*/winpage$doc\n||scam.example/*/framepage$subdocument\n".to_owned(),
+            )],
+        )
+        .unwrap();
+    let coverage = rules.report().webkit().unwrap();
+    assert_eq!(coverage.dropped_for(WebKitDropReason::NavigationChecked), 0);
+    assert_eq!(coverage.converted_input_rules(), 2);
+    let json = rules.webkit().unwrap().json();
+    assert!(json.contains("winpage") && json.contains("framepage"));
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_rule_stays_unsplit_where_splitting_would_pass_the_webkit_rule_limit() {
+    let compile =
+        |max_webkit_rules| compile_within(max_webkit_rules, 64 * 1024, "/banner.js^$script\n");
+    let split = compile(2);
+    let split = split.webkit().unwrap();
+    assert_eq!(split.rule_count(), 2);
+    assert!(!split.json().contains(".*"));
+    let unsplit = compile(1);
+    let unsplit = unsplit.webkit().unwrap();
+    assert_eq!(unsplit.rule_count(), 1);
+    assert!(unsplit
+        .json()
+        .contains(r"/banner\\.js([^A-Za-z0-9_.%-].*)?$"));
+}
+
+#[cfg(feature = "webkit")]
+fn compile_within(
+    max_webkit_rules: usize,
+    max_webkit_json_bytes: usize,
+    rules: &str,
+) -> CompiledRules {
+    let limits = CompileLimits::new(CompileLimitValues {
+        max_sources: 1,
+        max_source_bytes: 1_024,
+        max_total_source_bytes: 1_024,
+        max_line_bytes: 1_024,
+        max_rules: 8,
+        max_physical_lines: 8,
+        max_webkit_rules,
+        max_webkit_json_bytes,
+        max_request_url_bytes: 4_096,
+        max_source_url_bytes: 4_096,
+    })
+    .unwrap();
+    Compiler::new(limits)
+        .compile(CompileTarget::WebKit, vec![source(rules)])
+        .unwrap()
+}
+
+#[cfg(feature = "webkit")]
+#[test]
+fn a_list_that_fits_only_unsplit_is_compiled_unsplit_whole() {
+    // Split, the first rule alone would take both places; unsplit, both fit.
+    let rules = "/a.js^$script\n/b.js^$script\n";
+    let whole = compile_within(2, 64 * 1024, rules);
+    let whole = whole.webkit().unwrap();
+    assert_eq!(whole.rule_count(), 2);
+    assert_eq!(whole.json().matches("([^A-Za-z0-9_.%-].*)?$").count(), 2);
+
+    let unsplit_bytes = compile_within(1, 64 * 1024, "/banner.js^$script\n")
+        .webkit()
+        .unwrap()
+        .json()
+        .len();
+    let by_bytes = compile_within(2, unsplit_bytes, "/banner.js^$script\n");
+    let by_bytes = by_bytes.webkit().unwrap();
+    assert_eq!(
+        by_bytes.rule_count(),
+        1,
+        "the split form is past the byte limit"
+    );
 }

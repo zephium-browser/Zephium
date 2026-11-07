@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_SHARED_WORKER,
 };
 use webview2_com::WebResourceRequestedEventHandler;
+use windows::Win32::Foundation::E_INVALIDARG;
 use windows_core::{Interface, PCWSTR, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::blocker::{
@@ -86,7 +88,54 @@ pub(crate) struct ContentPolicyRegistration {
     core: Option<ICoreWebView2>,
     core22: Option<ICoreWebView2_22>,
     token: Option<i64>,
-    installed_filters: usize,
+    installed_filters: Rc<Cell<usize>>,
+    // Set before cleanup touches anything, for a pause change it interrupts.
+    retired: Rc<Cell<bool>>,
+    pause: Option<crate::platform::content_pause::PauseRegistration>,
+    published: Option<Publication>,
+}
+
+/// What a cohort tells its view: its report and the retry the view's
+/// protection reaches. The protection holds the retry only weakly, so it ends
+/// with this cohort.
+struct Publication {
+    protection: crate::platform::content_protection::ViewProtection,
+    retry: Rc<dyn Fn()>,
+    settle: Rc<dyn Fn()>,
+}
+
+impl Publication {
+    fn of<C: FilterCohort + 'static>(cohort: Rc<LiveCohort<C>>) -> Self {
+        let retrier = cohort.clone();
+        Self {
+            protection: cohort.protection.clone(),
+            retry: Rc::new(move || retrier.retry()),
+            settle: Rc::new(move || cohort.settle()),
+        }
+    }
+
+    /// An unfiltered view: never degraded, and filters a retired cohort
+    /// stranded are still taken back on a later commit.
+    fn unfiltered(
+        filters: Option<impl FilterCohort + 'static>,
+        protection: &crate::platform::content_protection::ViewProtection,
+    ) -> Self {
+        let (stranded, settled) = (protection.clone(), protection.clone());
+        Self {
+            protection: protection.clone(),
+            retry: Rc::new(move || {
+                if let Some(filters) = &filters {
+                    reclaim_stranded(filters, &stranded);
+                }
+            }),
+            settle: Rc::new(move || settled.settle(false)),
+        }
+    }
+
+    fn publish(&self) {
+        self.protection.set_retry(Rc::downgrade(&self.retry));
+        (self.settle)();
+    }
 }
 
 impl ContentPolicyRegistration {
@@ -95,7 +144,18 @@ impl ContentPolicyRegistration {
             core: None,
             core22: None,
             token: None,
-            installed_filters: 0,
+            installed_filters: Rc::default(),
+            retired: Rc::default(),
+            pause: None,
+            published: None,
+        }
+    }
+
+    /// Makes this cohort's state the view's again, after a replacement that
+    /// published its own was rolled back.
+    pub(crate) fn republish(&self) {
+        if let Some(published) = &self.published {
+            published.publish();
         }
     }
 
@@ -104,8 +164,13 @@ impl ContentPolicyRegistration {
     }
 
     fn cleanup(&mut self) -> Result<(), ContentRuleApplyFailure> {
+        self.retired.set(true);
+        // A retired cohort must not reinstall filters on a later pause change
+        // or a retry.
+        self.pause = None;
+        self.published = None;
         if self.core.is_none() && self.core22.is_none() {
-            return if self.token.is_none() && self.installed_filters == 0 {
+            return if self.token.is_none() && self.installed_filters.get() == 0 {
                 Ok(())
             } else {
                 Err(ContentRuleApplyFailure::NativeCleanup)
@@ -125,8 +190,8 @@ impl ContentPolicyRegistration {
             }
             self.token = None;
         }
-        while self.installed_filters != 0 {
-            let index = self.installed_filters - 1;
+        while self.installed_filters.get() != 0 {
+            let index = self.installed_filters.get() - 1;
             let Some((pattern, context)) = filter_registration(index) else {
                 return Err(ContentRuleApplyFailure::NativeCleanup);
             };
@@ -140,7 +205,7 @@ impl ContentPolicyRegistration {
                 eprintln!("content blocker: WebView2 filter removal failed: {error}");
                 return Err(ContentRuleApplyFailure::NativeCleanup);
             }
-            self.installed_filters = index;
+            self.installed_filters.set(index);
         }
         self.core = None;
         self.core22 = None;
@@ -186,6 +251,8 @@ pub(crate) fn install_on_view(
         view,
         policy,
         &crate::platform::content_pause::ContentPause::default(),
+        &crate::platform::content_protection::ViewProtection::default(),
+        &crate::platform::top_document::TopDocument::default(),
     )
 }
 
@@ -193,9 +260,18 @@ pub(crate) fn install_scoped_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,
     pause: &crate::platform::content_pause::ContentPause,
+    protection: &crate::platform::content_protection::ViewProtection,
+    top_document: &crate::platform::top_document::TopDocument,
 ) -> Result<ContentPolicyRegistration, ContentRuleApplyFailure> {
     let NativeContentPolicy::Runtime { policy, .. } = policy else {
-        return Ok(ContentPolicyRegistration::allow_all());
+        let mut registration = ContentPolicyRegistration::allow_all();
+        let filters = unsafe { view.controller().CoreWebView2() }
+            .ok()
+            .and_then(|core| core.cast::<ICoreWebView2_22>().ok());
+        let publication = Publication::unfiltered(filters, protection);
+        publication.publish();
+        registration.published = Some(publication);
+        return Ok(registration);
     };
     let controller = view.controller();
     let core = unsafe { controller.CoreWebView2() }
@@ -220,6 +296,7 @@ pub(crate) fn install_scoped_on_view(
     .map_err(|_| ContentRuleApplyFailure::NativeInstallation)?;
     let paused = pause.signal();
     let statistics = pause.statistics().cloned();
+    let top_document = top_document.clone();
     let handler = WebResourceRequestedEventHandler::create(Box::new(move |_sender, args| {
         #[cfg(test)]
         let mut sample = qualification::CallbackSample::start();
@@ -237,7 +314,7 @@ pub(crate) fn install_scoped_on_view(
             let Some(args) = args else {
                 return Ok(());
             };
-            match decide_observed_request(&args, callback_policy.as_ref()) {
+            match decide_observed_request(&args, callback_policy.as_ref(), &top_document) {
                 Some(NetworkDecision::Block) => {}
                 Some(NetworkDecision::Allow) => {
                     #[cfg(test)]
@@ -272,9 +349,18 @@ pub(crate) fn install_scoped_on_view(
         core: Some(core.clone()),
         core22: Some(core22.clone()),
         token: None,
-        installed_filters: 0,
+        installed_filters: Rc::default(),
+        retired: Rc::default(),
+        pause: None,
+        published: None,
     };
-    for index in 0..FILTER_REGISTRATION_COUNT {
+    // A view paused from the start installs its filters only when resumed.
+    let wanted = if pause.paused() {
+        0
+    } else {
+        FILTER_REGISTRATION_COUNT
+    };
+    for index in 0..wanted {
         let Some((pattern, context)) = filter_registration(index) else {
             return Err(match registration.cleanup() {
                 Ok(()) => ContentRuleApplyFailure::NativeInstallation,
@@ -295,7 +381,7 @@ pub(crate) fn install_scoped_on_view(
                 Err(_) => ContentRuleApplyFailure::NativeCleanup,
             });
         }
-        registration.installed_filters += 1;
+        registration.installed_filters.set(index + 1);
     }
     let mut token = 0;
     if unsafe { core.add_WebResourceRequested(&handler, &mut token) }.is_err() {
@@ -305,7 +391,265 @@ pub(crate) fn install_scoped_on_view(
         });
     }
     registration.token = Some(token);
+    let cohort = Rc::new(LiveCohort {
+        filters: core22,
+        installed: registration.installed_filters.clone(),
+        retired: registration.retired.clone(),
+        busy: Cell::new(false),
+        live: pause.signal(),
+        protection: protection.clone(),
+    });
+    let follower = cohort.clone();
+    let publication = Publication::of(cohort);
+    publication.publish();
+    registration.pause = pause.register(move |_| follower.follow());
+    registration.published = Some(publication);
     Ok(registration)
+}
+
+/// A cohort's state as its pause changes and retries share it.
+struct LiveCohort<C> {
+    filters: C,
+    installed: Rc<Cell<usize>>,
+    retired: Rc<Cell<bool>>,
+    busy: Cell<bool>,
+    live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    protection: crate::platform::content_protection::ViewProtection,
+}
+
+impl<C: FilterCohort> LiveCohort<C> {
+    fn paused(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn follow(&self) {
+        let paused = || self.paused();
+        let follow = Follow {
+            installed: &self.installed,
+            retired: &self.retired,
+            paused: &paused,
+            protection: &self.protection,
+        };
+        follow_pause(&self.filters, &follow, &self.busy);
+        self.settle();
+    }
+
+    /// A resumed view is protected only with every filter installed; a paused
+    /// one is right either way, since the callback reads the pause first.
+    fn settle(&self) {
+        if !self.retired.get() && !self.busy.get() {
+            self.protection
+                .settle(!self.paused() && self.installed.get() != FILTER_REGISTRATION_COUNT);
+        }
+    }
+
+    /// Takes back filters a retired cohort left on the view, then follows the
+    /// pause again, for a view whose last change left it degraded.
+    fn retry(&self) {
+        if self.retired.get() || self.busy.get() {
+            return;
+        }
+        reclaim_stranded(&self.filters, &self.protection);
+        self.follow();
+    }
+}
+
+/// Removes the filters retired cohorts left on the view; any that stay are
+/// stranded again.
+fn reclaim_stranded(
+    filters: &impl FilterCohort,
+    protection: &crate::platform::content_protection::ViewProtection,
+) {
+    for index in protection.take_stranded() {
+        if let Err(error) = filters.remove(index) {
+            eprintln!("content blocker: a stranded WebView2 filter stays: {error}");
+            protection.strand(index);
+        }
+    }
+}
+
+/// One view's cohort of request filters, as pausing and resuming change it.
+trait FilterCohort {
+    fn add(&self, index: usize) -> windows_core::Result<()>;
+    fn remove(&self, index: usize) -> windows_core::Result<()>;
+}
+
+impl FilterCohort for ICoreWebView2_22 {
+    fn add(&self, index: usize) -> windows_core::Result<()> {
+        let (pattern, context) =
+            filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        // SAFETY: `self` is a live interface held by the registration on the
+        // UI thread that created it, and the pattern is a static wide string.
+        unsafe {
+            self.AddWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                context,
+                FILTER_SOURCE_KINDS,
+            )
+        }
+    }
+
+    fn remove(&self, index: usize) -> windows_core::Result<()> {
+        let (pattern, context) =
+            filter_registration(index).ok_or_else(|| windows_core::Error::from(E_INVALIDARG))?;
+        // SAFETY: as in `add`; the tuple is one this cohort added.
+        unsafe {
+            self.RemoveWebResourceRequestedFilterWithRequestSourceKinds(
+                pattern,
+                context,
+                FILTER_SOURCE_KINDS,
+            )
+        }
+    }
+}
+
+/// How many times a resume tries to install a cohort whole: the first time,
+/// then once more after removing what the first left.
+const RESUME_TRIES: usize = 2;
+/// How many times one pause change follows a pause that keeps changing while
+/// its filters are being changed.
+const MAX_FOLLOWS: usize = 4;
+
+/// What a pause change needs of its cohort's live state.
+struct Follow<'a> {
+    installed: &'a Cell<usize>,
+    /// Set first by the registration's cleanup, which may run in a message
+    /// pumped from inside one of this cohort's native calls.
+    retired: &'a Cell<bool>,
+    paused: &'a dyn Fn() -> bool,
+    /// Where a filter a retired cohort could not take back is reported, for a
+    /// later retry.
+    protection: &'a crate::platform::content_protection::ViewProtection,
+}
+
+struct Busy<'a>(&'a Cell<bool>);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// Pausing removes the cohort's filters, so a paused view's requests never
+/// wait on this thread; resuming installs them again. A filter missing on a
+/// resumed view would let its requests through unseen, so a cohort is meant to
+/// be whole or empty: a resume that cannot install every filter tries again,
+/// and after that removes them all, leaving the view unfiltered as if paused
+/// until its next resume. Only filters that cannot be removed either are left
+/// in place, and the log says how many. A pause that cannot remove a filter
+/// leaves it to the callback's own pause check.
+///
+/// A native call can pump messages, and the pause can change again inside it.
+/// That nested change only finds the cohort busy; this call reads the live
+/// pause after every native call and follows wherever it ends up. A cleanup
+/// pumped the same way retires the cohort: its filters are then the
+/// cleanup's, and this call only takes back one it added meanwhile.
+fn follow_pause(cohort: &impl FilterCohort, follow: &Follow<'_>, busy: &Cell<bool>) {
+    if follow.retired.get() || busy.replace(true) {
+        return;
+    }
+    let _busy = Busy(busy);
+    for _ in 0..MAX_FOLLOWS {
+        let target = (follow.paused)();
+        let settled = || !follow.retired.get() && (follow.paused)() == target;
+        if target {
+            if let Err(error) = remove_filters(cohort, follow, &settled) {
+                eprintln!("content blocker: WebView2 filter removal on pause failed: {error}");
+            }
+        } else {
+            resume(cohort, follow, &settled);
+        }
+        if follow.retired.get() || settled() {
+            return;
+        }
+    }
+    // A whole cohort is right whichever way the pause ends up, since the
+    // callback reads the pause first; an empty one would fail open on a view
+    // left resumed by a change this pass finds busy.
+    eprintln!(
+        "content blocker: pause kept changing during a filter change; keeping all {FILTER_REGISTRATION_COUNT} filters until the pause settles"
+    );
+    resume(cohort, follow, &|| !follow.retired.get());
+}
+
+fn resume(cohort: &impl FilterCohort, follow: &Follow<'_>, settled: &dyn Fn() -> bool) {
+    let installed = follow.installed;
+    let mut failure = None;
+    for _ in 0..RESUME_TRIES {
+        match add_filters(cohort, follow, settled) {
+            Ok(()) => return,
+            Err(error) => failure = Some(error),
+        }
+        let _ = remove_filters(cohort, follow, settled);
+        if !settled() {
+            return;
+        }
+    }
+    if installed.get() != 0 {
+        let _ = remove_filters(cohort, follow, settled);
+    }
+    let Some(error) = failure else {
+        return;
+    };
+    if installed.get() == 0 {
+        eprintln!(
+            "content blocker: WebView2 filters could not be installed on resume, so the view stays unfiltered until its next resume: {error}"
+        );
+    } else {
+        eprintln!(
+            "content blocker: WebView2 filters could not be installed on resume or removed after, so the view is partially filtered ({} of {FILTER_REGISTRATION_COUNT}) until its next resume: {error}",
+            installed.get()
+        );
+    }
+}
+
+/// Adds the cohort's missing filters while the pause stays where it was. A
+/// filter is counted only once added, so a cleanup pumped by the call leaves
+/// it to this one, which takes it back.
+fn add_filters(
+    cohort: &impl FilterCohort,
+    follow: &Follow<'_>,
+    settled: &dyn Fn() -> bool,
+) -> windows_core::Result<()> {
+    let installed = follow.installed;
+    while installed.get() < FILTER_REGISTRATION_COUNT && settled() {
+        let index = installed.get();
+        cohort.add(index)?;
+        if follow.retired.get() {
+            if let Err(error) = cohort.remove(index) {
+                eprintln!("content blocker: a filter added while its view retired stays: {error}");
+                follow.protection.strand(index);
+            }
+            return Ok(());
+        }
+        installed.set(index + 1);
+    }
+    Ok(())
+}
+
+/// Removes the cohort's filters while the pause stays where it was. A filter
+/// is uncounted before its call, so a cleanup pumped by the call never removes
+/// it a second time.
+fn remove_filters(
+    cohort: &impl FilterCohort,
+    follow: &Follow<'_>,
+    settled: &dyn Fn() -> bool,
+) -> windows_core::Result<()> {
+    let installed = follow.installed;
+    while installed.get() > 0 && settled() {
+        let index = installed.get() - 1;
+        installed.set(index);
+        if let Err(error) = cohort.remove(index) {
+            if follow.retired.get() {
+                eprintln!("content blocker: a filter of a retired view stays: {error}");
+                follow.protection.strand(index);
+            } else {
+                installed.set(index + 1);
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -317,20 +661,34 @@ struct RequestBuffers {
 fn decide_observed_request(
     args: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs,
     policy: &dyn NetworkRequestPolicy,
+    top_document: &crate::platform::top_document::TopDocument,
 ) -> Option<NetworkDecision> {
     REQUEST_BUFFERS
         .try_with(|buffers| {
             let mut buffers = buffers.try_borrow_mut().ok()?;
             let resource_type = extract_request_into(args, &mut buffers)?;
-            let request = NetworkRequest::source_independent(
-                &buffers.url,
-                &buffers.method,
-                resource_type,
-                // The registration admits only the DOCUMENT source kind. Avoid a
-                // redundant per-request interface cast and COM query on this
-                // synchronous hot path.
-                NetworkRequestSourceKind::Document,
-            )?;
+            // The registration admits only the DOCUMENT source kind. Avoid a
+            // redundant per-request interface cast and COM query on this
+            // synchronous hot path.
+            let source_kind = NetworkRequestSourceKind::Document;
+            // A frame's requests are judged against the view's main document:
+            // WebView2 does not say which frame sent them.
+            let top = top_document.current();
+            let request = match top.as_deref() {
+                Some(top) => NetworkRequest::top_level_approximation(
+                    &buffers.url,
+                    top,
+                    &buffers.method,
+                    resource_type,
+                    source_kind,
+                ),
+                None => NetworkRequest::source_independent(
+                    &buffers.url,
+                    &buffers.method,
+                    resource_type,
+                    source_kind,
+                ),
+            }?;
             #[cfg(test)]
             let started = std::time::Instant::now();
             let decision = policy.decide(&request);
@@ -399,6 +757,350 @@ fn resource_type(context: COREWEBVIEW2_WEB_RESOURCE_CONTEXT) -> Option<NetworkRe
 mod tests {
     use super::*;
     use zephium_core::blocker::{ContentRuleCoverage, NetworkAttribution};
+
+    /// A cohort whose adds fail at `fail_at` for the first `failures` attempts.
+    struct FlakyCohort {
+        fail_at: usize,
+        failures: Cell<usize>,
+        remove_failures: Cell<usize>,
+    }
+
+    impl FilterCohort for FlakyCohort {
+        fn add(&self, index: usize) -> windows_core::Result<()> {
+            if index == self.fail_at && self.failures.get() > 0 {
+                self.failures.set(self.failures.get() - 1);
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        }
+
+        fn remove(&self, _index: usize) -> windows_core::Result<()> {
+            if self.remove_failures.get() > 0 {
+                self.remove_failures.set(self.remove_failures.get() - 1);
+                return Err(E_INVALIDARG.into());
+            }
+            Ok(())
+        }
+    }
+
+    fn flaky(fail_at: usize, failures: usize) -> FlakyCohort {
+        FlakyCohort {
+            fail_at,
+            failures: Cell::new(failures),
+            remove_failures: Cell::new(0),
+        }
+    }
+
+    fn follow(cohort: &impl FilterCohort, installed: &Cell<usize>, paused: bool) {
+        let follow = Follow {
+            installed,
+            retired: &Cell::new(false),
+            paused: &|| paused,
+            protection: &Default::default(),
+        };
+        follow_pause(cohort, &follow, &Cell::new(false));
+    }
+
+    /// A cohort whose native calls can change the pause, or retire the cohort
+    /// as its cleanup would, from inside the call, the way a message pumped by
+    /// a WebView2 call would. `filters` counts what WebView2 would hold.
+    #[derive(Default)]
+    struct Reentrant {
+        calls: Cell<usize>,
+        flip_at: Option<usize>,
+        flip_every: bool,
+        retire_at: Option<usize>,
+        paused: Rc<Cell<bool>>,
+        installed: Rc<Cell<usize>>,
+        retired: Rc<Cell<bool>>,
+        busy: Rc<Cell<bool>>,
+        filters: Cell<isize>,
+        protection: crate::platform::content_protection::ViewProtection,
+    }
+
+    impl Reentrant {
+        fn follow(&self) {
+            let paused = self.paused.clone();
+            let paused = move || paused.get();
+            let follow = Follow {
+                installed: &self.installed,
+                retired: &self.retired,
+                paused: &paused,
+                protection: &self.protection,
+            };
+            follow_pause(self, &follow, &self.busy);
+        }
+
+        fn call(&self) {
+            self.calls.set(self.calls.get() + 1);
+            if self.retire_at == Some(self.calls.get()) {
+                // As the registration's cleanup: retired first, then every
+                // counted filter removed.
+                self.retired.set(true);
+                while self.installed.get() > 0 {
+                    self.installed.set(self.installed.get() - 1);
+                    self.filters.set(self.filters.get() - 1);
+                }
+            }
+            if self.flip_every || self.flip_at == Some(self.calls.get()) {
+                self.paused.set(!self.paused.get());
+                self.follow();
+            }
+        }
+    }
+
+    impl FilterCohort for Reentrant {
+        fn add(&self, _index: usize) -> windows_core::Result<()> {
+            self.call();
+            self.filters.set(self.filters.get() + 1);
+            Ok(())
+        }
+
+        fn remove(&self, _index: usize) -> windows_core::Result<()> {
+            self.call();
+            self.filters.set(self.filters.get() - 1);
+            Ok(())
+        }
+    }
+
+    fn reentrant(paused: bool, installed: usize) -> Reentrant {
+        Reentrant {
+            paused: Rc::new(Cell::new(paused)),
+            installed: Rc::new(Cell::new(installed)),
+            filters: Cell::new(installed as isize),
+            ..Reentrant::default()
+        }
+    }
+
+    #[test]
+    fn a_pause_change_inside_a_native_call_is_followed_to_where_it_ends() {
+        for (start_paused, start_installed) in [(true, FILTER_REGISTRATION_COUNT), (false, 0)] {
+            let cohort = Reentrant {
+                flip_at: Some(3),
+                ..reentrant(start_paused, start_installed)
+            };
+            cohort.follow();
+            assert_ne!(cohort.paused.get(), start_paused);
+            let whole = if cohort.paused.get() {
+                0
+            } else {
+                FILTER_REGISTRATION_COUNT
+            };
+            assert_eq!(cohort.installed.get(), whole);
+            assert_eq!(cohort.filters.get(), whole as isize);
+            assert!(!cohort.busy.get());
+        }
+    }
+
+    #[test]
+    fn a_cohort_retired_inside_a_native_call_is_left_with_no_filter() {
+        for (start_paused, start_installed) in [(false, 0), (true, FILTER_REGISTRATION_COUNT)] {
+            let cohort = Reentrant {
+                retire_at: Some(3),
+                ..reentrant(start_paused, start_installed)
+            };
+            cohort.follow();
+            assert_eq!(cohort.installed.get(), 0);
+            assert_eq!(cohort.filters.get(), 0, "nothing leaks or is removed twice");
+            assert!(!cohort.busy.get());
+            // A later pause change finds the cohort retired and adds nothing.
+            cohort.paused.set(false);
+            cohort.follow();
+            assert_eq!(cohort.filters.get(), 0);
+        }
+    }
+
+    #[test]
+    fn a_pause_that_never_settles_keeps_the_whole_cohort() {
+        let cohort = Reentrant {
+            flip_every: true,
+            ..reentrant(false, 0)
+        };
+        cohort.follow();
+        assert_eq!(cohort.installed.get(), FILTER_REGISTRATION_COUNT);
+        assert_eq!(cohort.filters.get(), FILTER_REGISTRATION_COUNT as isize);
+        assert!(!cohort.busy.get());
+    }
+
+    fn live<C: FilterCohort>(filters: C, paused: bool, installed: usize) -> LiveCohort<C> {
+        LiveCohort {
+            filters,
+            installed: Rc::new(Cell::new(installed)),
+            retired: Rc::default(),
+            busy: Cell::new(false),
+            live: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(paused)),
+            protection: Default::default(),
+        }
+    }
+
+    fn degraded(
+        protection: &crate::platform::content_protection::ViewProtection,
+    ) -> Rc<Cell<bool>> {
+        let degraded = Rc::new(Cell::new(false));
+        let seen = degraded.clone();
+        protection.on_change(move |report| seen.set(report.degraded));
+        degraded
+    }
+
+    #[test]
+    fn a_resume_that_cannot_install_shows_degraded_until_a_retry_restores_it() {
+        let cohort = live(flaky(3, RESUME_TRIES), false, 0);
+        let degraded = degraded(&cohort.protection);
+        cohort.follow();
+        assert_eq!(cohort.installed.get(), 0);
+        assert!(degraded.get());
+        // The add that failed works now, as on a later navigation.
+        cohort.retry();
+        assert_eq!(cohort.installed.get(), FILTER_REGISTRATION_COUNT);
+        assert!(!degraded.get());
+    }
+
+    #[test]
+    fn a_paused_view_is_never_degraded() {
+        let cohort = live(flaky(0, 0), true, 0);
+        let degraded = degraded(&cohort.protection);
+        cohort.protection.settle(true);
+        cohort.follow();
+        assert!(!degraded.get());
+    }
+
+    /// Retires its cohort from inside every add, and cannot remove filters.
+    struct Retiring {
+        retired: Rc<Cell<bool>>,
+    }
+
+    impl FilterCohort for Retiring {
+        fn add(&self, _index: usize) -> windows_core::Result<()> {
+            self.retired.set(true);
+            Ok(())
+        }
+
+        fn remove(&self, _index: usize) -> windows_core::Result<()> {
+            Err(E_INVALIDARG.into())
+        }
+    }
+
+    #[test]
+    fn a_filter_a_retired_cohort_cannot_take_back_is_stranded_for_the_next_retry() {
+        let retiring = live(
+            Retiring {
+                retired: Rc::default(),
+            },
+            false,
+            0,
+        );
+        let stranded = Rc::new(Cell::new(0));
+        let seen = stranded.clone();
+        retiring
+            .protection
+            .on_change(move |report| seen.set(report.stranded_filters));
+        let retired = retiring.filters.retired.clone();
+        let follow = Follow {
+            installed: &retiring.installed,
+            retired: &retired,
+            paused: &|| false,
+            protection: &retiring.protection,
+        };
+        follow_pause(&retiring.filters, &follow, &Cell::new(false));
+        assert_eq!(stranded.get(), 1);
+        // The view's next cohort takes it back on its retry.
+        let next = LiveCohort {
+            protection: retiring.protection.clone(),
+            ..live(flaky(0, 0), false, FILTER_REGISTRATION_COUNT)
+        };
+        next.retry();
+        assert_eq!(stranded.get(), 0);
+    }
+
+    #[test]
+    fn an_unfiltered_view_still_takes_back_stranded_filters() {
+        let protection = crate::platform::content_protection::ViewProtection::default();
+        let stranded = Rc::new(Cell::new(0));
+        let seen = stranded.clone();
+        protection.on_change(move |report| seen.set(report.stranded_filters));
+        let unfiltered = Publication::unfiltered(Some(flaky(0, 0)), &protection);
+        unfiltered.publish();
+        protection.strand(4);
+        assert_eq!(stranded.get(), 1);
+        protection.retry();
+        assert_eq!(stranded.get(), 0);
+    }
+
+    #[test]
+    fn a_rolled_back_replacement_gives_the_view_back_to_the_live_cohort() {
+        let previous = Rc::new(live(flaky(0, 0), false, 0));
+        let degraded = degraded(&previous.protection);
+        let kept = Publication::of(previous.clone());
+        kept.publish();
+        assert!(degraded.get());
+        let replacement = Rc::new(LiveCohort {
+            protection: previous.protection.clone(),
+            ..live(flaky(0, 0), false, FILTER_REGISTRATION_COUNT)
+        });
+        let replaced = Publication::of(replacement.clone());
+        replaced.publish();
+        assert!(!degraded.get());
+        // A later view fails: the replacement retires, the previous cohort stays.
+        replacement.retired.set(true);
+        drop(replaced);
+        kept.publish();
+        assert!(degraded.get());
+        previous.protection.retry();
+        assert_eq!(previous.installed.get(), FILTER_REGISTRATION_COUNT);
+        assert!(!degraded.get());
+    }
+
+    #[test]
+    fn a_resume_rebuilds_a_cohort_that_did_not_install_whole() {
+        let installed = Cell::new(0);
+        follow(&flaky(3, 1), &installed, false);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
+
+    #[test]
+    fn a_resume_that_keeps_failing_leaves_no_filter_half_installed() {
+        let installed = Cell::new(0);
+        follow(&flaky(3, RESUME_TRIES), &installed, false);
+        assert_eq!(installed.get(), 0);
+        // The next resume tries again.
+        follow(&flaky(3, 0), &installed, false);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
+
+    #[test]
+    fn a_resume_whose_rollback_fails_still_ends_unfiltered_or_counts_what_stayed() {
+        // Both rollbacks fail, the last removal succeeds: nothing is left.
+        let installed = Cell::new(0);
+        let late = FlakyCohort {
+            remove_failures: Cell::new(RESUME_TRIES),
+            ..flaky(3, RESUME_TRIES)
+        };
+        follow(&late, &installed, false);
+        assert_eq!(installed.get(), 0);
+        // Removals keep failing: the filters added before the failure stay,
+        // and only those.
+        let installed = Cell::new(0);
+        let stuck = FlakyCohort {
+            remove_failures: Cell::new(usize::MAX),
+            ..flaky(3, RESUME_TRIES)
+        };
+        follow(&stuck, &installed, false);
+        assert_eq!(installed.get(), 3);
+    }
+
+    #[test]
+    fn a_pause_removes_every_filter_and_keeps_those_it_cannot() {
+        let installed = Cell::new(FILTER_REGISTRATION_COUNT);
+        follow(&flaky(0, 0), &installed, true);
+        assert_eq!(installed.get(), 0);
+        let installed = Cell::new(FILTER_REGISTRATION_COUNT);
+        let stuck = FlakyCohort {
+            remove_failures: Cell::new(usize::MAX),
+            ..flaky(0, 0)
+        };
+        follow(&stuck, &installed, true);
+        assert_eq!(installed.get(), FILTER_REGISTRATION_COUNT);
+    }
 
     struct PanickingPolicy;
 
@@ -477,7 +1179,8 @@ mod tests {
         assert!(registration.core.is_none());
         assert!(registration.core22.is_none());
         assert!(registration.token.is_none());
-        assert_eq!(registration.installed_filters, 0);
+        assert_eq!(registration.installed_filters.get(), 0);
+        assert!(registration.pause.is_none());
     }
 
     #[test]

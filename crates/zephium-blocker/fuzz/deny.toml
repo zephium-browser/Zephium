@@ -14,6 +14,8 @@ version = 2
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
+    # ring and untrusted, for the hardware SHA-256 the cache uses.
+    "ISC",
     "MIT",
     "MPL-2.0",
     # Test-only `libfuzzer-sys`; this graph is excluded from product binaries.

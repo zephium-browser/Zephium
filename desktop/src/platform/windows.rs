@@ -2,6 +2,8 @@
 mod caption;
 #[path = "windows_menus.rs"]
 mod menus;
+#[path = "windows_pointer.rs"]
+mod pointer;
 #[path = "windows_renderer.rs"]
 pub(crate) mod renderer;
 #[path = "windows_sidebar_edge.rs"]
@@ -433,6 +435,10 @@ pub fn harden_privileged(
                 &environment,
                 on_runtime_update,
             )?;
+            let mut browser = 0_u32;
+            // An id left unread records nothing, which invalidates the record.
+            let _ = core.BrowserProcessId(&mut browser);
+            crate::privileged_runtime_windows::record_browser_process(browser);
             Ok(())
         })();
         if let Err(error) = result {

@@ -323,7 +323,9 @@ pub(crate) struct FakeEngine {
         )>,
     >,
     pub(crate) popup_sites: Mutex<Vec<(ProfileId, Vec<String>)>>,
+    pub(crate) download_sites: Mutex<Vec<DownloadSitesPushed>>,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
+    release_spare_calls: std::sync::atomic::AtomicUsize,
     media_capture_stops: Mutex<Vec<(ItemId, NavigationPresentationId)>>,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -374,6 +376,10 @@ impl FakeEngine {
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
+    }
+    fn release_spare_calls(&self) -> usize {
+        self.release_spare_calls
+            .load(std::sync::atomic::Ordering::Acquire)
     }
     fn warm_spare_calls(&self) -> usize {
         self.warm_spare_calls
@@ -516,6 +522,19 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((profile, origins.iter().map(ToString::to_string).collect()));
+    }
+    fn set_download_sites(
+        &self,
+        profile: ProfileId,
+        sites: Vec<(zephium_core::permissions::PageOrigin, bool)>,
+    ) {
+        self.download_sites.lock().unwrap().push((
+            profile,
+            sites
+                .iter()
+                .map(|(origin, allowed)| (origin.to_string(), *allowed))
+                .collect(),
+        ));
     }
     fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
         self.automatic_pip
@@ -906,6 +925,10 @@ impl Engine for FakeEngine {
         self.log(format!("autofill {id}"));
         self.native_admission()
     }
+    fn autofill_insecure_password(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("autofill-insecure {id}"));
+        self.native_admission()
+    }
     fn discover_favicon(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("discover {id}"));
         self.native_admission()
@@ -953,6 +976,10 @@ impl Engine for FakeEngine {
         self.log(format!("open-app {url}"));
         self.native_admission()
     }
+    fn allow_blocked_navigation(&self, item: ItemId, url: String) -> NativeDispatch {
+        self.log(format!("allow-blocked {item} {url}"));
+        self.native_admission()
+    }
     fn allow_certificate_exception(&self, item: ItemId, url: String) -> NativeDispatch {
         self.log(format!("allow-certificate {item} {url}"));
         self.native_admission()
@@ -973,6 +1000,16 @@ impl Engine for FakeEngine {
         self.log(format!("http-auth {item} {request} {answer}"));
         self.native_admission()
     }
+    fn answer_download_permission(
+        &self,
+        item: ItemId,
+        request: u32,
+        allow: bool,
+    ) -> NativeDispatch {
+        let answer = if allow { "allow" } else { "refuse" };
+        self.log(format!("download-permission {item} {request} {answer}"));
+        self.native_admission()
+    }
     fn set_user_content(
         &self,
         _scope: ContentScope,
@@ -985,6 +1022,18 @@ impl Engine for FakeEngine {
     fn warm_spare(&self, _partition: Partition) {
         self.warm_spare_calls
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn release_spare(&self) {
+        self.release_spare_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn prepare_profile(&self, partition: Partition) {
+        let kind = match partition {
+            Partition::Default(_) => "default",
+            Partition::Persistent(_) => "persistent",
+            Partition::Ephemeral(_) => "ephemeral",
+        };
+        self.log(format!("prepare-profile {kind} {}", partition.profile()));
     }
     fn install_content_rules(
         &self,
@@ -1115,6 +1164,16 @@ pub(crate) struct FakeStore {
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
     pub(crate) popup_sites:
         Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::permissions::PageOrigin>>>,
+    pub(crate) download_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, bool)>>,
+    >,
+    pub(crate) app_link_sites: Mutex<
+        std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
+    >,
+    /// Every durable read of a pop-up, download or app-link list, by list.
+    pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
+    /// Application link writes report failure, as a store that timed out.
+    pub(crate) app_link_writes_fail: std::sync::atomic::AtomicBool,
     page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
     page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
     page_permission_load_calls: Mutex<Vec<ProfileId>>,
@@ -1139,6 +1198,14 @@ pub(crate) struct FakeStore {
     >,
     pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+/// The serial of the request the tab shows, as its card would answer.
+pub(crate) fn shown_serial(shell: &Shell, id: ItemId) -> u32 {
+    shell.items.tab(id).map_or(0, |tab| tab.page_request_serial)
+}
+
+/// One list of download decisions the shell handed the engine.
+type DownloadSitesPushed = (ProfileId, Vec<(String, bool)>);
 
 type AvatarWrite = (
     ProfileId,
@@ -1173,6 +1240,10 @@ impl Store for FakeStore {
         &self,
         profile: ProfileId,
     ) -> Option<Vec<zephium_core::permissions::PageOrigin>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("popup_sites", profile));
         Some(
             self.popup_sites
                 .lock()
@@ -1193,6 +1264,75 @@ impl Store for FakeStore {
         list.retain(|site| *site != origin);
         if allowed {
             list.push(origin);
+        }
+        true
+    }
+    fn app_link_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, String)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("app_link_sites", profile));
+        Some(
+            self.app_link_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_app_link_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        scheme: String,
+        allowed: bool,
+    ) -> bool {
+        if self
+            .app_link_writes_fail
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return false;
+        }
+        let mut sites = self.app_link_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|site| *site != (origin.clone(), scheme.clone()));
+        if allowed {
+            list.push((origin, scheme));
+        }
+        true
+    }
+    fn download_sites(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        self.site_list_reads
+            .lock()
+            .unwrap()
+            .push(("download_sites", profile));
+        Some(
+            self.download_sites
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+    fn set_download_site(
+        &self,
+        profile: ProfileId,
+        origin: zephium_core::permissions::PageOrigin,
+        allowed: Option<bool>,
+    ) -> bool {
+        let mut sites = self.download_sites.lock().unwrap();
+        let list = sites.entry(profile).or_default();
+        list.retain(|(site, _)| *site != origin);
+        if let Some(allowed) = allowed {
+            list.push((origin, allowed));
         }
         true
     }
