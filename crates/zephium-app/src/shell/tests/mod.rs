@@ -294,8 +294,23 @@ pub(super) fn agent_lifecycle_with_clean(
 
 type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
+thread_local! {
+    static SUSPENDS_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with engines that suspend hidden views as WebView2 does, so a
+/// shared shell test pins the Windows path as well as the macOS one.
+pub(super) fn suspending(test: fn()) {
+    SUSPENDS_HIDDEN.set(true);
+    test();
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    /// Hidden views are really suspended: the desired set is kept, and a
+    /// suspended page cannot answer a discard probe.
+    suspends_hidden: std::sync::atomic::AtomicBool,
+    suspended: Mutex<std::collections::HashSet<ItemId>>,
     automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
@@ -942,6 +957,11 @@ impl Engine for FakeEngine {
             .load(std::sync::atomic::Ordering::Acquire)
     }
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        // A suspended WebView2 does not run the probe's script.
+        assert!(
+            !self.suspended.lock().unwrap().contains(&id),
+            "{id} was probed while still suspended"
+        );
         self.log(format!("probe-discard {id} {}", probe.0));
         true
     }
@@ -961,6 +981,12 @@ impl Engine for FakeEngine {
         ));
     }
     fn set_dormant(&self, ids: Vec<ItemId>) {
+        if self
+            .suspends_hidden
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.suspended.lock().unwrap() = ids.iter().copied().collect();
+        }
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
@@ -2216,6 +2242,9 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
 
 pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
+    engine
+        .suspends_hidden
+        .store(SUSPENDS_HIDDEN.get(), std::sync::atomic::Ordering::Release);
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,

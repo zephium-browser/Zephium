@@ -1521,3 +1521,196 @@ fn split_created_views_are_not_unsafely_discarded() {
     }
     assert!(shell.items.tab(second).unwrap().has_view());
 }
+
+use crate::shell::view_lifecycle::DISCARD_IDLE_GRACE;
+
+/// Backdates every activity time of `id` by `by`, as if it had been left then.
+fn left_ago(shell: &mut Shell, id: ItemId, by: std::time::Duration) {
+    let Some(then) = std::time::Instant::now().checked_sub(by) else {
+        return;
+    };
+    for times in [
+        &mut shell.residency.last_focus,
+        &mut shell.residency.resident_since,
+        &mut shell.residency.inactive_since,
+    ] {
+        if let Some(time) = times.get_mut(&id) {
+            *time = then;
+        }
+    }
+}
+
+/// Four tabs, the first left `idle` ago and the last in front.
+fn four_tabs_first_left(idle: std::time::Duration) -> (Shell, Arc<FakeEngine>, ItemId) {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "idle0.example");
+    for n in 1..4 {
+        shell.handle(Command::Open);
+        let id = active_id(&screen);
+        navigate_and_commit(&mut shell, id, &format!("idle{n}.example"));
+    }
+    left_ago(&mut shell, first, idle);
+    (shell, engine, first)
+}
+
+#[test]
+fn a_suspended_hidden_page_is_discarded_once_its_idle_grace_passes() {
+    let (mut shell, engine, first) = four_tabs_first_left(std::time::Duration::from_secs(5 * 60));
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    assert!(shell.residency.discard_probes.is_empty());
+
+    left_ago(
+        &mut shell,
+        first,
+        DISCARD_IDLE_GRACE + std::time::Duration::from_secs(60),
+    );
+    shell.handle(Command::Tick);
+    let (candidate, _) = first_probing_discard(&shell);
+    assert_eq!(candidate, first);
+    // Resumed before it is asked: one wake, then the discard.
+    assert!(!shell.residency.dormant_sent.contains(&first));
+    let calls = engine.calls();
+    let probed = calls
+        .iter()
+        .position(|c| c.starts_with(&format!("probe-discard {first}")))
+        .unwrap();
+    assert!(calls[..probed]
+        .iter()
+        .rev()
+        .find(|c| c.starts_with("dormant"))
+        .is_some_and(|c| !c.contains(&first.to_string())));
+}
+
+#[test]
+fn a_suspended_heavy_page_is_discarded_after_the_heavy_grace() {
+    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::from_secs(4 * 60));
+    shell.residency.warm_view_limit = 4;
+    shell.residency.page_bytes.insert(first, 512 << 20);
+    shell.handle(Command::Tick);
+    let (candidate, _) = first_probing_discard(&shell);
+    assert_eq!(candidate, first);
+}
+
+#[test]
+fn a_page_that_refuses_suspension_runs_until_shown_and_can_still_be_discarded() {
+    let (mut shell, engine, first) = four_tabs_first_left(std::time::Duration::from_secs(60));
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DormancyRefused {
+        id: first,
+        profile,
+    }));
+    assert!(!shell.residency.dormant_sent.contains(&first));
+    assert!(engine
+        .calls()
+        .iter()
+        .rev()
+        .find(|c| c.starts_with("dormant"))
+        .is_some_and(|c| !c.contains(&first.to_string())));
+    shell.handle(Command::Tick);
+    assert!(
+        !shell.residency.dormant_sent.contains(&first),
+        "not asked again"
+    );
+
+    // Awake, it is still discarded after its idle grace.
+    left_ago(
+        &mut shell,
+        first,
+        DISCARD_IDLE_GRACE + std::time::Duration::from_secs(60),
+    );
+    shell.handle(Command::Tick);
+    assert_eq!(first_probing_discard(&shell).0, first);
+}
+
+#[test]
+fn a_refused_suspension_is_asked_again_after_the_page_was_shown() {
+    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::from_secs(60));
+    shell.handle(Command::Tick);
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DormancyRefused {
+        id: first,
+        profile,
+    }));
+    shell.handle(Command::Activate(first));
+    assert!(!shell.residency.suspend_refused.contains(&first));
+    shell.handle(Command::Open);
+    left_ago(&mut shell, first, std::time::Duration::from_secs(60));
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+}
+
+#[test]
+fn a_refusal_for_a_page_not_asked_to_sleep_is_ignored() {
+    let (mut shell, _engine, first) = four_tabs_first_left(std::time::Duration::ZERO);
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.handle(Command::Engine(EngineEvent::DormancyRefused {
+        id: first,
+        profile,
+    }));
+    assert!(shell.residency.suspend_refused.is_empty());
+}
+
+/// Every test above again, with hidden views really suspended as on Windows.
+mod suspending {
+    macro_rules! twins {
+        ($($name:ident)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    super::super::suspending(super::$name);
+                }
+            )*
+        };
+    }
+    twins! {
+        final_discard_veto_preserves_view_and_replays_latest_foreground_navigation
+        rejected_discard_admission_clears_closing_without_losing_residency
+        explicit_close_during_final_discard_check_still_closes_and_forgets_native_state
+        renderer_death_supersedes_final_discard_and_cannot_strand_recovery
+        loading_background_documents_are_not_requested_to_suspend
+        disabling_sleep_cancels_a_pending_close_without_reloading_hidden_tabs
+        leaving_a_visible_split_starts_idle_grace_and_minimization_keeps_discard_protection
+        never_focused_fresh_background_view_respects_idle_grace_until_real_pressure
+        rejected_view_creation_rolls_back_the_live_view_synchronously
+        failed_native_view_can_be_retried
+        background_views_are_not_discarded_without_safety_signals
+        crashed_page_recreates_once_then_reports
+        crash_presentation_never_overwrites_the_durable_document_title
+        hidden_renderer_crash_does_not_close_a_future_generation_or_relaunch
+        profile_process_exit_recreates_focused_view_only_once
+        profile_process_exit_defers_hidden_recovery_until_activation
+        profile_process_exit_recreates_every_visible_split_leaf
+        multi_leaf_process_recovery_accounts_for_the_whole_optimistic_batch
+        repeated_crash_leaf_temporarily_collapses_to_a_live_split_sibling
+        hidden_idle_views_go_dormant_and_wake_on_show
+        hidden_pages_with_sound_capture_or_picture_in_picture_stay_awake
+        idle_hidden_pages_beyond_the_warm_set_sleep_only_after_acknowledgement
+        unsafe_page_is_exempt_from_budget_and_reprobe_is_cooled_down
+        a_hidden_page_that_keeps_running_is_not_probed_for_discard
+        missing_probe_callback_times_out_fail_closed_with_bounded_state
+        common_tab_counts_probe_before_and_never_exceed_the_resident_view_ceiling
+        resident_ceiling_defers_foreground_create_and_expires_without_changing_saved_title
+        foreground_capacity_waits_for_physical_close_and_replays_only_latest_intent
+        disabled_sleep_is_honored_until_critical_memory_pressure
+        heavy_hidden_pages_sleep_early_but_the_last_hidden_page_stays_instant
+        memory_warning_uses_a_short_grace_instead_of_discarding_at_once
+        performance_preferences_load_durably_and_pressure_restores_preferred_targets
+        awake_site_exceptions_cover_subdomains_and_disabling_sleep_cancels_probes
+        optimistic_multi_leaf_batch_admits_available_slots_in_effect_order
+        stale_or_navigation_cancelled_discard_probe_cannot_close_a_view
+        every_currently_visible_split_leaf_is_outside_the_discard_candidate_set
+        acknowledged_discard_preserves_url_and_activation_recreates_lazily
+        minimized_window_hides_before_dormancy_and_wakes_focused_view
+        split_created_views_are_not_unsafely_discarded
+        a_suspended_hidden_page_is_discarded_once_its_idle_grace_passes
+        a_suspended_heavy_page_is_discarded_after_the_heavy_grace
+        a_page_that_refuses_suspension_runs_until_shown_and_can_still_be_discarded
+        a_refused_suspension_is_asked_again_after_the_page_was_shown
+        a_refusal_for_a_page_not_asked_to_sleep_is_ignored
+    }
+}

@@ -493,6 +493,7 @@ impl Shell {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => {
                 self.on_view_discard_refused(id, profile, probe)
             }
+            EngineEvent::DormancyRefused { id, profile } => self.on_dormancy_refused(id, profile),
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }
@@ -799,6 +800,7 @@ impl Shell {
             EngineEvent::ContentRulesSettled { profile, .. }
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
+            | EngineEvent::DormancyRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
             | EngineEvent::ProfileProcessExited { profile, .. }
             | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),

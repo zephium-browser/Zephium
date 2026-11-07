@@ -988,12 +988,9 @@ pub trait Engine {
     fn release_spare(&self) {}
     /// Hidden views the shell's idle policy wants suspended. The engine
     /// suspends where it has a primitive (WebView2, WebKit scheduling policy)
-    /// and resumes implicitly when a view becomes visible again.
+    /// and resumes implicitly when a view becomes visible again. A page that
+    /// cannot be suspended is reported with `EngineEvent::DormancyRefused`.
     fn set_dormant(&self, _ids: Vec<ItemId>) {}
-    /// Whether `set_dormant` actually suspends hidden renderers here.
-    fn suspends_hidden_views(&self) -> bool {
-        false
-    }
     /// Drops speculative resources during OS pressure; never evicts user work.
     fn set_memory_pressure(&self, _pressure: MemoryPressure) {}
     /// Requests `EngineEvent::PageMemory` for these live pages where the
@@ -1743,6 +1740,12 @@ pub enum EngineEvent {
         id: ItemId,
         profile: ProfileId,
         probe: DiscardProbeId,
+    },
+    /// A hidden page the shell asked to suspend refused, also on its retry,
+    /// and keeps running until it is shown or no longer meant to sleep.
+    DormancyRefused {
+        id: ItemId,
+        profile: ProfileId,
     },
     /// Physical footprint of the renderer process serving one live page.
     PageMemory {

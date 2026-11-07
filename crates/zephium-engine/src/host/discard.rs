@@ -1519,7 +1519,22 @@ impl EngineHost {
                     .insert(id, SuspendRetry { generation, timer });
             }
             Some(true) => {}
-            Some(false) => eprintln!("suspend: refused after its retry; the page stays awake"),
+            Some(false) => {
+                eprintln!("suspend: refused after its retry; the page stays awake");
+                // The shell then stops asking, so its desired set says what
+                // is really suspended.
+                if let (Some(view), Some(partition)) =
+                    (self.views.get(&id), self.partitions.get(&id))
+                {
+                    view.event_permit.emit(
+                        &self.sink,
+                        EngineEvent::DormancyRefused {
+                            id,
+                            profile: partition.profile(),
+                        },
+                    );
+                }
+            }
         }
     }
 

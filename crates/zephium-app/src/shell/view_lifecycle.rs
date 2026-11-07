@@ -79,6 +79,9 @@ pub(super) struct ResidencyState {
     last_shown: std::collections::HashSet<ItemId>,
     pub(super) dormant_min: std::time::Duration,
     pub(super) dormant_sent: Vec<ItemId>,
+    /// Hidden pages the engine could not suspend; they run until shown again
+    /// and stay out of the desired dormant set, so it matches the engine.
+    pub(super) suspend_refused: std::collections::HashSet<ItemId>,
     pub(super) discard_idle_min: std::time::Duration,
     pub(super) discard_probe_timeout: std::time::Duration,
     pub(super) discard_protected_retry: std::time::Duration,
@@ -111,6 +114,7 @@ impl Default for ResidencyState {
             last_shown: std::collections::HashSet::new(),
             dormant_min: DORMANT_GRACE,
             dormant_sent: Vec::new(),
+            suspend_refused: std::collections::HashSet::new(),
             discard_idle_min: DISCARD_IDLE_GRACE,
             discard_probe_timeout: DISCARD_PROBE_TIMEOUT,
             discard_protected_retry: DISCARD_PROTECTED_RETRY,
@@ -219,6 +223,19 @@ impl Shell {
             self.residency.apply_setting(key, value);
             self.maintain_views();
         }
+    }
+
+    /// The engine gave up suspending a hidden page: it stays awake until it
+    /// is shown again, and its discard grace still applies.
+    pub(super) fn on_dormancy_refused(&mut self, id: ItemId, profile: ProfileId) {
+        if self.profile_of_item(id) != Some(profile)
+            || !self.items.tab(id).is_some_and(TabState::has_view)
+            || !self.residency.dormant_sent.contains(&id)
+        {
+            return;
+        }
+        self.residency.suspend_refused.insert(id);
+        self.maintain_views();
     }
 
     pub(super) fn on_page_memory(&mut self, id: ItemId, profile: ProfileId, bytes: u64) {
@@ -602,12 +619,16 @@ impl Shell {
             self.engine.cancel_discard(id, probe);
         }
 
+        self.residency.suspend_refused.retain(|id| {
+            !shown.contains(id) && self.items.tab(*id).is_some_and(TabState::has_view)
+        });
         let mut dormant: Vec<ItemId> = self
             .items
             .view_ids()
             .into_iter()
             .filter(|id| {
                 self.residency.sleeping
+                    && !self.residency.suspend_refused.contains(id)
                     && !self.site_kept_awake(*id)
                     && !self.keeps_running(*id)
                     && !shown.contains(id)
@@ -636,6 +657,7 @@ impl Shell {
                     self.residency.sleeping
                         && !shown.contains(id)
                         && !self.residency.dormant_sent.contains(id)
+                        && !self.residency.suspend_refused.contains(id)
                         && !self.site_kept_awake(*id)
                         && !self.keeps_running(*id)
                 })
@@ -652,7 +674,9 @@ impl Shell {
 
         let urgent = self.discard_is_urgent(live_count);
         let capacity = !self.residency.capacity_requests.is_empty();
-        let suspended_hidden = self.engine.suspends_hidden_views();
+        // A suspended page is a candidate like any other once its discard
+        // grace has passed: suspension saves CPU, only a discard frees its
+        // memory. The probe below resumes it first, one wake per discard.
         let mut candidates: Vec<ItemId> = self
             .items
             .view_ids()
@@ -667,11 +691,6 @@ impl Shell {
                             .discard_protected_until
                             .get(id)
                             .is_none_or(|until| *until <= std::time::Instant::now()))
-                    // A suspended page already costs no CPU. Waking it only to
-                    // ask is worthwhile when memory is actually needed.
-                    && (urgent
-                        || !suspended_hidden
-                        || !self.residency.dormant_sent.contains(id))
                     && self.items.tab(*id).is_some_and(|tab| {
                         tab.has_view() && !tab.loading && tab.url.is_some()
                     })
@@ -1072,6 +1091,7 @@ impl Shell {
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {
         self.residency.resident_since.remove(&id);
         self.residency.inactive_since.remove(&id);
+        self.residency.suspend_refused.remove(&id);
         self.forget_view_protection(id);
     }
 

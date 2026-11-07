@@ -1267,6 +1267,9 @@ impl RetirementGate {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::ViewDiscardRefused { id, profile, probe }),
+            EngineEvent::DormancyRefused { id, profile } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::DormancyRefused { id, profile }),
             EngineEvent::PageMemory { id, profile, bytes } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::PageMemory { id, profile, bytes }),
@@ -2586,10 +2589,6 @@ impl Engine for WebviewEngine {
 
     fn release_spare(&self) {
         self.run(|| host::best_effort_with(|host| host.release_spare()));
-    }
-
-    fn suspends_hidden_views(&self) -> bool {
-        cfg!(target_os = "windows")
     }
 
     fn set_dormant(&self, ids: Vec<ItemId>) {
