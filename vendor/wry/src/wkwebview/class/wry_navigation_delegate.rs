@@ -167,6 +167,7 @@ define_class!(
       }
       if let Some(delegate) = &self.ivars().download_delegate {
         if let Some(native) = &delegate.ivars().native {
+          let _menu = crate::wkwebview::ContextMenuDownload::begin();
           if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
             unsafe { download.cancel(None) };
           }

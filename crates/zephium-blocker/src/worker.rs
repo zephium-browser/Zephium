@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use crate::Sha256;
 use thiserror::Error;
 use zephium_core::blocker::{
     BlockerConfig, ContentPolicyGeneration, ContentRuleCoverage, ContentRuleDigest, ContentRules,
@@ -23,6 +23,8 @@ use crate::cache::{
 };
 #[cfg(feature = "runtime")]
 use crate::rules::CachedRuntimeRules;
+#[cfg(feature = "runtime-exact")]
+use crate::rules::SourceDocument;
 use crate::{
     CompileError, CompileTarget, CompiledRules, Compiler, FilterSource, NetworkAction,
     NetworkRequest, RequestMethod, ResourceType, SourceFormat, SourceId,
@@ -42,6 +44,7 @@ pub struct PolicySource {
     id: SourceId,
     format: SourceFormat,
     contents: Arc<str>,
+    trusted: bool,
 }
 
 impl PolicySource {
@@ -52,7 +55,15 @@ impl PolicySource {
             id,
             format,
             contents,
+            trusted: false,
         }
+    }
+
+    /// Lets this source's `trusted-*` scriptlet rules run.
+    #[must_use]
+    pub const fn trusting_scriptlets(mut self) -> Self {
+        self.trusted = true;
+        self
     }
 
     /// Returns the immutable source byte length without copying it.
@@ -61,11 +72,16 @@ impl PolicySource {
     }
 
     fn instantiate(&self) -> FilterSource {
-        FilterSource::new(
+        let source = FilterSource::new(
             self.id.clone(),
             self.format,
             self.contents.as_ref().to_owned(),
-        )
+        );
+        if self.trusted {
+            source.trusting_scriptlets()
+        } else {
+            source
+        }
     }
 }
 
@@ -216,14 +232,21 @@ impl StaticPolicyCatalog {
     ///
     /// Catalog admission happens before the worker can clone source strings,
     /// so an updater cannot queue oversized deep copies for every profile.
+    /// Zephium's own rules compile with every catalog, so admission keeps a
+    /// source slot, their bytes, lines and rules free for them and refuses
+    /// their ID.
     pub fn new(sources: Vec<PolicySource>) -> Result<Self, CatalogError> {
         let limits = crate::CompileLimits::default();
-        if sources.len() > limits.max_sources() {
+        if sources.len() >= limits.max_sources() {
             return Err(CatalogError::TooManySources);
         }
-        let mut total_bytes = 0usize;
+        let mut total_bytes = crate::builtin::byte_len();
+        let (mut total_lines, mut total_rules) = crate::builtin::line_counts();
         let mut ids = HashSet::with_capacity(sources.len());
         for source in &sources {
+            if source.id.as_str() == crate::builtin::ID {
+                return Err(CatalogError::ReservedSource);
+            }
             if !ids.insert(&source.id) {
                 return Err(CatalogError::DuplicateSource);
             }
@@ -235,6 +258,15 @@ impl StaticPolicyCatalog {
                 .ok_or(CatalogError::TotalBytesExceeded)?;
             if total_bytes > limits.max_total_source_bytes() {
                 return Err(CatalogError::TotalBytesExceeded);
+            }
+            let (lines, rules) = crate::compiler::line_counts(source.format, &source.contents);
+            total_lines = total_lines.saturating_add(lines);
+            if total_lines > limits.max_physical_lines() {
+                return Err(CatalogError::TooManyLines);
+            }
+            total_rules = total_rules.saturating_add(rules);
+            if total_rules > limits.max_rules() {
+                return Err(CatalogError::TooManyRules);
             }
         }
         Ok(Self {
@@ -266,7 +298,9 @@ impl StaticPolicyCatalog {
                     SourceFormat::Standard => 0,
                     SourceFormat::Hosts => 1,
                 };
-                (source.id.as_str(), format, source.contents.as_ref())
+                // Trust changes what compiles, so it is part of the key.
+                let trust = if source.trusted { 2 } else { 0 };
+                (source.id.as_str(), format | trust, source.contents.as_ref())
             }),
         )
     }
@@ -281,6 +315,15 @@ pub enum CatalogError {
     /// Source identifiers were not unique.
     #[error("blocker catalog contains a duplicate source identifier")]
     DuplicateSource,
+    /// The sources' physical lines exceeded the compiler ceiling.
+    #[error("blocker catalog has too many lines")]
+    TooManyLines,
+    /// The sources' candidate rules exceeded the compiler ceiling.
+    #[error("blocker catalog has too many rules")]
+    TooManyRules,
+    /// A source used the identifier reserved for Zephium's own rules.
+    #[error("blocker catalog source uses a reserved identifier")]
+    ReservedSource,
     /// One source exceeded the immutable per-source byte ceiling.
     #[error("blocker catalog source exceeds its byte limit")]
     SourceTooLarge,
@@ -1006,7 +1049,7 @@ fn run_worker(
                 prepared = None;
                 let mut candidate = ArtifactCache::new(preparation.catalog);
                 let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    candidate.resolve(compiler, &mut persistent)
+                    crate::priority::in_background(|| candidate.resolve(compiler, &mut persistent))
                 })) {
                     Ok(BlockerCompileOutcome::Compiled(rules)) => {
                         prepared = Some((preparation.identity, candidate));
@@ -1227,14 +1270,33 @@ impl ArtifactCache {
         let failure = if catalog.is_empty() {
             BlockerCompileFailure::SourceUnavailable
         } else {
-            match compiler.compile(target, catalog.instantiate()) {
+            match compiler.compile(target, with_own_rules(catalog.instantiate(), target)) {
                 Ok(compiled) => {
                     let persistent_copy = compiled.clone();
                     match adapt_rules(compiled) {
                         Ok(rules) => {
+                            // Badware in the catalog that cannot be compiled
+                            // fails the generation: the policy applied before
+                            // stays, never one without the navigation check.
+                            let navigation = match compile_navigation(&catalog, compiler) {
+                                Ok(navigation) => navigation,
+                                Err(failure) => {
+                                    self.artifact = Some(CachedArtifact::Failed(failure));
+                                    self.catalog = None;
+                                    return BlockerCompileOutcome::Failed(failure);
+                                }
+                            };
+                            let rules = with_navigation(rules, navigation.clone());
                             let durably_cached = match persistent.as_ref() {
                                 Some(cache)
-                                    if cache.store(cache_key, &persistent_copy, &rules).is_ok() =>
+                                    if cache
+                                        .store(
+                                            cache_key,
+                                            &persistent_copy,
+                                            &rules,
+                                            navigation.as_ref(),
+                                        )
+                                        .is_ok() =>
                                 {
                                     true
                                 }
@@ -1291,6 +1353,77 @@ fn complete_job(
         }));
         admission.finish_delivery(job.profile, job.generation);
     }
+}
+
+/// uBlock Origin's list of scam and malware sites, which alone judges each
+/// page and frame as it starts loading: WebKit gets none of its wildcard
+/// rules, and a refused page is named as a scam or malware site.
+#[cfg(feature = "runtime")]
+const NAVIGATION_SOURCE: &str = "ublock-badware";
+
+/// The badware list alone, compiled for the runtime matcher.
+/// The badware list's own matcher: none when the catalog has no badware list,
+/// an error when it has one that does not compile.
+#[cfg(feature = "runtime")]
+fn compile_navigation(
+    catalog: &StaticPolicyCatalog,
+    compiler: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+    #[allow(unused_mut)]
+    let mut sources: Vec<_> = catalog
+        .instantiate()
+        .into_iter()
+        .filter(|source| source.id().as_str() == NAVIGATION_SOURCE)
+        .collect();
+    #[cfg(feature = "qa-test-hosts")]
+    sources.push(FilterSource::new(
+        crate::SourceId::new("zephium-qa-badware").expect("a valid source ID"),
+        crate::SourceFormat::Standard,
+        crate::builtin::QA_BADWARE_RULES.to_owned(),
+    ));
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    compiler
+        .compile(CompileTarget::Runtime, sources)
+        .map(Some)
+        .map_err(|error| {
+            eprintln!("content blocker: navigation check unavailable: {error}");
+            map_compile_error(&error)
+        })
+}
+
+#[cfg(not(feature = "runtime"))]
+fn compile_navigation(
+    _: &StaticPolicyCatalog,
+    _: Compiler,
+) -> Result<Option<CompiledRules>, BlockerCompileFailure> {
+    Ok(None)
+}
+
+#[cfg(feature = "runtime")]
+fn with_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<CompiledRules>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) if rules.enabled() => {
+            rules.with_navigation(Arc::new(RuntimePolicy::compiled(navigation)))
+        }
+        _ => rules,
+    }
+}
+
+#[cfg(not(feature = "runtime"))]
+fn with_navigation(rules: Arc<ContentRules>, _: Option<CompiledRules>) -> Arc<ContentRules> {
+    rules
+}
+
+fn with_own_rules(mut sources: Vec<FilterSource>, target: CompileTarget) -> Vec<FilterSource> {
+    if crate::builtin::applies_to(target) {
+        sources.push(crate::builtin::source());
+    }
+    sources
 }
 
 #[cfg(target_os = "windows")]
@@ -1370,6 +1503,10 @@ pub(crate) fn adapt_rules(
     };
     let result = match rules.target() {
         CompileTarget::Runtime => {
+            if let Err(error) = rules.verify_official_canary() {
+                eprintln!("content blocker: lists refused: {error}");
+                return Err(BlockerCompileFailure::InvalidSource);
+            }
             let digest = ContentRuleDigest::from_bytes(*rules.digest().as_bytes());
             ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::compiled(rules)))
                 .ok_or(BlockerCompileFailure::Internal)
@@ -1417,8 +1554,9 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             coverage,
             rules,
             cosmetics,
+            navigation,
         } => ContentRules::runtime(digest, coverage, Arc::new(RuntimePolicy::persistent(rules)))
-            .map(|rules| attach_cosmetics(rules, cosmetics)),
+            .map(|rules| attach_loaded_navigation(attach_cosmetics(rules, cosmetics), navigation)),
         #[cfg(feature = "webkit")]
         LoadedArtifact::WebKit {
             digest,
@@ -1426,22 +1564,32 @@ fn adapt_loaded_rules(loaded: LoadedArtifact) -> Option<Arc<ContentRules>> {
             artifact_digest,
             encoded,
             cosmetics,
+            #[cfg(feature = "runtime")]
+            navigation,
         } => {
-            let rules = ContentRules::declarative(
+            let rules = ContentRules::declarative_with_digest(
                 digest,
                 coverage,
                 zephium_core::blocker::DeclarativeRuleFormat::WebKitContentBlockerV1,
+                artifact_digest,
                 encoded,
             )?;
-            let zephium_core::blocker::ContentRulesPayload::Declarative {
-                artifact_digest: observed,
-                ..
-            } = rules.payload()
-            else {
-                return None;
-            };
-            (observed.as_bytes() == &artifact_digest).then(|| attach_cosmetics(rules, cosmetics))
+            let rules = attach_cosmetics(rules, cosmetics);
+            #[cfg(feature = "runtime")]
+            let rules = attach_loaded_navigation(rules, navigation);
+            Some(rules)
         }
+    }
+}
+
+#[cfg(feature = "runtime")]
+fn attach_loaded_navigation(
+    rules: Arc<ContentRules>,
+    navigation: Option<Box<CachedRuntimeRules>>,
+) -> Arc<ContentRules> {
+    match navigation {
+        Some(navigation) => rules.with_navigation(Arc::new(RuntimePolicy::persistent(navigation))),
+        None => rules,
     }
 }
 
@@ -1512,34 +1660,99 @@ impl RuntimePolicyCounters {
 struct RuntimePolicy {
     artifact: RuntimePolicyArtifact,
     counters: RuntimePolicyCounters,
+    #[cfg(feature = "runtime-exact")]
+    sources: Mutex<RecentSources>,
+}
+
+/// Documents that recently sent requests, newest first. Every view of a
+/// profile shares one policy, so a few entries cover the pages loading at once.
+#[cfg(feature = "runtime-exact")]
+#[derive(Default)]
+struct RecentSources(Vec<(Box<str>, Arc<SourceDocument>)>);
+
+#[cfg(feature = "runtime-exact")]
+impl RecentSources {
+    const CAPACITY: usize = 8;
+    /// Longer document URLs are parsed per request rather than held.
+    const MAX_URL_BYTES: usize = 2048;
+
+    fn get(&mut self, url: &str) -> Option<Arc<SourceDocument>> {
+        let index = self.0.iter().position(|(held, _)| **held == *url)?;
+        let entry = self.0.remove(index);
+        let source = Arc::clone(&entry.1);
+        self.0.insert(0, entry);
+        Some(source)
+    }
+
+    fn insert(&mut self, url: &str, source: &Arc<SourceDocument>) {
+        if url.len() > Self::MAX_URL_BYTES {
+            return;
+        }
+        self.0.truncate(Self::CAPACITY - 1);
+        self.0.insert(0, (url.into(), Arc::clone(source)));
+    }
 }
 
 impl RuntimePolicy {
     fn compiled(rules: CompiledRules) -> Self {
-        Self {
-            artifact: RuntimePolicyArtifact::Compiled(rules),
-            counters: RuntimePolicyCounters::default(),
-        }
+        Self::new(RuntimePolicyArtifact::Compiled(rules))
     }
 
     #[cfg(feature = "runtime")]
     fn persistent(rules: Box<CachedRuntimeRules>) -> Self {
+        Self::new(RuntimePolicyArtifact::Persistent(rules))
+    }
+
+    fn new(artifact: RuntimePolicyArtifact) -> Self {
         Self {
-            artifact: RuntimePolicyArtifact::Persistent(rules),
+            artifact,
             counters: RuntimePolicyCounters::default(),
+            #[cfg(feature = "runtime-exact")]
+            sources: Mutex::default(),
         }
     }
 
     #[cfg(feature = "runtime-exact")]
-    fn evaluate(
+    fn evaluate_from(
         &self,
-        request: NetworkRequest<'_>,
+        url: &str,
+        source_url: &str,
+        resource_type: ResourceType,
+        method: RequestMethod,
     ) -> Result<crate::NetworkDecision, crate::MatchError> {
+        let source = self.source_document(source_url)?;
         match &self.artifact {
-            RuntimePolicyArtifact::Compiled(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Compiled(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
             #[cfg(feature = "runtime")]
-            RuntimePolicyArtifact::Persistent(rules) => rules.evaluate(request),
+            RuntimePolicyArtifact::Persistent(rules) => {
+                rules.evaluate_from(url, &source, resource_type, method)
+            }
         }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    fn source_document(&self, url: &str) -> Result<Arc<SourceDocument>, crate::MatchError> {
+        // Decisions run on the UI thread: a contended cache parses instead of
+        // waiting.
+        let mut recent = match self.sources.try_lock() {
+            Ok(recent) => Some(recent),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(source) = recent.as_mut().and_then(|recent| recent.get(url)) {
+            return Ok(source);
+        }
+        let source = Arc::new(match &self.artifact {
+            RuntimePolicyArtifact::Compiled(rules) => rules.source_document(url),
+            #[cfg(feature = "runtime")]
+            RuntimePolicyArtifact::Persistent(rules) => rules.source_document(url),
+        }?);
+        if let Some(recent) = recent.as_mut() {
+            recent.insert(url, &source);
+        }
+        Ok(source)
     }
 
     fn evaluate_source_independent(
@@ -1560,41 +1773,48 @@ impl NetworkRequestPolicy for RuntimePolicy {
         let attribution = request.attribution();
         let resource_type = map_resource_type(request.resource_type());
         let method = map_method(request.method());
-        let decision =
-            match attribution {
-                NetworkAttribution::Exact => {
-                    #[cfg(feature = "runtime-exact")]
-                    {
-                        let Some(source_url) = request.source_url() else {
-                            self.counters.record_attribution_unavailable();
-                            return CoreDecision::Allow;
-                        };
-                        self.evaluate(NetworkRequest::new(
-                            request.url(),
-                            source_url,
-                            resource_type,
-                            method,
-                        ))
-                    }
-                    #[cfg(not(feature = "runtime-exact"))]
-                    {
-                        // The shipped WebView2 callback has no exact initiating-frame
-                        // URL. The resolver is used for document cosmetics only;
-                        // it does not grant request attribution. Treat an unexpected
-                        // exact request as a capability mismatch and fail open.
+        let decision = match attribution {
+            NetworkAttribution::Exact => {
+                #[cfg(feature = "runtime-exact")]
+                {
+                    let Some(source_url) = request.source_url() else {
                         self.counters.record_attribution_unavailable();
                         return CoreDecision::Allow;
-                    }
+                    };
+                    self.evaluate_from(request.url(), source_url, resource_type, method)
                 }
-                NetworkAttribution::TopLevelApproximation
-                | NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
-                    NetworkRequest::source_independent(request.url(), resource_type, method),
-                ),
-                NetworkAttribution::Unavailable => {
+                #[cfg(not(feature = "runtime-exact"))]
+                {
+                    // The shipped WebView2 callback has no exact initiating-frame
+                    // URL. The resolver is used for document cosmetics only;
+                    // it does not grant request attribution. Treat an unexpected
+                    // exact request as a capability mismatch and fail open.
                     self.counters.record_attribution_unavailable();
                     return CoreDecision::Allow;
                 }
-            };
+            }
+            // The main document stands in for the frame WebView2 cannot
+            // name: `$domain` and party options are judged against it.
+            #[cfg(feature = "runtime-exact")]
+            NetworkAttribution::TopLevelApproximation => {
+                let Some(top_level_url) = request.source_url() else {
+                    self.counters.record_attribution_unavailable();
+                    return CoreDecision::Allow;
+                };
+                self.evaluate_from(request.url(), top_level_url, resource_type, method)
+            }
+            #[cfg(not(feature = "runtime-exact"))]
+            NetworkAttribution::TopLevelApproximation => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::SourceIndependent => self.evaluate_source_independent(
+                NetworkRequest::source_independent(request.url(), resource_type, method),
+            ),
+            NetworkAttribution::Unavailable => {
+                self.counters.record_attribution_unavailable();
+                return CoreDecision::Allow;
+            }
+        };
         match decision {
             Ok(decision) if decision.action() == NetworkAction::Block => CoreDecision::Block,
             Ok(_) => CoreDecision::Allow,
@@ -1650,7 +1870,7 @@ fn map_method(method: &str) -> RequestMethod {
 }
 
 fn allow_all_digest() -> ContentRuleDigest {
-    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN).into())
+    ContentRuleDigest::from_bytes(Sha256::digest(ALLOW_ALL_DIGEST_DOMAIN))
 }
 
 fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
@@ -1696,6 +1916,239 @@ fn map_compile_error(error: &CompileError) -> BlockerCompileFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_badware_test_host() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        let navigation = RuntimePolicy::compiled(
+            compile_navigation(&catalog, Compiler::default())
+                .expect("the QA host compiles")
+                .expect("the QA host"),
+        );
+        let url = "https://blocked-badware.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(navigation.decide(&request), NetworkDecision::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "qa-test-hosts")))]
+    #[test]
+    fn a_badware_list_that_does_not_compile_fails_the_generation_closed() {
+        let catalog = |rules: &str| {
+            StaticPolicyCatalog::new(vec![
+                PolicySource::new(
+                    SourceId::new("easylist").unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from("||ads.example^"),
+                ),
+                PolicySource::new(
+                    SourceId::new(NAVIGATION_SOURCE).unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(rules),
+                ),
+            ])
+            .unwrap()
+        };
+        assert!(
+            compile_navigation(&catalog("||scam.example^"), Compiler::default())
+                .unwrap()
+                .is_some()
+        );
+        // A list with nothing usable in it is an error, not "no check".
+        assert!(compile_navigation(&catalog("! nothing usable"), Compiler::default()).is_err());
+        let no_badware = StaticPolicyCatalog::new(vec![PolicySource::new(
+            SourceId::new("easylist").unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.example^"),
+        )])
+        .unwrap();
+        assert!(compile_navigation(&no_badware, Compiler::default())
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(all(feature = "qa-test-hosts", feature = "runtime-exact"))]
+    #[test]
+    fn qa_builds_refuse_the_ads_test_host_on_the_runtime_engine() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let sources = with_own_rules(
+            vec![FilterSource::new(
+                SourceId::new("easylist").unwrap(),
+                SourceFormat::Standard,
+                "||ads.example^".to_owned(),
+            )],
+            CompileTarget::Runtime,
+        );
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(CompileTarget::Runtime, sources)
+                .unwrap(),
+        );
+        let url = "https://blocked-ads.test/";
+        let request = CoreRequest::exact(
+            url,
+            url,
+            "GET",
+            NetworkResourceType::Document,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&request), NetworkDecision::Block);
+    }
+
+    /// WebView2 names no frame's parent, so a Windows view judges each frame
+    /// navigation as a subdocument of its main page, as requests are judged.
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_runtime_lists_judge_a_frame_against_its_main_page() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let lists = RuntimePolicy::compiled(
+            Compiler::default()
+                .compile(
+                    CompileTarget::Runtime,
+                    vec![FilterSource::new(
+                        SourceId::new("easylist").unwrap(),
+                        SourceFormat::Standard,
+                        "||adsystem.example^\n\
+                         @@||adsystem.example/kept^$subdocument,domain=shop.example\n\
+                         ||tracker.example^$third-party\n"
+                            .to_owned(),
+                    )],
+                )
+                .unwrap(),
+        );
+        let frame = |url, page| {
+            lists.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    page,
+                    "GET",
+                    NetworkResourceType::Subdocument,
+                    NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let shop = "https://www.shop.example/";
+        assert_eq!(
+            frame("https://s.adsystem.example/iu3?slot=footer", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", shop),
+            NetworkDecision::Allow
+        );
+        // The exception is for frames on shop.example only.
+        assert_eq!(
+            frame("https://s.adsystem.example/kept", "https://news.example/"),
+            NetworkDecision::Block
+        );
+        let script = CoreRequest::top_level_approximation(
+            "https://s.adsystem.example/kept",
+            shop,
+            "GET",
+            NetworkResourceType::Script,
+            NetworkRequestSourceKind::Document,
+        )
+        .unwrap();
+        assert_eq!(lists.decide(&script), NetworkDecision::Block);
+        assert_eq!(
+            frame("https://tracker.example/frame", shop),
+            NetworkDecision::Block
+        );
+        assert_eq!(
+            frame("https://tracker.example/frame", "https://tracker.example/"),
+            NetworkDecision::Allow
+        );
+    }
+
+    #[cfg(all(
+        feature = "runtime-exact",
+        feature = "webkit",
+        not(target_os = "windows")
+    ))]
+    #[test]
+    fn webkit_rules_carry_a_badware_navigation_check() {
+        use zephium_core::blocker::{
+            NetworkDecision, NetworkRequest as CoreRequest, NetworkRequestSourceKind,
+            NetworkResourceType,
+        };
+        let source = |id: &str, rules: &str| {
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from(rules),
+            )
+        };
+        let catalog = |sources| StaticPolicyCatalog::new(sources).unwrap();
+        let compile = |catalog: &StaticPolicyCatalog| {
+            let compiler = Compiler::default();
+            let compiled = compiler
+                .compile(CompileTarget::WebKit, catalog.instantiate())
+                .unwrap();
+            with_navigation(
+                adapt_rules(compiled).unwrap(),
+                compile_navigation(catalog, compiler).unwrap(),
+            )
+        };
+        let page = |url| {
+            CoreRequest::exact(
+                url,
+                url,
+                "GET",
+                NetworkResourceType::Document,
+                NetworkRequestSourceKind::Document,
+            )
+            .unwrap()
+        };
+        let with_badware = compile(&catalog(vec![
+            source("easylist", "||ads.example^"),
+            source(
+                "ublock-badware",
+                "||scam.example^$doc\n||cdn.example/*/alarm.mp3",
+            ),
+        ]));
+        let navigation = with_badware
+            .navigation_policy()
+            .expect("a navigation check");
+        assert_eq!(
+            navigation.decide(&page("https://scam.example/")),
+            NetworkDecision::Block
+        );
+        // Only the badware list judges navigations.
+        assert_eq!(
+            navigation.decide(&page("https://ads.example/")),
+            NetworkDecision::Allow
+        );
+        let without = compile(&catalog(vec![source("easylist", "||ads.example^")]));
+        // Protection QA builds always carry their test host.
+        assert_eq!(
+            without.navigation_policy().is_some(),
+            cfg!(feature = "qa-test-hosts")
+        );
+    }
 
     fn compiler_with_post_ack_exit_gate() -> (Arc<WorkerBlocker>, SyncSender<()>, Receiver<()>) {
         let (queue, receiver) = mpsc::sync_channel::<WorkerCommand>(1);
@@ -2379,6 +2832,168 @@ mod tests {
         ));
     }
 
+    fn numbered_sources(count: usize) -> Vec<PolicySource> {
+        (0..count)
+            .map(|n| {
+                PolicySource::new(
+                    SourceId::new(format!("list{n}")).unwrap(),
+                    SourceFormat::Standard,
+                    Arc::from(format!("||ads{n}.zephium.invalid^")),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn catalog_keeps_a_source_slot_for_zephium_s_own_rules() {
+        let limit = crate::CompileLimits::default().max_sources();
+        assert!(matches!(
+            StaticPolicyCatalog::new(numbered_sources(limit)),
+            Err(CatalogError::TooManySources)
+        ));
+        StaticPolicyCatalog::new(numbered_sources(limit - 1)).unwrap();
+    }
+
+    #[cfg(any(
+        all(target_os = "windows", feature = "runtime"),
+        all(not(target_os = "windows"), feature = "webkit")
+    ))]
+    #[test]
+    fn a_catalog_one_below_the_source_limit_compiles_with_zephium_s_own_rules() {
+        let limit = crate::CompileLimits::default().max_sources();
+        let catalog = StaticPolicyCatalog::new(numbered_sources(limit - 1)).unwrap();
+        let mut cache = ArtifactCache::new(PolicyCatalog::eager(catalog));
+        let mut persistent = None;
+        assert!(matches!(
+            cache.resolve(Compiler::default(), &mut persistent),
+            BlockerCompileOutcome::Compiled(_)
+        ));
+    }
+
+    #[test]
+    fn catalog_keeps_room_for_zephium_s_own_rule_bytes() {
+        let limits = crate::CompileLimits::default();
+        let source = |id: &str, len: usize| {
+            PolicySource::new(
+                SourceId::new(id).unwrap(),
+                SourceFormat::Standard,
+                Arc::from("!".repeat(len)),
+            )
+        };
+        let half = limits.max_total_source_bytes() / 2;
+        assert!(half <= limits.max_source_bytes());
+        assert!(matches!(
+            StaticPolicyCatalog::new(vec![source("a", half), source("b", half)]),
+            Err(CatalogError::TotalBytesExceeded)
+        ));
+        StaticPolicyCatalog::new(vec![
+            source("a", half),
+            source("b", half - crate::builtin::byte_len()),
+        ])
+        .unwrap();
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn the_exact_runtime_target_applies_zephium_s_own_site_exceptions_per_page() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                with_own_rules(
+                    vec![FilterSource::new(
+                        SourceId::new("list").unwrap(),
+                        SourceFormat::Standard,
+                        "||pagead2.googlesyndication.com^".to_owned(),
+                    )],
+                    CompileTarget::Runtime,
+                ),
+            )
+            .unwrap();
+        let on = |page| {
+            rules
+                .evaluate(NetworkRequest::new(
+                    "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+                    page,
+                    ResourceType::Script,
+                    RequestMethod::Get,
+                ))
+                .unwrap()
+                .action()
+        };
+        assert_eq!(
+            on("https://www.allrecipes.com/recipe/1/"),
+            NetworkAction::Allow
+        );
+        assert_eq!(on("https://news.example/story"), NetworkAction::Block);
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+    #[test]
+    fn the_runtime_target_leaves_out_zephium_s_own_site_exceptions() {
+        let compile = |sources| {
+            Compiler::default()
+                .compile(CompileTarget::Runtime, sources)
+                .unwrap()
+        };
+        let blocklist = || {
+            FilterSource::new(
+                SourceId::new("list").unwrap(),
+                SourceFormat::Standard,
+                "||pagead2.googlesyndication.com^".to_owned(),
+            )
+        };
+        let loader = NetworkRequest::source_independent(
+            "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js",
+            ResourceType::Script,
+            RequestMethod::Get,
+        );
+        let action =
+            |rules: &CompiledRules| rules.evaluate_source_independent(loader).unwrap().action();
+        let rules = compile(with_own_rules(vec![blocklist()], CompileTarget::Runtime));
+        assert_eq!(action(&rules), NetworkAction::Block);
+        // Without the page, a site-scoped exception applies on no site.
+        let scoped = compile(vec![blocklist(), crate::builtin::source()]);
+        assert_eq!(action(&scoped), NetworkAction::Block);
+    }
+
+    #[test]
+    fn catalog_keeps_room_for_zephium_s_own_lines_and_rules() {
+        let limits = crate::CompileLimits::default();
+        let (own_lines, own_rules) = crate::builtin::line_counts();
+        let source = |lines: Vec<&str>| {
+            vec![PolicySource::new(
+                SourceId::new("list").unwrap(),
+                SourceFormat::Standard,
+                Arc::from(lines.join("\n")),
+            )]
+        };
+        let comments = |count: usize| source(vec!["!"; count]);
+        assert!(matches!(
+            StaticPolicyCatalog::new(comments(limits.max_physical_lines() - own_lines + 1)),
+            Err(CatalogError::TooManyLines)
+        ));
+        StaticPolicyCatalog::new(comments(limits.max_physical_lines() - own_lines)).unwrap();
+        let rules = |count: usize| source(vec!["||ads.zephium.invalid^"; count]);
+        assert!(matches!(
+            StaticPolicyCatalog::new(rules(limits.max_rules() - own_rules + 1)),
+            Err(CatalogError::TooManyRules)
+        ));
+        StaticPolicyCatalog::new(rules(limits.max_rules() - own_rules)).unwrap();
+    }
+
+    #[test]
+    fn catalog_refuses_the_id_of_zephium_s_own_rules() {
+        let source = PolicySource::new(
+            SourceId::new(crate::builtin::ID).unwrap(),
+            SourceFormat::Standard,
+            Arc::from("||ads.zephium.invalid^"),
+        );
+        assert!(matches!(
+            StaticPolicyCatalog::new(vec![source]),
+            Err(CatalogError::ReservedSource)
+        ));
+    }
+
     #[cfg(feature = "runtime")]
     #[test]
     fn runtime_artifact_preserves_typed_native_coverage_dimensions() {
@@ -2437,7 +3052,7 @@ mod tests {
 
     #[cfg(feature = "runtime")]
     #[test]
-    fn runtime_policy_preserves_source_independent_fail_open_semantics() {
+    fn runtime_policy_keeps_a_block_a_page_scoped_exception_could_lift() {
         let rules = Compiler::default()
             .compile(
                 CompileTarget::Runtime,
@@ -2463,7 +3078,7 @@ mod tests {
             source_kind,
         )
         .unwrap();
-        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Allow);
+        assert_eq!(policy.decide(&potentially_excepted), CoreDecision::Block);
 
         let generic = CoreRequest::source_independent(
             "https://generic.example/ad.js",
@@ -2567,6 +3182,247 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn top_level_attribution_applies_domain_party_and_scoped_exception_rules() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||tracker.example^$script,domain=publisher.example
+",
+                        "||cdn.example^$third-party
+",
+                        "||ads.example/loader.js
+",
+                        "@@||ads.example/loader.js$domain=friendly.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url, top| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    top,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        let unattributed = |url| {
+            policy.decide(
+                &CoreRequest::source_independent(
+                    url,
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+
+        let tracker = "https://tracker.example/t.js";
+        assert_eq!(
+            decide(tracker, "https://publisher.example/a"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(tracker, "https://unrelated.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(tracker), CoreDecision::Allow);
+
+        let cdn = "https://cdn.example/lib.js";
+        assert_eq!(
+            decide(cdn, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(decide(cdn, "https://www.cdn.example/"), CoreDecision::Allow);
+        assert_eq!(unattributed(cdn), CoreDecision::Allow);
+
+        // Unattributed, an exception for one site lifts the block nowhere.
+        let loader = "https://ads.example/loader.js";
+        assert_eq!(
+            decide(loader, "https://publisher.example/"),
+            CoreDecision::Block
+        );
+        assert_eq!(
+            decide(loader, "https://friendly.example/"),
+            CoreDecision::Allow
+        );
+        assert_eq!(unattributed(loader), CoreDecision::Block);
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_document_parsed_once_decides_like_its_url() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    [
+                        "||cdn.example^$third-party",
+                        "||widget.example^$~third-party",
+                        "||tracker.example^$domain=publisher.example|b.co.uk",
+                        "||ads.example/loader.js",
+                        "@@||ads.example/loader.js$domain=friendly.example",
+                        "||pages.github.io^$third-party",
+                        "||xn--bcher-kva.example^$domain=xn--bcher-kva.example",
+                    ]
+                    .join("\n"),
+                )],
+            )
+            .unwrap();
+        let urls = [
+            "https://cdn.example/lib.js",
+            "https://static.cdn.example/lib.js",
+            "https://widget.example/w.js",
+            "https://tracker.example/t.js",
+            "https://ads.example/loader.js",
+            "https://a.pages.github.io/x.js",
+            "https://xn--bcher-kva.example/i.js",
+        ];
+        let documents = [
+            "https://publisher.example/a?b=c#d",
+            "https://WWW.CDN.EXAMPLE:8443/",
+            "https://widget.example/",
+            "https://friendly.example/",
+            "https://a.b.co.uk/",
+            "https://a.pages.github.io/",
+            "https://b.pages.github.io/",
+            "https://bücher.example/",
+            "http://127.0.0.1:8080/",
+        ];
+        for document in documents {
+            let source = rules.source_document(document).unwrap();
+            for url in urls {
+                assert_eq!(
+                    rules.evaluate_from(url, &source, ResourceType::Script, RequestMethod::Get),
+                    rules.evaluate(NetworkRequest::new(
+                        url,
+                        document,
+                        ResourceType::Script,
+                        RequestMethod::Get,
+                    )),
+                    "{url} from {document}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn a_source_document_too_long_or_unparsable_is_refused() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let limit = crate::CompileLimits::default().max_source_url_bytes();
+        let long = format!("https://a.example/{}", "x".repeat(limit));
+        assert!(matches!(
+            rules.source_document(&long),
+            Err(crate::MatchError::SourceUrlTooLong { .. })
+        ));
+        assert!(matches!(
+            rules.source_document("not a url"),
+            Err(crate::MatchError::InvalidRequest)
+        ));
+    }
+
+    #[cfg(feature = "runtime-exact")]
+    #[test]
+    fn recent_documents_are_parsed_once_and_bounded() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    "||ads.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let first = policy.source_document("https://a.example/").unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        for index in 0..RecentSources::CAPACITY {
+            policy
+                .source_document(&format!("https://{index}.example/"))
+                .unwrap();
+        }
+        assert!(!Arc::ptr_eq(
+            &first,
+            &policy.source_document("https://a.example/").unwrap()
+        ));
+        let long = format!(
+            "https://a.example/{}",
+            "x".repeat(RecentSources::MAX_URL_BYTES)
+        );
+        let once = policy.source_document(&long).unwrap();
+        assert!(!Arc::ptr_eq(&once, &policy.source_document(&long).unwrap()));
+        assert_eq!(
+            policy.sources.lock().unwrap().0.len(),
+            RecentSources::CAPACITY
+        );
+    }
+
+    #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
+    #[test]
+    fn runtime_only_policy_keeps_top_level_requests_source_independent() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("test").unwrap(),
+                    SourceFormat::Standard,
+                    concat!(
+                        "||generic.example^
+",
+                        "||tracker.example^$script,domain=publisher.example
+",
+                    )
+                    .to_owned(),
+                )],
+            )
+            .unwrap();
+        let policy = RuntimePolicy::compiled(rules);
+        let decide = |url| {
+            policy.decide(
+                &CoreRequest::top_level_approximation(
+                    url,
+                    "https://publisher.example/",
+                    "GET",
+                    NetworkResourceType::Script,
+                    zephium_core::blocker::NetworkRequestSourceKind::Document,
+                )
+                .unwrap(),
+            )
+        };
+        assert_eq!(decide("https://generic.example/a.js"), CoreDecision::Block);
+        assert_eq!(decide("https://tracker.example/t.js"), CoreDecision::Allow);
+        assert_eq!(policy.diagnostics().attribution_unavailable, 0);
+    }
+
     #[cfg(all(feature = "runtime", not(feature = "runtime-exact")))]
     #[test]
     fn shipped_runtime_only_policy_fails_open_on_unexpected_exact_attribution() {
@@ -2600,6 +3456,8 @@ mod tests {
         all(not(target_os = "windows"), feature = "webkit")
     ))]
     #[test]
+    // Protection QA builds add a rule of their own, so no catalog fails alone.
+    #[cfg(not(feature = "qa-test-hosts"))]
     fn deterministic_compile_failure_is_cached_once() {
         let catalog = StaticPolicyCatalog::new(vec![PolicySource::new(
             SourceId::new("invalid").unwrap(),
@@ -3120,6 +3978,25 @@ mod tests {
         assert_eq!(
             worker.shutdown_until(Instant::now() + Duration::from_secs(2)),
             BlockerShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(feature = "runtime")]
+    #[test]
+    fn an_official_list_that_stops_blocking_is_refused() {
+        let rules = Compiler::default()
+            .compile(
+                CompileTarget::Runtime,
+                vec![FilterSource::new(
+                    SourceId::new("easylist").unwrap(),
+                    SourceFormat::Standard,
+                    "||unrelated.example^".to_owned(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            adapt_rules(rules).err(),
+            Some(BlockerCompileFailure::InvalidSource)
         );
     }
 }

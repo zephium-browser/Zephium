@@ -21,16 +21,19 @@ use crate::runtime_security::{
 #[path = "webview2_runtime.rs"]
 mod runtime;
 #[cfg(target_os = "windows")]
-pub use runtime::{RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind};
+pub use runtime::{
+    BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
+    RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser,
+};
 
-/// Windows Stable security release published by Microsoft on 2026-10-22.
-pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(156, 0, 4314, 42);
-pub const SECURITY_FLOOR_TEXT: &str = "156.0.4314.42";
-pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-10-22";
-/// 2026-10-22T00:00:00Z. A wall clock before the reviewed release cannot
+/// Windows Stable security release published by Microsoft on 2026-10-29.
+pub const SECURITY_FLOOR: WebView2Version = WebView2Version::stable(156, 0, 4314, 56);
+pub const SECURITY_FLOOR_TEXT: &str = "156.0.4314.56";
+pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-10-29";
+/// 2026-10-29T00:00:00Z. A wall clock before the reviewed release cannot
 /// establish that the floor is current and must fail closed just like an
 /// expired review.
-pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_792_627_200;
+pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_793_232_000;
 pub const SECURITY_FLOOR_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnotes-security";
 /// Microsoft's first-party update catalog proves the exact reviewed WebView2
@@ -38,17 +41,17 @@ pub const SECURITY_FLOOR_SOURCE_URL: &str =
 /// establish the security release; this independent source establishes that
 /// the corresponding supported WebView2 artifacts actually exist.
 pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
-    "https://www.catalog.update.microsoft.com/Search.aspx?q=Microsoft+WebView2+Runtime+156.0.4314.42";
+    "https://www.catalog.update.microsoft.com/Search.aspx?q=Microsoft+WebView2+Runtime+156.0.4314.56";
 
 /// Newest Stable security release included in this review. It is intentionally
 /// separate from the hard floor: falling behind by one serviced patch produces
 /// an actionable advisory rather than a wall-clock or latest-version kill
 /// switch.
-pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(156, 0, 4314, 42);
-pub const LATEST_REVIEWED_TEXT: &str = "156.0.4314.42";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-22";
-/// 2026-10-22T00:00:00Z.
-pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_792_627_200;
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(156, 0, 4314, 58);
+pub const LATEST_REVIEWED_TEXT: &str = "156.0.4314.58";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-30";
+/// 2026-10-30T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_793_318_400;
 /// First-party Stable-channel release evidence for [`LATEST_REVIEWED`].
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnote-stable-channel";
@@ -70,11 +73,11 @@ pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-10-24";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-// Reviewed against vendor security releases and WebView2 packages on 2026-10-24.
-// Evidence: docs/windows-webview2-security-review-2026-10-24.md.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-31";
-/// 2026-11-01T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_793_491_200;
+// Reviewed against vendor security releases and WebView2 packages on 2026-11-02.
+// Evidence: docs/windows-webview2-security-review-2026-11-02.md.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
+/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -505,9 +508,16 @@ mod tests {
 
     #[test]
     fn assessment_separates_floor_recommendation_review_age_and_future_stable_line() {
+        let floor_advisories = if SECURITY_FLOOR != LATEST_REVIEWED {
+            RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::update_recommended(
+                RuntimeSecurityUpdateTarget::BrowserRuntime,
+            ))
+        } else {
+            RuntimeSecurityAdvisories::new()
+        };
         assert_eq!(
             assess_runtime(SECURITY_FLOOR_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
-            Ok((SECURITY_FLOOR, RuntimeSecurityAdvisories::new()))
+            Ok((SECURITY_FLOOR, floor_advisories))
         );
         assert_eq!(
             assess_runtime(LATEST_REVIEWED_TEXT, LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),

@@ -132,7 +132,7 @@ tela, junto com a página.
   o uso de memória continua baixo mesmo com muitas abas abertas.
 - Um bloqueador nativo de anúncios e rastreadores, ativado por padrão, baseado
   no [adblock-rust](https://github.com/brave/adblock-rust) do Brave, com
-  EasyList e EasyPrivacy. As requisições são barradas antes que uma página possa
+  EasyList, EasyPrivacy e os filtros do uBlock Origin. As requisições são barradas antes que uma página possa
   fazê-las, e você pode ocultar com um clique qualquer outra coisa em uma
   página.
 

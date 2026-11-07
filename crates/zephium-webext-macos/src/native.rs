@@ -121,7 +121,7 @@ fn open(
         .borrow()
         .get(&extension)
         .is_some_and(|loaded| {
-            loaded.external_native_messaging
+            loaded.external_native_messaging.get()
                 && std::ptr::eq(&*loaded.context, context)
                 && unsafe { context.hasPermission(&NSString::from_str("nativeMessaging")) }
         });
@@ -202,14 +202,16 @@ pub(crate) fn verify_open_admission(shared: &Rc<Shared>, id: &str) -> Result<(),
         .borrow_mut()
         .get_mut(id)
         .unwrap()
-        .external_native_messaging = false;
+        .external_native_messaging
+        .set(false);
     let unreviewed = check(&context, DENIED);
     shared
         .loaded
         .borrow_mut()
         .get_mut(id)
         .unwrap()
-        .external_native_messaging = true;
+        .external_native_messaging
+        .set(true);
     unreviewed?;
     let mismatch = unsafe {
         WKWebExtensionContext::initForExtension(
