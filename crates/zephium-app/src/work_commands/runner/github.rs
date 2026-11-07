@@ -264,7 +264,9 @@ mod tests {
                     .or_else(|| std::env::var_os("PUBLIC"))
                     .expect("set ZEPHIUM_TEST_SOCKET_DIR to a writable local AF_UNIX directory"),
             )
-            .expect("create AF_UNIX fixture; set ZEPHIUM_TEST_SOCKET_DIR if PUBLIC is not writable");
+            .expect(
+                "create AF_UNIX fixture; set ZEPHIUM_TEST_SOCKET_DIR if PUBLIC is not writable",
+            );
         #[cfg(not(any(unix, windows)))]
         let directory = tempfile::Builder::new().prefix("zgh-").tempdir().unwrap();
         let path = directory.path().canonicalize().unwrap().join("broker.sock");
