@@ -231,7 +231,9 @@ impl Shell {
         let engine = self.engine.clone();
         let settled = join.clone();
         let wanted = site.clone();
-        let forget = move |origins: Vec<String>| {
+        // Origins the scan may have left out may still hold data, so the
+        // removal can only be partial then.
+        let forget = move |origins: Vec<String>, complete: bool| {
             engine.browsing_data_call(
                 partition,
                 EngineDataCall::ForgetSite {
@@ -242,8 +244,10 @@ impl Shell {
                     Join::settle_part(
                         &settled,
                         match reply {
-                            EngineDataReply::Cleared => Part::Cleared,
-                            EngineDataReply::PartlyCleared => Part::PartlyCleared,
+                            EngineDataReply::Cleared if complete => Part::Cleared,
+                            EngineDataReply::Cleared | EngineDataReply::PartlyCleared => {
+                                Part::PartlyCleared
+                            }
                             EngineDataReply::Failed(why) => Part::Failed(failure(why)),
                             EngineDataReply::Sites { .. } => {
                                 Part::Failed(BrowsingDataError::Failed)
@@ -254,27 +258,30 @@ impl Shell {
             );
         };
         // The history scan runs on the store's thread; a refused one still
-        // removes what the open pages name.
+        // removes what the open pages name, and says it may not be all.
         let pending = Arc::new(Mutex::new(Some((forget, origins))));
         let answer = pending.clone();
         let asked = self.store.site_origins(
             profile,
             site,
-            Box::new(move |history| {
+            Box::new(move |history, scanned| {
                 let taken = answer
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .take();
                 if let Some((forget, mut origins)) = taken {
+                    let mut complete = scanned;
                     for found in history {
+                        if origins.contains(&found) {
+                            continue;
+                        }
                         if origins.len() >= MAX_SITE_ORIGINS {
+                            complete = false;
                             break;
                         }
-                        if !origins.contains(&found) {
-                            origins.push(found);
-                        }
+                        origins.push(found);
                     }
-                    forget(origins);
+                    forget(origins, complete);
                 }
             }),
         );
@@ -284,7 +291,7 @@ impl Shell {
                 .unwrap_or_else(|error| error.into_inner())
                 .take();
             if let Some((forget, origins)) = taken {
-                forget(origins);
+                forget(origins, false);
             }
         }
     }

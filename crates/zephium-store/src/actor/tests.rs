@@ -4885,24 +4885,32 @@ fn a_sites_origins_come_from_its_history_and_icons_with_their_ports() {
         hub.record_visit(profile, url, "Page");
     }
     hub.save_favicon(profile, "https://cdn.example.com", None, &rgba());
+    hub.save_favicon(profile, "https://shop.example.com:8443/cart", None, &rgba());
 
-    let origins = hub.site_origins(profile, "example.com");
-    assert_eq!(origins.len(), 3, "{origins:?}");
+    let (origins, complete) = hub.site_origins(profile, "example.com");
+    assert!(complete);
+    assert_eq!(origins.len(), 4, "{origins:?}");
     for origin in [
         "https://www.example.com",
         "http://example.com:8080",
         "https://cdn.example.com",
+        "https://shop.example.com:8443",
     ] {
         assert!(origins.iter().any(|o| o == origin), "{origin}: {origins:?}");
     }
     assert_eq!(
         hub.site_origins(profile, "127.0.0.1"),
-        vec!["http://127.0.0.1:3000".to_owned()]
+        (vec!["http://127.0.0.1:3000".to_owned()], true)
     );
-    assert!(hub.site_origins(profile, "https://example.com").is_empty());
-    assert!(hub
-        .site_origins(ProfileId::from(9), "example.com")
-        .is_empty());
+    // Nothing can be read for a name that is no site or a profile not held.
+    assert_eq!(
+        hub.site_origins(profile, "https://example.com"),
+        (Vec::new(), false)
+    );
+    assert_eq!(
+        hub.site_origins(ProfileId::from(9), "example.com"),
+        (Vec::new(), false)
+    );
 }
 
 #[test]
@@ -4916,7 +4924,8 @@ fn a_sites_origins_stop_at_their_cap() {
     for (url, title) in &visits {
         hub.record_visit(profile, url, title);
     }
-    let origins = hub.site_origins(profile, "example.com");
+    let (origins, complete) = hub.site_origins(profile, "example.com");
+    assert!(!complete, "stopped at the cap, so some may be left out");
     assert_eq!(origins.len(), zephium_core::browsing_data::MAX_SITE_ORIGINS);
     // Newest visits first.
     assert_eq!(

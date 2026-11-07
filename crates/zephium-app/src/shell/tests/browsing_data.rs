@@ -349,11 +349,14 @@ fn forgetting_a_listed_site_asks_only_for_that_site() {
 #[test]
 fn forgetting_a_site_names_the_origins_its_history_and_open_pages_know() {
     let store = Arc::new(FakeStore::default());
-    *store.site_origins.lock().unwrap() = Some(vec![
-        "https://www.example.com".into(),
-        "http://example.com:8080".into(),
-        "https://shop.example.com".into(),
-    ]);
+    *store.site_origins.lock().unwrap() = Some((
+        vec![
+            "https://www.example.com".into(),
+            "http://example.com:8080".into(),
+            "https://shop.example.com".into(),
+        ],
+        true,
+    ));
     let (mut shell, engine, screen, _queue) = browsed(store);
     let profile = focused_profile(&shell);
     let tab = active_id(&screen);
@@ -661,4 +664,28 @@ fn site_data_clear_waits_for_backup_disposal_and_preserves_engine_failures() {
             error: BrowsingDataError::Unavailable
         }
     );
+}
+
+#[test]
+fn a_site_removal_whose_origin_scan_stopped_short_or_was_refused_is_partial() {
+    for refused in [false, true] {
+        let store = Arc::new(FakeStore::default());
+        *store.site_origins.lock().unwrap() = Some((vec!["https://www.example.com".into()], false));
+        store
+            .site_origins_refused
+            .store(refused, std::sync::atomic::Ordering::Release);
+        let (mut shell, engine, _screen, _queue) = browsed(store);
+        let profile = focused_profile(&shell);
+
+        let answer = dispatch(
+            &mut shell,
+            profile,
+            BrowsingDataCall::ForgetSite {
+                site: "example.com".into(),
+            },
+        );
+
+        assert_eq!(answered(&answer), BrowsingDataResponse::PartlyCleared);
+        assert_eq!(engine.data_calls.lock().unwrap().len(), 1);
+    }
 }

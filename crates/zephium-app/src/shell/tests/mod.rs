@@ -1124,7 +1124,10 @@ type SiteUpdateCallback =
 #[derive(Default)]
 pub(crate) struct FakeStore {
     /// What a site's history names; none refuses the scan.
-    pub(crate) site_origins: Mutex<Option<Vec<String>>>,
+    /// The origin scan's answer and whether it finished; none answers an
+    /// empty, finished scan. `site_origins_refused` refuses the scan.
+    pub(crate) site_origins: Mutex<Option<(Vec<String>, bool)>>,
+    pub(crate) site_origins_refused: std::sync::atomic::AtomicBool,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1907,12 +1910,21 @@ impl Store for FakeStore {
         &self,
         _profile: ProfileId,
         _site: String,
-        done: Box<dyn FnOnce(Vec<String>) + Send>,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
     ) -> bool {
-        let Some(origins) = self.site_origins.lock().unwrap().clone() else {
+        if self
+            .site_origins_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return false;
-        };
-        done(origins);
+        }
+        let (origins, complete) = self
+            .site_origins
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((Vec::new(), true));
+        done(origins, complete);
         true
     }
     fn discard_session_backup(
