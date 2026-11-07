@@ -16,11 +16,13 @@ import { observe } from "$shared/lib/observe";
 import { operations, settle, type Settlement } from "$domain/operations";
 
 let view = $state.raw<ProfilesView | null>(null);
+let deletedProfile = $state<string | null>(null);
 let users = 0;
 let stop: (() => void) | null = null;
 let generation = 0;
 
 export const all = (): ProfileEntryView[] => view?.profiles ?? [];
+export const lastDeleted = () => deletedProfile;
 export const current = (): ProfileEntryView | null =>
   view?.profiles.find((profile) => profile.id === view?.current) ?? null;
 export const inPrivate = () => view?.private ?? false;
@@ -115,6 +117,8 @@ function observeDeletion(profile: string, operationId: string) {
     )
       return;
     if (disposition.outcome === "applied" || disposition.outcome === "no_op") forgetDrafts(profile);
+    if (disposition.outcome === "applied" && disposition.reason === "profile_deletion_completed")
+      deletedProfile = profile;
     finishDraftDeletion(operationId);
   });
   // The bounded ledger may already contain completion before subscription.
@@ -145,6 +149,12 @@ export const remove = async (id: string, operationId?: string): Promise<Deletion
       )
     : await settle(commands.profilesDelete(id), 5000);
   if (applied(result)) {
+    if (
+      result.outcome === "applied" &&
+      result.disposition?.reason === "profile_deletion_completed" &&
+      (!operationId || pendingDeletions.has(operationId))
+    )
+      deletedProfile = id;
     if (operationId) finishDraftDeletion(operationId);
     forgetDrafts(id);
     return { state: "completed" };
