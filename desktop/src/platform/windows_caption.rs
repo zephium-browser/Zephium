@@ -33,6 +33,9 @@ const TOP_DWELL_MS: u32 = 400;
 const REVEAL_DWELL_MS: u32 = 150;
 // How long the caption takes to come out or go away.
 const FADE_MS: u32 = 220;
+// A step of that motion on every system timer tick. Asking for 15 ms, just
+// under a tick, often waited two.
+const FRAME_MS: u32 = USER_TIMER_MINIMUM;
 /// Why the caption is out of the way. Each holder clears only its own, so a
 /// page leaving fullscreen cannot unhide the caption of a window the person
 /// had made fullscreen.
@@ -694,7 +697,7 @@ unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
     if animate {
         (*p).fade_from = (*p).opacity;
         (*p).fade_started = std::time::Instant::now();
-        SetTimer(Some((*p).strip), FADE, 15, None);
+        SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
     } else {
         (*p).opacity = target;
         let _ = KillTimer(Some((*p).strip), FADE);
@@ -1020,7 +1023,7 @@ unsafe fn resume_motion(p: *mut State) {
     if let Some(paused) = (*p).motion_paused.take() {
         (*p).fade_started += paused.elapsed();
         if (*p).opacity != if (*p).expanded { 255 } else { 0 } {
-            SetTimer(Some((*p).strip), FADE, 15, None);
+            SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
         }
     }
 }
