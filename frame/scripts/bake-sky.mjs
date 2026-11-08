@@ -1,23 +1,21 @@
-// Writes each sky's light: its source picture in grey. The app prints it in
-// the scene's palette at the screen's own pixels (src/shared/sky/dither.ts),
-// so nothing about the look is baked here. Run with `node scripts/bake-sky.mjs`
+// Writes each sky's picture from its source. The app prints it as an ordered
+// screen at the screen's own pixels (src/shared/sky/dither.ts), so nothing
+// about the look is baked here. Run with `node scripts/bake-sky.mjs`
 // after changing a source in assets/sky (needs ffmpeg with libsvtav1).
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 for (const name of ["day", "night"]) {
   const source = fileURLToPath(new URL(`../../assets/sky/${name}-source.png`, import.meta.url));
-  const out = fileURLToPath(
-    new URL(`../src/shared/sky/assets/sky-${name}-light.avif`, import.meta.url),
-  );
+  const out = fileURLToPath(new URL(`../src/shared/sky/assets/sky-${name}.avif`, import.meta.url));
   execFileSync("ffmpeg", [
     "-v",
     "error",
     "-y",
     "-i",
     source,
-    "-vf",
-    "format=gray",
+    "-pix_fmt",
+    "yuv420p",
     "-frames:v",
     "1",
     "-c:v",

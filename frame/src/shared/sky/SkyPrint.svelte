@@ -1,7 +1,7 @@
 <script lang="ts">
   import { frameFor, type Quiet, type SkyFrame } from "./dither";
   import type { Box } from "./place";
-  import { loadLuma } from "./luma";
+  import { loadPicture } from "./picture";
   import { frostFrom, printed } from "./print.svelte";
   import type { Scene } from "./scenes";
 
@@ -48,7 +48,7 @@
   let size = $derived(frameFor(width, height, scale));
   let frame = $derived<SkyFrame>({ ...size, density: scale, sky, horizon, pictureHorizon, quiet });
 
-  // Printed as soon as its light is read, once per change the page settles:
+  // Printed as soon as its picture is read, once per change the page settles:
   // a resize prints each size it is laid out at, and nothing runs at rest. No
   // animation frame is waited for, so a window still hidden is printed before
   // it is shown.
@@ -58,10 +58,10 @@
     const wantedScene = scene;
     if (!target || wanted.columns <= 0 || wanted.rows <= 0 || wanted.sky.w <= 0) return;
     let live = true;
-    void loadLuma(wantedScene).then(
-      (luma) => {
+    void loadPicture(wantedScene).then(
+      (picture) => {
         if (!live) return;
-        const pixels = printed(wantedScene, luma, wanted);
+        const pixels = printed(wantedScene, picture, wanted);
         if (target.width !== wanted.columns) target.width = wanted.columns;
         if (target.height !== wanted.rows) target.height = wanted.rows;
         target.getContext("2d")?.putImageData(pixels, 0, 0);

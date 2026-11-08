@@ -1,5 +1,5 @@
 import { SvelteSet } from "svelte/reactivity";
-import { PALETTES, edgeLight, printSky, type Luma, type Rgb, type SkyFrame } from "./dither";
+import { INKS, edgeLight, printSky, type Picture, type Rgb, type SkyFrame } from "./dither";
 import type { Scene } from "./scenes";
 
 let last: { key: string; pixels: ImageData } | null = null;
@@ -24,11 +24,11 @@ const keyOf = (scene: Scene, frame: SkyFrame) =>
 
 /** The printed sky for a frame. The last one is kept, so the next new tab of
  *  the same size shows it without printing again. */
-export function printed(scene: Scene, luma: Luma, frame: SkyFrame): ImageData {
+export function printed(scene: Scene, picture: Picture, frame: SkyFrame): ImageData {
   const key = keyOf(scene, frame);
   if (last?.key === key) return last.pixels;
   const pixels = new ImageData(frame.columns, frame.rows);
-  printSky(pixels.data, luma, PALETTES[scene], frame);
+  printSky(pixels.data, picture, INKS[scene], frame);
   last = { key, pixels };
   shown.add(scene);
   light = { scene, bands: edgeLight(pixels.data, frame.columns, frame.rows) };
@@ -49,7 +49,7 @@ const FROSTING: Record<
   { flatten: number; veil: readonly [number, number, number, number] }
 > = {
   day: { flatten: 0.5, veil: [255, 255, 255, 0.25] },
-  night: { flatten: 0.3, veil: [8, 11, 21, 0.26] },
+  night: { flatten: 0.3, veil: [10, 22, 46, 0.26] },
 };
 
 let frosts = $state.raw<Partial<Record<Scene, string>>>({});

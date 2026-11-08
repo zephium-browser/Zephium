@@ -13,7 +13,7 @@ import Shell from "../Shell.svelte";
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  mediaUrl: () => "/src/shared/sky/assets/sky-day-light.avif",
+  mediaUrl: () => "/src/shared/sky/assets/sky-day.avif",
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");

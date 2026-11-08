@@ -94,7 +94,7 @@ beforeEach(async () => {
   native.settings = {};
   native.profile = "00000000000000000000000901";
   native.import.mockReset().mockResolvedValue({ status: "ok", data: imported() });
-  native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day-light.avif");
+  native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day.avif");
   native.decode.mockClear();
   native.blocked
     .mockReset()
