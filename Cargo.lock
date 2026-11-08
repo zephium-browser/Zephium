@@ -7615,7 +7615,7 @@ dependencies = [
 
 [[package]]
 name = "zephium-desktop"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "async-io",
  "base64 0.22.1",
@@ -7642,6 +7642,7 @@ dependencies = [
  "serde_json",
  "specta",
  "specta-typescript",
+ "tao",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
