@@ -103,7 +103,14 @@ impl Shell {
                         tab.has_view()
                             && (tab.url.is_some()
                                 || tab.content == zephium_core::item::TabContent::ExtensionOwned)
-                            && !self.presentation.deferred_first_content_layout.contains(id)
+                            // Verified, the layout that admits the page is
+                            // the one that makes room for it.
+                            && (!self.presentation.deferred_first_content_layout.contains(id)
+                                || self
+                                    .presentation
+                                    .pending_presentations
+                                    .get(id)
+                                    .is_some_and(|pending| pending.chrome_applied))
                     })
                 })
             });
