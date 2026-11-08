@@ -8,9 +8,20 @@ import SiteSettings from "../components/SiteSettings.svelte";
 const native = vi.hoisted(() => ({
   list: vi.fn<(origin?: string) => Promise<SitePermissionsView | null>>(),
   set: vi.fn(async () => true),
+  switchProfile: (_id: string) => {},
 }));
 vi.mock("$domain/permissions", () => ({ sitePermissions: native }));
-afterEach(() => vi.clearAllMocks());
+vi.mock("$domain/tabs", async () => {
+  const { SvelteMap } = await import("svelte/reactivity");
+  const active = new SvelteMap([["id", "personal"]]);
+  native.switchProfile = (id) => active.set("id", id);
+  return { tabs: { profile: () => ({ id: active.get("id") }) } };
+});
+afterEach(() => {
+  vi.resetAllMocks();
+  native.set.mockResolvedValue(true);
+  native.switchProfile("personal");
+});
 
 const saved: SitePermissionsView = {
   private: false,
@@ -76,6 +87,41 @@ test("a failed change says so", async () => {
   await expect
     .element(page.getByRole("alert"))
     .toHaveTextContent("Couldn't change this site's permission.");
+});
+
+test("a profile switch during a read discards the old reply and reads the new profile", async () => {
+  let finish!: (reply: SitePermissionsView) => void;
+  const first = new Promise<SitePermissionsView>((resolve) => (finish = resolve));
+  native.list.mockReturnValueOnce(first).mockResolvedValueOnce({ ...saved, entries: [] });
+  await render(SiteSettings);
+  await expect.poll(() => native.list.mock.calls.length).toBe(1);
+
+  native.switchProfile("work");
+  await expect.element(page.getByText("https://meet.example")).not.toBeInTheDocument();
+  expect(native.list).toHaveBeenCalledTimes(1);
+  finish(saved);
+
+  await expect.element(page.getByText("Sites you allow or block will appear here.")).toBeVisible();
+  await expect.element(page.getByText("https://meet.example")).not.toBeInTheDocument();
+  expect(native.list).toHaveBeenCalledTimes(2);
+});
+
+test("switching profiles hides the old controls and ignores a late change failure", async () => {
+  let finish!: (accepted: boolean) => void;
+  const change = new Promise<boolean>((resolve) => (finish = resolve));
+  native.list.mockResolvedValueOnce(saved).mockResolvedValueOnce({ ...saved, entries: [] });
+  native.set.mockReturnValueOnce(change);
+  await render(SiteSettings);
+
+  const remove = page.getByRole("button", { name: "Remove https://mail.example" });
+  await remove.click();
+  native.switchProfile("work");
+  await expect.element(remove).not.toBeInTheDocument();
+  finish(false);
+
+  await expect.element(page.getByText("Sites you allow or block will appear here.")).toBeVisible();
+  await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+  expect(native.set).toHaveBeenCalledTimes(1);
 });
 
 test("an empty, a private and an unreadable profile each say why there is no list", async () => {

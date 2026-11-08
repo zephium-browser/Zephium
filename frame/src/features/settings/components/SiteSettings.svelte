@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import * as m from "$shared/i18n/messages";
   import type {
     SitePermissionDecisionView,
@@ -8,6 +7,7 @@
     SitePermissionsView,
   } from "$shared/ipc/bindings";
   import { sitePermissions } from "$domain/permissions";
+  import { tabs } from "$domain/tabs";
   import Button from "$shared/ui/Button";
   import Select from "$shared/ui/Select";
 
@@ -26,10 +26,14 @@
     app_links: m.permission_app_links,
   };
 
-  let view = $state<SitePermissionsView | null>(null);
-  let loaded = $state(false);
+  const activeProfile = $derived(tabs.profile()?.id);
+  let view = $state.raw<SitePermissionsView | null>(null);
+  let loadedFor = $state<string | null>(null);
+  const loaded = $derived(loadedFor !== null && loadedFor === activeProfile);
   let busy = $state<string | null>(null);
   let failed = $state(false);
+  let generation = 0;
+  let pending = Promise.resolve();
 
   let groups = $derived(
     (view?.kinds ?? [])
@@ -60,26 +64,52 @@
           { value: "block", label: m.permission_block() },
         ];
 
-  async function load() {
-    view = await sitePermissions.list();
-    loaded = true;
+  const current = (profile: string, scope: number) =>
+    profile === activeProfile && scope === generation;
+
+  async function load(profile: string, scope: number) {
+    if (!current(profile, scope)) return;
+    const next = await sitePermissions.list();
+    if (!current(profile, scope)) return;
+    view = next;
+    loadedFor = profile;
   }
 
-  async function change(entry: SitePermissionView, decision: SitePermissionDecisionView | null) {
-    if (busy !== null) return;
+  function change(entry: SitePermissionView, decision: SitePermissionDecisionView | null) {
+    const profile = activeProfile;
+    if (!profile || !loaded || busy !== null) return;
+    const scope = generation;
     busy = key(entry);
-    failed = !(await sitePermissions.set(entry.origin, entry.kind, decision, entry.scheme));
-    await load();
-    busy = null;
+    pending = (async () => {
+      const applied = await sitePermissions
+        .set(entry.origin, entry.kind, decision, entry.scheme)
+        .catch(() => false);
+      if (!current(profile, scope)) return;
+      failed = !applied;
+      await load(profile, scope);
+      if (current(profile, scope)) busy = null;
+    })();
   }
 
-  onMount(() => void load());
+  $effect(() => {
+    const profile = activeProfile;
+    const scope = generation;
+    loadedFor = null;
+    view = null;
+    busy = null;
+    failed = false;
+    // Native admits only one list request at a time.
+    if (profile) pending = pending.then(() => load(profile, scope));
+    return () => {
+      generation += 1;
+    };
+  });
 </script>
 
 <div class="site-settings" data-setting="privacy.site-settings" aria-busy={!loaded || undefined}>
   {#if loaded && view === null}
     <p class="note">{m.site_settings_unavailable()}</p>
-  {:else if view?.private}
+  {:else if loaded && view?.private}
     <p class="note">{m.site_settings_private()}</p>
   {:else if loaded}
     {#if groups.length === 0}
@@ -120,7 +150,7 @@
       <p class="note">{m.site_settings_incomplete()}</p>
     {/if}
   {/if}
-  {#if failed}
+  {#if loaded && failed}
     <p class="note error" role="alert">{m.site_settings_failed()}</p>
   {/if}
 </div>
