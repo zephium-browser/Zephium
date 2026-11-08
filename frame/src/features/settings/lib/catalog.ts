@@ -1,4 +1,5 @@
 import * as m from "$shared/i18n/messages";
+import { IS_MAC } from "$shared/platform";
 export const fields = {
   "privacy.cleanup": {
     preview: true,
@@ -318,6 +319,8 @@ export const fields = {
       { value: "new-tab", label: m.tabs_external_option_same },
       { value: "end", label: m.tabs_external_option_end },
       { value: "after-current", label: m.tabs_external_option_next },
+      // Only macOS hosts Little windows.
+      ...(IS_MAC ? [{ value: "little", label: m.tabs_external_option_little }] : []),
     ],
   },
   "tabs.close-button": {

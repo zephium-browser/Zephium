@@ -3,12 +3,17 @@
 //! admits every address before the shell sees it.
 
 use super::*;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use zephium_core::navigation::{external_target, MAX_EXTERNAL_TARGETS};
 
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.
 static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A running instance received links and wants the window that shows them
+/// in front. The shell says which window that is once it has opened them.
+static FORWARD: AtomicBool = AtomicBool::new(false);
 
 /// Admits `arguments` and opens them. `forward` brings the window to the
 /// front, which a running instance wants and a launch leaves to its own
@@ -35,9 +40,26 @@ pub(crate) fn hand_off(
         waiting.extend(urls.into_iter().take(room));
         return;
     };
-    if shell.dispatch(Command::OpenExternal(urls)) && forward {
-        bring_forward(app);
+    if forward {
+        FORWARD.store(true, Ordering::Release);
     }
+    if !shell.dispatch(Command::OpenExternal(urls)) {
+        FORWARD.store(false, Ordering::Release);
+    }
+}
+
+/// Links opened as tabs: the main window comes forward to show them.
+pub(crate) fn forward_pending(app: &tauri::AppHandle) {
+    if FORWARD.swap(false, Ordering::AcqRel) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || bring_forward(&handle));
+    }
+}
+
+/// A link opened in a Little window, which comes forward on its own; the
+/// main window stays where it is.
+pub(crate) fn forward_handled() {
+    FORWARD.store(false, Ordering::Release);
 }
 
 /// Runs once the shell is managed: what arrived early, then this launch's own

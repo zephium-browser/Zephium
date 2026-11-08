@@ -47,6 +47,9 @@ pub(super) struct TabPreferences {
     /// Where a link handed over by another application opens; none
     /// follows `new_position`.
     pub(super) external_position: Option<NewTabPosition>,
+    /// A link handed over by another application opens in a Little window
+    /// where the engine can host one, and as a new tab elsewhere.
+    pub(super) external_little: bool,
     pub(super) archive_after: ArchiveAfter,
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
@@ -66,6 +69,7 @@ impl Default for TabPreferences {
         Self {
             new_position: NewTabPosition::default(),
             external_position: None,
+            external_little: false,
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
@@ -124,10 +128,21 @@ impl TabPreferences {
                 self.startup_pages = zephium_core::preferences::startup_pages(value)
             }
             ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
-            ("tabs.external-position", "new-tab") => self.external_position = None,
-            ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
+            ("tabs.external-position", "new-tab") => {
+                self.external_position = None;
+                self.external_little = false;
+            }
+            ("tabs.external-position", "end") => {
+                self.external_position = Some(NewTabPosition::End);
+                self.external_little = false;
+            }
             ("tabs.external-position", "after-current") => {
-                self.external_position = Some(NewTabPosition::AfterCurrent)
+                self.external_position = Some(NewTabPosition::AfterCurrent);
+                self.external_little = false;
+            }
+            ("tabs.external-position", "little") => {
+                self.external_position = None;
+                self.external_little = true;
             }
             ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
             ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,

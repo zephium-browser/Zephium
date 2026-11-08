@@ -79,6 +79,11 @@ impl Hub {
                     Placement::Space { space, section } => {
                         (Some(space.to_string()), section_to_str(section))
                     }
+                    Placement::Little { .. } => {
+                        return Err(invalid_data(
+                            "legacy session writer cannot encode a Little window page",
+                        ));
+                    }
                 };
                 let (kind, name, url, title, zoom) = match &item.kind {
                     PersistedKind::Folder { name } => {
@@ -547,10 +552,14 @@ pub(super) fn clear_legacy_session_rows_once(conn: &mut Connection) -> rusqlite:
 }
 
 fn owns_placement(profile: ProfileId, s: &SessionState, placement: Placement) -> bool {
-    let (Placement::Favorites { space } | Placement::Space { space, .. }) = placement;
-    s.spaces
-        .iter()
-        .any(|x| x.id == space && x.profile == profile)
+    match placement {
+        Placement::Favorites { space } | Placement::Space { space, .. } => s
+            .spaces
+            .iter()
+            .any(|x| x.id == space && x.profile == profile),
+        // Never saved: a Little window's page belongs to no session.
+        Placement::Little { .. } => false,
+    }
 }
 
 fn section_to_str(section: SpaceSection) -> &'static str {

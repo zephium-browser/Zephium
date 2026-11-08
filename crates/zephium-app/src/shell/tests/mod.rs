@@ -377,6 +377,7 @@ pub(crate) struct FakeEngine {
     >,
     pub(crate) extension_data_changes:
         Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
+    hosts_little_windows: std::sync::atomic::AtomicBool,
 }
 
 impl FakeEngine {
@@ -851,6 +852,14 @@ impl Engine for FakeEngine {
         preview: Option<zephium_core::ports::engine::DropPreview>,
     ) -> NativeDispatch {
         self.previews.lock().unwrap().push(preview);
+        self.native_admission()
+    }
+    fn hosts_little_windows(&self) -> bool {
+        self.hosts_little_windows
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        self.log(format!("release@{window}"));
         self.native_admission()
     }
     fn raise_chrome(
@@ -2285,6 +2294,10 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::RecentlyClosed(_) => {}
         Projection::MediaPlayer(_) => {}
         Projection::OpenNote { .. } => {}
+        Projection::LittleOpened(_)
+        | Projection::Little(_)
+        | Projection::LittleClosed(_)
+        | Projection::ExternalTabsOpened => {}
     }
 }
 
@@ -2597,6 +2610,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod little;
 mod lookup;
 mod media;
 #[path = "navigation.rs"]

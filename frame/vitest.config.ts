@@ -126,7 +126,7 @@ export default defineConfig({
                 readFileSync(new URL("../desktop/tauri.conf.json", import.meta.url), "utf8"),
               ).app.security.csp["style-src"] as string,
               // Match the HTML style elements to which Tauri adds nonce sources.
-              inlineStyleCount: ["./browser.html", "./panel.html"].reduce(
+              inlineStyleCount: ["./browser.html", "./panel.html", "./little.html"].reduce(
                 (count, path) =>
                   count +
                   (readFileSync(new URL(path, import.meta.url), "utf8").match(/<style(?:\s|>)/giu)

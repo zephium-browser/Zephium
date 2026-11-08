@@ -112,7 +112,10 @@ impl crate::Shell {
                     ..
                 } => self.items.get(*tab).is_some_and(|item| {
                     let (zephium_core::item::Placement::Favorites { space }
-                    | zephium_core::item::Placement::Space { space, .. }) = item.placement;
+                    | zephium_core::item::Placement::Space { space, .. }) = item.placement
+                    else {
+                        return false;
+                    };
                     item.tab().is_some()
                         && self
                             .spaces

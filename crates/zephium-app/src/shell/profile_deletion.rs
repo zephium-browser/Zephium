@@ -224,9 +224,13 @@ impl Shell {
             .recently_closed
             .retain(|entry| entry.profile != profile);
         filtered.spaces.retain(|space| space.profile != profile);
-        filtered.items.retain(|item| {
-            let (Placement::Favorites { space } | Placement::Space { space, .. }) = item.placement;
-            !removed_spaces.contains(&space)
+        filtered.items.retain(|item| match item.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                !removed_spaces.contains(&space)
+            }
+            Placement::Little {
+                profile: item_profile,
+            } => item_profile != profile,
         });
 
         (session::canonicalize(filtered.clone()) == filtered).then_some(filtered)

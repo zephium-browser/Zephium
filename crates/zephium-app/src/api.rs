@@ -115,6 +115,17 @@ pub trait PresentationChrome: GeometryChrome {
         presentation: ChromePresentation,
         done: ChromePresentationCallback,
     ) -> ChromePresentationDispatch;
+
+    /// The same barrier for the page of a Little window, whose own toolbar
+    /// must show the exact page before it may appear.
+    fn apply_little_presentation(
+        &self,
+        _window: zephium_core::ids::WindowId,
+        _presentation: ChromePresentation,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Rejected
+    }
 }
 
 /// Terminal result of the ordered application shutdown protocol.
@@ -249,6 +260,19 @@ pub enum SpaceCommand {
     },
     /// Moves the tab in front, for the menu bar.
     MoveActive(zephium_core::ids::SpaceId),
+}
+
+/// Something the toolbar of a Little window asks of its page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LittleAction {
+    Back,
+    Forward,
+    Reload,
+    /// Moves the page into the main window as a tab and closes the window.
+    OpenInMain,
+    /// The same, into the space the person picked.
+    OpenInSpace(zephium_core::ids::SpaceId),
+    Close,
 }
 
 /// What the person chose for a page's request to open another application
@@ -648,6 +672,9 @@ pub enum Command {
     SearchScoped {
         query: String,
         context: Box<zephium_ipc::SearchContext>,
+        /// The launcher is choosing a page for a Little window, so it offers
+        /// only sites, and an open tab's site rather than the tab.
+        little: bool,
     },
     CancelSearch {
         session_id: String,
@@ -664,6 +691,9 @@ pub enum Command {
         /// The tab whose address the launcher was opened to edit: an address
         /// chosen there replaces that tab's page while it is still in front.
         replace: Option<String>,
+        /// The launcher was opened for a new Little window: an address chosen
+        /// there opens in one, unless the main window shows a private session.
+        new_little: bool,
     },
     OpenUrl {
         input: String,
@@ -675,6 +705,21 @@ pub enum Command {
     /// `navigation::external_target`. Each opens in a new tab; any that
     /// arrive before the session is restored wait for it.
     OpenExternal(Vec<String>),
+    /// The desktop built the native window for a Little window the shell
+    /// opened, and the engine took its handle.
+    LittleAttached {
+        window: zephium_core::ids::WindowId,
+        size: Size,
+    },
+    LittleResized {
+        window: zephium_core::ids::WindowId,
+        size: Size,
+    },
+    /// What the person typed in a Little window's address field.
+    Little {
+        window: zephium_core::ids::WindowId,
+        action: LittleAction,
+    },
     SetAppSetting {
         key: String,
         value: String,

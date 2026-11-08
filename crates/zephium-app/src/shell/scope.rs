@@ -14,9 +14,12 @@ impl Shell {
     }
 
     pub(super) fn profile_of_item(&self, id: ItemId) -> Option<ProfileId> {
-        let (Placement::Favorites { space } | Placement::Space { space, .. }) =
-            self.items.get(id)?.placement;
-        self.spaces.get(space).map(|s| s.profile)
+        match self.items.get(id)?.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                self.spaces.get(space).map(|s| s.profile)
+            }
+            Placement::Little { profile } => Some(profile),
+        }
     }
 
     /// A space is an authorization boundary for UI-directed item IDs: its
@@ -35,11 +38,14 @@ impl Shell {
         let Some(item) = self.items.get(id).filter(|item| item.tab().is_some()) else {
             return false;
         };
-        let (Placement::Favorites { space: item_space }
-        | Placement::Space {
-            space: item_space, ..
-        }) = item.placement;
-        item_space == space
+        match item.placement {
+            Placement::Favorites { space: item_space }
+            | Placement::Space {
+                space: item_space, ..
+            } => item_space == space,
+            // A Little window's page answers only to that window.
+            Placement::Little { .. } => false,
+        }
     }
 
     pub(super) fn item_in_focused_scope(&self, id: ItemId) -> bool {

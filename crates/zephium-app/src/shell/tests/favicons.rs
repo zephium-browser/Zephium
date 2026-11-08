@@ -740,6 +740,7 @@ fn the_launcher_is_sent_its_icons_again_only_after_its_page_loads_afresh() {
     };
     let present = |shell: &mut Shell, session: &str| {
         shell.handle(Command::SearchScoped {
+            little: false,
             query: String::new(),
             context: Box::new(zephium_ipc::SearchContext {
                 window_id: window_id.to_string(),

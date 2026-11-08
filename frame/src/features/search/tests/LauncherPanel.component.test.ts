@@ -64,6 +64,7 @@ const context: PanelState = {
   corner_radius: 20,
   seed: null,
   seed_tab: null,
+  little: false,
 };
 const destinations = [
   { kind: "tasks" as const, label: "Tasks", icon: CheckListIcon },
@@ -136,6 +137,30 @@ test("ArrowUp from the typed action selects and runs the last suggestion", async
   await vi.waitFor(() =>
     expect(native.run).toHaveBeenCalledExactlyOnceWith(bookmark.action, owner, false),
   );
+});
+
+test("opened for a Little window, the field says where the address goes", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, little: true }, destinations },
+  });
+  await expect
+    .element(screen.getByRole("combobox", { name: "Open in a little window" }))
+    .toBeVisible();
+});
+
+test("opened for a Little window, it offers sites and no app actions", async () => {
+  const screen = await render(LauncherPanel, {
+    props: {
+      context: { ...context, little: true },
+      destinations,
+      onCapture: async (text: string) => text,
+    },
+  });
+  await expect.element(screen.getByRole("button", { name: "Tasks" })).not.toBeInTheDocument();
+  await screen.getByRole("combobox").fill("tasks");
+  await reply("tasks", [search("tasks")]);
+  await expect.element(screen.getByRole("option", { name: /tasks/iu }).first()).toBeVisible();
+  await expect.poll(() => screen.getByRole("option").elements().length).toBe(1);
 });
 
 test("an obsolete answer cannot put its rows back on screen", async () => {
