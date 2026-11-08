@@ -20,6 +20,10 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     pagePermissionCardHost: async () => {},
+    runCommand: async (id) => {
+      emitNativeEvent("uiCommand", id);
+      return { accepted: true, operation_id: null };
+    },
     tabsBootstrap: async () => {},
     tabsActivate: native.activate,
     sidebarSetHidden: async () => {},
@@ -204,4 +208,26 @@ test("leaving Work or Settings gives back the column the window had", async () =
   emitNativeEvent("browserReturn", { ...items, projection_revision: revision(31) });
   await expect.poll(shown).toEqual(browse);
   expect(screen.container.querySelector(".settings-sidebar-navigation")).toBeNull();
+});
+
+test("the new tab settings button opens General after another section was selected", async () => {
+  await surface.init();
+  await tabs.init();
+  const { handleNativeSection } = await import("$features/settings");
+  handleNativeSection("settings.section.newtab");
+  const tab = tabFixture({ url: null });
+  emitNativeEvent("itemsChanged", {
+    projection_revision: revision(60),
+    profile: null,
+    spaces: [],
+    active_space_id: null,
+    nodes: [],
+    tabs: [tab],
+    active: tab.id,
+    split_group: null,
+  });
+  const screen = await render(Shell);
+  await screen.getByRole("button", { name: "Customize New Tab" }).click();
+  await expect.poll(() => surface.currentPage()).toBe("settings");
+  await expect.element(screen.getByRole("heading", { name: "General", exact: true })).toBeVisible();
 });

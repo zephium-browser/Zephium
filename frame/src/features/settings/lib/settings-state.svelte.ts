@@ -37,6 +37,7 @@ export function handleNativeSection(id: string) {
   if (
     id.startsWith("settings.section.") &&
     [
+      "general",
       "profiles",
       "newtab",
       "ai",

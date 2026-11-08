@@ -82,7 +82,7 @@
   }
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
-    handleNativeSection("settings.section.newtab");
+    handleNativeSection("settings.section.general");
     void browserPage.open("settings");
   }
   function openAccount(intent: "account" | "credits") {

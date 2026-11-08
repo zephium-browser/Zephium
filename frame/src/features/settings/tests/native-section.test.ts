@@ -3,6 +3,7 @@ import { handleNativeSection, section } from "../lib/settings-state.svelte";
 
 test("every settings page a menu or command names is the one that opens", () => {
   for (const id of [
+    "general",
     "about",
     "shortcuts",
     "account",
