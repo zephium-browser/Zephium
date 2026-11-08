@@ -257,6 +257,7 @@
         playing={step === "work"}
         modes={ai}
         scene={sky}
+        skyZoom={fit * close.scale}
         space={tabs.activeSpace()?.name ?? ""}
         named={!leaving && (step !== "welcome" || phase === "formed" || phase === "still")}
         timed={!leaving && step !== "welcome"}

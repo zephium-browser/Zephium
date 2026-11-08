@@ -9,7 +9,6 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import { resourceTestServer } from "$shared/testing/resources/server";
 import type { MediaImportV1_Deserialize } from "$shared/ipc/bindings";
 import { loadNewTab } from "$features/newtab";
-import { isDecoded } from "$shared/sky";
 import { loadSettings, handleNativeSection } from "$features/settings";
 
 async function settingsScreen() {
@@ -34,9 +33,9 @@ vi.mock("$shared/sky", async (original) => {
   const real = await original<typeof import("$shared/sky")>();
   return {
     ...real,
-    decode: (scene: import("$shared/sky").Scene, url?: string) => {
+    prepareSky: (scene: import("$shared/sky").Scene) => {
       native.decode(scene);
-      return real.decode(scene, url);
+      return real.prepareSky(scene);
     },
   };
 });
@@ -95,7 +94,7 @@ beforeEach(async () => {
   native.settings = {};
   native.profile = "00000000000000000000000901";
   native.import.mockReset().mockResolvedValue({ status: "ok", data: imported() });
-  native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day.avif");
+  native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day-light.avif");
   native.decode.mockClear();
   native.blocked
     .mockReset()
@@ -227,9 +226,7 @@ test("a missing or broken image silently restores the sky, including its materia
   expect(newTabImage()).toBeNull();
   expect(ntp.container.querySelector("[role=alert]")).toBeNull();
   expect(ntp.container.querySelector("img")).toBeNull();
-  await expect
-    .poll(() => ntp.container.querySelector<HTMLElement>(".sky")!.style.backgroundImage)
-    .toMatch(/sky-/u);
+  await expect.poll(() => ntp.container.querySelector(".sky canvas")).not.toBeNull();
 });
 
 test("settings follow the existing dark and light surfaces", async () => {
@@ -246,27 +243,15 @@ test("settings follow the existing dark and light surfaces", async () => {
   }
 });
 
-test("a later new tab draws the sky already decoded as it first appears, never an undecoded one", async () => {
+test("a later new tab shows its printed sky as it first appears", async () => {
   await preferences.init();
   const first = await tab();
-  const drawn = () => first.container.querySelector<HTMLElement>(".sky")?.style.backgroundImage;
-  await expect.poll(drawn).toMatch(/sky-/u);
+  await expect
+    .poll(() => first.container.querySelector<HTMLElement>(".newtab")!.dataset.ready)
+    .toBe("true");
   first.unmount();
 
-  const appeared: string[] = [];
-  const watch = new MutationObserver((records) => {
-    for (const node of records.flatMap((record) => [...record.addedNodes])) {
-      if (!(node instanceof HTMLElement)) continue;
-      const sky = node.matches(".sky") ? node : node.querySelector<HTMLElement>(".sky");
-      if (sky) appeared.push(sky.style.backgroundImage);
-    }
-  });
-  watch.observe(document.body, { childList: true, subtree: true });
   const next = await tab();
-  await expect.poll(() => appeared.length).toBeGreaterThan(0);
-  watch.disconnect();
-  const url = /url\("(.+)"\)/u.exec(appeared[0]!)?.[1];
-  expect(url).toBeDefined();
-  expect(isDecoded(url!)).toBe(true);
   expect(next.container.querySelector<HTMLElement>(".newtab")!.dataset.ready).toBe("true");
+  await expect.poll(() => next.container.querySelector(".sky canvas")).not.toBeNull();
 });

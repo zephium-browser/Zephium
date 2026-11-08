@@ -21,7 +21,7 @@
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
-  import { FROSTS, scene } from "$shared/sky";
+  import { scene, skyFrost } from "$shared/sky";
   import { uiCommands as ui } from "$domain/ui-commands";
   import SidebarHeader from "./SidebarHeader.svelte";
   import * as shapeMorph from "../lib/shape-morph";
@@ -480,8 +480,8 @@
   style:left={leaving ? `${leaving.left}px` : undefined}
   style:top={leaving ? `${leaving.top}px` : undefined}
   style:height={leaving ? `${leaving.height}px` : undefined}
-  style:--sidebar-frost={(away || handing) && !newTabImage()
-    ? `url("${FROSTS[scene()]}")`
+  style:--sidebar-frost={(away || handing) && !newTabImage() && skyFrost(scene())
+    ? `url("${skyFrost(scene())}")`
     : undefined}
   data-custom-background={newTabImage() !== null || undefined}
   data-handing={handing ?? undefined}

@@ -13,7 +13,7 @@ import Shell from "../Shell.svelte";
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<Record<string, unknown>>()),
-  mediaUrl: () => "/src/shared/sky/assets/sky-day.avif",
+  mediaUrl: () => "/src/shared/sky/assets/sky-day-light.avif",
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -56,7 +56,7 @@ test("custom images remove sky light and hidden-card frost, and failure restores
   document.documentElement.dataset.material = "mica";
   const screen = await render(Shell);
   const sidebar = () => screen.container.querySelector<HTMLElement>(".browser-sidebar")!;
-  await expect.poll(() => sidebar()?.style.getPropertyValue("--sidebar-frost")).toContain("frost-");
+  await expect.poll(() => sidebar()?.style.getPropertyValue("--sidebar-frost")).toContain("data:image/png");
   expect(screen.container.querySelector(".sky-light")).not.toBeNull();
   emitNativeEvent("uiCommand", `preference.ui.newtab-image=${"a".repeat(64)}`);
   emitNativeEvent("uiCommand", "preference.ui.newtab-background=image");
@@ -66,6 +66,6 @@ test("custom images remove sky light and hidden-card frost, and failure restores
   await expect.poll(() => screen.container.querySelector(".newtab img")).not.toBeNull();
   screen.container.querySelector(".newtab img")!.dispatchEvent(new Event("error"));
   await expect.poll(() => screen.container.querySelector(".sky-light")).not.toBeNull();
-  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toContain("frost-");
+  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toContain("data:image/png");
   expect(document.documentElement.dataset.material).toBe("mica");
 });

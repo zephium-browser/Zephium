@@ -140,8 +140,9 @@ test("the field hangs from the top, and the name and the day stand in the sky", 
   // The page is the sky less the notch the field hangs in.
   const ground = screen.container.querySelector<HTMLElement>(".page")!;
   expect(ground.style.clipPath).toMatch(/A ?18 18 0 0 0/u);
-  const sky = screen.container.querySelector<HTMLElement>(".sky")!;
-  expect(sky.style.backgroundImage).toMatch(/sky-day|sky-night/u);
+  const print = screen.container.querySelector<HTMLCanvasElement>(".sky canvas")!;
+  expect(print.width).toBeGreaterThan(0);
+  expect(getComputedStyle(print).imageRendering).toBe("pixelated");
 
   // The figures: what the blocker stopped today, focus time against the
   // day's goal, and what is due, read from Tasks with the overdue one.

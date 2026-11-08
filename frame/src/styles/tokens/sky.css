@@ -1,18 +1,18 @@
-/* The new tab's sky: the page each sky is baked into (scripts/bake-sky.mjs),
+/* The new tab's sky: the paper each sky is printed on (shared/sky/dither.ts),
    and what stands on it. Day stands over a light page and night
    over a dark one, whatever the theme; the sky brings its own light. */
 :root {
-  --sky-day-paper: #f7f7f8;
+  --sky-day-paper: #fbfcfe;
   --sky-day-shadow: rgb(18 48 112 / 22%);
   --sky-day-disc-fill: rgb(255 255 255 / 18%);
   --sky-day-disc-rim: rgb(255 255 255 / 36%);
-  --sky-night-paper: #1a1d25;
+  --sky-night-paper: #0a0c12;
 
   /* Beside a new tab the window's glass is first evened out, so whatever
      the wallpaper puts through it is only a hint, then lit from the side by
      the picture's own edge, this strongly where the light comes in. */
-  --sky-day-glass: rgb(242 244 248 / 72%);
-  --sky-night-glass: rgb(18 20 27 / 76%);
+  --sky-day-glass: rgb(242 244 248 / 40%);
+  --sky-night-glass: rgb(10 12 18 / 42%);
   --sky-day-edge-strength: 0.5;
   --sky-night-edge-strength: 0.62;
 
@@ -54,9 +54,9 @@
   --sky-day-edge: rgb(232 238 248 / 46%);
   --sky-day-edge-half: rgb(232 238 248 / 22%);
   --sky-day-edge-faint: rgb(232 238 248 / 7%);
-  --sky-night-edge: rgb(10 16 32 / 58%);
-  --sky-night-edge-half: rgb(10 16 32 / 28%);
-  --sky-night-edge-faint: rgb(10 16 32 / 9%);
+  --sky-night-edge: rgb(10 12 18 / 58%);
+  --sky-night-edge-half: rgb(10 12 18 / 28%);
+  --sky-night-edge-faint: rgb(10 12 18 / 9%);
 
   /* A sheet of glass standing on the sky: dark over the night, white over
      the day, so the theme's own ink reads on it. Its rim is the light caught
