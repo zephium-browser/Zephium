@@ -317,6 +317,12 @@
     });
   });
   $effect(() => {
+    const resizing = sidebarResizeActive();
+    untrack(() => {
+      if (!resizing && away && peeking && !pointerIn && !atEdge) release();
+    });
+  });
+  $effect(() => {
     if (away) return;
     clearTimeout(linger);
     clearTimeout(lowered);
@@ -514,7 +520,7 @@
 >
   {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
       {width}
-      disabled={reshaping || hidden}
+      disabled={reshaping}
     />{/if}
   <!-- Settings stands beside the rail with no head: its panel runs the full
        height and the rail keeps only the lights' row. A tool keeps the head,

@@ -137,11 +137,13 @@ describe("theme startup lifecycle", () => {
     expect(harness.attributes.get("data-material")).toBe("none");
     harness.emit("material.liquid_glass");
     expect(harness.attributes.get("data-material")).toBe("liquid_glass");
+    harness.emit("material.mica_alt");
+    expect(harness.attributes.get("data-material")).toBe("mica_alt");
     harness.emit("material.untrusted-value");
-    expect(harness.attributes.get("data-material")).toBe("liquid_glass");
+    expect(harness.attributes.get("data-material")).toBe("mica_alt");
     theme.dispose();
     harness.emit("material.none");
-    expect(harness.attributes.get("data-material")).toBe("liquid_glass");
+    expect(harness.attributes.get("data-material")).toBe("mica_alt");
   });
 
   it("removes a listener that resolves after disposal", async () => {

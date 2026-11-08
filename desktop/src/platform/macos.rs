@@ -713,20 +713,20 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
-            let commit = std::rc::Rc::new(move |width, revision| {
+            let commit = std::rc::Rc::new(move |width, revision, active: Option<bool>| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
                     return;
                 }
-                // A guide release is a snap to a new shape: the content
-                // travels there, which also covers the chrome's repaint.
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, true)) {
+                let hidden = HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(sender.label()));
+                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, !hidden && active.is_none())) {
+                    let event = if active.is_some() { "zephium:sidebar-resize-progress" } else { "zephium:sidebar-width-selected" };
                     crate::emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
-                        "zephium:sidebar-width-selected",
-                        &serde_json::json!({"width": width, "revision": revision}),
+                        event,
+                        &serde_json::json!({"width": width, "revision": revision, "active": active}),
                     );
                 }
             });

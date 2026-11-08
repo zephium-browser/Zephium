@@ -1,13 +1,19 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { userEvent } from "vitest/browser";
+import { tick } from "svelte";
 import * as sidebar from "$session/sidebar-mode.svelte";
 import * as attention from "$session/attention.svelte";
 import SidebarHost from "./SidebarHost.svelte";
 
+const native = vi.hoisted(() => ({
+  set: vi.fn(async () => ({ accepted: true, operation_id: null })),
+}));
+
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    settingSet: native.set,
     settingGet: async (key) => (key === "sidebar.mode" ? "hidden" : null),
     sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
@@ -89,4 +95,36 @@ test("keyboard focus between sidebar controls keeps the card visible", async () 
   (control as HTMLElement).blur();
   await vi.advanceTimersByTimeAsync(1000);
   expect(aside.dataset.peek).toBeUndefined();
+});
+
+test("the hidden card resizes live without becoming a window drag region or snapping", async () => {
+  const aside = await peek();
+  const handle = aside.querySelector<HTMLElement>('[aria-label="Resize sidebar"]')!;
+  expect(handle.getAttribute("aria-disabled")).toBe("false");
+  expect(handle.dataset.tauriDragRegion).toBe("false");
+  expect(handle.classList.contains("pointer-events-none")).toBe(false);
+  // Synthetic pointer events have no browser pointer to capture.
+  const capture = vi.spyOn(handle, "setPointerCapture").mockImplementation(() => {});
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 240, pointerId: 1 }),
+  );
+  expect(capture).toHaveBeenCalledWith(1);
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 340, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("340px");
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  await leave(aside);
+  expect(aside.dataset.peek).toBe("true");
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 56, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("180px");
+  handle.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 56, pointerId: 1 }));
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");
 });

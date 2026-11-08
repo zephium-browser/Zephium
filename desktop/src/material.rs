@@ -10,6 +10,7 @@ pub enum Material {
     LiquidGlass,
     Acrylic,
     Mica,
+    MicaAlt,
 }
 
 /// The person's choice of material. The system still decides what it can
@@ -23,6 +24,7 @@ pub enum Preference {
     Vibrancy,
     Acrylic,
     Mica,
+    MicaAlt,
     None,
 }
 
@@ -33,9 +35,23 @@ impl Preference {
             "vibrancy" => Self::Vibrancy,
             "acrylic" => Self::Acrylic,
             "mica" => Self::Mica,
+            "mica_alt" => Self::MicaAlt,
             "none" => Self::None,
             _ => Self::Auto,
         }
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub fn windows_material(preference: Preference, high_contrast: bool, launcher: bool) -> Material {
+    if high_contrast || preference == Preference::None {
+        Material::None
+    } else if launcher || preference == Preference::Acrylic {
+        Material::Acrylic
+    } else if preference == Preference::MicaAlt {
+        Material::MicaAlt
+    } else {
+        Material::Mica
     }
 }
 
@@ -409,6 +425,66 @@ mod tests {
         assert_eq!(tint_alpha(40), 87);
         assert!(theme_changed("ui.theme", "zephium"));
         assert!(theme_changed("ui.window-tint", "0"));
+    }
+
+    #[test]
+    fn material_preferences_parse_and_unknown_values_use_auto() {
+        for (value, expected) in [
+            ("auto", Preference::Auto),
+            ("mica", Preference::Mica),
+            ("mica_alt", Preference::MicaAlt),
+            ("acrylic", Preference::Acrylic),
+            ("none", Preference::None),
+            ("vibrancy", Preference::Vibrancy),
+            ("liquid_glass", Preference::LiquidGlass),
+            ("MicaAlt", Preference::Auto),
+            ("", Preference::Auto),
+        ] {
+            assert_eq!(Preference::parse(value), expected);
+        }
+        assert_eq!(
+            serde_json::to_string(&Material::MicaAlt).unwrap(),
+            "\"mica_alt\""
+        );
+    }
+
+    #[test]
+    fn windows_choices_select_the_requested_backdrop() {
+        for (preference, expected) in [
+            (Preference::Auto, Material::Mica),
+            (Preference::Mica, Material::Mica),
+            (Preference::MicaAlt, Material::MicaAlt),
+            (Preference::Acrylic, Material::Acrylic),
+            (Preference::None, Material::None),
+            (Preference::Vibrancy, Material::Mica),
+            (Preference::LiquidGlass, Material::Mica),
+        ] {
+            assert_eq!(windows_material(preference, false, false), expected);
+            assert_eq!(windows_material(preference, true, false), Material::None);
+            assert_eq!(windows_material(preference, true, true), Material::None);
+            assert_eq!(
+                windows_material(preference, false, true),
+                if preference == Preference::None {
+                    Material::None
+                } else {
+                    Material::Acrylic
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn macos_uses_its_auto_ladder_for_windows_materials() {
+        for preference in [Preference::Mica, Preference::MicaAlt] {
+            assert_eq!(
+                select_material(false, preference, || true, || false),
+                Material::LiquidGlass
+            );
+            assert_eq!(
+                select_material(false, preference, || false, || true),
+                Material::Vibrancy
+            );
+        }
     }
 
     #[test]
