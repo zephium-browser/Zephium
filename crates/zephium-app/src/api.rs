@@ -119,8 +119,8 @@ pub trait PresentationChrome: GeometryChrome {
 
 /// Terminal result of the ordered application shutdown protocol.
 ///
-/// A retryable failure happens before the native engine is torn down and
-/// leaves the actor live. `Unclean` is terminal: either the actor exited
+/// A retryable failure means shutdown admission was refused; an already
+/// admitted barrier may still be running. `Unclean` is terminal: either the actor exited
 /// without completing the barrier or one of agent lifecycle, Store, blocker,
 /// or native cleanup was not proven, so the process must exit unsuccessfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

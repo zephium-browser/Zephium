@@ -1177,8 +1177,8 @@ impl Handle {
     }
 
     /// Requests an ordered shutdown without waiting for queue capacity on the
-    /// caller (normally the UI thread). Only `RetryableFailure` leaves the
-    /// actor and native engine available for another attempt.
+    /// caller (normally the UI thread). An admitted shutdown is terminal even
+    /// when storage fails; `RetryableFailure` only reports refused admission.
     pub fn shutdown(&self) -> ShutdownRequest {
         self.shutdown_with_deadline(self.shutdown_deadline())
     }
