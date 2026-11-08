@@ -31,6 +31,8 @@ const TOP_DWELL_MS: u32 = 400;
 // The pointer must rest on the reveal edge this long before the caption
 // slides in, so passing over it on the way elsewhere reveals nothing.
 const REVEAL_DWELL_MS: u32 = 150;
+// How long the caption takes to come out or go away.
+const FADE_MS: u32 = 220;
 /// Why the caption is out of the way. Each holder clears only its own, so a
 /// page leaving fullscreen cannot unhide the caption of a window the person
 /// had made fullscreen.
@@ -42,6 +44,7 @@ pub enum Suppression {
     Window = 2,
 }
 struct State {
+    window: WebviewWindow,
     owner: HWND,
     strip: HWND,
     edge: HWND,
@@ -78,6 +81,8 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
+    // Whether the chrome was last told the caption is out.
+    announced: bool,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -154,6 +159,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             buttons[index] = button;
         }
         let pointer = Box::into_raw(Box::new(State {
+            window: window.clone(),
             owner,
             strip,
             edge,
@@ -184,6 +190,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
+            announced: false,
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -459,6 +466,7 @@ unsafe fn layout(p: *mut State) {
         cancel_reveal(p);
         let _ = KillTimer(Some((*p).strip), FADE);
         let _ = KillTimer(Some((*p).strip), HIDE);
+        announce(p, false, 0);
     }
     let progress = f64::from((*p).opacity) / 255.0;
     let displacement = (height as f64 * progress).round() as i32;
@@ -632,30 +640,59 @@ unsafe fn prepare_state_change(p: *mut State) {
     zephium_engine::set_window_caption_offset((*p).owner.0 as isize, 0.0, false);
     let _ = KillTimer(Some((*p).strip), FADE);
     let _ = KillTimer(Some((*p).strip), HIDE);
+    announce(p, false, 0);
+}
+/// Tells the chrome that the caption starts to come out or to go away, so
+/// what it draws under the band can make way in step.
+unsafe fn announce(p: *mut State, shown: bool, duration: u32) {
+    if (*p).announced == shown {
+        return;
+    }
+    (*p).announced = shown;
+    let _ = (*p).window.eval(format!(
+        "window.dispatchEvent(new CustomEvent('zephium:caption',{{detail:{{shown:{shown},height:{},duration:{duration}}}}}))",
+        paint::HEIGHT
+    ));
+}
+fn animates() -> bool {
+    let mut enabled = windows::core::BOOL(1);
+    // SAFETY: reads a system parameter into a local.
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut enabled as *mut windows::core::BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    enabled.as_bool() && !super::menus::high_contrast()
 }
 unsafe fn transition(p: *mut State, expanded: bool) {
+    transition_in(p, expanded, animates());
+}
+unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
+    let target = if expanded { 255 } else { 0 };
     if (*p).expanded == expanded {
+        if !animate && (*p).opacity != target {
+            (*p).opacity = target;
+            let _ = KillTimer(Some((*p).strip), FADE);
+            layout(p);
+        }
         return;
     }
     (*p).expanded = expanded;
     if !expanded {
         (*p).last_hot = HWND::default();
     }
-    let mut enabled = windows::core::BOOL(1);
-    let _ = SystemParametersInfoW(
-        SPI_GETCLIENTAREAANIMATION,
-        0,
-        Some((&mut enabled as *mut windows::core::BOOL).cast()),
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-    );
-    if !enabled.as_bool() || super::menus::high_contrast() {
-        (*p).opacity = if expanded { 255 } else { 0 };
-        let _ = KillTimer(Some((*p).strip), FADE);
-    } else {
+    if animate {
         (*p).fade_from = (*p).opacity;
         (*p).fade_started = std::time::Instant::now();
         SetTimer(Some((*p).strip), FADE, 15, None);
+    } else {
+        (*p).opacity = target;
+        let _ = KillTimer(Some((*p).strip), FADE);
     }
+    announce(p, expanded, if animate { FADE_MS } else { 0 });
     layout(p);
 }
 unsafe fn reveal(p: *mut State) {
@@ -1224,11 +1261,9 @@ unsafe extern "system" fn owner_proc(
         && msg == WM_SYSKEYDOWN
         && w.0 == VK_F10.0 as usize
     {
-        reveal(p);
+        let _ = KillTimer(Some((*p).strip), HIDE);
         // Keyboard focus requires a fully visible native target immediately.
-        (*p).opacity = 255;
-        let _ = KillTimer(Some((*p).strip), FADE);
-        layout(p);
+        transition_in(p, true, false);
         let first = enabled_buttons(hwnd).iter().position(|enabled| *enabled);
         let _ = SetFocus(Some((*p).buttons[first.unwrap_or(2)]));
         return LRESULT(0);
@@ -1425,7 +1460,8 @@ unsafe extern "system" fn strip_proc(
             if (*p).motion_paused.is_some() {
                 return LRESULT(0);
             }
-            let t = ((*p).fade_started.elapsed().as_secs_f64() / 0.22).min(1.0);
+            let t =
+                ((*p).fade_started.elapsed().as_secs_f64() * 1000.0 / f64::from(FADE_MS)).min(1.0);
             let eased = 1.0 - (1.0 - t).powi(3);
             let target = if (*p).expanded { 255.0 } else { 0.0 };
             (*p).opacity = (f64::from((*p).fade_from)
