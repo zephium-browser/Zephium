@@ -30,9 +30,11 @@ mod certificates;
 mod content_filter;
 mod find;
 mod leftover_processes;
+pub(crate) mod middle_click;
 pub use leftover_processes::{
     browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
 };
+pub use middle_click::watch_middle_clicks;
 mod http_auth;
 pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
