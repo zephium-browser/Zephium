@@ -828,12 +828,11 @@ unsafe fn caption_part_at_cursor(p: *mut State) -> HWND {
     }
 }
 /// Asks for a leave message from the part of the caption under the pointer,
-/// for the part of it the pointer is in, and says whether there was one.
-/// Tracking the wrong part ends at once, as a leave of a caption still held.
-unsafe fn track_pointer(p: *mut State) -> bool {
+/// for the part of it the pointer is in: tracking the wrong part ends at once.
+unsafe fn track_pointer(p: *mut State) {
     let hovered = caption_part_at_cursor(p);
     if hovered.0.is_null() {
-        return false;
+        return;
     }
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);
@@ -846,7 +845,6 @@ unsafe fn track_pointer(p: *mut State) -> bool {
         )),
     );
     track(hovered, hit.0 != HTCLIENT as isize);
-    true
 }
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
@@ -1116,9 +1114,12 @@ unsafe fn pointer_input(
         }
         WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
             // Crossing into the neighbouring button, or between the host and
-            // its resize rim, ends this window's hover, not the pointer's.
+            // its resize rim, ends this window's hover, not the pointer's:
+            // the part it is on now tracks it from its first move. Tracking
+            // again from here would end at once until that move arrives, and
+            // the leave messages would keep it from arriving.
             update_hot(p, button_at_cursor(p));
-            if !track_pointer(p) {
+            if caption_part_at_cursor(p).0.is_null() {
                 cancel_reveal(p);
                 SetTimer(Some((*p).strip), HIDE, 450, None);
             }
