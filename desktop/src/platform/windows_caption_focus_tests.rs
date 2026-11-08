@@ -144,6 +144,7 @@ fn owner_captures_before_default_and_restores_only_a_surviving_child() {
                 geometry: None,
                 render_failed: false,
                 near_top: false,
+                on_caption: false,
                 announced: false,
             }));
             assert!(SetWindowSubclass(owner, Some(default_activation), ID + 10, 0).as_bool());

@@ -82,6 +82,8 @@ struct State {
     render_failed: bool,
     // The pointer was near the window's top at the last reading.
     near_top: bool,
+    // The pointer was on the input host or a button at the last reading.
+    on_caption: bool,
     // Whether the chrome was last told the caption is out.
     announced: bool,
 }
@@ -191,6 +193,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             geometry: None,
             render_failed: false,
             near_top: false,
+            on_caption: false,
             announced: false,
         }));
         let mut installed =
@@ -787,6 +790,7 @@ fn pointer_moved(owner: HWND) {
         };
         let strip = (*p).strip;
         let near = near_top(p);
+        let on_caption = !caption_part_at_cursor(p).0.is_null();
         if near && !(*p).expanded {
             if !(*p).suppressed
                 && !(*p).changing_state
@@ -797,12 +801,49 @@ fn pointer_moved(owner: HWND) {
                 (*p).reveal_armed = true;
                 SetTimer(Some(strip), REVEAL, TOP_DWELL_MS, None);
             }
-        } else if !near && (*p).near_top {
+        } else if !near && !on_caption && ((*p).near_top || (*p).on_caption) {
+            // Leaving the caption for a page makes no leave message here
+            // until the system gets round to it, which can take seconds.
             cancel_reveal(p);
             SetTimer(Some(strip), HIDE, 450, None);
         }
         (*p).near_top = near;
+        (*p).on_caption = on_caption;
     }
+}
+/// The input host or button under the pointer, if it is on one.
+unsafe fn caption_part_at_cursor(p: *mut State) -> HWND {
+    let mut cursor = POINT::default();
+    if GetCursorPos(&mut cursor).is_err() {
+        return HWND::default();
+    }
+    let hovered = WindowFromPoint(cursor);
+    if hovered == (*p).edge || (*p).buttons.contains(&hovered) {
+        hovered
+    } else {
+        HWND::default()
+    }
+}
+/// Asks for a leave message from the part of the caption under the pointer,
+/// for the part of it the pointer is in, and says whether there was one.
+/// Tracking the wrong part ends at once, as a leave of a caption still held.
+unsafe fn track_pointer(p: *mut State) -> bool {
+    let hovered = caption_part_at_cursor(p);
+    if hovered.0.is_null() {
+        return false;
+    }
+    let mut cursor = POINT::default();
+    let _ = GetCursorPos(&mut cursor);
+    let hit = SendMessageW(
+        hovered,
+        WM_NCHITTEST,
+        None,
+        Some(LPARAM(
+            ((cursor.y as u16 as u32) << 16 | cursor.x as u16 as u32) as isize,
+        )),
+    );
+    track(hovered, hit.0 != HTCLIENT as isize);
+    true
 }
 /// Whether the pointer is where the controls stand when they are out.
 unsafe fn at_controls(p: *mut State) -> bool {
@@ -1071,11 +1112,13 @@ unsafe fn pointer_input(
             return Some(LRESULT(0));
         }
         WM_MOUSELEAVE | WM_NCMOUSELEAVE => {
-            cancel_reveal(p);
-            // Crossing into the neighbouring button ends this window's hover,
-            // not the pointer's.
+            // Crossing into the neighbouring button, or between the host and
+            // its resize rim, ends this window's hover, not the pointer's.
             update_hot(p, button_at_cursor(p));
-            SetTimer(Some((*p).strip), HIDE, 450, None);
+            if !track_pointer(p) {
+                cancel_reveal(p);
+                SetTimer(Some((*p).strip), HIDE, 450, None);
+            }
         }
         _ => {}
     }
@@ -1523,7 +1566,7 @@ unsafe extern "system" fn strip_proc(
             } else {
                 // The input host stays visible, so a leave event can dismiss
                 // the band without a polling timer during a stationary hover.
-                track(hovered, button_at_cursor(p) == (*p).buttons[1]);
+                track_pointer(p);
             }
         }
         WM_COMMAND if (w.0 >> 16) == BN_CLICKED as usize => {
