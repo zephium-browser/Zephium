@@ -519,6 +519,11 @@ impl Shell {
             sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
+                shortcuts: store
+                    .app_setting("search.shortcuts")
+                    .as_deref()
+                    .and_then(zephium_core::search::ShortcutRegistry::from_setting)
+                    .unwrap_or_default(),
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
                     .app_setting("search.engine")

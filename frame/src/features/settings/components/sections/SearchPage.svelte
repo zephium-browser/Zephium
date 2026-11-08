@@ -8,6 +8,7 @@
   import Button from "$shared/ui/Button";
   import Switch from "$shared/ui/Switch";
   import { untrack } from "svelte";
+  import SearchShortcuts from "../SearchShortcuts.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let customUrl = $state(untrack(() => preferences.value("search.custom-url")));
@@ -109,6 +110,8 @@
     </form>
   </SettingsRow>
 </SettingsGroup>
+
+<SearchShortcuts />
 
 <style>
   form {

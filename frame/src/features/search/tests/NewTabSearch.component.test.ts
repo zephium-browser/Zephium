@@ -1,3 +1,4 @@
+import { preferences } from "$domain/preferences";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -23,6 +24,19 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+    settingGet: async () => null,
     newtabSearchContext: async () => native.context,
     newtabSearch: native.search,
     newtabRun: native.run,
@@ -30,6 +44,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 afterEach(() => {
+  preferences.dispose();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
 });
@@ -403,4 +418,16 @@ test("an offered host completes the field and the appended part stays selected",
   await userEvent.keyboard("{Backspace}");
   await reply("git", [search("git"), tab("GitHub")], "github.com");
   await expect.element(input).toHaveValue("git");
+});
+
+test("shortcut activation and empty Backspace update the accessible field immediately", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "yt ");
+  await expect.element(screen.getByRole("combobox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.element(field).toHaveValue("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
 });

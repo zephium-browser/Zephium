@@ -88,7 +88,9 @@
   function keydown(event: KeyboardEvent) {
     // See LauncherPanel: WebKit's committing keydown arrives after compositionend.
     if (surface.composing || event.isComposing || event.keyCode === 229) return;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (event.key === "Backspace" && surface.backspace()) {
+      event.preventDefault();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
     } else if (event.key === "Escape") {
@@ -116,6 +118,7 @@
 <div
   bind:this={root}
   class="dock"
+  data-shortcut={surface.activeShortcut?.id}
   data-active={active}
   data-open={visible}
   style:--available={`${available}px`}
@@ -127,7 +130,9 @@
   <div class="bar" data-glass-text>
     <SearchField
       size="page"
-      label={m.search_web()}
+      label={surface.activeShortcut
+        ? m.search_shortcut_label({ name: surface.activeShortcut.name })
+        : m.search_web()}
       placeholder={m.search_web_short()}
       value={surface.query}
       bind:ref={input}

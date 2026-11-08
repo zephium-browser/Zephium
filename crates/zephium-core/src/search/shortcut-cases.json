@@ -1,0 +1,822 @@
+[
+  {
+    "input": "cats",
+    "shortcut": null,
+    "query": "cats",
+    "trigger": "none"
+  },
+  {
+    "input": "yt cats",
+    "shortcut": "youtube",
+    "query": "cats",
+    "trigger": "keyword"
+  },
+  {
+    "input": "YouTube Cats",
+    "shortcut": "youtube",
+    "query": "Cats",
+    "trigger": "keyword"
+  },
+  {
+    "input": "yt ",
+    "shortcut": "youtube",
+    "query": "",
+    "trigger": "keyword"
+  },
+  {
+    "input": "yt",
+    "shortcut": null,
+    "query": "yt",
+    "trigger": "none"
+  },
+  {
+    "input": " yt cats",
+    "shortcut": null,
+    "query": "yt cats",
+    "trigger": "none"
+  },
+  {
+    "input": "yt\tcats",
+    "shortcut": null,
+    "query": "yt\tcats",
+    "trigger": "none"
+  },
+  {
+    "input": "cats !yt",
+    "shortcut": "youtube",
+    "query": "cats",
+    "trigger": "bang"
+  },
+  {
+    "input": "!YT cats",
+    "shortcut": "youtube",
+    "query": "cats",
+    "trigger": "bang"
+  },
+  {
+    "input": "cats !youtube videos",
+    "shortcut": "youtube",
+    "query": "cats videos",
+    "trigger": "bang"
+  },
+  {
+    "input": "!yt",
+    "shortcut": "youtube",
+    "query": "",
+    "trigger": "bang"
+  },
+  {
+    "input": "cats !unknown",
+    "shortcut": null,
+    "query": "cats !unknown",
+    "trigger": "none"
+  },
+  {
+    "input": "cats!yt",
+    "shortcut": null,
+    "query": "cats!yt",
+    "trigger": "none"
+  },
+  {
+    "input": "!yt, cats",
+    "shortcut": null,
+    "query": "!yt, cats",
+    "trigger": "none"
+  },
+  {
+    "input": "yt cats",
+    "shortcut": null,
+    "query": "yt cats",
+    "trigger": "none",
+    "disabled": [
+      "youtube"
+    ]
+  },
+  {
+    "input": "cats !yt",
+    "shortcut": null,
+    "query": "cats !yt",
+    "trigger": "none",
+    "disabled": [
+      "youtube"
+    ]
+  },
+  {
+    "input": "ex cats",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "keyword",
+    "custom": true
+  },
+  {
+    "input": "cats !EX",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "bang",
+    "custom": true
+  },
+  {
+    "input": "yt cats !g",
+    "shortcut": "youtube",
+    "query": "cats !g",
+    "trigger": "keyword"
+  },
+  {
+    "input": "cats !g !yt",
+    "shortcut": "google",
+    "query": "cats !yt",
+    "trigger": "bang"
+  },
+  {
+    "input": "yt   ",
+    "shortcut": "youtube",
+    "query": "",
+    "trigger": "keyword"
+  },
+  {
+    "input": "!unknown cats !yt",
+    "shortcut": "youtube",
+    "query": "!unknown cats",
+    "trigger": "bang"
+  },
+  {
+    "input": "yt caf\u00e9 \u2615",
+    "shortcut": "youtube",
+    "query": "caf\u00e9 \u2615",
+    "trigger": "keyword"
+  },
+  {
+    "input": "a dog",
+    "shortcut": null,
+    "query": "a dog",
+    "trigger": "none"
+  },
+  {
+    "input": "so what",
+    "shortcut": null,
+    "query": "so what",
+    "trigger": "none"
+  },
+  {
+    "input": "w hat",
+    "shortcut": null,
+    "query": "w hat",
+    "trigger": "none"
+  },
+  {
+    "input": "gm everyone",
+    "shortcut": null,
+    "query": "gm everyone",
+    "trigger": "none"
+  },
+  {
+    "input": "gl hf",
+    "shortcut": null,
+    "query": "gl hf",
+    "trigger": "none"
+  },
+  {
+    "input": "gh zephium",
+    "shortcut": "github",
+    "query": "zephium",
+    "trigger": "keyword"
+  },
+  {
+    "input": "!a dog",
+    "shortcut": "amazon",
+    "query": "dog",
+    "trigger": "bang"
+  },
+  {
+    "input": "dog !so",
+    "shortcut": "stackoverflow",
+    "query": "dog",
+    "trigger": "bang"
+  },
+  {
+    "input": "SO what",
+    "shortcut": null,
+    "query": "SO what",
+    "trigger": "none"
+  },
+  {
+    "input": "so !yt cats",
+    "shortcut": "youtube",
+    "query": "so cats",
+    "trigger": "bang"
+  },
+  {
+    "input": "a cats",
+    "shortcut": null,
+    "query": "a cats",
+    "trigger": "none"
+  },
+  {
+    "input": "I cats",
+    "shortcut": null,
+    "query": "I cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "i"
+    ]
+  },
+  {
+    "input": "e cats",
+    "shortcut": null,
+    "query": "e cats",
+    "trigger": "none"
+  },
+  {
+    "input": "x cats",
+    "shortcut": null,
+    "query": "x cats",
+    "trigger": "none"
+  },
+  {
+    "input": "r cats",
+    "shortcut": null,
+    "query": "r cats",
+    "trigger": "none"
+  },
+  {
+    "input": "b cats",
+    "shortcut": null,
+    "query": "b cats",
+    "trigger": "none"
+  },
+  {
+    "input": "d cats",
+    "shortcut": null,
+    "query": "d cats",
+    "trigger": "none"
+  },
+  {
+    "input": "g cats",
+    "shortcut": null,
+    "query": "g cats",
+    "trigger": "none"
+  },
+  {
+    "input": "k cats",
+    "shortcut": null,
+    "query": "k cats",
+    "trigger": "none"
+  },
+  {
+    "input": "w cats",
+    "shortcut": null,
+    "query": "w cats",
+    "trigger": "none"
+  },
+  {
+    "input": "so cats",
+    "shortcut": null,
+    "query": "so cats",
+    "trigger": "none"
+  },
+  {
+    "input": "aw cats",
+    "shortcut": null,
+    "query": "aw cats",
+    "trigger": "none"
+  },
+  {
+    "input": "gm cats",
+    "shortcut": null,
+    "query": "gm cats",
+    "trigger": "none"
+  },
+  {
+    "input": "gl cats",
+    "shortcut": null,
+    "query": "gl cats",
+    "trigger": "none"
+  },
+  {
+    "input": "gr cats",
+    "shortcut": null,
+    "query": "gr cats",
+    "trigger": "none"
+  },
+  {
+    "input": "tw cats",
+    "shortcut": null,
+    "query": "tw cats",
+    "trigger": "none"
+  },
+  {
+    "input": "wa cats",
+    "shortcut": null,
+    "query": "wa cats",
+    "trigger": "none"
+  },
+  {
+    "input": "ia cats",
+    "shortcut": null,
+    "query": "ia cats",
+    "trigger": "none"
+  },
+  {
+    "input": "tr cats",
+    "shortcut": null,
+    "query": "tr cats",
+    "trigger": "none"
+  },
+  {
+    "input": "sp cats",
+    "shortcut": null,
+    "query": "sp cats",
+    "trigger": "none"
+  },
+  {
+    "input": "OK cats",
+    "shortcut": null,
+    "query": "OK cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "ok"
+    ]
+  },
+  {
+    "input": "HI cats",
+    "shortcut": null,
+    "query": "HI cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "hi"
+    ]
+  },
+  {
+    "input": "NO cats",
+    "shortcut": null,
+    "query": "NO cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "no"
+    ]
+  },
+  {
+    "input": "YO cats",
+    "shortcut": null,
+    "query": "YO cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "yo"
+    ]
+  },
+  {
+    "input": "GO cats",
+    "shortcut": null,
+    "query": "GO cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "go"
+    ]
+  },
+  {
+    "input": "TO cats",
+    "shortcut": null,
+    "query": "TO cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "to"
+    ]
+  },
+  {
+    "input": "IN cats",
+    "shortcut": null,
+    "query": "IN cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "in"
+    ]
+  },
+  {
+    "input": "ON cats",
+    "shortcut": null,
+    "query": "ON cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "on"
+    ]
+  },
+  {
+    "input": "AT cats",
+    "shortcut": null,
+    "query": "AT cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "at"
+    ]
+  },
+  {
+    "input": "IT cats",
+    "shortcut": null,
+    "query": "IT cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "it"
+    ]
+  },
+  {
+    "input": "IS cats",
+    "shortcut": null,
+    "query": "IS cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "is"
+    ]
+  },
+  {
+    "input": "ME cats",
+    "shortcut": null,
+    "query": "ME cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "me"
+    ]
+  },
+  {
+    "input": "MY cats",
+    "shortcut": null,
+    "query": "MY cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "my"
+    ]
+  },
+  {
+    "input": "WE cats",
+    "shortcut": null,
+    "query": "WE cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "we"
+    ]
+  },
+  {
+    "input": "US cats",
+    "shortcut": null,
+    "query": "US cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "us"
+    ]
+  },
+  {
+    "input": "OR cats",
+    "shortcut": null,
+    "query": "OR cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "or"
+    ]
+  },
+  {
+    "input": "AN cats",
+    "shortcut": null,
+    "query": "AN cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "an"
+    ]
+  },
+  {
+    "input": "AS cats",
+    "shortcut": null,
+    "query": "AS cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "as"
+    ]
+  },
+  {
+    "input": "BE cats",
+    "shortcut": null,
+    "query": "BE cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "be"
+    ]
+  },
+  {
+    "input": "DO cats",
+    "shortcut": null,
+    "query": "DO cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "do"
+    ]
+  },
+  {
+    "input": "HE cats",
+    "shortcut": null,
+    "query": "HE cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "he"
+    ]
+  },
+  {
+    "input": "IF cats",
+    "shortcut": null,
+    "query": "IF cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "if"
+    ]
+  },
+  {
+    "input": "OF cats",
+    "shortcut": null,
+    "query": "OF cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "of"
+    ]
+  },
+  {
+    "input": "UP cats",
+    "shortcut": null,
+    "query": "UP cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "up"
+    ]
+  },
+  {
+    "input": "YA cats",
+    "shortcut": null,
+    "query": "YA cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "ya"
+    ]
+  },
+  {
+    "input": "LOL cats",
+    "shortcut": null,
+    "query": "LOL cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "lol"
+    ]
+  },
+  {
+    "input": "OMG cats",
+    "shortcut": null,
+    "query": "OMG cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "omg"
+    ]
+  },
+  {
+    "input": "IDK cats",
+    "shortcut": null,
+    "query": "IDK cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "idk"
+    ]
+  },
+  {
+    "input": "BRB cats",
+    "shortcut": null,
+    "query": "BRB cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "brb"
+    ]
+  },
+  {
+    "input": "BTW cats",
+    "shortcut": null,
+    "query": "BTW cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "btw"
+    ]
+  },
+  {
+    "input": "HEY cats",
+    "shortcut": null,
+    "query": "HEY cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "hey"
+    ]
+  },
+  {
+    "input": "YES cats",
+    "shortcut": null,
+    "query": "YES cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "yes"
+    ]
+  },
+  {
+    "input": "google cats",
+    "shortcut": null,
+    "query": "google cats",
+    "trigger": "none"
+  },
+  {
+    "input": "brave cats",
+    "shortcut": null,
+    "query": "brave cats",
+    "trigger": "none"
+  },
+  {
+    "input": "perplexity cats",
+    "shortcut": null,
+    "query": "perplexity cats",
+    "trigger": "none"
+  },
+  {
+    "input": "wiki cats",
+    "shortcut": null,
+    "query": "wiki cats",
+    "trigger": "none"
+  },
+  {
+    "input": "images cats",
+    "shortcut": null,
+    "query": "images cats",
+    "trigger": "none"
+  },
+  {
+    "input": "maps cats",
+    "shortcut": null,
+    "query": "maps cats",
+    "trigger": "none"
+  },
+  {
+    "input": "twitter cats",
+    "shortcut": null,
+    "query": "twitter cats",
+    "trigger": "none"
+  },
+  {
+    "input": "crates cats",
+    "shortcut": null,
+    "query": "crates cats",
+    "trigger": "none"
+  },
+  {
+    "input": "crate cats",
+    "shortcut": null,
+    "query": "crate cats",
+    "trigger": "none"
+  },
+  {
+    "input": "translate cats",
+    "shortcut": null,
+    "query": "translate cats",
+    "trigger": "none"
+  },
+  {
+    "input": "rust cats",
+    "shortcut": null,
+    "query": "rust cats",
+    "trigger": "none"
+  },
+  {
+    "input": "twitch cats",
+    "shortcut": null,
+    "query": "twitch cats",
+    "trigger": "none"
+  },
+  {
+    "input": "archive cats",
+    "shortcut": null,
+    "query": "archive cats",
+    "trigger": "none"
+  },
+  {
+    "input": "z cats",
+    "shortcut": null,
+    "query": "z cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "z"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "cats !z",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "bang",
+    "custom": true,
+    "custom_keywords": [
+      "z"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "ok cats",
+    "shortcut": null,
+    "query": "ok cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "ok"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "cats !ok",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "bang",
+    "custom": true,
+    "custom_keywords": [
+      "ok"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "hi cats",
+    "shortcut": null,
+    "query": "hi cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "hi"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "cats !hi",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "bang",
+    "custom": true,
+    "custom_keywords": [
+      "hi"
+    ],
+    "disabled": []
+  },
+  {
+    "input": "rust cats",
+    "shortcut": null,
+    "query": "rust cats",
+    "trigger": "none",
+    "custom": true,
+    "custom_keywords": [
+      "rust"
+    ],
+    "disabled": [
+      "rust-docs"
+    ]
+  },
+  {
+    "input": "cats !rust",
+    "shortcut": "custom:example",
+    "query": "cats",
+    "trigger": "bang",
+    "custom": true,
+    "custom_keywords": [
+      "rust"
+    ],
+    "disabled": [
+      "rust-docs"
+    ]
+  }
+]

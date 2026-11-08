@@ -2,6 +2,7 @@
 pub const KEYS: &[&str] = &[
     "appearance",
     "search.engine",
+    "search.shortcuts",
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
@@ -187,6 +188,7 @@ pub fn feature_enabled(stored: impl Fn(&str) -> Option<String>, feature: &str) -
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
+        "search.shortcuts" => crate::search::ShortcutRegistry::from_setting(value).is_some(),
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),

@@ -770,6 +770,9 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    #[serde(default)]
+    #[specta(optional)]
+    pub shortcut: Option<String>,
     pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,

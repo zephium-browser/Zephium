@@ -516,6 +516,7 @@ export const commands = {
 } | null>("launcher_set_double_tap", { mode }),
 	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
+	searchShortcutDefaults: () => __TAURI_INVOKE<SearchShortcut[]>("search_shortcut_defaults"),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	windowsDiagnosticsSettings: () => __TAURI_INVOKE<boolean>("windows_diagnostics_settings"),
 	/**  None identifies a local launch-read fallback to ON, separate from Windows policy. */
@@ -3014,6 +3015,8 @@ export type SearchContext = {
 	space_id: string,
 };
 
+export type SearchEngine = "google" | "duckduckgo" | "bing" | "brave" | "custom";
+
 export type SearchResult = {
 	kind: string,
 	title: string,
@@ -3023,6 +3026,7 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	shortcut?: string | null,
 	pending: boolean,
 	context: SearchContext | null,
 	query: string,
@@ -3033,6 +3037,17 @@ export type SearchResults = {
 	 */
 	completion: string | null,
 	results: SearchResult[],
+};
+
+export type SearchShortcut = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions: SearchEngine | null,
+	enabled: boolean,
 };
 
 export type ShutSiteView = {
