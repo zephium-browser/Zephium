@@ -68,6 +68,27 @@ test("a refused start shows an error and a retry clears it", async () => {
   await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
 });
 
+test("a refused start stays visible when an earlier import reports progress", async () => {
+  const fake = importer();
+  let refuse!: (accepted: boolean) => void;
+  const second = new Promise<boolean>((resolve) => (refuse = resolve));
+  let attempts = 0;
+  fake.adapter.start = async () => (++attempts === 1 ? true : second);
+  browserImport.provide(fake.adapter);
+  const screen = await render(ImportBrowserData);
+  const start = screen.getByRole("button", { name: "Import", exact: true });
+
+  await start.click();
+  await start.click();
+  fake.emit(job(false, { kind: "history", state: "running", done: 0, total: null }));
+  refuse(false);
+
+  await expect.element(screen.getByText("Importing from Zen")).toBeVisible();
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("Couldn't start the import. Try again.");
+});
+
 test("an import shows each kind as it goes and what it brought", async () => {
   const fake = importer();
   browserImport.provide(fake.adapter);

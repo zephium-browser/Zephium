@@ -89,19 +89,36 @@ const finished = (kinds: ImportJob["kinds"]): ImportJob => ({
   kinds,
 });
 
-test("a refused start is reported during onboarding", async () => {
-  const fake = importer();
-  fake.adapter.start = async () => false;
-  browserImport.provide(fake.adapter);
-  await browserImport.detect();
-  const screen = await render(Import);
-  await screen.getByRole("radio", { name: "Chrome" }).click();
-  await screen.getByRole("button", { name: "Import", exact: true }).click();
+test.each([false, true])(
+  "a refused start is reported during onboarding (transport error: %s)",
+  async (transportError) => {
+    const fake = importer();
+    let refuse!: () => void;
+    const reply = new Promise<boolean>((resolve, reject) => {
+      refuse = () => {
+        if (transportError) reject(new Error("transport unavailable"));
+        else resolve(false);
+      };
+    });
+    fake.adapter.start = async () => reply;
+    browserImport.provide(fake.adapter);
+    await browserImport.detect();
+    const screen = await render(Import);
+    await screen.getByRole("radio", { name: "Chrome" }).click();
+    const start = screen.getByRole("button", { name: "Import", exact: true });
+    await start.click();
+    await expect.element(start).toHaveAttribute("aria-busy", "true");
+    refuse();
 
-  await expect
-    .element(screen.getByRole("alert"))
-    .toHaveTextContent("Couldn't start the import. Try again.");
-});
+    await expect
+      .element(screen.getByRole("alert"))
+      .toHaveTextContent("Couldn't start the import. Try again.");
+
+    fake.emit({ ...finished([]), finished: false });
+    await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+    await expect.element(screen.getByRole("alert")).toBeVisible();
+  },
+);
 
 test("an import that found nothing says so instead of counting zero items brought over", async () => {
   const fake = importer();

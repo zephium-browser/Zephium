@@ -24,6 +24,7 @@
   );
   let available = $derived(browserImport.available());
   let job = $derived(browserImport.current());
+  let refused = $derived(browserImport.startFailure());
   let nothingFound = $derived(browserImport.found()?.length === 0);
   let failure = $derived(job?.kinds.find((entry) => entry.state === "failed") ?? null);
   let jobBrowser = $derived(sources.find((candidate) => candidate.id === job?.source)?.name ?? "");
@@ -196,7 +197,7 @@
     <p class="note">{m.onb_import_none()}</p>
   {/if}
   {#if hint}<p class="note">{hint}</p>{/if}
-  {#if !job && source && browserImport.startFailure() === source.id}
+  {#if refused !== null && (job || source?.id === refused)}
     <p class="note start-error" role="alert">{m.import_start_failed()}</p>
   {/if}
 

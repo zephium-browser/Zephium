@@ -35,6 +35,7 @@
   );
   let offered = $derived(kinds.filter((kind) => source?.kinds.includes(kind)));
   let running = $derived(browserImport.busy());
+  let refused = $derived(browserImport.startFailure());
   let jobSource = $derived(found?.find((candidate) => candidate.id === job?.source) ?? null);
   let jobName = $derived(jobSource?.name ?? "");
   const number = new Intl.NumberFormat();
@@ -192,9 +193,11 @@
       >
     {/if}
   </SettingsRow>
-  {#if source && browserImport.startFailure() === source.id}
-    <p class="start-error" role="alert">{m.import_start_failed()}</p>
-  {/if}
+{/if}
+{#if refused !== null && (job || source?.id === refused)}
+  <p class="start-error" role="alert">{m.import_start_failed()}</p>
+{/if}
+{#if !job}
   {#if found && found.length > 0}
     <div class="sources" role="radiogroup" aria-label={m.onb_import_from()}>
       {#each found as candidate, index (candidate.id)}
