@@ -4,11 +4,13 @@
 //! input host.
 #[path = "windows_caption_paint.rs"]
 mod paint;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::WebviewWindow;
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
+    Graphics::{Dwm::DwmFlush, Gdi::*},
     UI::{
         Controls::*,
         HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
@@ -33,9 +35,22 @@ const TOP_DWELL_MS: u32 = 400;
 const REVEAL_DWELL_MS: u32 = 150;
 // How long the caption takes to come out or go away.
 const FADE_MS: u32 = 220;
-// A step of that motion on every system timer tick. Asking for 15 ms, just
-// under a tick, often waited two.
+// Without a frame pacer, a step of that motion on every system timer tick.
+// Asking for 15 ms, just under a tick, often waited two.
 const FRAME_MS: u32 = USER_TIMER_MINIMUM;
+// A step of the motion, posted once a frame by its pacer.
+const STEP: u32 = WM_APP + 0x43;
+/// Paces the caption's motion by the compositor: one step for each frame it
+/// presents. A timer's message waits until nothing else is queued, so steps
+/// came late whenever the window had other work; a posted one does not.
+struct Pacer {
+    running: Arc<AtomicBool>,
+}
+impl Drop for Pacer {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
 /// Why the caption is out of the way. Each holder clears only its own, so a
 /// page leaving fullscreen cannot unhide the caption of a window the person
 /// had made fullscreen.
@@ -89,6 +104,9 @@ struct State {
     on_caption: bool,
     // Whether the chrome was last told the caption is out.
     announced: bool,
+    pacer: Option<Pacer>,
+    // A step is posted and not yet taken, so a busy window gets one, not a queue.
+    step_queued: Arc<AtomicBool>,
 }
 
 pub fn install(window: &WebviewWindow) -> bool {
@@ -198,6 +216,8 @@ pub fn install(window: &WebviewWindow) -> bool {
             near_top: false,
             on_caption: false,
             announced: false,
+            pacer: None,
+            step_queued: Arc::new(AtomicBool::new(false)),
         }));
         let mut installed =
             SetWindowSubclass(owner, Some(owner_proc), ID, pointer as usize).as_bool();
@@ -471,7 +491,7 @@ unsafe fn layout(p: *mut State) {
             let _ = ReleaseCapture();
         }
         cancel_reveal(p);
-        let _ = KillTimer(Some((*p).strip), FADE);
+        stop_motion(p);
         let _ = KillTimer(Some((*p).strip), HIDE);
         announce(p, false, 0);
     }
@@ -645,7 +665,7 @@ unsafe fn prepare_state_change(p: *mut State) {
     (*p).reveal_block = Some(cursor);
     cancel_reveal(p);
     zephium_engine::set_window_caption_offset((*p).owner.0 as isize, 0.0, false);
-    let _ = KillTimer(Some((*p).strip), FADE);
+    stop_motion(p);
     let _ = KillTimer(Some((*p).strip), HIDE);
     announce(p, false, 0);
 }
@@ -685,7 +705,7 @@ unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
     if (*p).expanded == expanded {
         if !animate && (*p).opacity != target {
             (*p).opacity = target;
-            let _ = KillTimer(Some((*p).strip), FADE);
+            stop_motion(p);
             layout(p);
         }
         return;
@@ -697,13 +717,75 @@ unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
     if animate {
         (*p).fade_from = (*p).opacity;
         (*p).fade_started = std::time::Instant::now();
-        SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
+        start_motion(p);
     } else {
         (*p).opacity = target;
-        let _ = KillTimer(Some((*p).strip), FADE);
+        stop_motion(p);
     }
     announce(p, expanded, if animate { FADE_MS } else { 0 });
     layout(p);
+}
+/// Starts the motion's frame pacer, or its timer if no thread can be had.
+unsafe fn start_motion(p: *mut State) {
+    if (*p).pacer.is_some() {
+        return;
+    }
+    let running = Arc::new(AtomicBool::new(true));
+    let queued = (*p).step_queued.clone();
+    let strip = (*p).strip.0 as isize;
+    let pacing = running.clone();
+    let spawned = std::thread::Builder::new()
+        .name("caption-motion".into())
+        .spawn(move || {
+            while pacing.load(Ordering::Acquire) {
+                // SAFETY: waits for the compositor's next presented frame.
+                if unsafe { DwmFlush() }.is_err() {
+                    std::thread::sleep(std::time::Duration::from_millis(16));
+                }
+                if !pacing.load(Ordering::Acquire) {
+                    break;
+                }
+                if !queued.swap(true, Ordering::AcqRel) {
+                    // SAFETY: posting fails once the window is gone, which
+                    // ends the pacer.
+                    let posted = unsafe {
+                        PostMessageW(Some(HWND(strip as *mut _)), STEP, WPARAM(0), LPARAM(0))
+                    };
+                    if posted.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    if spawned.is_ok() {
+        (*p).pacer = Some(Pacer { running });
+    } else {
+        SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
+    }
+}
+unsafe fn stop_motion(p: *mut State) {
+    (*p).pacer = None;
+    let _ = KillTimer(Some((*p).strip), FADE);
+}
+/// Moves the caption and the page on to where the motion has got to.
+unsafe fn step_motion(p: *mut State) {
+    // A press owns a stable target even when it begins mid-reveal.
+    if (*p).motion_paused.is_some() {
+        return;
+    }
+    let t = ((*p).fade_started.elapsed().as_secs_f64() * 1000.0 / f64::from(FADE_MS)).min(1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    let target = if (*p).expanded { 255.0 } else { 0.0 };
+    (*p).opacity =
+        (f64::from((*p).fade_from) + (target - f64::from((*p).fade_from)) * eased).round() as u8;
+    layout(p);
+    if t >= 1.0 {
+        stop_motion(p);
+        if !(*p).expanded {
+            let _ = ShowWindow((*p).strip, SW_HIDE);
+            layout(p);
+        }
+    }
 }
 unsafe fn reveal(p: *mut State) {
     if (*p).suppressed || (*p).changing_state || (*p).sizing {
@@ -1015,13 +1097,13 @@ unsafe fn update_hot(p: *mut State, hot: HWND) {
 unsafe fn pause_motion(p: *mut State) {
     (*p).motion_paused
         .get_or_insert_with(std::time::Instant::now);
-    let _ = KillTimer(Some((*p).strip), FADE);
+    stop_motion(p);
 }
 unsafe fn resume_motion(p: *mut State) {
     if let Some(paused) = (*p).motion_paused.take() {
         (*p).fade_started += paused.elapsed();
         if (*p).opacity != if (*p).expanded { 255 } else { 0 } {
-            SetTimer(Some((*p).strip), FADE, FRAME_MS, None);
+            start_motion(p);
         }
     }
 }
@@ -1507,24 +1589,13 @@ unsafe extern "system" fn strip_proc(
             return LRESULT(0);
         }
         WM_TIMER if w.0 == FADE => {
-            // A press owns a stable target even when it begins mid-reveal.
-            if (*p).motion_paused.is_some() {
-                return LRESULT(0);
-            }
-            let t =
-                ((*p).fade_started.elapsed().as_secs_f64() * 1000.0 / f64::from(FADE_MS)).min(1.0);
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let target = if (*p).expanded { 255.0 } else { 0.0 };
-            (*p).opacity = (f64::from((*p).fade_from)
-                + (target - f64::from((*p).fade_from)) * eased)
-                .round() as u8;
-            layout(p);
-            if t >= 1.0 {
-                let _ = KillTimer(Some(hwnd), FADE);
-                if !(*p).expanded {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                    layout(p);
-                }
+            step_motion(p);
+            return LRESULT(0);
+        }
+        STEP => {
+            (*p).step_queued.store(false, Ordering::Release);
+            if (*p).pacer.is_some() {
+                step_motion(p);
             }
             return LRESULT(0);
         }
