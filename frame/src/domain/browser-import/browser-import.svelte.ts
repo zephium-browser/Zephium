@@ -60,6 +60,7 @@ let adapter = $state.raw<ImportAdapter | null>(null);
 let sources = $state.raw<ImportSource[] | null>(null);
 let job = $state.raw<ImportJob | null>(null);
 let starting = $state(false);
+let refusedSource = $state<string | null>(null);
 let stop: (() => void) | null = null;
 let generation = 0;
 let lifetime = 0;
@@ -70,6 +71,7 @@ export const available = () => adapter !== null;
 export const found = () => sources;
 export const current = () => job;
 export const busy = () => starting || (job !== null && !job.finished);
+export const startFailure = () => refusedSource;
 
 /** Native installs itself here once it can import; null withdraws it. */
 export function provide(next: ImportAdapter | null) {
@@ -94,11 +96,15 @@ export async function start(source: string, profile: string, kinds: ImportKind[]
   const port = adapter;
   if (!port || busy() || kinds.length === 0) return false;
   starting = true;
+  refusedSource = null;
   const owner = lifetime;
   try {
     const accepted = await port.start(source, profile, kinds);
-    return owner === lifetime && accepted;
+    if (owner !== lifetime) return false;
+    if (!accepted) refusedSource = source;
+    return accepted;
   } catch {
+    if (owner === lifetime) refusedSource = source;
     return false;
   } finally {
     if (owner === lifetime) starting = false;
@@ -126,4 +132,5 @@ function reset() {
   sources = null;
   job = null;
   starting = false;
+  refusedSource = null;
 }

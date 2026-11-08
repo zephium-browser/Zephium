@@ -47,6 +47,27 @@ const job = (finished: boolean, history: ImportJob["kinds"][number]): ImportJob 
   ],
 });
 
+test("a refused start shows an error and a retry clears it", async () => {
+  const fake = importer();
+  let refuse!: (accepted: boolean) => void;
+  const reply = new Promise<boolean>((resolve) => (refuse = resolve));
+  let attempts = 0;
+  fake.adapter.start = async () => (++attempts === 1 ? reply : true);
+  browserImport.provide(fake.adapter);
+  const screen = await render(ImportBrowserData);
+  const start = screen.getByRole("button", { name: "Import", exact: true });
+
+  await start.click();
+  await expect.element(start).toHaveAttribute("aria-busy", "true");
+  refuse(false);
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("Couldn't start the import. Try again.");
+  await start.click();
+  expect(attempts).toBe(2);
+  await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
+});
+
 test("an import shows each kind as it goes and what it brought", async () => {
   const fake = importer();
   browserImport.provide(fake.adapter);

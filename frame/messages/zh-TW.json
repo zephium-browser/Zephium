@@ -1501,6 +1501,7 @@
   "onb_import_bookmarks": "書籤",
   "onb_import_history": "瀏覽記錄",
   "onb_import_action": "匯入",
+  "import_start_failed": "無法開始匯入。請再試一次。",
   "onb_import_unavailable": "匯入功能即將在更新中推出。",
   "onb_import_quit": "請先結束 {browser}。它開啟時會鎖定其資料。",
   "onb_import_permission": "Zephium 需要「完整磁碟取用權限」才能讀取 {browser}。請在系統設定中開啟，然後重新打開 Zephium。",

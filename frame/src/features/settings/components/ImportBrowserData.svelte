@@ -185,12 +185,16 @@
       <Button
         size="compact"
         variant="primary"
-        disabled={running || offered.length === 0 || profileId === null}
+        pending={running}
+        disabled={offered.length === 0 || profileId === null}
         onclick={() => profileId && void browserImport.start(source.id, profileId, offered)}
         >{m.onb_import_action()}</Button
       >
     {/if}
   </SettingsRow>
+  {#if source && browserImport.startFailure() === source.id}
+    <p class="start-error" role="alert">{m.import_start_failed()}</p>
+  {/if}
   {#if found && found.length > 0}
     <div class="sources" role="radiogroup" aria-label={m.onb_import_from()}>
       {#each found as candidate, index (candidate.id)}
@@ -242,6 +246,13 @@
 {/if}
 
 <style>
+  .start-error {
+    margin: 0;
+    padding: 0 18px 12px;
+    color: var(--color-danger);
+    font-size: var(--text-label);
+  }
+
   /* The browsers sit under the row that names them, as one choice. */
   .sources {
     display: flex;

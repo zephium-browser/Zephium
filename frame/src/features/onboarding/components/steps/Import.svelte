@@ -185,6 +185,7 @@
           size="compact"
           shape="capsule"
           disabled={!available || offered.length === 0 || source.running}
+          pending={browserImport.busy()}
           onclick={() => void browserImport.start(source.id, source.profiles[0]?.id ?? "", offered)}
           >{m.onb_import_action()}</Button
         >
@@ -195,6 +196,9 @@
     <p class="note">{m.onb_import_none()}</p>
   {/if}
   {#if hint}<p class="note">{hint}</p>{/if}
+  {#if !job && source && browserImport.startFailure() === source.id}
+    <p class="note start-error" role="alert">{m.import_start_failed()}</p>
+  {/if}
 
   <div class="search">
     <p class="label" aria-hidden="true">{m.onb_search_with()}</p>
@@ -448,6 +452,10 @@
     margin: -12px 0 0;
     color: var(--color-faint);
     line-height: 1.45;
+  }
+
+  .note.start-error {
+    color: var(--color-danger);
   }
 
   @keyframes lift {

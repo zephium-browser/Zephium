@@ -89,6 +89,20 @@ const finished = (kinds: ImportJob["kinds"]): ImportJob => ({
   kinds,
 });
 
+test("a refused start is reported during onboarding", async () => {
+  const fake = importer();
+  fake.adapter.start = async () => false;
+  browserImport.provide(fake.adapter);
+  await browserImport.detect();
+  const screen = await render(Import);
+  await screen.getByRole("radio", { name: "Chrome" }).click();
+  await screen.getByRole("button", { name: "Import", exact: true }).click();
+
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("Couldn't start the import. Try again.");
+});
+
 test("an import that found nothing says so instead of counting zero items brought over", async () => {
   const fake = importer();
   browserImport.provide(fake.adapter);
