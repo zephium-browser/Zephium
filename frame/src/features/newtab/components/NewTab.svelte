@@ -34,6 +34,7 @@
     SkyPrint,
     type Scene,
   } from "$shared/sky";
+  import { IS_WINDOWS } from "$shared/platform";
   import NewTabAccount from "./NewTabAccount.svelte";
 
   let {
@@ -68,6 +69,9 @@
   // settings keep the corner, so nothing moves when the account is known.
   let showAccount = $derived(!!onaccount && account.available);
   let signInWidth = $state(0);
+  let nameWidth = $state(0);
+  // The name beside the picture only where the page is wide enough to spare it.
+  let named = $derived(width >= 1100);
   let profile = $derived(tabs.profile()?.id ?? null);
   let picture = $derived(newTabImage());
   let useSky = $derived(picture === null);
@@ -177,7 +181,9 @@
     };
   });
   let controls = $derived([
-    ...(showAccount ? [account.signedIn ? 32 : Math.max(32, signInWidth)] : []),
+    ...(showAccount
+      ? [account.signedIn ? (nameWidth > 0 ? nameWidth + 48 : 32) : Math.max(32, signInWidth)]
+      : []),
     ...(oncustomize ? [32] : []),
   ]);
   let page = $derived(
@@ -188,6 +194,28 @@
     }),
   );
   const at = ({ x, y, w, h }: Box) => `left:${x}px;top:${y}px;width:${w}px;height:${h}px`;
+
+  // On Windows the window's controls come down into the page's top corner on
+  // hover; the account and settings step down out of their way meanwhile, with
+  // the same timing, and back up as they go.
+  let caption = $state({ height: 0, duration: 0 });
+  $effect(() => {
+    if (!IS_WINDOWS) return;
+    const moved = (event: Event) => {
+      const detail = (event as CustomEvent<{ shown?: boolean; height?: number; duration?: number }>)
+        .detail;
+      if (typeof detail?.shown !== "boolean") return;
+      caption = {
+        height: detail.shown ? Math.max(0, Number(detail.height) || 0) : 0,
+        duration: Math.max(0, Number(detail.duration) || 0),
+      };
+    };
+    window.addEventListener("zephium:caption", moved);
+    return () => window.removeEventListener("zephium:caption", moved);
+  });
+  const CAPTION_CLEARANCE = 6;
+  const stepDown = (box: Box) =>
+    caption.height > 0 ? Math.max(0, caption.height + CAPTION_CLEARANCE - box.y) : 0;
 
   // Day over a light page, night over a dark one.
   let scene = $derived(skyScene());
@@ -423,12 +451,22 @@
 
   <!-- Each control a disc of light on the sky, level with the field. -->
   {#if showAccount && onaccount && page.controls[0]}
-    <div class="control" style={at(page.controls[0])}>
-      <NewTabAccount {account} {onaccount} bind:signInWidth />
+    <div
+      class="control"
+      style={at(page.controls[0])}
+      style:translate={`0 ${stepDown(page.controls[0])}px`}
+      style:transition-duration={`${caption.duration}ms`}
+    >
+      <NewTabAccount {account} {onaccount} {named} bind:signInWidth bind:nameWidth />
     </div>
   {/if}
   {#if oncustomize && page.controls.at(-1)}
-    <div class="control" style={at(page.controls.at(-1)!)}>
+    <div
+      class="control"
+      style={at(page.controls.at(-1)!)}
+      style:translate={`0 ${stepDown(page.controls.at(-1)!)}px`}
+      style:transition-duration={`${caption.duration}ms`}
+    >
       <IconButton
         icon={Settings01Icon}
         label={m.settings_customize_newtab()}
@@ -686,6 +724,8 @@
   .control {
     position: absolute;
     z-index: 1;
+    transition-property: translate;
+    transition-timing-function: var(--ease-emphasized);
     display: grid;
     place-items: center;
     border-radius: var(--radius-capsule);
