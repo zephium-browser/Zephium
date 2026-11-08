@@ -44,7 +44,8 @@ pub enum Suppression {
     Window = 2,
 }
 struct State {
-    window: WebviewWindow,
+    // The chrome told when the caption comes and goes.
+    window: Option<WebviewWindow>,
     owner: HWND,
     strip: HWND,
     edge: HWND,
@@ -159,7 +160,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             buttons[index] = button;
         }
         let pointer = Box::into_raw(Box::new(State {
-            window: window.clone(),
+            window: Some(window.clone()),
             owner,
             strip,
             edge,
@@ -649,7 +650,10 @@ unsafe fn announce(p: *mut State, shown: bool, duration: u32) {
         return;
     }
     (*p).announced = shown;
-    let _ = (*p).window.eval(format!(
+    let Some(window) = &(*p).window else {
+        return;
+    };
+    let _ = window.eval(format!(
         "window.dispatchEvent(new CustomEvent('zephium:caption',{{detail:{{shown:{shown},height:{},duration:{duration}}}}}))",
         paint::HEIGHT
     ));
