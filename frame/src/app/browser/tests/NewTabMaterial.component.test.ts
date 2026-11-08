@@ -36,7 +36,7 @@ afterEach(() => {
   delete document.documentElement.dataset.material;
 });
 
-test("custom images remove sky light and hidden-card frost, and failure restores both", async () => {
+test("custom images remove sky light, and failure restores it; the hidden card wears no picture", async () => {
   await preferences.init();
   await surface.init();
   await tabs.init();
@@ -56,16 +56,14 @@ test("custom images remove sky light and hidden-card frost, and failure restores
   document.documentElement.dataset.material = "mica";
   const screen = await render(Shell);
   const sidebar = () => screen.container.querySelector<HTMLElement>(".browser-sidebar")!;
-  await expect.poll(() => sidebar()?.style.getPropertyValue("--sidebar-frost")).toContain("data:image/png");
-  expect(screen.container.querySelector(".sky-light")).not.toBeNull();
+  await expect.poll(() => screen.container.querySelector(".sky-light")).not.toBeNull();
+  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toBe("");
   emitNativeEvent("uiCommand", `preference.ui.newtab-image=${"a".repeat(64)}`);
   emitNativeEvent("uiCommand", "preference.ui.newtab-background=image");
   await expect.poll(() => screen.container.querySelector(".sky-light")).toBeNull();
-  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toBe("");
   expect(document.documentElement.dataset.material).toBe("mica");
   await expect.poll(() => screen.container.querySelector(".newtab img")).not.toBeNull();
   screen.container.querySelector(".newtab img")!.dispatchEvent(new Event("error"));
   await expect.poll(() => screen.container.querySelector(".sky-light")).not.toBeNull();
-  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toContain("data:image/png");
   expect(document.documentElement.dataset.material).toBe("mica");
 });

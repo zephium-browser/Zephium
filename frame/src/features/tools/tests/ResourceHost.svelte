@@ -5,7 +5,6 @@
 
 <div class="host" style:width="384px">
   <div class="sidebar-columns">
-    <div class="sidebar-browser-column sidebar-tool-rail"></div>
     <div class="sidebar-tool-host"><ToolSlot {tool} {profile} onclose={() => {}} /></div>
   </div>
 </div>

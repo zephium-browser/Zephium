@@ -1,10 +1,5 @@
 <script lang="ts">
-  import {
-    ArrowUpRight01Icon,
-    Cancel01Icon,
-    MoreHorizontalIcon,
-    Settings01Icon,
-  } from "@hugeicons/core-free-icons";
+  import { MoreHorizontalIcon, Settings01Icon } from "@hugeicons/core-free-icons";
   import type { ToolHostProps } from "$session/tool-drafts.svelte";
   import { commands } from "$shared/ipc/bindings";
   import { surface as browser } from "$domain/surface";
@@ -18,10 +13,7 @@
   let props: ToolHostProps = $props();
 
   const entries: MenuEntry[] = [
-    { kind: "item", id: "expand", label: m.time_open_page(), icon: ArrowUpRight01Icon },
     { kind: "item", id: "settings", label: m.time_settings(), icon: Settings01Icon },
-    { kind: "separator" },
-    { kind: "item", id: "close", label: m.tool_close(), icon: Cancel01Icon },
   ];
 
   // The page is the same time in more depth, so the panel does not stay open
@@ -32,18 +24,17 @@
   }
 
   function act(id: string) {
-    if (id === "expand") expand();
-    else if (id === "settings") {
+    if (id === "settings") {
       void commands.runCommand("settings.focus");
       props.onclose();
-    } else if (id === "close") props.onclose();
+    }
   }
 </script>
 
 <ToolFrame
   {...props}
   caption={false}
-  closable={false}
+  onexpand={expand}
   filters={[
     { value: "today", label: m.tool_today() },
     { value: "week", label: m.tool_time_week() },

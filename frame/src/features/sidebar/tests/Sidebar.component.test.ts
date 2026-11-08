@@ -4,6 +4,7 @@ import { userEvent } from "vitest/browser";
 import { tick } from "svelte";
 import * as sidebar from "$session/sidebar-mode.svelte";
 import * as attention from "$session/attention.svelte";
+import * as tools from "$session/tools.svelte";
 import SidebarHost from "./SidebarHost.svelte";
 
 const native = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 afterEach(() => {
+  tools.close();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -127,4 +129,20 @@ test("the hidden card resizes live without becoming a window drag region or snap
   expect(sidebar.sidebarResizeActive()).toBe(false);
   expect(sidebar.sidebarMode()).toBe("hidden");
   expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");
+});
+
+test("Escape closes an open tool, after first leaving a field typed in", async () => {
+  await sidebar.init();
+  const screen = await render(SidebarHost);
+  const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+  tools.open("notes");
+  await expect.element(screen.getByRole("textbox", { name: "Tool field" })).toBeVisible();
+  const field = aside.querySelector<HTMLInputElement>('input[aria-label="Tool field"]')!;
+  field.focus();
+  await userEvent.keyboard("{Escape}");
+  expect(document.activeElement).not.toBe(field);
+  expect(tools.activeTool()).toBe("notes");
+  await userEvent.keyboard("{Escape}");
+  expect(tools.activeTool()).toBeNull();
+  await expect.element(screen.getByRole("textbox", { name: "Sidebar field" })).toBeVisible();
 });

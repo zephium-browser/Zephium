@@ -351,8 +351,12 @@
   min-width: 0;
   min-height: 0;
 }
-.sidebar-tool-rail {
-  flex: 0 0 56px;
+.sidebar-tabs {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 /* Beside a full-height panel the rail keeps only the lights' row. */
 .sidebar-lights {
@@ -898,16 +902,36 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: var(--radius-control);
-  background: var(--color-fill);
-  animation: tool-host-in var(--motion-page) var(--ease-emphasized) backwards;
 }
-/* A tool grows out of the rail it was opened from. */
-@keyframes tool-host-in {
+/* A tool is the column's own page, on the column's material like the tabs it
+   replaces: it comes in from the side the tabs leave to, and they come back
+   from the other. Transforms and opacity only. */
+.sidebar-sheet {
+  animation: sidebar-sheet-in var(--motion-page) var(--ease-emphasized) backwards;
+}
+.sidebar-tabs[data-returning] {
+  animation: sidebar-tabs-back var(--motion-page) var(--ease-emphasized) backwards;
+}
+@keyframes sidebar-sheet-in {
   from {
     opacity: 0;
-    translate: -8px 0;
+    translate: 20px 0;
   }
+}
+@keyframes sidebar-tabs-back {
+  from {
+    opacity: 0;
+    translate: -20px 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-sheet,
+  .sidebar-tabs[data-returning] {
+    animation: none;
+  }
+}
+:root[data-reduce-motion="true"] :is(.sidebar-sheet, .sidebar-tabs[data-returning]) {
+  animation: none;
 }
 
 /* A list that scrolls dissolves at whichever edge still has more of it, and

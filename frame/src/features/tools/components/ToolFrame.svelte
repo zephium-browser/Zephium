@@ -6,7 +6,13 @@
   import Icon from "$shared/ui/Icon";
   import IconButton from "$shared/ui/IconButton";
   import SegmentedControl from "$shared/ui/SegmentedControl";
-  import { Cancel01Icon, Add01Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import {
+    Add01Icon,
+    ArrowExpand01Icon,
+    ArrowLeft01Icon,
+    Cancel01Icon,
+    Search01Icon,
+  } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import "./tools.css";
   let {
@@ -23,7 +29,7 @@
     actions,
     canCompose = false,
     marked = false,
-    closable = true,
+    onexpand,
     caption = true,
     scrolls = true,
     children,
@@ -46,8 +52,8 @@
     /** A glyph before the title. Titles stand alone; the dock already shows
      *  which tool this is. */
     marked?: boolean;
-    /** False where the tool offers closing among its own actions. */
-    closable?: boolean;
+    /** Opens the tool as a page of its own, where it has one. */
+    onexpand?: () => void;
     /** A finished tool does not describe itself as a layout study. */
     caption?: boolean;
     /** Set false when the view owns a scroller of its own, so the frame does
@@ -71,16 +77,18 @@
 
 <section class="shared-tool" data-tool={tool} aria-label={meta.title()}>
   <header role="group" aria-label={meta.title()} class="shared-tool-header">
+    <!-- The way back to the tabs leads the row, where reading starts. -->
+    <IconButton icon={ArrowLeft01Icon} label={m.tool_back_to_tabs()} onclick={onclose} />
     {#if marked}<span class="shared-tool-icon"><Icon icon={meta.icon} size={16} /></span>{/if}
     {#if heading}{@render heading()}{:else}<h2>{meta.title()}</h2>{/if}
     {#if actions}{@render actions()}{/if}{#if canCompose}<IconButton
         icon={Add01Icon}
         label={tool === "notes" ? m.tool_add_note() : m.tool_add_task()}
         onclick={() => edit({ composing: !state.composing })}
-      />{/if}{#if closable}<IconButton
-        icon={Cancel01Icon}
-        label={m.tool_close()}
-        onclick={onclose}
+      />{/if}{#if onexpand}<IconButton
+        icon={ArrowExpand01Icon}
+        label={m.tool_open_full()}
+        onclick={onexpand}
       />{/if}
   </header>
   {#if (searchLabel && searchOpen) || filters}<div

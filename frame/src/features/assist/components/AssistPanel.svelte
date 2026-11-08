@@ -29,7 +29,6 @@
     ToolHostProps & {
       caption?: boolean;
       scrolls?: boolean;
-      closable?: boolean;
       actions?: Snippet;
       footer?: Snippet;
       children?: Snippet;
@@ -152,9 +151,8 @@
 />
 
 <div class="assist-host" data-assist role="presentation">
-  <Frame {...viewProps} caption={false} scrolls={false} closable={false}>
+  <Frame {...viewProps} caption={false} scrolls={false}>
     {#snippet actions()}
-      <IconButton icon={Cancel01Icon} label={m.tool_close()} onclick={viewProps.onclose} />
       <IconButton
         icon={PencilEdit02Icon}
         label={m.assist_new()}

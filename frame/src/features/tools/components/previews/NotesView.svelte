@@ -9,8 +9,6 @@
   import Icon from "$shared/ui/Icon";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
   import {
-    ArrowUpRight01Icon,
-    Cancel01Icon,
     Delete02Icon,
     Globe02Icon,
     MoreHorizontalIcon,
@@ -65,7 +63,6 @@
     ...(capturable && !session?.trash
       ? [{ kind: "item" as const, id: "capture", label: m.note_from_page(), icon: Globe02Icon }]
       : []),
-    { kind: "item", id: "page", label: m.note_open_page(), icon: ArrowUpRight01Icon },
     {
       kind: "item",
       id: "trash",
@@ -73,8 +70,6 @@
       icon: session?.trash ? ArrowLeft01Icon : Delete02Icon,
     },
     { kind: "item", id: "folder", label: m.note_reveal_folder(), icon: FolderOpenIcon },
-    { kind: "separator" },
-    { kind: "item", id: "close", label: m.note_close(), icon: Cancel01Icon },
   ]);
 
   let noteEntries: MenuEntry[] = $derived(
@@ -85,12 +80,6 @@
           ...(note?.id
             ? [
                 { kind: "item" as const, id: "reveal", label: reveal, icon: FolderOpenIcon },
-                {
-                  kind: "item" as const,
-                  id: "page",
-                  label: m.note_open_page(),
-                  icon: ArrowUpRight01Icon,
-                },
                 { kind: "separator" as const },
                 {
                   kind: "item" as const,
@@ -124,10 +113,8 @@
       // Page titles are text, not Markdown.
       const escaped = title.replace(/[\\`*_[\]<>~]/gu, (c) => `\\${c}`);
       await current.create(`# ${escaped}\n\n[${escaped}](<${capturable.url}>)\n\n`);
-    } else if (action === "page") await expand();
-    else if (action === "trash") await current.showTrash(!current.trash);
+    } else if (action === "trash") await current.showTrash(!current.trash);
     else if (action === "folder") await current.reveal(null);
-    else if (action === "close") props.onclose();
     else if (action === "copy") await navigator.clipboard.writeText(current.markdown);
     else if (action === "reveal" && id) await current.reveal(id);
     else if (action === "delete" && id) await current.moveToTrash(id);
@@ -140,7 +127,7 @@
     {...props}
     caption={false}
     scrolls={false}
-    closable={false}
+    onexpand={() => void expand()}
     searchLabel={m.note_search()}
     searchOpen={!note}
     searchFocus={false}

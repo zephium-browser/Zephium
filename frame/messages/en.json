@@ -788,6 +788,8 @@
   "tool_time_help": "Time on the web appears here as you browse. It is counted on this device only.",
   "tool_time_week": "This week",
   "tool_close": "Close tool",
+  "tool_back_to_tabs": "Back to tabs",
+  "tool_open_full": "Open as a page",
   "tool_add_note": "New note",
   "tool_add_task": "New task",
   "ntp_greeting_named": "{greeting}, {name}",
