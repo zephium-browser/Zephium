@@ -17,6 +17,7 @@
 
   let presentation = $state<PanelState | null>(null);
   let Launcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["default"] | null>(null);
+  let Switcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["TabSwitcher"] | null>(null);
   let failed = $state(false);
   let captures = $state(0);
   $effect(() => {
@@ -104,6 +105,7 @@
         ]);
         if (disposed) return;
         Launcher = launcher.default;
+        Switcher = launcher.TabSwitcher;
         theme.customizationKeys.forEach((key, index) => {
           const value = look[index];
           if (!liveLook.includes(key) && value != null) theme.customize(key, value);
@@ -172,7 +174,9 @@
 >
   {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
   <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-    {#if Launcher}{#key off.join()}<Launcher
+    {#if presentation?.visible && presentation.switcher && Switcher}
+      <Switcher snapshot={presentation.switcher} />
+    {:else if !presentation?.switcher && Launcher}{#key off.join()}<Launcher
           context={presentation}
           onTool={open}
           onCapture={off.includes("tasks") ? undefined : capture}

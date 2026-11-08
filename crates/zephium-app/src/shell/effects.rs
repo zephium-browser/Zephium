@@ -63,6 +63,7 @@ impl Shell {
         // residency, or split topology. A captured divider path cannot cross
         // that boundary; resize/sidebar geometry updates deliberately bypass
         // `commit` and remain draggable through path-based recomputation.
+        self.capture_departed_tab_preview();
         self.drop_divider();
         let mut native = self.apply(effects);
         self.schedule_persist();
@@ -71,6 +72,7 @@ impl Shell {
         // request first would permanently lose the transition.
         native.record(self.relayout());
         self.maintain_views();
+        self.reconcile_recent_tabs();
         self.project_items();
         self.project_private_if_changed();
         self.project_recently_closed_if_changed();

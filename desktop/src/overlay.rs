@@ -59,6 +59,7 @@ struct State {
     content_height: f64,
     layout_revision: u64,
     placement: Option<geometry::Placement>,
+    placed_switcher: Option<bool>,
     pending_document: Option<tauri::Url>,
     focus_revision: u64,
     focus_timer: bool,
@@ -75,6 +76,9 @@ impl State {
     /// drops as a duplicate, would otherwise refuse every later action.
     fn begin(&mut self) {
         self.pending = None;
+        if self.model.switcher.is_some() {
+            self.content_height = geometry::INITIAL_HEIGHT;
+        }
         self.model.search();
     }
     /// Holds the launcher for one action until it settles, so a second one
@@ -130,6 +134,7 @@ impl Overlay {
                 content_height: geometry::INITIAL_HEIGHT,
                 layout_revision: 0,
                 placement: None,
+                placed_switcher: None,
                 pending_document,
                 focus_revision: 0,
                 focus_timer: false,
@@ -229,6 +234,7 @@ impl Overlay {
             return;
         }
         self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
@@ -259,6 +265,7 @@ impl Overlay {
     /// Opens on the current page's address, the way an address bar would.
     pub fn edit(&self, tab: String, url: String) {
         self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
@@ -266,10 +273,70 @@ impl Overlay {
             {
                 let mut state = this.state();
                 state.pending = None;
+                if state.model.switcher.is_some() {
+                    state.content_height = geometry::INITIAL_HEIGHT;
+                }
                 state.model.edit(tab, url);
             }
             this.cancel_search(old);
             this.present();
+        });
+    }
+    pub fn switcher(&self, snapshot: zephium_ipc::TabSwitcherState) {
+        self.on_main(move |this| {
+            if !crate::tab_switcher::may_present(this.window_app(), &snapshot) {
+                return;
+            }
+            let old = this.state().model.session();
+            let opening = this.state().model.switcher.as_ref().map(|s| &s.session_id)
+                != Some(&snapshot.session_id);
+            {
+                let mut state = this.state();
+                state.pending = None;
+                state.model.show_switcher(snapshot);
+                if opening {
+                    state.content_height = 320.0;
+                }
+            }
+            if opening {
+                this.cancel_search(old);
+                #[cfg(target_os = "macos")]
+                crate::panel::layout(
+                    &PanelLayout {
+                        height: 320.0,
+                        field: zephium_ipc::PanelRect {
+                            x: 40.0,
+                            y: 40.0,
+                            width: 680.0,
+                            height: 240.0,
+                        },
+                        sheet: None,
+                    },
+                    false,
+                );
+            }
+            this.present();
+        });
+    }
+    pub fn finish_switcher(&self, session: u64, commit: bool) {
+        self.on_main(move |this| {
+            if this
+                .state()
+                .model
+                .switcher
+                .as_ref()
+                .is_some_and(|s| s.session_id == session.to_string())
+            {
+                this.state().model.hide();
+                this.present();
+                if commit {
+                    this.raise_browser();
+                }
+                #[cfg(target_os = "macos")]
+                if !commit {
+                    crate::panel::return_to_previous();
+                }
+            }
         });
     }
     pub fn editing_tab(&self) -> Option<String> {
@@ -277,11 +344,15 @@ impl Overlay {
     }
     pub fn toggle(&self) {
         self.on_main(|this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
             let old = this.state().model.session();
-            let dismissing = this.state().model.presented;
+            let dismissing = {
+                let state = this.state();
+                state.model.presented && state.model.switcher.is_none()
+            };
             if dismissing {
                 this.state().model.hide();
             } else {
@@ -329,10 +400,13 @@ impl Overlay {
     /// where native draws the shapes, they move first and a smaller window
     /// follows once they have settled, so nothing is cut off mid-motion.
     pub fn layout(&self, layout: PanelLayout) {
-        if !layout.bounded() {
+        if self.state().model.switcher.is_some() || !layout.bounded() {
             return;
         }
         self.on_main(move |this| {
+            if this.state().model.switcher.is_some() {
+                return;
+            }
             let height = layout
                 .height
                 .clamp(geometry::RESTING_HEIGHT, geometry::MAX_HEIGHT);
@@ -418,6 +492,11 @@ impl Overlay {
     }
     fn present(&self) {
         let snapshot = self.snapshot();
+        if let Some(switcher) = &snapshot.switcher {
+            if !crate::tab_switcher::may_present(self.window_app(), switcher) {
+                return;
+            }
+        }
         let (ready, document) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let document = if snapshot.visible && !state.model.ready {
@@ -456,8 +535,10 @@ impl Overlay {
         // On macOS the window stays up through its fade-out, so a launcher
         // called back inside it arrives without ever having been ordered out.
         let arriving = !shown(&self.window);
-        if !visible(&self.window) {
+        let switcher = snapshot.switcher.is_some();
+        if !visible(&self.window) || self.state().placed_switcher != Some(switcher) {
             self.place();
+            self.state().placed_switcher = Some(switcher);
         }
         if arriving {
             self.tell_browser("launcher.presented");
@@ -571,6 +652,7 @@ impl Overlay {
                     .model
                     .focus(panel_focused, main_focused, app_active);
                 if this.snapshot() != old {
+                    crate::tab_switcher::cancel(this.window_app());
                     #[cfg(target_os = "macos")]
                     crate::panel::forget_previous();
                     this.cancel_search(old_session);
@@ -1062,6 +1144,7 @@ mod action_barrier_tests {
             content_height: geometry::INITIAL_HEIGHT,
             layout_revision: 0,
             placement: None,
+            placed_switcher: None,
             pending_document: None,
             focus_revision: 0,
             focus_timer: false,

@@ -360,28 +360,40 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "tab.next",
         "Next Tab",
-        Keys::same("Ctrl+Tab"),
+        Keys::same("Ctrl+PageDown"),
         Group::Window,
     ),
     command(
         "tab.previous",
         "Previous Tab",
-        Keys::same("Ctrl+Shift+Tab"),
+        Keys::same("Ctrl+PageUp"),
         Group::Window,
+    ),
+    command(
+        "tab.recent.next",
+        "Next Recent Tab",
+        Keys::same("Ctrl+Tab"),
+        Group::Keys,
+    ),
+    command(
+        "tab.recent.previous",
+        "Previous Recent Tab",
+        Keys::same("Ctrl+Shift+Tab"),
+        Group::Keys,
     ),
     alternate(
         "tab.next.alt",
         "Next Tab (Alternate)",
-        split("CmdOrCtrl+Shift+]", "Ctrl+PageDown"),
+        mac_only("CmdOrCtrl+Shift+]"),
         "tab.next",
     ),
     alternate(
         "tab.previous.alt",
         "Previous Tab (Alternate)",
-        split("CmdOrCtrl+Shift+[", "Ctrl+PageUp"),
+        mac_only("CmdOrCtrl+Shift+["),
         "tab.previous",
     ),
-    // The same walk down the sidebar as Ctrl+Tab, on the arrows that point
+    // The same walk down the sidebar, on the arrows that point
     // along it. Ctrl+Alt stays clear of text: only letters and digits are
     // AltGr's.
     command(
@@ -915,6 +927,20 @@ mod tests {
     }
 
     #[test]
+    fn recent_and_sidebar_walks_have_distinct_defaults_on_both_platforms() {
+        for platform in [Platform::Mac, Platform::Other] {
+            let keys = bound_to(platform);
+            assert_eq!(keys.get("Ctrl+Tab").copied(), Some("tab.recent.next"));
+            assert_eq!(
+                keys.get("Ctrl+Shift+Tab").copied(),
+                Some("tab.recent.previous")
+            );
+            assert_eq!(keys.get("Ctrl+PageDown").copied(), Some("tab.next"));
+            assert_eq!(keys.get("Ctrl+PageUp").copied(), Some("tab.previous"));
+        }
+    }
+
+    #[test]
     fn windows_and_linux_answer_chromes_keys() {
         let keys = bound_to(Platform::Other);
         for (text, id) in [
@@ -929,8 +955,8 @@ mod tests {
             ("Alt+Left", "nav.back.alt"),
             ("Alt+Right", "nav.forward.alt"),
             ("Alt+Home", "nav.home"),
-            ("Ctrl+PageUp", "tab.previous.alt"),
-            ("Ctrl+PageDown", "tab.next.alt"),
+            ("Ctrl+PageUp", "tab.previous"),
+            ("Ctrl+PageDown", "tab.next"),
             ("Ctrl+Shift+Delete", "settings.clearData"),
             ("Ctrl+H", "tool.history"),
             ("Ctrl+J", "tool.downloads"),

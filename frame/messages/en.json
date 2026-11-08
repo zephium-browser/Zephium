@@ -277,6 +277,8 @@
   "command_browser_history": "Show all history",
   "command_tab_next": "Next tab",
   "command_tab_previous": "Previous tab",
+  "command_tab_recent_next": "Next recent tab",
+  "command_tab_recent_previous": "Previous recent tab",
   "command_tool_downloads": "Downloads",
   "command_browser_tasks": "Show all tasks",
   "command_browser_notes": "Show all notes",
@@ -3631,6 +3633,8 @@
   "native_show_bookmarks": "Show Bookmarks",
   "native_next_tab": "Next Tab",
   "native_previous_tab": "Previous Tab",
+  "native_next_recent_tab": "Next Recent Tab",
+  "native_previous_recent_tab": "Previous Recent Tab",
   "native_notes": "Notes",
   "native_tasks": "Tasks",
   "native_time": "Time",
@@ -3959,5 +3963,6 @@
   "tab_selection_close": "Close selected tabs",
   "tab_selection_mute": "Mute selected tabs",
   "tab_selection_unmute": "Unmute selected tabs",
-  "tab_selection_failed": "Could not apply an action to every selected tab. Try again."
+  "tab_selection_failed": "Could not apply an action to every selected tab. Try again.",
+  "tab_switcher_title": "Switch tabs"
 }

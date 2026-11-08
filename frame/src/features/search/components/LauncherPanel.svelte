@@ -1,3 +1,7 @@
+<script module lang="ts">
+  export { default as TabSwitcher } from "./TabSwitcher.svelte";
+</script>
+
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
