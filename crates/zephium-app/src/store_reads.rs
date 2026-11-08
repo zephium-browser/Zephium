@@ -707,18 +707,6 @@ impl StoreReadQueue {
         true
     }
 
-    pub(crate) fn resume(&self) {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !state.stopped {
-            state.accepting = true;
-            self.inner.ready.notify_one();
-        }
-    }
-
     pub(crate) fn stop(&self) {
         let mut state = self
             .inner
@@ -1594,13 +1582,13 @@ mod tests {
     }
 
     #[test]
-    fn quiescence_clears_pending_and_can_resume_after_retryable_shutdown() {
+    fn quiescence_clears_pending_and_refuses_further_reads() {
         let queue = StoreReadQueue::new();
         assert!(queue.request_history(1, ProfileId::from(1), "pending".into(), Sources::HISTORY));
         assert!(queue.quiesce_until(Instant::now()));
         assert!(!queue.request_history(2, ProfileId::from(1), "rejected".into(), Sources::HISTORY));
-        queue.resume();
-        assert!(queue.request_history(3, ProfileId::from(1), "accepted".into(), Sources::HISTORY));
+        queue.stop();
+        assert!(!queue.request_history(3, ProfileId::from(1), "rejected".into(), Sources::HISTORY));
     }
 
     #[test]

@@ -9076,20 +9076,20 @@ fn validate_agent_app_lifecycle(
         .ok_or_else(|| "application native shutdown boundary is missing".to_owned())?;
     let ordered = &shell[shutdown_start..shutdown_end];
     let flush = ordered
-        .find("self.store.flush_until(deadline)")
+        .find("self.store.flush_until(storage_deadline)")
         .ok_or_else(|| "application Store preflight is missing".to_owned())?;
     let agent = ordered
-        .find("self.shutdown_agent_lifecycle_until(deadline)")
+        .find("self.shutdown_agent_lifecycle_until(storage_deadline)")
         .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
     let store = ordered
-        .find("self.store.shutdown_until(deadline)")
+        .find("self.store.shutdown_until(storage_deadline)")
         .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
     let engine = ordered
         .rfind("self.shutdown_native_and_blocker_until(deadline)")
         .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
     if !(flush < agent && agent < store && store < engine) {
         return Err(
-            "agent lifecycle must follow retryable durability preflight and precede Store and engine teardown"
+            "agent lifecycle must follow durability preflight and precede Store and engine teardown"
                 .to_owned(),
         );
     }
@@ -10244,14 +10244,56 @@ mod tests {
                 .is_err()
         );
         let invalid_shell = shell.replacen(
-            "self.shutdown_agent_lifecycle_until(deadline)",
-            "self.shutdown_agent_lifecycle_after_store(deadline)",
+            "self.shutdown_agent_lifecycle_until(storage_deadline)",
+            "self.shutdown_agent_lifecycle_after_store(storage_deadline)",
             1,
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
                 .is_err()
         );
+
+        for call in [
+            "self.store.flush_until(storage_deadline)",
+            "self.store.shutdown_until(storage_deadline)",
+            "self.shutdown_native_and_blocker_until(deadline)",
+        ] {
+            let invalid_shell = shell.replacen(call, "true", 1);
+            assert_ne!(invalid_shell, shell, "mutation must remove {call}");
+            assert!(
+                validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                    .is_err(),
+                "application shutdown accepted missing barrier {call}"
+            );
+        }
+        for (first, second) in [
+            (
+                "self.store.flush_until(storage_deadline)",
+                "self.shutdown_agent_lifecycle_until(storage_deadline)",
+            ),
+            (
+                "self.shutdown_agent_lifecycle_until(storage_deadline)",
+                "self.store.shutdown_until(storage_deadline)",
+            ),
+            (
+                "self.store.shutdown_until(storage_deadline)",
+                "self.shutdown_native_and_blocker_until(deadline)",
+            ),
+        ] {
+            let invalid_shell = shell
+                .replacen(first, "SWAPPED_SHUTDOWN_BARRIER", 1)
+                .replacen(second, first, 1)
+                .replacen("SWAPPED_SHUTDOWN_BARRIER", second, 1);
+            assert_ne!(
+                invalid_shell, shell,
+                "mutation must swap {first} and {second}"
+            );
+            assert!(
+                validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                    .is_err(),
+                "application shutdown accepted {second} before {first}"
+            );
+        }
 
         let invalid_desktop = desktop.replace(
             "macos-page-permission-prompts = [",

@@ -168,10 +168,14 @@ fn browsing_activity(cmd: &Command) -> bool {
         _ => false,
     }
 }
-#[cfg(not(test))]
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume
-// this one caller-owned deadline.
+// this one caller-owned deadline. Under CPU load a WebView2 browser took up
+// to 13 s to exit, so Windows gets room for its 20 s process wait.
+#[cfg(all(not(test), target_os = "windows"))]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24);
+#[cfg(all(not(test), not(target_os = "windows")))]
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 // A clean shutdown joins the shell, timer and storage-reader threads, which
@@ -1833,6 +1837,10 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        // Reserve the last quarter of the remaining budget for native teardown.
+        let now = std::time::Instant::now();
+        let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
+        let mut terminal_clean = now < deadline;
         self.flush_visit_titles();
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();
@@ -1861,22 +1869,15 @@ impl Shell {
         if let Some(work) = &mut self.work {
             work.begin_shutdown();
         }
-        if std::time::Instant::now() >= deadline {
-            self.retryable_shutdown_failure(ack);
-            return;
-        }
-
         self.cancel_pending_page_permission_for_shutdown();
 
-        let mut terminal_clean = true;
         if let Some(reads) = &self.store_reads {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                reads.quiesce_until(deadline)
+                reads.quiesce_until(storage_deadline)
             })) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.retryable_shutdown_failure(ack);
-                    return;
+                    terminal_clean = false;
                 }
                 Err(_) => {
                     crate::diagnostic!("shutdown: storage-reader quiescence panicked");
@@ -1896,8 +1897,7 @@ impl Shell {
         })) {
             Ok(true) => {}
             Ok(false) => {
-                self.retryable_shutdown_failure(ack);
-                return;
+                terminal_clean = false;
             }
             Err(_) => {
                 crate::diagnostic!("shutdown: focus admission preflight panicked");
@@ -1909,16 +1909,11 @@ impl Shell {
             terminal_clean = false;
         }
 
-        // Preserve retryability only while every earlier boundary is still
-        // known-good.
+        // A failed durability barrier is terminal, but cannot skip native teardown.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.store.flush_until(deadline)
+            self.store.flush_until(storage_deadline)
         })) {
             Ok(true) => {}
-            Ok(false) if terminal_clean => {
-                self.retryable_shutdown_failure(ack);
-                return;
-            }
             Ok(false) => {
                 crate::diagnostic!("shutdown: storage durability preflight was not proven");
                 terminal_clean = false;
@@ -1930,7 +1925,7 @@ impl Shell {
         }
 
         #[cfg(feature = "agentic-browser")]
-        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
+        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(storage_deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
         // Fold every result already published before Store's terminal
@@ -1938,7 +1933,7 @@ impl Shell {
         // follow-up reconciliation is then ordered ahead of Store shutdown.
         // A projection or adapter panic is terminal, but cannot skip the
         // independent Store/native/blocker barriers below.
-        let pre_store_coordination_clean = if std::time::Instant::now() >= deadline {
+        let pre_store_coordination_clean = if std::time::Instant::now() >= storage_deadline {
             crate::diagnostic!("shutdown: pre-Store blocker result folding deadline passed");
             false
         } else if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1954,9 +1949,9 @@ impl Shell {
         if !pre_store_coordination_clean {
             crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
         }
-        terminal_clean &= self.flush_blocker_statistics_until(deadline);
+        terminal_clean &= self.flush_blocker_statistics_until(storage_deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.store.shutdown_until(deadline)
+            self.store.shutdown_until(storage_deadline)
         })) {
             Ok(StoreShutdownOutcome::Clean) => true,
             Ok(StoreShutdownOutcome::RetryableFailure) => {
@@ -2198,53 +2193,6 @@ impl Shell {
                 false
             }
         }
-    }
-
-    fn retryable_shutdown_failure(&mut self, ack: SyncSender<ShutdownOutcome>) {
-        let recovered = self
-            .self_queue
-            .as_ref()
-            .map(CommandQueue::reopen_after_failed_shutdown)
-            .unwrap_or_default();
-        // These callbacks were truthfully rejected after the barrier, but the
-        // browser is about to resume. Fold their bounded latest state into the
-        // actor before acknowledging failure or accepting newly dispatched
-        // work.
-        for command in recovered {
-            self.handle(command);
-        }
-        let now = std::time::Instant::now();
-        if let Some(queue) = &self.self_queue {
-            // A timer wake removes its entry before trying to enter the actor.
-            // If it raced the shutdown barrier it was truthfully rejected as
-            // sealed, so explicitly restore every still-live exact reveal
-            // obligation when the retryable barrier reopens. Both maps remain
-            // bounded to one entry per logical item.
-            for (id, pending) in &self.presentation.pending_presentations {
-                queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
-            }
-        }
-        self.rearm_blocker_startup_deadlines();
-        if let Some(reads) = &self.store_reads {
-            reads.resume();
-        }
-        // A failed terminal storage admission may have invalidated pending
-        // presentation reads. Restart only currently visible leaves (at most
-        // the split ceiling), never all restored tabs.
-        let visible = self
-            .pane_tree()
-            .map(|tree| tree.tabs())
-            .or_else(|| {
-                self.windows
-                    .focused()
-                    .and_then(|window| window.active)
-                    .map(|id| vec![id])
-            })
-            .unwrap_or_default();
-        for id in visible {
-            self.maybe_discover_favicon(id);
-        }
-        let _ = ack.send(ShutdownOutcome::RetryableFailure);
     }
 
     fn clear_pending_store_reads(&mut self) {
