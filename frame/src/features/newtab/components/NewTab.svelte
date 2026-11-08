@@ -539,7 +539,10 @@
   .newtab {
     --sky-paper: var(--sky-day-paper);
     --sky-shadow: var(--sky-day-shadow);
+    --sky-ink: var(--sky-day-ink);
+    --sky-name: var(--sky-day-name);
     --sky-type-edge: var(--sky-day-type-edge);
+    --sky-type-halo: var(--sky-day-type-halo);
     --sky-lip: var(--sky-day-lip);
     --disc-fill: var(--sky-day-disc-fill);
     --disc-rim: var(--sky-day-disc-rim);
@@ -561,7 +564,10 @@
   .newtab[data-scene="night"] {
     --sky-paper: var(--sky-night-paper);
     --sky-shadow: var(--sky-night-shadow);
+    --sky-ink: var(--sky-night-ink);
+    --sky-name: var(--sky-night-name);
     --sky-type-edge: var(--sky-night-type-edge);
+    --sky-type-halo: var(--sky-night-type-halo);
     --sky-lip: var(--sky-night-lip);
     --disc-fill: var(--sky-night-disc-fill);
     --disc-rim: var(--sky-night-disc-rim);
@@ -583,7 +589,10 @@
     --sky-card-edge: var(--color-border);
     --disc-fill: var(--color-surface);
     --sky-shadow: var(--newtab-image-dim);
+    --sky-ink: var(--sky-night-ink);
+    --sky-name: var(--sky-night-name);
     --sky-type-edge: var(--newtab-image-dim);
+    --sky-type-halo: var(--newtab-image-dim);
     --disc-rim: var(--color-border);
   }
 
@@ -681,7 +690,7 @@
     text-shadow:
       0 0 1px var(--sky-type-edge),
       0 1px 5px var(--sky-type-edge),
-      0 1px 18px var(--sky-shadow);
+      0 1px 18px var(--sky-type-halo);
     pointer-events: none;
   }
 

@@ -109,7 +109,7 @@
         phase = "still";
         return;
       }
-      const color = getComputedStyle(document.documentElement).getPropertyValue("--sky-ink");
+      const color = getComputedStyle(air).getPropertyValue("--sky-ink");
       const box = hero;
       return formName(air, {
         stage: STAGE,
@@ -392,8 +392,8 @@
     pointer-events: none;
   }
 
-  /* Under the name, in the sky: white words, and a white control with the
-     sky's own ink. */
+  /* Under the name, in the sky: words in the sky's ink, and a control
+     filled with it. */
   .welcome {
     --color-lit: var(--sky-ink);
     --color-lit-hover: var(--sky-ink-hover);
@@ -415,7 +415,9 @@
     font-weight: 500;
     line-height: 1.5;
     text-align: center;
-    text-shadow: 0 1px 18px var(--sky-shadow);
+    text-shadow:
+      0 0 1px var(--sky-type-edge),
+      0 1px 18px var(--sky-type-halo);
     text-wrap: balance;
   }
 

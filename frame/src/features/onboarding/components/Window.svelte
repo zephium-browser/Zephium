@@ -558,7 +558,7 @@
     color: var(--sky-ink);
     font-size: 9px;
     font-variant-numeric: tabular-nums;
-    text-shadow: 0 1px 10px var(--sky-shadow);
+    text-shadow: 0 1px 10px var(--sky-type-halo);
     transition: opacity 600ms var(--ease-out);
   }
 

@@ -5,17 +5,23 @@
   --sky-day-paper: #fff;
   --sky-day-shadow: rgb(18 48 112 / 22%);
 
-  /* Type on the sky keeps a close edge of shade, so it reads on cloud. */
+  /* What stands on the sky is white; type keeps a close edge of shade round
+     it, so it reads on cloud. */
+  --sky-day-ink: rgb(255 255 255);
+  --sky-day-name: rgb(255 255 255 / 94%);
+  --sky-day-ink-hover: rgb(255 255 255 / 86%);
+  --sky-day-on-ink: rgb(16 24 42);
   --sky-day-type-edge: rgb(28 58 112 / 34%);
+  --sky-day-type-halo: var(--sky-day-shadow);
   --sky-day-disc-fill: rgb(255 255 255 / 18%);
   --sky-day-disc-rim: rgb(255 255 255 / 36%);
-  --sky-night-paper: #0a162e;
+  --sky-night-paper: #0e0f13;
 
   /* Beside a new tab the window's glass is first evened out, so whatever
      the wallpaper puts through it is only a hint, then lit from the side by
      the picture's own edge, this strongly where the light comes in. */
   --sky-day-glass: rgb(242 244 248 / 40%);
-  --sky-night-glass: rgb(10 22 46 / 42%);
+  --sky-night-glass: rgb(14 15 19 / 42%);
   --sky-day-edge-strength: 0.5;
   --sky-night-edge-strength: 0.62;
 
@@ -45,10 +51,15 @@
   );
   --sky-night-shadow: rgb(2 8 24 / 40%);
   --sky-night-type-edge: rgb(2 8 24 / 46%);
+  --sky-night-type-halo: var(--sky-night-shadow);
   --sky-night-disc-fill: rgb(255 255 255 / 10%);
   --sky-night-disc-rim: rgb(255 255 255 / 18%);
-  --sky-ink: rgb(255 255 255);
-  --sky-name: rgb(255 255 255 / 92%);
+  --sky-night-ink: rgb(255 255 255);
+  --sky-night-name: rgb(255 255 255 / 92%);
+  --sky-night-ink-hover: rgb(255 255 255 / 86%);
+  --sky-night-on-ink: rgb(16 24 42);
+  --sky-ink: var(--sky-night-ink);
+  --sky-name: var(--sky-night-name);
   --sky-glint: rgb(255 255 255);
   --sky-day-lip: rgb(236 244 255 / 34%);
   --sky-night-lip: rgb(176 196 238 / 30%);
@@ -58,9 +69,9 @@
   --sky-day-edge: rgb(232 238 248 / 46%);
   --sky-day-edge-half: rgb(232 238 248 / 22%);
   --sky-day-edge-faint: rgb(232 238 248 / 7%);
-  --sky-night-edge: rgb(10 22 46 / 58%);
-  --sky-night-edge-half: rgb(10 22 46 / 28%);
-  --sky-night-edge-faint: rgb(10 22 46 / 9%);
+  --sky-night-edge: rgb(14 15 19 / 58%);
+  --sky-night-edge-half: rgb(14 15 19 / 28%);
+  --sky-night-edge-faint: rgb(14 15 19 / 9%);
 
   /* A sheet of glass standing on the sky: dark over the night, white over
      the day, so the theme's own ink reads on it. Its rim is the light caught
@@ -72,9 +83,9 @@
   --sky-night-card-rim: rgb(176 196 238 / 26%);
   --sky-night-card-edge: rgb(176 196 238 / 14%);
 
-  /* Ink on a white control set on the sky. */
-  --sky-on-ink: rgb(16 24 42);
-  --sky-ink-hover: rgb(255 255 255 / 86%);
+  /* Ink on a control filled with the sky's ink. */
+  --sky-on-ink: var(--sky-night-on-ink);
+  --sky-ink-hover: var(--sky-night-ink-hover);
 }
 
 /* A scene drawn outside the new tab names its sky; what stands on it
@@ -82,6 +93,12 @@
 [data-sky="day"] {
   --sky-paper: var(--sky-day-paper);
   --sky-shadow: var(--sky-day-shadow);
+  --sky-ink: var(--sky-day-ink);
+  --sky-name: var(--sky-day-name);
+  --sky-ink-hover: var(--sky-day-ink-hover);
+  --sky-on-ink: var(--sky-day-on-ink);
+  --sky-type-edge: var(--sky-day-type-edge);
+  --sky-type-halo: var(--sky-day-type-halo);
   --sky-lip: var(--sky-day-lip);
   --sky-card: var(--sky-day-card);
   --sky-card-rim: var(--sky-day-card-rim);
@@ -91,6 +108,12 @@
 [data-sky="night"] {
   --sky-paper: var(--sky-night-paper);
   --sky-shadow: var(--sky-night-shadow);
+  --sky-ink: var(--sky-night-ink);
+  --sky-name: var(--sky-night-name);
+  --sky-ink-hover: var(--sky-night-ink-hover);
+  --sky-on-ink: var(--sky-night-on-ink);
+  --sky-type-edge: var(--sky-night-type-edge);
+  --sky-type-halo: var(--sky-night-type-halo);
   --sky-lip: var(--sky-night-lip);
   --sky-card: var(--sky-night-card);
   --sky-card-rim: var(--sky-night-card-rim);

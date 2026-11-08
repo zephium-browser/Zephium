@@ -6,20 +6,77 @@ export type Rgb = readonly [number, number, number];
 /** A sky's picture, decoded once: three bytes a pixel. */
 export type Picture = { data: Uint8Array; width: number; height: number };
 
-/** How a scene is printed. Below the horizon the sky thins into `paper`, the
- *  page's own colour; `hold` is how far the sky behind the page's type gives
- *  way to `still`, its own open blue, so the type reads on cloud. */
-export type Ink = { paper: Rgb; hold: number; still: Rgb };
-
-export const INKS: Record<Scene, Ink> = {
-  day: { paper: [255, 255, 255], hold: 0.45, still: [123, 185, 245] },
-  night: { paper: [10, 22, 46], hold: 0, still: [10, 22, 46] },
+/** How a scene is printed: each dot takes its light from the picture and its
+ *  colour from `tone`, a ramp of the scene's blue from the page's own surface
+ *  up to its light. The ramp is screened in `levels` steps, so every dot is a
+ *  shade of the one blue. Below the horizon the sky thins into the end of the
+ *  ramp that is the page (`paper`); `hold` is how far the sky behind the
+ *  page's type gives way to the light `still`, so the type reads on cloud. */
+export type Ink = {
+  tone: readonly (readonly [number, Rgb])[];
+  levels: number;
+  paper: 0 | 1;
+  hold: number;
+  still: number;
 };
 
-/** Levels each channel is printed in: few enough that the screen shows, many
- *  enough that the picture keeps its own colours. */
-const LEVELS = 6;
-const STEP = 255 / (LEVELS - 1);
+export const INKS: Record<Scene, Ink> = {
+  day: {
+    tone: [
+      [0, [52, 104, 186]],
+      [0.4, [86, 142, 218]],
+      [0.62, [138, 182, 238]],
+      [0.84, [212, 230, 250]],
+      [1, [255, 255, 255]],
+    ],
+    levels: 7,
+    paper: 1,
+    hold: 0.5,
+    still: 0.5,
+  },
+  night: {
+    tone: [
+      [0, [14, 15, 19]],
+      [0.2, [15, 19, 28]],
+      [0.48, [28, 56, 104]],
+      [0.76, [96, 146, 214]],
+      [1, [214, 228, 248]],
+    ],
+    levels: 7,
+    paper: 0,
+    hold: 0,
+    still: 0,
+  },
+};
+
+/** The page's own colour under a sky: the end of its ramp it thins into. */
+export const paperOf = (scene: Scene): Rgb => {
+  const { tone, paper } = INKS[scene];
+  return tone[paper ? tone.length - 1 : 0]![1];
+};
+
+const swatches = new WeakMap<Ink, Rgb[]>();
+
+/** The ramp's colour at each of the ink's levels, darkest first. */
+export function swatchesOf(ink: Ink): Rgb[] {
+  let swatch = swatches.get(ink);
+  if (swatch) return swatch;
+  const stops = ink.tone;
+  swatch = Array.from({ length: ink.levels }, (_, level): Rgb => {
+    const at = level / (ink.levels - 1);
+    const next = Math.max(
+      1,
+      stops.findIndex(([position]) => position >= at),
+    );
+    const [p0, c0] = stops[next - 1]!;
+    const [p1, c1] = stops[next]!;
+    const t = Math.min(1, Math.max(0, (at - p0) / (p1 - p0)));
+    const mix = (c: number) => Math.round(c0[c]! + (c1[c]! - c0[c]!) * t);
+    return [mix(0), mix(1), mix(2)];
+  });
+  swatches.set(ink, swatch);
+  return swatch;
+}
 
 /** Device pixels per dot: about one and a half page pixels, never under two
  *  device pixels, so each dot is a crisp square at every density. */
@@ -86,22 +143,25 @@ export function frameFor(width: number, height: number, density: number) {
   };
 }
 
-/** Prints the sky into `out` (RGBA, columns × rows) in its own colours, each
- *  channel set to the level above or below by an ordered screen. The levels
- *  are laid from the paper, so where the sky has thinned into it below the
- *  horizon the page is one flat colour. */
+/** Prints the sky into `out` (RGBA, columns × rows): each dot's light set to
+ *  the ink's level above or below it by an ordered screen. Where the sky has
+ *  thinned into the paper below the horizon the page is one flat colour. */
 export function printSky(out: Uint8ClampedArray, picture: Picture, ink: Ink, frame: SkyFrame) {
   const { columns, rows, dot, density, sky, horizon, quiet } = frame;
   const { data, width, height } = picture;
-  const { paper, hold, still } = ink;
+  const { levels, paper, hold, still } = ink;
+  const swatch = swatchesOf(ink);
+  const last = levels - 1;
   const held = quiet && hold > 0 ? quiet : null;
-  const offset = paper.map((c) => c % STEP);
   const step = dot / density;
   const toX = width / sky.w;
   const toY = height / sky.h;
   const horizonRow = horizon / step;
   const fade = Math.max(1, rows - horizonRow);
-  const rgb = [0, 0, 0];
+  const lightAt = (x: number, y: number) => {
+    const at = (y * width + x) * 3;
+    return (0.2126 * data[at]! + 0.7152 * data[at + 1]! + 0.0722 * data[at + 2]!) / 255;
+  };
   for (let row = 0; row < rows; row++) {
     const y = ((row + 0.5) * step - sky.y) * toY - 0.5;
     const y0 = Math.min(height - 1, Math.max(0, Math.floor(y)));
@@ -114,31 +174,23 @@ export function printSky(out: Uint8ClampedArray, picture: Picture, ink: Ink, fra
       const x0 = Math.min(width - 1, Math.max(0, Math.floor(x)));
       const x1 = Math.min(width - 1, x0 + 1);
       const fx = Math.min(1, Math.max(0, x - x0));
-      let give = 0;
+      const top = lightAt(x0, y0) * (1 - fx) + lightAt(x1, y0) * fx;
+      const bottom = lightAt(x0, y1) * (1 - fx) + lightAt(x1, y1) * fx;
+      let light = top * (1 - fy) + bottom * fy;
       if (held) {
         const dx = ((column + 0.5) * step - held.x) / held.rx;
         const near = 1 - dx * dx - dy * dy;
-        if (near > 0) give = hold * near * near * (3 - 2 * near);
+        if (near > 0) light += (still - light) * hold * near * near * (3 - 2 * near);
       }
-      const at = (row * columns + column) * 4;
+      light += (paper - light) * below;
+      const level = light * last;
+      const base = Math.floor(level);
       const threshold = BAYER[((row & 7) << 3) | (column & 7)]!;
-      for (let c = 0; c < 3; c++) {
-        const a = (y0 * width + x0) * 3 + c;
-        const b = (y0 * width + x1) * 3 + c;
-        const d = (y1 * width + x0) * 3 + c;
-        const e = (y1 * width + x1) * 3 + c;
-        const top = data[a]! * (1 - fx) + data[b]! * fx;
-        const bottom = data[d]! * (1 - fx) + data[e]! * fx;
-        let value = top * (1 - fy) + bottom * fy;
-        value += (still[c]! - value) * give;
-        value += (paper[c]! - value) * below;
-        const level = (value - offset[c]!) / STEP;
-        const base = Math.floor(level);
-        rgb[c] = offset[c]! + (base + (level - base > threshold ? 1 : 0)) * STEP;
-      }
-      out[at] = rgb[0]!;
-      out[at + 1] = rgb[1]!;
-      out[at + 2] = rgb[2]!;
+      const rgb = swatch[Math.min(last, base + (level - base > threshold ? 1 : 0))]!;
+      const at = (row * columns + column) * 4;
+      out[at] = rgb[0];
+      out[at + 1] = rgb[1];
+      out[at + 2] = rgb[2];
       out[at + 3] = 255;
     }
   }
