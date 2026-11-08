@@ -2740,3 +2740,6 @@ mod frame_judge_tests {
         assert!(!frame_refused(Some("https://fine.example/"), blocks));
     }
 }
+
+mod capture_stream;
+pub(crate) mod tab_preview;

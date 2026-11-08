@@ -9,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
@@ -264,6 +264,29 @@ pub enum PageRequestDecision {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    BeginTabSwitcher {
+        session: u64,
+        reverse: bool,
+        keyboard: bool,
+    },
+    TabSwitcher {
+        session: u64,
+        action: zephium_ipc::TabSwitcherAction,
+    },
+    RevealTabSwitcher {
+        session: u64,
+    },
+    CaptureTabPreview,
+    TabPreviewReady {
+        request: u64,
+        bytes: Option<Vec<u8>>,
+    },
+    ReadTabPreview {
+        window: WindowId,
+        tab: ItemId,
+        revision: u64,
+        done: std::sync::mpsc::SyncSender<Option<Vec<u8>>>,
+    },
     WorkDocument(crate::WorkDocumentSubmission),
     WorkChanged(zephium_ipc::work::WorkChangedV1),
     WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1),

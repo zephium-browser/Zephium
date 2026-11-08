@@ -743,7 +743,37 @@ impl PanelLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TabSwitcherAction {
+    Step { reverse: bool },
+    Select { index: u32 },
+    Commit,
+    Cancel,
+    Close,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherEntry {
+    pub tab_id: String,
+    pub title: String,
+    pub url_host: String,
+    pub favicon: Option<IconRef>,
+    pub preview_url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherState {
+    pub session_id: String,
+    pub window_id: String,
+    pub entries: Vec<TabSwitcherEntry>,
+    pub selected: u32,
+    pub keyboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelState {
+    pub switcher: Option<TabSwitcherState>,
     pub window_id: Option<String>,
     pub revision: String,
     pub session_id: String,
@@ -1728,6 +1758,10 @@ pub enum Projection {
     WorkEnvironmentChanged(work::WorkEnvironmentChangedV1),
     WorkChanged(work::WorkChangedV1),
     PanelOwner(PanelOwner),
+    TabSwitcher {
+        session: u64,
+        state: Option<TabSwitcherState>,
+    },
     Items(ItemsState),
     Tab(TabView),
     Favicons(FaviconsView),

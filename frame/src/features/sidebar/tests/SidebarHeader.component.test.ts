@@ -8,6 +8,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import SidebarHeader from "../components/SidebarHeader.svelte";
 
 const native = vi.hoisted(() => ({
+  switcher: vi.fn(async () => true),
   menu: vi.fn(async (..._args: unknown[]) => true),
   kind: "default" as "default" | "incognito",
 }));
@@ -25,6 +26,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     runCommand: async () => ({ accepted: true, operation_id: null }),
     settingGet: async () => null,
     sidebarMenuPopup: native.menu,
+    tabSwitcherOpen: native.switcher,
   });
 });
 
@@ -36,6 +38,7 @@ afterEach(() => {
   surface.dispose();
   preferences.dispose();
   native.menu.mockClear();
+  native.switcher.mockClear();
   native.kind = "default";
 });
 
@@ -77,4 +80,10 @@ test("an internal page has no site to clear either", async () => {
 test("a private window keeps nothing, so offers nothing to clear", async () => {
   native.kind = "incognito";
   expect(offersClearData(await rail({ url: "https://example.com/" }))).toBe(false);
+});
+
+test("the header opens the mouse switcher", async () => {
+  const screen = await render(SidebarHeader, { compact: false, ontoggle: () => {} });
+  await screen.getByRole("button", { name: "Switch tabs" }).click();
+  await vi.waitFor(() => expect(native.switcher).toHaveBeenCalledOnce());
 });

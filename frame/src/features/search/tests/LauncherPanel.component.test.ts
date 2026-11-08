@@ -71,6 +71,7 @@ function glass(layout: PanelLayout) {
 }
 
 const context: PanelState = {
+  switcher: null,
   ...native.context,
   revision: "0000000000000001",
   visible: true,

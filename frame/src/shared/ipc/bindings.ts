@@ -458,6 +458,7 @@ export const commands = {
 	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	panelReady: () => __TAURI_INVOKE<{
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -472,6 +473,8 @@ export const commands = {
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
 } | null>("panel_ready"),
+	tabSwitcherOpen: () => __TAURI_INVOKE<boolean>("tab_switcher_open"),
+	tabSwitcherAction: (sessionId: string, intent: TabSwitcherAction) => __TAURI_INVOKE<boolean>("tab_switcher_action", { sessionId, intent }),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
 	/**
 	 *  The launcher's content reports what it shows; native sizes the window and
@@ -2612,6 +2615,7 @@ export type PanelRect = {
 };
 
 export type PanelState = {
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -3294,6 +3298,25 @@ export type TabMenuContext = {
 	 *  in-use indicator.
 	 */
 	media_only: boolean,
+};
+
+export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" };
+
+export type TabSwitcherEntry = {
+	tab_id: string,
+	title: string,
+	url_host: string,
+	favicon: IconRef | null,
+	preview_url: string | null,
+	active: boolean,
+};
+
+export type TabSwitcherState = {
+	session_id: string,
+	window_id: string,
+	entries: TabSwitcherEntry[],
+	selected: number,
+	keyboard: boolean,
 };
 
 export type TabView = {

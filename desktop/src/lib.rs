@@ -128,6 +128,8 @@ mod startup_alert;
 mod startup_styles;
 mod swipe;
 mod system_time;
+mod tab_previews;
+mod tab_switcher;
 #[cfg(all(target_os = "windows", feature = "work-product"))]
 mod taskbar_badge;
 mod updates;
@@ -1935,6 +1937,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             run_command,
             panel_hide,
             panel_ready,
+            tab_switcher::tab_switcher_open,
+            tab_switcher::tab_switcher_action,
             panel_intent,
             panel_layout,
             launcher_edit,
@@ -3950,6 +3954,16 @@ fn execute_command_or(
         return rejected_operation();
     }
     let id = zephium_core::commands::runs_as(id);
+    if id == "tab.close" && tab_switcher::close_selected(app) {
+        return accepted_ui_operation();
+    }
+    if matches!(id, "tab.recent.next" | "tab.recent.previous") {
+        return if tab_switcher::step(app, id == "tab.recent.previous", true) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     // A feature switched off has no way in, from any menu, key or launcher.
     if !app
         .try_state::<keymap::Keymap>()
@@ -6820,6 +6834,8 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .manage(tab_switcher::Switcher::default())
+        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -7394,6 +7410,7 @@ pub fn run() {
                     "zephium:work-changed",
                     &change,
                 ),
+                Projection::TabSwitcher { session, state } => tab_switcher::project(&emit_handle, session, state),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     #[cfg(feature = "adblock-qa")]
@@ -10108,7 +10125,7 @@ mod tests {
         assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
         assert_eq!(
             directive("img-src"),
-            "'self' data: zephium-media: http://zephium-media.localhost"
+            "'self' data: zephium-media: http://zephium-media.localhost zephium-preview: http://zephium-preview.localhost"
         );
         assert_eq!(directive("font-src"), "'self' data:");
         // Same-origin workers only: the diagram layout engine runs off the page thread.

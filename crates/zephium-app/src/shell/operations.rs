@@ -1034,6 +1034,8 @@ impl Shell {
                     }
                 }
             }
+            "tab.recent.next" => self.operation_recent_tab(false),
+            "tab.recent.previous" => self.operation_recent_tab(true),
             "tab.next" | "tab.below" => self.operation_cycle_tab(1),
             "tab.previous" | "tab.above" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(
