@@ -90,7 +90,9 @@ describe("which width changes the page travels with", () => {
     expect(last()).toEqual([310, true]);
     expect(hidden()).toBe(true);
     applyDragWidth(SNAP_THRESHOLD + 40);
-    expect(last()[1]).toBe(true);
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+    expect(hidden()).toBe(true);
+    toggleMode();
     expect(hidden()).toBe(false);
   });
 

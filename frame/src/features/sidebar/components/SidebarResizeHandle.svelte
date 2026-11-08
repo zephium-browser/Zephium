@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     applyDragWidth,
+    isHidden,
     claimSidebarResizeOwner,
     sidebarResizeRevision,
     beginSidebarResize,
@@ -64,6 +65,7 @@
     const value = width;
     const enabled = !disabled;
     configuredRevision = sidebarResizeRevision();
+    if (sidebarResizeActive()) return;
     queueConfiguration({
       width: value,
       enabled,
@@ -99,6 +101,11 @@
     updateGuide(width);
   }
   function updateGuide(value: number) {
+    if (isHidden()) {
+      pending = Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      applyDragWidth(pending);
+      return;
+    }
     pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
     // Preview where release lands, including the snap to the rail.
     const landing = resolveDragWidth(pending);
@@ -179,7 +186,8 @@
   role="separator"
   aria-label="Resize sidebar"
   aria-orientation="vertical"
-  aria-valuemin={COMPACT_WIDTH}
+  data-tauri-drag-region="false"
+  aria-valuemin={isHidden() ? MIN_EXPANDED_WIDTH : COMPACT_WIDTH}
   aria-valuemax={MAX_EXPANDED_WIDTH}
   aria-valuenow={width}
   aria-disabled={disabled}

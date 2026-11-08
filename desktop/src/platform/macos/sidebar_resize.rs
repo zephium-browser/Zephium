@@ -1,4 +1,4 @@
-//! Native pointer feedback for the Svelte sidebar. Only release changes layout.
+//! Native pointer feedback for the Svelte sidebar. Hidden cards follow capture live.
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -20,9 +20,9 @@ use objc2_foundation::{
 };
 use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
-use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use zephium_core::layout::{HIDDEN_CARD_INSET, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-type Commit = Rc<dyn Fn(f64, u64)>;
+type Commit = Rc<dyn Fn(f64, u64, Option<bool>)>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -102,6 +102,7 @@ pub struct Ivars {
     chrome: Weak<WKWebView>,
     width: Cell<f64>,
     enabled: Cell<bool>,
+    hidden_card: Cell<bool>,
     revision: Cell<u64>,
     generation: Cell<u64>,
     capture: Cell<Option<Capture>>,
@@ -144,7 +145,7 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool { true }
         #[unsafe(method(mouseEntered:))]
-        fn entered(&self, _event: &NSEvent) { if self.ivars().enabled.get() { self.feedback(self.ivars().width.get(), false); } }
+        fn entered(&self, _event: &NSEvent) { if self.ivars().enabled.get() && !self.ivars().hidden_card.get() { self.feedback(self.ivars().width.get(), false); } }
         #[unsafe(method(mouseExited:))]
         fn exited(&self, _event: &NSEvent) { if self.ivars().capture.get().is_none() { self.cancel(false); } }
         #[unsafe(method(viewDidMoveToWindow))]
@@ -161,7 +162,8 @@ define_class!(
             let original = self.ivars().width.get();
             self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get() }));
             if !self.install_observers(window) { self.cancel(false); return; }
-            self.feedback(original, true);
+            if self.ivars().hidden_card.get() { (self.ivars().commit)(original, self.ivars().revision.get(), Some(true)); }
+            else { self.feedback(original, true); }
         }
         #[unsafe(method(mouseDragged:))]
         fn dragged(&self, event: &NSEvent) {
@@ -175,8 +177,14 @@ define_class!(
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
             self.ivars().capture.set(Some(capture));
-            // Preview where release will land, including the rail snap.
-            self.feedback(resolved_width(capture.pending), true);
+            if self.ivars().hidden_card.get() {
+                let width = card_width(capture.pending);
+                if width != self.ivars().width.get() {
+                    self.ivars().width.set(width);
+                    self.place();
+                    (self.ivars().commit)(width, capture.revision, Some(true));
+                }
+            } else { self.feedback(resolved_width(capture.pending), true); }
         }
         #[unsafe(method(mouseUp:))]
         fn up(&self, event: &NSEvent) {
@@ -184,13 +192,15 @@ define_class!(
             let Some(capture) = self.ivars().capture.get() else { return };
             if !revision_current(capture.revision) { self.cancel(false); return; }
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
-            let width = resolved_width(if requested.is_finite() { requested } else { capture.pending });
+            let requested = if requested.is_finite() { requested } else { capture.pending };
+            let width = if self.ivars().hidden_card.get() { card_width(requested) } else { resolved_width(requested) };
             let generation = self.ivars().generation.get();
-            self.feedback(width, true);
+            if !self.ivars().hidden_card.get() { self.feedback(width, true); }
             if self.ivars().generation.get() != generation { return; }
+            self.ivars().capture.set(None);
             self.cancel(true);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision); }
+            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision, None); }
         }
     }
 );
@@ -218,6 +228,7 @@ impl Control {
             chrome: Weak::from_retained(chrome),
             width: Cell::new(width),
             enabled: Cell::new(true),
+            hidden_card: Cell::new(false),
             revision: Cell::new(revision),
             generation: Cell::new(0),
             capture: Cell::new(None),
@@ -238,10 +249,11 @@ impl Control {
             return;
         };
         let frame = chrome.frame();
-        let width = self.ivars().width.get();
-        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < GUTTER + width;
+        let edge = resize_edge(self.ivars().width.get(), self.ivars().hidden_card.get());
+        let hidden = !self.ivars().enabled.get()
+            || (self.ivars().capture.get().is_none() && frame.size.width + 0.5 < edge);
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
+            NSPoint::new(frame.origin.x + edge - HOT_INSET, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
         );
         let current = self.frame();
@@ -358,7 +370,11 @@ impl Control {
             })
     }
     fn cancel(&self, fade: bool) {
-        self.ivars().capture.set(None);
+        let capture = self.ivars().capture.take();
+        if let Some(capture) = capture.filter(|_| self.ivars().hidden_card.get()) {
+            self.ivars().width.set(capture.original);
+            (self.ivars().commit)(capture.original, capture.revision, Some(false));
+        }
         self.ivars()
             .generation
             .set(self.ivars().generation.get().wrapping_add(1));
@@ -574,13 +590,23 @@ pub(super) fn configure(
         }
         control
     };
-    if control.ivars().capture.get().is_some() || control.ivars().width.get() != width || !enabled {
+    let hidden_card =
+        super::HIDDEN_SIDEBARS.with(|windows| windows.borrow().contains(crate::MAIN_LABEL));
+    let live = hidden_card
+        && control.ivars().hidden_card.get()
+        && control.ivars().revision.get() == revision;
+    if !live && (control.ivars().capture.get().is_some() || control.ivars().width.get() != width)
+        || !enabled
+    {
         control.cancel(false);
     }
     if !configuration_current(epoch, generation, revision) || !registered(&control, generation) {
         return false;
     }
-    control.ivars().width.set(width);
+    control.ivars().hidden_card.set(hidden_card);
+    if control.ivars().capture.get().is_none() {
+        control.ivars().width.set(width);
+    }
     control.ivars().enabled.set(enabled);
     control.ivars().revision.set(revision);
     control.place();
@@ -701,5 +727,39 @@ fn resolved_width(width: f64) -> f64 {
         MIN_SIDEBAR_WIDTH
     } else {
         width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+    }
+}
+
+fn resize_edge(width: f64, hidden_card: bool) -> f64 {
+    GUTTER
+        + width
+        + if hidden_card {
+            2.0 * HIDDEN_CARD_INSET
+        } else {
+            0.0
+        }
+}
+
+fn card_width(width: f64) -> f64 {
+    width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_tracks_the_cards_outer_edge_including_its_padding() {
+        assert_eq!(resize_edge(240.0, false), 248.0);
+        assert_eq!(resize_edge(240.0, true), 264.0);
+    }
+
+    #[test]
+    fn hidden_card_clamps_without_snapping() {
+        assert_eq!(card_width(56.0), MIN_EXPANDED);
+        assert_eq!(card_width(139.0), MIN_EXPANDED);
+        assert_eq!(card_width(310.6), 311.0);
+        assert_eq!(card_width(900.0), MAX_SIDEBAR_WIDTH);
+        assert_eq!(resolved_width(139.0), MIN_SIDEBAR_WIDTH);
     }
 }
