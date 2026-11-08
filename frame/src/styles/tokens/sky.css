@@ -2,17 +2,20 @@
    and what stands on it. Day stands over a light page and night
    over a dark one, whatever the theme; the sky brings its own light. */
 :root {
-  --sky-day-paper: #fbfcfe;
+  --sky-day-paper: #fcfdff;
   --sky-day-shadow: rgb(18 48 112 / 22%);
+
+  /* Type on the sky keeps a close edge of shade, so it reads on cloud. */
+  --sky-day-type-edge: rgb(28 58 112 / 34%);
   --sky-day-disc-fill: rgb(255 255 255 / 18%);
   --sky-day-disc-rim: rgb(255 255 255 / 36%);
-  --sky-night-paper: #0a0c12;
+  --sky-night-paper: #080b15;
 
   /* Beside a new tab the window's glass is first evened out, so whatever
      the wallpaper puts through it is only a hint, then lit from the side by
      the picture's own edge, this strongly where the light comes in. */
   --sky-day-glass: rgb(242 244 248 / 40%);
-  --sky-night-glass: rgb(10 12 18 / 42%);
+  --sky-night-glass: rgb(8 11 21 / 42%);
   --sky-day-edge-strength: 0.5;
   --sky-night-edge-strength: 0.62;
 
@@ -41,6 +44,7 @@
     transparent 100%
   );
   --sky-night-shadow: rgb(2 8 24 / 40%);
+  --sky-night-type-edge: rgb(2 8 24 / 46%);
   --sky-night-disc-fill: rgb(255 255 255 / 10%);
   --sky-night-disc-rim: rgb(255 255 255 / 18%);
   --sky-ink: rgb(255 255 255);
@@ -54,9 +58,9 @@
   --sky-day-edge: rgb(232 238 248 / 46%);
   --sky-day-edge-half: rgb(232 238 248 / 22%);
   --sky-day-edge-faint: rgb(232 238 248 / 7%);
-  --sky-night-edge: rgb(10 12 18 / 58%);
-  --sky-night-edge-half: rgb(10 12 18 / 28%);
-  --sky-night-edge-faint: rgb(10 12 18 / 9%);
+  --sky-night-edge: rgb(8 11 21 / 58%);
+  --sky-night-edge-half: rgb(8 11 21 / 28%);
+  --sky-night-edge-faint: rgb(8 11 21 / 9%);
 
   /* A sheet of glass standing on the sky: dark over the night, white over
      the day, so the theme's own ink reads on it. Its rim is the light caught

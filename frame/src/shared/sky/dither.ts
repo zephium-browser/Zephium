@@ -16,31 +16,62 @@ export type Luma = {
 /** The tones a sky is printed in, darkest first. The page below the horizon is
  *  the scene's paper, one end of the palette. */
 /** `curve` bends the light before it is printed: above 1 keeps the open sky
- *  in its deepest tone and saves the dots for the clouds. */
-export type Palette = { tones: readonly Rgb[]; paper: number; contrast: number; curve: number };
+ *  in its deepest tone and saves the dots for the clouds. `hold` is how much
+ *  light the sky gives up behind the page's type, so white type reads. */
+export type Palette = {
+  tones: readonly Rgb[];
+  paper: number;
+  contrast: number;
+  curve: number;
+  hold: number;
+};
+
+/** A ramp of `levels` tones through a scene's colours, darkest first: enough
+ *  steps that the screen between neighbours reads as fine grain, not as bands
+ *  of a poster. */
+function ramp(stops: readonly (readonly [number, Rgb])[], levels: number): Rgb[] {
+  return Array.from({ length: levels }, (_, level): Rgb => {
+    const at = level / (levels - 1);
+    const next = stops.findIndex(([position]) => position >= at);
+    const [p1, c1] = stops[Math.max(0, next)]!;
+    const [p0, c0] = stops[Math.max(0, next - 1)]!;
+    const t = p1 === p0 ? 0 : (at - p0) / (p1 - p0);
+    return [0, 1, 2].map((c) => Math.round(c0[c]! + (c1[c]! - c0[c]!) * t)) as unknown as Rgb;
+  });
+}
 
 export const PALETTES: Record<Scene, Palette> = {
   day: {
-    tones: [
-      [120, 150, 196],
-      [184, 205, 231],
-      [232, 238, 247],
-      [251, 252, 254],
-    ],
+    tones: ramp(
+      [
+        [0, [106, 144, 202]],
+        [0.32, [150, 182, 226]],
+        [0.62, [200, 218, 241]],
+        [0.86, [240, 245, 252]],
+        [1, [252, 253, 255]],
+      ],
+      9,
+    ),
     paper: 1,
     contrast: 1,
-    curve: 2.6,
+    curve: 1.9,
+    hold: 0.3,
   },
   night: {
-    tones: [
-      [10, 12, 18],
-      [37, 44, 63],
-      [107, 119, 148],
-      [208, 214, 228],
-    ],
+    tones: ramp(
+      [
+        [0, [8, 11, 21]],
+        [0.28, [20, 30, 58]],
+        [0.55, [52, 72, 122]],
+        [0.8, [122, 142, 192]],
+        [1, [212, 221, 241]],
+      ],
+      9,
+    ),
     paper: 0,
     contrast: 1,
-    curve: 1.35,
+    curve: 1.25,
+    hold: 0,
   },
 };
 
@@ -50,10 +81,10 @@ export const paperOf = (scene: Scene): Rgb => {
   return tones[paper ? tones.length - 1 : 0]!;
 };
 
-/** Device pixels per dot: about one and a half page pixels, never under two
- *  device pixels, so each dot is a crisp square at every density. */
+/** Device pixels per dot: about one page pixel, never under two device
+ *  pixels, so each dot is a crisp square at every density. */
 export function dotSize(density: number): number {
-  return Math.max(2, Math.round(1.5 * density));
+  return Math.max(2, Math.round(density));
 }
 
 const BAYER = (() => {
@@ -106,7 +137,12 @@ export type SkyFrame = {
   horizon: number;
   /** The share of the picture's height its own horizon sits at. */
   pictureHorizon: number;
+  /** Where the page's type stands, as an ellipse in page pixels: the sky is
+   *  held quieter there. */
+  quiet?: Quiet | null;
 };
+
+export type Quiet = { x: number; y: number; rx: number; ry: number };
 
 /** The page's size in dots for a page `width`×`height` page pixels. */
 export function frameFor(width: number, height: number, density: number) {
@@ -122,9 +158,10 @@ export function frameFor(width: number, height: number, density: number) {
  *  palette's tones, each dot taking the tone above or below by an ordered
  *  screen, and below the horizon thinning into the paper. */
 export function printSky(out: Uint8ClampedArray, luma: Luma, palette: Palette, frame: SkyFrame) {
-  const { columns, rows, dot, density, sky, horizon } = frame;
+  const { columns, rows, dot, density, sky, horizon, quiet } = frame;
   const { data, width, height, low, high } = luma;
-  const { tones, paper, contrast, curve } = palette;
+  const { tones, paper, contrast, curve, hold } = palette;
+  const held = quiet && hold > 0 ? quiet : null;
   const last = tones.length - 1;
   const step = dot / density;
   const range = high - low;
@@ -140,6 +177,7 @@ export function printSky(out: Uint8ClampedArray, luma: Luma, palette: Palette, f
     const below = Math.min(1, Math.max(0, (row - horizonRow) / fade) * 1.15);
     const toward = paper * below;
     const keep = 1 - below;
+    const dy = held ? ((row + 0.5) * step - held.y) / held.ry : 0;
     for (let column = 0; column < columns; column++) {
       const x = ((column + 0.5) * step - sky.x) * toX - 0.5;
       const x0 = Math.min(width - 1, Math.max(0, Math.floor(x)));
@@ -148,7 +186,13 @@ export function printSky(out: Uint8ClampedArray, luma: Luma, palette: Palette, f
       const top = data[y0 * width + x0]! * (1 - fx) + data[y0 * width + x1]! * fx;
       const bottom = data[y1 * width + x0]! * (1 - fx) + data[y1 * width + x1]! * fx;
       let light = ((top * (1 - fy) + bottom * fy - low) / range - 0.5) * contrast + 0.5;
-      light = Math.min(1, Math.max(0, light)) ** curve * keep + toward;
+      light = Math.min(1, Math.max(0, light)) ** curve;
+      if (held) {
+        const dx = ((column + 0.5) * step - held.x) / held.rx;
+        const near = 1 - dx * dx - dy * dy;
+        if (near > 0) light *= 1 - hold * near * near * (3 - 2 * near);
+      }
+      light = light * keep + toward;
       const level = light * last;
       const base = Math.floor(level);
       const tone = Math.min(

@@ -193,6 +193,15 @@
       wordmark: showWordmark,
     }),
   );
+  // The sky is held quieter behind the name and the time, so they read on
+  // cloud as well as on open sky.
+  let quiet = $derived.by(() => {
+    const top = page.mark.y;
+    const bottom = page.when === null ? top + page.mark.h : page.when + 20;
+    if (bottom <= top) return null;
+    const ry = (bottom - top) * 1.4 + 24;
+    return { x: width / 2, y: (top + bottom) / 2, rx: Math.max(page.mark.w, 320) * 0.85, ry };
+  });
   const at = ({ x, y, w, h }: Box) => `left:${x}px;top:${y}px;width:${w}px;height:${h}px`;
 
   // On Windows the window's controls come down into the page's top corner on
@@ -366,6 +375,7 @@
             {sky}
             horizon={page.horizon}
             pictureHorizon={PICTURE.horizon}
+            {quiet}
             onready={(printed) => (shown = printed)}
           />
         </div>{/if}
@@ -529,6 +539,7 @@
   .newtab {
     --sky-paper: var(--sky-day-paper);
     --sky-shadow: var(--sky-day-shadow);
+    --sky-type-edge: var(--sky-day-type-edge);
     --sky-lip: var(--sky-day-lip);
     --disc-fill: var(--sky-day-disc-fill);
     --disc-rim: var(--sky-day-disc-rim);
@@ -550,6 +561,7 @@
   .newtab[data-scene="night"] {
     --sky-paper: var(--sky-night-paper);
     --sky-shadow: var(--sky-night-shadow);
+    --sky-type-edge: var(--sky-night-type-edge);
     --sky-lip: var(--sky-night-lip);
     --disc-fill: var(--sky-night-disc-fill);
     --disc-rim: var(--sky-night-disc-rim);
@@ -571,6 +583,7 @@
     --sky-card-edge: var(--color-border);
     --disc-fill: var(--color-surface);
     --sky-shadow: var(--newtab-image-dim);
+    --sky-type-edge: var(--newtab-image-dim);
     --disc-rim: var(--color-border);
   }
 
@@ -665,7 +678,10 @@
     margin: 0 auto;
     color: var(--sky-ink);
     text-align: center;
-    text-shadow: 0 1px 18px var(--sky-shadow);
+    text-shadow:
+      0 0 1px var(--sky-type-edge),
+      0 1px 5px var(--sky-type-edge),
+      0 1px 18px var(--sky-shadow);
     pointer-events: none;
   }
 

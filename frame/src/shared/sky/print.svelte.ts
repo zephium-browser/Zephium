@@ -19,6 +19,7 @@ const keyOf = (scene: Scene, frame: SkyFrame) =>
     frame.sky.w,
     frame.sky.h,
     frame.horizon,
+    frame.quiet ? `${frame.quiet.x},${frame.quiet.y},${frame.quiet.rx},${frame.quiet.ry}` : "",
   ].join(" ");
 
 /** The printed sky for a frame. The last one is kept, so the next new tab of
@@ -48,7 +49,7 @@ const FROSTING: Record<
   { flatten: number; veil: readonly [number, number, number, number] }
 > = {
   day: { flatten: 0.5, veil: [255, 255, 255, 0.25] },
-  night: { flatten: 0.3, veil: [10, 11, 14, 0.26] },
+  night: { flatten: 0.3, veil: [8, 11, 21, 0.26] },
 };
 
 let frosts = $state.raw<Partial<Record<Scene, string>>>({});

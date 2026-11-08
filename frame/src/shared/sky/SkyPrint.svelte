@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { frameFor, type SkyFrame } from "./dither";
+  import { frameFor, type Quiet, type SkyFrame } from "./dither";
   import type { Box } from "./place";
   import { loadLuma } from "./luma";
   import { frostFrom, printed } from "./print.svelte";
@@ -13,6 +13,7 @@
     horizon,
     pictureHorizon,
     zoom = 1,
+    quiet = null,
     onready,
   }: {
     scene: Scene;
@@ -27,6 +28,8 @@
     /** How much larger than its own size the page is ever drawn: a page a
      *  camera closes in on is printed for its closest view. */
     zoom?: number;
+    /** Where the page's type stands, so the sky is held quieter behind it. */
+    quiet?: Quiet | null;
     /** Called once the scene first shows. */
     onready?: (scene: Scene) => void;
   } = $props();
@@ -43,7 +46,7 @@
   let canvas = $state<HTMLCanvasElement>();
   let scale = $derived(density * zoom);
   let size = $derived(frameFor(width, height, scale));
-  let frame = $derived<SkyFrame>({ ...size, density: scale, sky, horizon, pictureHorizon });
+  let frame = $derived<SkyFrame>({ ...size, density: scale, sky, horizon, pictureHorizon, quiet });
 
   // Printed as soon as its light is read, once per change the page settles:
   // a resize prints each size it is laid out at, and nothing runs at rest. No
