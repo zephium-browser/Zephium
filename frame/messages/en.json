@@ -160,6 +160,8 @@
   "settings_material_solid": "Solid",
   "settings_material_acrylic": "Acrylic",
   "settings_material_mica": "Mica",
+  "settings_material_mica_alt": "Mica Alt",
+  "settings_material_none": "None",
   "settings_motion": "Motion",
   "settings_reduce_motion": "Reduce motion",
   "settings_reduce_motion_desc": "Keep transitions subtle. Your system preference always takes priority.",

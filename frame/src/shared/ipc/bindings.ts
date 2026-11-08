@@ -1788,7 +1788,7 @@ export type LoginItemStatus = {
 	needs_approval: boolean,
 };
 
-export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica" | "mica_alt";
 
 /**  Outcome of admitting one public image for a subject on the canvas. */
 export type MediaAdmitV1 =
