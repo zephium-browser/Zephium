@@ -3963,5 +3963,16 @@
   "tab_selection_close": "Close selected tabs",
   "tab_selection_mute": "Mute selected tabs",
   "tab_selection_unmute": "Unmute selected tabs",
-  "tab_selection_failed": "Could not apply an action to every selected tab. Try again."
+  "tab_selection_failed": "Could not apply an action to every selected tab. Try again.",
+  "search_shortcut_label": "Search {name}",
+  "search_shortcuts_title": "Search shortcuts",
+  "search_shortcuts_help": "Type a keyword followed by Space, or use !keyword anywhere in a query.",
+  "search_shortcut_keyword": "Keyword",
+  "search_shortcut_name": "Name",
+  "search_shortcut_url": "Search URL with {query}",
+  "search_shortcut_add": "Add shortcut",
+  "search_shortcut_remove": "Remove shortcut",
+  "search_shortcuts_reset": "Reset shortcuts to defaults",
+  "search_shortcut_invalid": "Use a unique keyword and an HTTPS URL containing {query} once.",
+  "search_shortcut_enabled": "Enable {name}"
 }

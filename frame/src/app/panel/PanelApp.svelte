@@ -8,6 +8,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { theme } from "$domain/appearance";
+  import { preferences } from "$domain/preferences";
   import { favicons } from "$domain/favicons";
   import { acceptPanelState } from "$features/panel";
   import { loadLauncherPanel } from "$features/search";
@@ -87,6 +88,11 @@
         // Listening comes first, so a setting changed while the reads below
         // are in flight is heard rather than lost between read and listener.
         [stop, stopMotion] = await Promise.all([listener, motionListener]);
+        if (disposed) {
+          stop();
+          stopMotion();
+          return;
+        }
         // The launcher is loaded while the window is still hidden, and native
         // shows nothing before `panelReady`, so the first frame is never empty.
         // Nothing below waits on anything else, so the wait is the slowest one.
@@ -101,6 +107,7 @@
             commands.settingGet("tasks.enabled").catch(() => null),
             ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
           ]),
+          preferences.init(),
         ]);
         if (disposed) return;
         Launcher = launcher.default;
@@ -128,6 +135,7 @@
       disposed = true;
       stop?.();
       stopMotion?.();
+      preferences.dispose();
       favicons.dispose();
       theme.dispose();
     };

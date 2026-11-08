@@ -716,3 +716,77 @@ fn recorded_searches_cannot_crowd_visited_pages_out_of_the_list() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn shortcuts_drive_typed_navigation_and_search_answers_after_settings_reload() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries
+        .iter_mut()
+        .find(|entry| entry.id == "youtube")
+        .unwrap()
+        .keywords = vec!["video".into()];
+    let stored = serde_json::to_string(&entries).unwrap();
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    shell.operation_set_app_setting("search.shortcuts".into(), stored.clone());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(stored));
+    drop(shell);
+    let (seen, emit) = search_sink();
+    let engine = Arc::new(FakeEngine::default());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        emit,
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let id = shell.windows.focused().unwrap().active.unwrap();
+    for (input, query) in [("video cats", "cats"), ("dogs !video", "dogs")] {
+        shell.handle(Command::Navigate {
+            id,
+            input: input.into(),
+        });
+        let expected = format!("https://www.youtube.com/results?search_query={query}");
+        assert!(engine
+            .calls()
+            .iter()
+            .filter_map(|call| {
+                call.strip_prefix(&format!("navigate {id} "))
+                    .or_else(|| call.strip_prefix(&format!("create {id} ")))
+                    .and_then(|rest| rest.split(' ').next())
+            })
+            .any(|url| url == expected));
+        shell.handle(Command::Search(input.into()));
+        let answer = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(answer.shortcut.as_deref(), Some("youtube"));
+        let row = answer
+            .results
+            .iter()
+            .find(|row| row.kind == "search")
+            .unwrap();
+        assert_eq!(row.title, query);
+        assert_eq!(row.detail, "YouTube");
+    }
+    shell.handle(Command::Search("video ".into()));
+    let answer = seen.lock().unwrap().last().unwrap().clone();
+    assert!(
+        matches!(&answer.results[0].action, SearchAction::OpenUrl { url } if url == "https://www.youtube.com/")
+    );
+    shell.operation_set_app_setting("search.shortcuts".into(), "".into());
+    assert!(shell
+        .search
+        .shortcuts
+        .get("youtube")
+        .unwrap()
+        .keywords
+        .contains(&"yt".into()));
+    assert_eq!(store.app_setting("search.engine"), None);
+    let before = shell.search.shortcuts.entries().to_vec();
+    shell.operation_set_app_setting("search.shortcuts".into(), "{bad}".into());
+    assert_eq!(shell.search.shortcuts.entries(), before);
+}

@@ -8,7 +8,9 @@ use tauri::{Manager, WebviewWindow};
 use zephium_app::{Command, Handle};
 use zephium_core::notes::{NoteCall, NoteQuery, NoteResponse};
 use zephium_core::ports::store::Store;
-use zephium_core::search::{remote_query_allowed, scoped_query, SearchEngine, SearchScope};
+use zephium_core::search::{
+    remote_query_allowed, scoped_query, ParsedSearch, SearchEngine, SearchScope, ShortcutRegistry,
+};
 use zephium_ipc::{SearchAction, SearchContext, SearchResult};
 
 struct Pending {
@@ -99,7 +101,10 @@ pub(super) fn schedule(
         && !term.is_empty()
         && term.len() <= 512;
     let term = term.to_owned();
-    let remote_possible = remote_query_allowed(&query);
+    let remote_possible = scope == SearchScope::All
+        && query.len() <= 2048
+        && (remote_query_allowed(&query)
+            || query.split_whitespace().any(|token| token.starts_with('!')));
     if !notes_possible && !remote_possible {
         // Nothing supplementary can run for this input. Settle now rather than
         // spending a task to discover it, so the list stops waiting at once.
@@ -192,20 +197,28 @@ pub(super) fn schedule(
                         .app_setting("search.engine")
                         .unwrap_or_else(|| "duckduckgo".into()),
                     store.app_setting("search.suggestions").as_deref() != Some("false"),
+                    store
+                        .app_setting("search.shortcuts")
+                        .as_deref()
+                        .and_then(ShortcutRegistry::from_setting)
+                        .unwrap_or_default(),
                 ))
             })
             .await
             .ok()
             .flatten();
-            let Some((engine, true)) = settings else {
+            let Some((engine, true, shortcuts)) = settings else {
                 return;
             };
             // Suggestions come from the engine the user searches with, and from
             // nowhere else; a custom engine names no endpoint.
-            let Some(engine) = SearchEngine::from_id(&engine) else {
+            let Some((engine, parsed)) =
+                suggestion_query(&shortcuts, &query, SearchEngine::from_id(&engine))
+            else {
                 return;
             };
-            let Some(endpoint) = engine.suggestions(&query) else {
+            let shortcut = parsed.shortcut.and_then(|id| shortcuts.get(id));
+            let Some(endpoint) = engine.suggestions(&parsed.query) else {
                 return;
             };
             let client = CLIENT.get_or_init(|| {
@@ -246,7 +259,18 @@ pub(super) fn schedule(
                     _ => return,
                 }
             }
-            let results = parse_suggestions(engine, &bytes, query.trim());
+            let mut results = parse_suggestions(engine, &bytes, parsed.query.trim());
+            if let Some(shortcut) = shortcut {
+                for result in &mut results {
+                    let Some(url) = shortcut.resolve(&result.title) else {
+                        return;
+                    };
+                    result.detail = shortcut.name.clone();
+                    result.action = SearchAction::OpenUrl {
+                        url: url.to_string(),
+                    };
+                }
+            }
             shell.dispatch(Command::SearchAdditional {
                 context: Box::new(context.clone()),
                 query: query.clone(),
@@ -258,6 +282,23 @@ pub(super) fn schedule(
     registry()
         .get_or_insert_with(HashMap::new)
         .insert(session, Pending { token, task });
+}
+
+fn suggestion_query<'registry, 'input>(
+    shortcuts: &'registry ShortcutRegistry,
+    input: &'input str,
+    default: Option<SearchEngine>,
+) -> Option<(SearchEngine, ParsedSearch<'registry, 'input>)> {
+    let parsed = shortcuts.parse(input);
+    if !remote_query_allowed(&parsed.query) {
+        return None;
+    }
+    let engine = if let Some(shortcut) = parsed.shortcut.and_then(|id| shortcuts.get(id)) {
+        shortcut.suggestions
+    } else {
+        default
+    }?;
+    Some((engine, parsed))
 }
 
 fn parse_suggestions(engine: SearchEngine, bytes: &[u8], query: &str) -> Vec<SearchResult> {
@@ -307,6 +348,35 @@ fn parse_suggestions(engine: SearchEngine, bytes: &[u8], query: &str) -> Vec<Sea
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shortcut_suggestions_use_only_the_selected_provider_and_safe_query() {
+        let registry = ShortcutRegistry::default();
+        for input in ["g browsers", "browsers !g", "!GOOGLE browsers"] {
+            let (engine, parsed) =
+                suggestion_query(&registry, input, Some(SearchEngine::Bing)).unwrap();
+            assert_eq!(engine, SearchEngine::Google);
+            assert_eq!(parsed.query, "browsers");
+        }
+        for input in [
+            "yt rust",
+            "cats !unknown",
+            "g https://example.com",
+            "g someone@example.com",
+            "g ",
+        ] {
+            assert!(
+                suggestion_query(&registry, input, Some(SearchEngine::Bing)).is_none(),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            suggestion_query(&registry, "rust", Some(SearchEngine::Bing))
+                .unwrap()
+                .0,
+            SearchEngine::Bing
+        );
+    }
+
     #[test]
     fn untrusted_suggestions_are_bounded_and_cannot_supply_actions() {
         let rows = parse_suggestions(
