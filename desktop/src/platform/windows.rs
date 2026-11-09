@@ -508,6 +508,58 @@ pub fn set_caption_window_fullscreen(window: &WebviewWindow, fullscreen: bool) {
     caption::set_suppressed(window, caption::Suppression::Window, fullscreen);
 }
 
+pub(crate) fn set_window_fullscreen(window: &WebviewWindow, enter: bool) -> tauri::Result<()> {
+    with_fullscreen_border(
+        enter,
+        || window.set_fullscreen(enter),
+        |suppressed| set_fullscreen_border(window, suppressed),
+    )
+}
+
+fn with_fullscreen_border<E>(
+    enter: bool,
+    change_fullscreen: impl FnOnce() -> Result<(), E>,
+    mut suppress_border: impl FnMut(bool),
+) -> Result<(), E> {
+    if enter {
+        suppress_border(true);
+    }
+    let result = change_fullscreen();
+    // Restore the default on a successful exit or a failed entry.
+    if enter != result.is_ok() {
+        suppress_border(false);
+    }
+    result
+}
+
+fn set_fullscreen_border(window: &WebviewWindow, suppressed: bool) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+
+    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
+    const DWMWA_COLOR_DEFAULT: u32 = 0xffff_ffff;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let color = COLORREF(if suppressed {
+        DWMWA_COLOR_NONE
+    } else {
+        DWMWA_COLOR_DEFAULT
+    });
+    // Windows 11 can draw an accent border over a borderless fullscreen window.
+    // Older Windows versions reject this attribute; fullscreen can still proceed.
+    // SAFETY: hwnd identifies the live window and DWM copies the COLORREF.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&color as *const COLORREF).cast(),
+            size_of::<COLORREF>() as u32,
+        )
+    };
+}
+
 // Undecorated windows lose DWM rounding unless asked for explicitly.
 pub fn round_corners(window: &WebviewWindow) {
     use windows::Win32::Graphics::Dwm::{
@@ -801,3 +853,49 @@ pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
 #[cfg(test)]
 #[path = "windows_startup_tests.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+mod fullscreen_border_tests {
+    use super::with_fullscreen_border;
+    use std::cell::RefCell;
+
+    #[test]
+    fn restores_default_border_when_the_window_is_windowed() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            HideBorder,
+            ChangeFullscreen,
+            RestoreBorder,
+        }
+        use Step::*;
+
+        for (enter, result, expected) in [
+            (true, Ok(()), &[HideBorder, ChangeFullscreen][..]),
+            (
+                true,
+                Err(()),
+                &[HideBorder, ChangeFullscreen, RestoreBorder],
+            ),
+            (false, Ok(()), &[ChangeFullscreen, RestoreBorder]),
+            (false, Err(()), &[ChangeFullscreen]),
+        ] {
+            let steps = RefCell::new(Vec::new());
+            let returned = with_fullscreen_border(
+                enter,
+                || {
+                    steps.borrow_mut().push(ChangeFullscreen);
+                    result
+                },
+                |suppressed| {
+                    steps.borrow_mut().push(if suppressed {
+                        HideBorder
+                    } else {
+                        RestoreBorder
+                    });
+                },
+            );
+            assert_eq!(returned, result);
+            assert_eq!(steps.into_inner(), expected);
+        }
+    }
+}
