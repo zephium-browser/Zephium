@@ -47,15 +47,15 @@ pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
 /// separate from the hard floor: falling behind by one serviced patch produces
 /// an actionable advisory rather than a wall-clock or latest-version kill
 /// switch.
-pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(156, 0, 4314, 58);
-pub const LATEST_REVIEWED_TEXT: &str = "156.0.4314.58";
-pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-10-30";
-/// 2026-10-30T00:00:00Z.
-pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_793_318_400;
+pub const LATEST_REVIEWED: WebView2Version = WebView2Version::stable(157, 0, 4341, 42);
+pub const LATEST_REVIEWED_TEXT: &str = "157.0.4341.42";
+pub const LATEST_REVIEWED_PUBLISHED_ON: &str = "2026-11-05";
+/// 2026-11-05T00:00:00Z.
+pub const LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS: u64 = 1_793_836_800;
 /// First-party Stable-channel release evidence for [`LATEST_REVIEWED`].
 pub const LATEST_REVIEWED_SOURCE_URL: &str =
     "https://learn.microsoft.com/en-us/deployedge/microsoft-edge-relnote-stable-channel";
-pub const REVIEWED_STABLE_MAJOR: u32 = 156;
+pub const REVIEWED_STABLE_MAJOR: u32 = 157;
 
 /// On October 6 Microsoft posted that it is working on a security fix for
 /// recent Chromium fixes, a day after Stable 154.0.4258.62. The October 24
@@ -69,15 +69,20 @@ pub const PRODUCTION_RELEASE_BLOCKED_ON_OUTSTANDING_VENDOR_FIX: bool = false;
 /// 2026-10-06T00:00:00Z, the date of Microsoft's pending-fix notice.
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_UNIX_SECONDS: u64 = 1_791_244_800;
 pub const OUTSTANDING_VENDOR_FIX_NOTICE_ON: &str = "2026-10-06";
-pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-10-24";
+pub const OUTSTANDING_VENDOR_FIX_REVIEWED_ON: &str = "2026-11-10";
 pub const OUTSTANDING_VENDOR_FIX_SOURCE_URL: &str = SECURITY_FLOOR_SOURCE_URL;
 
 /// The last UTC date on which CI may accept this review without an update.
-// Reviewed against vendor security releases and WebView2 packages on 2026-11-02.
-// Evidence: docs/windows-webview2-security-review-2026-11-02.md.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
-/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
+// Reviewed 2026-11-10: the security and Stable notes list 157.0.4341.42
+// (November 5), with no pending-fix notice or published critical/exploited CVE.
+// The WebView2 release index lists that runtime on November 6:
+// https://learn.microsoft.com/en-us/microsoft-edge/webview2/release-notes/runtime/
+// Keep the catalog-backed floor from the November 2 review; recommend Stable
+// 157 without changing admission or claiming native qualification.
+// Floor evidence: docs/windows-webview2-security-review-2026-11-02.md.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-17";
+/// 2026-11-18T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_960_000;
 
 /// Loader/debugger environment variables that can replace the selected
 /// runtime or UDF, change channel selection, append browser flags (including
@@ -646,6 +651,28 @@ mod tests {
     }
 
     #[test]
+    fn november_security_review_covers_release_and_recommends_stable_157() {
+        let reviewed_at = 1_794_268_800; // 2026-11-10T00:00:00Z.
+        assert!(production_release_security_is_current(reviewed_at));
+        assert!(security_floor_review_is_current(1_794_959_999));
+        assert!(!security_floor_review_is_current(1_794_960_000));
+        assert_eq!(
+            assess_runtime("157.0.4341.42", reviewed_at),
+            Ok((
+                WebView2Version::stable(157, 0, 4341, 42),
+                RuntimeSecurityAdvisories::new(),
+            ))
+        );
+        let (_, previous) = assess_runtime("156.0.4314.58", reviewed_at).unwrap();
+        assert_eq!(
+            previous,
+            RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::update_recommended(
+                RuntimeSecurityUpdateTarget::BrowserRuntime,
+            ))
+        );
+    }
+
+    #[test]
     fn assessment_separates_floor_recommendation_review_age_and_future_stable_line() {
         let floor_advisories = if SECURITY_FLOOR != LATEST_REVIEWED {
             RuntimeSecurityAdvisories::from_advisory(RuntimeSecurityAdvisory::update_recommended(
@@ -663,9 +690,9 @@ mod tests {
             Ok((LATEST_REVIEWED, RuntimeSecurityAdvisories::new()))
         );
         assert_eq!(
-            assess_runtime("157.0.0.0", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
+            assess_runtime("158.0.0.0", LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS),
             Ok((
-                WebView2Version::stable(157, 0, 0, 0),
+                WebView2Version::stable(158, 0, 0, 0),
                 RuntimeSecurityAdvisories::from_advisory(
                     RuntimeSecurityAdvisory::unreviewed_runtime(),
                 )
@@ -679,7 +706,7 @@ mod tests {
             ))
         );
 
-        let (_, combined) = assess_runtime("157.0.0.0", OVERDUE).unwrap();
+        let (_, combined) = assess_runtime("158.0.0.0", OVERDUE).unwrap();
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
     }
