@@ -115,6 +115,13 @@ impl DecisionDeadline {
             expires: Some(now + duration),
         }
     }
+    fn waiting_for_picker(self, now: Instant) -> Self {
+        if self.phase == DecisionPhase::NativePicker {
+            self
+        } else {
+            Self::new(DecisionPhase::NativePicker, now)
+        }
+    }
     fn expired(self, now: Instant) -> bool {
         self.expires.is_some_and(|expires| now > expires)
     }
@@ -162,6 +169,7 @@ struct Transfer {
     destination: Option<Destination>,
     panel: Option<SavePanel>,
     panel_lease: Option<DialogLease>,
+    picker_preferences: Option<DownloadPreferences>,
     on_started: Option<Box<dyn FnOnce()>>,
     authorized: bool,
     cancelling: bool,
@@ -377,6 +385,15 @@ impl Downloads {
             self.work.set(self.work.get() - 1);
             self.cancel(id, Some(DownloadError::Unavailable));
         }
+    }
+
+    fn defer_destination(&self, id: DownloadId, preferences: DownloadPreferences) {
+        let mut active = self.active.borrow_mut();
+        let Some(transfer) = active.get_mut(&id) else {
+            return;
+        };
+        transfer.picker_preferences = Some(preferences);
+        transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
     }
 
     fn persist(&self, id: DownloadId) {
@@ -752,6 +769,25 @@ impl Downloads {
         for (id, error) in cancel {
             self.cancel(id, Some(error));
         }
+        // Retry queued pickers on the existing pending-transfer timer. Taking
+        // the request before entering native UI prevents reentrant presentation.
+        let pickers: Vec<_> = self
+            .active
+            .borrow_mut()
+            .iter_mut()
+            .filter(|(_, transfer)| {
+                transfer.record.state == DownloadState::Pending && !transfer.cancelling
+            })
+            .filter_map(|(id, transfer)| {
+                transfer
+                    .picker_preferences
+                    .take()
+                    .map(|preferences| (*id, preferences))
+            })
+            .collect();
+        for (id, preferences) in pickers {
+            self.choose_destination(id, preferences);
+        }
         // A file nobody confirmed is deleted rather than kept for ever.
         let unconfirmed: Vec<_> = self
             .active
@@ -1109,6 +1145,32 @@ mod state_tests {
             }
         }
     }
+    #[test]
+    fn background_picker_waits_past_admission_without_renewing_its_deadline() {
+        let started = Instant::now();
+        let admission = DecisionDeadline::new(DecisionPhase::Admission, started);
+        let waiting = admission.waiting_for_picker(started);
+        let refocused = started + Duration::from_secs(45);
+        assert!(admission.expired(refocused));
+        assert!(!waiting.expired(refocused));
+        assert_eq!(waiting.phase, DecisionPhase::NativePicker);
+        let retried = waiting.waiting_for_picker(refocused);
+        assert_eq!(waiting.expires, retried.expires);
+        assert!(retried.expired(started + Duration::from_secs(24 * 60 * 60 + 1)));
+
+        // Waiting retains the native destination callback; revocation still
+        // answers it exactly once, without a destination.
+        let replies = Rc::new(Cell::new(0));
+        let received = replies.clone();
+        let reply = DestinationReply::new(move |path| {
+            assert!(path.is_none());
+            received.set(received.get() + 1);
+        });
+        assert_eq!(replies.get(), 0);
+        drop(reply);
+        assert_eq!(replies.get(), 1);
+    }
+
     #[test]
     fn abandoned_destination_decisions_cancel_once() {
         let replies = Rc::new(Cell::new(0));
