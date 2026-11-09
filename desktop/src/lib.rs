@@ -8932,8 +8932,11 @@ mod tests {
         let shutdown_deadline = watchdog.deadline.lock().unwrap().unwrap();
         watchdog.begin_install();
         let install_deadline = watchdog.deadline.lock().unwrap().unwrap();
-        assert!(install_deadline > shutdown_deadline + std::time::Duration::from_secs(40));
-        assert!(install_deadline <= std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let install_phase_duration = std::time::Duration::from_secs(60);
+        let minimum_extension =
+            install_phase_duration - super::HARD_EXIT_TIMEOUT - std::time::Duration::from_secs(1);
+        assert!(install_deadline > shutdown_deadline + minimum_extension);
+        assert!(install_deadline <= std::time::Instant::now() + install_phase_duration);
         watchdog.begin_install();
         assert_eq!(watchdog.deadline.lock().unwrap().unwrap(), install_deadline);
     }

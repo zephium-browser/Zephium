@@ -2027,9 +2027,10 @@ mod tests {
         make_unavailable_for_test();
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn temporary_spare_release_leaves_page_when_deferral_is_refused() {
-        make_unavailable_for_test();
+        let _root = install_empty_host_for_release_test();
         with_temporary_spare_release(
             ProfileId::generate(),
             |_| panic!("failed deferral must never fall back to inline Close"),
