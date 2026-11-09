@@ -427,6 +427,29 @@ mod tests {
     use rusqlite::config::DbConfig;
 
     #[test]
+    fn bundled_sqlite_security_floor_preserves_storage_policy() {
+        // libsqlite3-sys 0.39 bundles SQLite 3.54, fixing RUSTSEC-2026-0459.
+        assert!(rusqlite::version_number() >= 3_054_000);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("security-floor.sqlite");
+        let connection = open_database(&path).unwrap();
+        configure(&connection).unwrap();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+        configure_profile(&connection).unwrap();
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1);
+    }
+
+    #[test]
     fn authoritative_meta_creation_and_read_only_reopen_reach_exact_boundary() {
         for precreate_empty_file in [false, true] {
             let dir = tempfile::tempdir().unwrap();

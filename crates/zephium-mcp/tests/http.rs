@@ -97,9 +97,13 @@ async fn serve(listener: tokio::net::TcpListener, token: Option<&'static str>) {
                 let ticktick = token == Some("ticktick-test-token");
                 let result = match message["method"].as_str() {
                     _ if id.is_null() => None,
-                    Some("initialize") => Some(
-                        json!({"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": {"name": if ticktick { "ticktick" } else { "http-fixture" }, "version": "0.1.0"}}),
-                    ),
+                    Some("initialize") => {
+                        let mut result = json!({"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": {"name": if ticktick { "ticktick" } else { "http-fixture" }, "version": "0.1.0"}});
+                        if token == Some("oversized") {
+                            result["instructions"] = Value::String("x".repeat(16 * 1024 * 1024));
+                        }
+                        Some(result)
+                    }
                     Some("tools/list") => Some(
                         json!({"tools": [{"name": if ticktick { "get_projects" } else { "ping" }, "description": "Read projects.", "inputSchema": {"type": "object"}}]}),
                     ),
@@ -159,6 +163,62 @@ async fn an_http_server_answers_over_json() {
         .await
         .unwrap();
     assert_eq!(pong.text, "pong");
+}
+
+#[tokio::test]
+async fn oversized_http_json_response_is_rejected() {
+    let url = server(Some("oversized")).await;
+    let result = McpSession::connect(&Endpoint::Http(HttpServer {
+        url,
+        auth: HttpAuth::Bearer("oversized".into()),
+    }))
+    .await;
+    assert_eq!(result.err(), Some(McpError::Protocol));
+}
+
+#[tokio::test]
+async fn oauth_metadata_rejects_ipv6_private_authorization_servers() {
+    use rmcp::transport::auth::{
+        AuthorizationManager, OAuthHttpClient, OAuthHttpClientFuture, OAuthHttpRequest,
+    };
+    use std::sync::Arc;
+
+    struct Metadata;
+    impl OAuthHttpClient for Metadata {
+        fn execute(&self, request: OAuthHttpRequest) -> OAuthHttpClientFuture<'_> {
+            Box::pin(async move {
+                assert_eq!(
+                    request.request.uri().to_string(),
+                    "https://mcp.example.invalid/.well-known/oauth-protected-resource",
+                    "must not fetch an authorization server at a private IPv6 address"
+                );
+                Ok(http::Response::new(
+                    serde_json::to_vec(&json!({
+                        "resource": "https://mcp.example.invalid/mcp",
+                        "authorization_servers": [
+                            "https://[::ffff:127.0.0.1]",
+                            "https://[fe80::1]",
+                            "https://[fc00::1]"
+                        ]
+                    }))
+                    .unwrap(),
+                ))
+            })
+        }
+    }
+
+    let manager = AuthorizationManager::new_with_oauth_http_client(
+        "https://mcp.example.invalid/mcp",
+        Arc::new(Metadata),
+    )
+    .await
+    .unwrap();
+    assert!(manager
+        .resolve_metadata_from_challenge(Some(
+            "Bearer resource_metadata=\"https://mcp.example.invalid/.well-known/oauth-protected-resource\""
+        ))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
