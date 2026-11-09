@@ -494,8 +494,26 @@ fn bootstrap_is_idempotent_across_chrome_reloads() {
         input: "example.com".into(),
     });
 
+    shell.handle(Command::SetSidebarHidden(true));
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    let window = shell.windows.focused().unwrap().id;
     // chrome webview reloaded (dev HMR): same window, same stage, state kept
     shell.handle(Command::Bootstrap);
+    assert_eq!(
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("raise@"))
+            .collect::<Vec<_>>(),
+        [
+            format!("raise@{window} false"),
+            format!("raise@{window} true"),
+            format!("raise@{window} false")
+        ]
+    );
     assert_eq!(active_id(&screen), first);
     let windows: std::collections::HashSet<String> = engine
         .calls()

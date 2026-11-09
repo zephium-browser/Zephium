@@ -1034,9 +1034,10 @@ impl Shell {
                 }
                 win.metrics.sidebar_hidden = hidden;
                 let id = win.id;
-                // A sidebar shown from its card leaves the chrome over the
-                // page until the page has slid out from under the column;
-                // the frame puts it back beneath then.
+                // A visibility change ends the peek even if the old chrome
+                // document never delivers its delayed lowering.
+                let card = layout::hidden_card(win.size, win.metrics);
+                let _ = self.engine.raise_chrome(id, false, card, false);
                 let _ = self.engine.hint_stage_motion(id, StageMotion::Slide);
                 let _ = self.relayout_with(true);
             }
