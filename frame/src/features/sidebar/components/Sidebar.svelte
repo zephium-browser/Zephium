@@ -297,7 +297,7 @@
     const openPanel = !!aside.querySelector(
       '.ui-disclosure-panel[data-open="true"], .capture[data-open="true"]',
     );
-    return focused || openPanel || tool !== null;
+    return focused || openPanel || toolWaiting;
   };
   function release() {
     clearTimeout(linger);
@@ -338,12 +338,16 @@
     window.addEventListener("zephium:sidebar-edge", edge);
     return () => window.removeEventListener("zephium:sidebar-edge", edge);
   });
-  // A tool opened while the column is put away comes out on the card and
-  // stays there until it is closed.
+  // A tool opened while the column is put away comes out on the card, and
+  // from then on the card keeps its own rules: it stays while the pointer is
+  // on it or something in it is being typed in, and goes when they leave.
+  // Opened from the keyboard, it waits for the pointer's first visit.
+  let toolWaiting = false;
   $effect(() => {
     const open = tool !== null;
     if (!away) return;
     untrack(() => {
+      toolWaiting = open && !pointerIn;
       if (open) peek();
       else if (peeking && !pointerIn && !atEdge) release();
     });
@@ -467,6 +471,7 @@
   let pointerIn = $state(false);
   function entered() {
     pointerIn = true;
+    toolWaiting = false;
     // Back on the card as it leaves, it comes back.
     if (away && !peeking && lowered !== undefined) peek();
     else if (away) clearTimeout(linger);

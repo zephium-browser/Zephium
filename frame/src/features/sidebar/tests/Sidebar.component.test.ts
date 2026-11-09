@@ -74,6 +74,19 @@ test("the card stays while native has the pointer over it, and goes when it leav
   expect(aside.dataset.peek).toBeUndefined();
 });
 
+test("a tool on the card stays while the pointer is on it and leaves with it", async () => {
+  const aside = await peek();
+  tools.open("notes");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  aside.dispatchEvent(new PointerEvent("pointerenter"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  await leave(aside);
+  expect(aside.dataset.peek).toBeUndefined();
+  expect(tools.activeTool()).toBe("notes");
+});
+
 test("attention still holds the card until released", async () => {
   const aside = await peek();
   const release = attention.hold();
