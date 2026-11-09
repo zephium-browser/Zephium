@@ -738,9 +738,13 @@ unsafe fn start_motion(p: *mut State) {
         .name("caption-motion".into())
         .spawn(move || {
             while pacing.load(Ordering::Acquire) {
+                let waited = std::time::Instant::now();
                 // SAFETY: waits for the compositor's next presented frame.
-                if unsafe { DwmFlush() }.is_err() {
-                    std::thread::sleep(std::time::Duration::from_millis(16));
+                let flushed = unsafe { DwmFlush() }.is_ok();
+                // A flush that did not wait, as without composition, would
+                // turn this into a spin.
+                if !flushed || waited.elapsed() < std::time::Duration::from_millis(1) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 if !pacing.load(Ordering::Acquire) {
                     break;
