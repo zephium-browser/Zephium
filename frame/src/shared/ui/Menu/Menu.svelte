@@ -6,6 +6,8 @@
         id: string;
         label: string;
         icon?: IconSvgElement;
+        /** A site's own mark, drawn in place of `icon` once it has arrived. */
+        site?: { image: ImageData | null; tone?: "dark" | "light" | "mid" };
         hint?: string;
         checked?: boolean;
         danger?: boolean;
@@ -19,6 +21,7 @@
   import { DropdownMenu } from "bits-ui";
   import type { Snippet } from "svelte";
   import Icon from "../Icon/Icon.svelte";
+  import FavIcon from "../FavIcon/FavIcon.svelte";
   import Mark from "./Mark.svelte";
   import "./popover.css";
   import { menuMaterialFor } from "./material";
@@ -33,6 +36,8 @@
     align = "start",
     returnFocus,
     onselect,
+    onopenchange,
+    open = $bindable(false),
   }: {
     label: string;
     entries: MenuEntry[];
@@ -46,6 +51,8 @@
      *  it, such as a field the action opened, instead of back on the trigger. */
     returnFocus?: () => boolean;
     onselect: (id: string) => void;
+    onopenchange?: (open: boolean) => void;
+    open?: boolean;
   } = $props();
   let triggerElement = $state<HTMLButtonElement | null>(null);
   let material = $state<"opaque" | undefined>();
@@ -55,8 +62,10 @@
 </script>
 
 <DropdownMenu.Root
+  bind:open
   onOpenChange={(open) => {
     if (open) material = menuMaterialFor(triggerElement);
+    onopenchange?.(open);
   }}
 >
   <DropdownMenu.Trigger bind:ref={triggerElement} class={triggerClass} aria-label={label}>
@@ -90,7 +99,17 @@
             data-danger={entry.danger || undefined}
             onSelect={() => onselect(entry.id)}
           >
-            {#if entry.icon}
+            {#if entry.site}
+              <span class="ui-menu-icon" aria-hidden="true"
+                ><FavIcon
+                  image={entry.site.image}
+                  tone={entry.site.tone}
+                  size={16}
+                  lit
+                  fallback={entry.icon}
+                /></span
+              >
+            {:else if entry.icon}
               <span class="ui-menu-icon" aria-hidden="true"
                 ><Icon icon={entry.icon} size={15} /></span
               >

@@ -95,6 +95,12 @@
   transition: color var(--motion-instant) var(--ease-smooth);
 }
 
+/* A hint already takes the free space, so the mark column after it sits
+   against it at the row's end rather than halving that space. */
+.ui-menu-hint + .ui-menu-mark {
+  margin-inline-start: 0;
+}
+
 .ui-menu-item[data-highlighted] .ui-menu-hint {
   color: var(--color-muted);
 }

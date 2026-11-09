@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { SearchShortcut } from "$shared/ipc/bindings";
-import { emptyShortcutBackspace, shortcutPrefix } from "../search-shortcuts";
+import {
+  emptyShortcutBackspace,
+  shortcutFor,
+  shortcutKeyword,
+  shortcutPrefix,
+  withShortcut,
+} from "../search-shortcuts";
 
 const base = new URL("../../../../../crates/zephium-core/src/search/", import.meta.url);
 const defaults = JSON.parse(
@@ -43,5 +49,45 @@ describe("core prefix parity", () => {
     expect(emptyShortcutBackspace("!yt", defaults)).toBeNull();
     expect(emptyShortcutBackspace("a ", defaults)).toBeNull();
     expect(emptyShortcutBackspace("so ", defaults)).toBeNull();
+  });
+});
+
+describe("where a query goes", () => {
+  it.each(cases)("names what native routes for $input", (fixture) => {
+    const entries = defaults.map((entry) => ({
+      ...entry,
+      enabled: !fixture.disabled?.includes(entry.id),
+    }));
+    if (fixture.custom) return;
+    expect(shortcutFor(fixture.input, entries)?.id ?? null).toBe(fixture.shortcut);
+  });
+
+  it("offers every shortcut in a form that reaches it", () => {
+    for (const entry of defaults) {
+      const keyword = shortcutKeyword(entry, defaults);
+      expect(shortcutFor(`${keyword} cats`, defaults)?.id).toBe(entry.id);
+    }
+    expect(
+      shortcutKeyword(
+        defaults.find((entry) => entry.id === "youtube")!,
+        defaults,
+      ),
+    ).toBe("yt");
+    expect(
+      shortcutKeyword(
+        defaults.find((entry) => entry.id === "google")!,
+        defaults,
+      ),
+    ).toBe("!g");
+  });
+
+  it("puts a keyword in front of the query in place of the one it named", () => {
+    expect(withShortcut("cats", "yt", defaults)).toBe("yt cats");
+    expect(withShortcut("", "yt", defaults)).toBe("yt ");
+    expect(withShortcut("w cats", "yt", defaults)).toBe("yt w cats");
+    expect(withShortcut("wiki cats", "yt", defaults)).toBe("yt wiki cats");
+    expect(withShortcut("gh cats", "yt", defaults)).toBe("yt cats");
+    expect(withShortcut("cats !gh", "yt", defaults)).toBe("yt cats");
+    expect(withShortcut("cats !nothing", "yt", defaults)).toBe("yt cats !nothing");
   });
 });

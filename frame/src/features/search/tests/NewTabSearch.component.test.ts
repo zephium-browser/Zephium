@@ -26,6 +26,16 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     searchShortcutDefaults: async () => [
       {
+        id: "duckduckgo",
+        name: "DuckDuckGo",
+        keywords: ["ddg"],
+        domain: "duckduckgo.com",
+        enabled: true,
+        search_url: "https://duckduckgo.com/?q={query}",
+        home_url: "https://duckduckgo.com/",
+        suggestions: null,
+      },
+      {
         id: "youtube",
         name: "YouTube",
         keywords: ["yt"],
@@ -51,7 +61,10 @@ afterEach(() => {
 
 /** The field hangs in a notch whose height it fills, as on the page. */
 async function mount(props: { tabId: string }) {
-  const screen = await render(NewTabSearch, props);
+  const screen = await render(NewTabSearch, {
+    ...props,
+    loadMenu: () => import("$shared/ui/Menu"),
+  });
   screen.container.style.blockSize = "50px";
   return screen;
 }
@@ -430,4 +443,33 @@ test("shortcut activation and empty Backspace update the accessible field immedi
   await userEvent.keyboard("{Backspace}");
   await expect.element(field).toHaveValue("");
   expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
+});
+
+test("the field's mark is the engine while it has the focus, and the site a query names", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const mark = () => screen.container.querySelector("[data-mark]")?.getAttribute("data-mark");
+  const field = screen.getByRole("combobox");
+  await vi.waitFor(() => expect(mark()).toBe("duckduckgo"));
+  (field.element() as HTMLInputElement).blur();
+  await vi.waitFor(() => expect(mark()).toBe("search"));
+  await userEvent.fill(field, "yt ");
+  await vi.waitFor(() => expect(mark()).toBe("youtube"));
+  await userEvent.fill(field, "cats !yt");
+  await vi.waitFor(() => expect(mark()).toBe("youtube"));
+  await userEvent.fill(field, "cats");
+  await vi.waitFor(() => expect(mark()).toBe("duckduckgo"));
+});
+
+test("the engine menu puts a shortcut's keyword in front of the query", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "cats");
+  await screen.getByRole("button", { name: "Search engine and shortcuts" }).click();
+  await expect.element(page.getByRole("menuitemcheckbox", { name: "DuckDuckGo" })).toBeVisible();
+  await page.getByRole("menuitem", { name: /YouTube/u }).click();
+  await expect.element(field).toHaveValue("yt cats");
+  await vi.waitFor(() => expect(document.activeElement).toBe(field.element()));
+  expect(screen.container.querySelector("[data-mark]")?.getAttribute("data-mark")).toBe("youtube");
 });

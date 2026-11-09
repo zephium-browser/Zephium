@@ -1,0 +1,228 @@
+<script lang="ts">
+  import { scale } from "svelte/transition";
+  import { backOut } from "svelte/easing";
+  import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import * as m from "$shared/i18n/messages";
+  import { commands, type SearchShortcut } from "$shared/ipc/bindings";
+  import { preferences } from "$domain/preferences";
+  import { favicons } from "$domain/favicons";
+  import type { MenuEntry } from "$shared/ui/Menu";
+  import Icon from "$shared/ui/Icon";
+  import FavIcon from "$shared/ui/FavIcon";
+  import { reducedMotion } from "$shared/lib/motion";
+  import { shortcutFor, shortcutKeyword, withShortcut } from "$shared/lib/search-shortcuts";
+
+  type MenuModule = typeof import("$shared/ui/Menu");
+
+  let {
+    query,
+    awake,
+    profile,
+    loadMenu,
+    size = 16,
+    onpick,
+  }: {
+    /** Whose icons to ask for; a private window asks for none. */
+    profile: { id: string; kind: string } | null;
+    /** The menu, loaded by whoever composes the page, so its machinery stays
+     *  out of every graph that only shares this field. */
+    loadMenu?: () => Promise<MenuModule>;
+    query: string;
+    /** The field has the focus or holds a query: the mark says where it goes. */
+    awake: boolean;
+    size?: number;
+    /** A new query to put in the field, or null when only the engine changed. */
+    onpick: (query: string | null) => void;
+  } = $props();
+
+  /** The engines a search can go to by default, which are shortcuts too. */
+  const ENGINES = ["google", "duckduckgo", "bing", "brave"];
+
+  let shortcuts = $derived(preferences.searchShortcuts());
+  let engine = $derived(preferences.value("search.engine"));
+  let named = $derived(shortcutFor(query, shortcuts));
+  let fallback = $derived(shortcuts.find((entry) => entry.id === engine) ?? null);
+  let open = $state(false);
+  // The menu and its machinery are not part of the page's first load: they
+  // arrive as the pointer or the focus reaches the mark, before it is pressed.
+  let MenuView = $state<MenuModule["default"] | null>(null);
+  let loading: Promise<void> | null = null;
+  let host = $state<HTMLElement>();
+  function load(opening = false) {
+    if (!loadMenu) return;
+    loading ??= loadMenu()
+      .then((module) => {
+        const focused = host?.contains(document.activeElement) ?? false;
+        MenuView = module.default;
+        if (focused) queueMicrotask(() => host?.querySelector<HTMLElement>(".engine")?.focus());
+      })
+      .catch(() => {
+        loading = null;
+      });
+    if (opening) void loading.then(() => (open = true));
+  }
+  /** The site the query is headed for: one it names, else the engine. */
+  let shown = $derived(named ?? (awake || open ? fallback : null));
+
+  const markOf = (entry: SearchShortcut | null) =>
+    entry ? favicons.forPage(entry.home_url) : null;
+
+  // The marks of every place a search can go are asked for once, where the
+  // profile keeps what it sees; a private window probes nothing.
+  let asked = "";
+  $effect(() => {
+    if (!profile || profile.kind === "incognito") return;
+    const origins = [
+      ...new Set(
+        shortcuts.filter((entry) => entry.enabled).map((entry) => new URL(entry.home_url).origin),
+      ),
+    ];
+    const key = `${profile.id} ${origins.join(" ")}`;
+    if (!origins.length || key === asked) return;
+    asked = key;
+    void commands.faviconProbe(profile.id, origins).catch(() => {});
+  });
+
+  let entries = $derived.by<MenuEntry[]>(() => {
+    const site = (entry: SearchShortcut) => {
+      const mark = markOf(entry);
+      return { image: mark?.image ?? null, tone: mark?.tone };
+    };
+    const engines = shortcuts.filter((entry) => ENGINES.includes(entry.id));
+    const others = shortcuts.filter((entry) => entry.enabled && !ENGINES.includes(entry.id));
+    return [
+      { kind: "heading", label: m.search_menu_engines() },
+      ...engines.map((entry): MenuEntry => ({
+        kind: "item",
+        id: `engine:${entry.id}`,
+        label: entry.name,
+        icon: Globe02Icon,
+        site: site(entry),
+        checked: entry.id === engine,
+      })),
+      ...(others.length
+        ? [
+            { kind: "separator" } as const,
+            { kind: "heading", label: m.search_menu_shortcuts() } as const,
+          ]
+        : []),
+      ...others.map((entry): MenuEntry => ({
+        kind: "item",
+        id: `shortcut:${entry.id}`,
+        label: entry.name,
+        icon: Globe02Icon,
+        site: site(entry),
+        hint: shortcutKeyword(entry, shortcuts),
+      })),
+    ];
+  });
+
+  function select(id: string) {
+    const [kind, value] = id.split(/:(.*)/su) as [string, string];
+    if (kind === "engine") {
+      void preferences.set("search.engine", value);
+      onpick(
+        named && ENGINES.includes(named.id) ? withShortcut(query, "", shortcuts).trim() : null,
+      );
+      return;
+    }
+    const entry = shortcuts.find((item) => item.id === value);
+    if (entry) onpick(withShortcut(query, shortcutKeyword(entry, shortcuts), shortcuts));
+  }
+</script>
+
+{#snippet mark()}
+  <span class="stack" style:--size={`${size}px`} data-mark={shown?.id ?? "search"}>
+    {#key shown?.id ?? ""}
+      <span
+        class="mark"
+        in:scale={{ start: 0.55, duration: reducedMotion() ? 0 : 220, easing: backOut }}
+        out:scale={{ start: 0.8, duration: reducedMotion() ? 0 : 120 }}
+      >
+        {#if shown}<FavIcon
+            image={markOf(shown)?.image ?? null}
+            tone={markOf(shown)?.tone}
+            {size}
+            lit
+            fallback={Search01Icon}
+          />{:else}<Icon icon={Search01Icon} {size} />{/if}
+      </span>
+    {/key}
+  </span>
+{/snippet}
+
+<span class="host" bind:this={host}>
+  {#if MenuView}
+    <MenuView
+      label={m.search_menu_label()}
+      {entries}
+      triggerClass="engine"
+      contentClass="engine-menu"
+      returnFocus={() => false}
+      onselect={select}
+      bind:open
+      trigger={mark}
+    />
+  {:else}
+    <button
+      type="button"
+      class="engine"
+      aria-label={m.search_menu_label()}
+      aria-haspopup={loadMenu ? "menu" : undefined}
+      onpointerenter={() => load()}
+      onfocus={() => load()}
+      onclick={() => load(true)}>{@render mark()}</button
+    >
+  {/if}
+</span>
+
+<style>
+  /* The magnifier's place, a press target a little larger than it. */
+  :global(.engine) {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 28px;
+    block-size: 28px;
+    margin-inline: -6px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-inset);
+    background: transparent;
+    color: inherit;
+    transition: background-color var(--motion-instant) var(--ease-smooth);
+  }
+
+  :global(.engine:hover),
+  :global(.engine[data-state="open"]) {
+    background: var(--color-fill);
+  }
+
+  :global(.engine:focus-visible) {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 0;
+  }
+
+  .host {
+    display: contents;
+  }
+
+  .stack {
+    display: grid;
+    inline-size: var(--size);
+    block-size: var(--size);
+  }
+
+  .mark {
+    display: grid;
+    grid-area: 1 / 1;
+    place-items: center;
+  }
+
+  /* It opens over the page's sky, which no trace of should read through. */
+  :global(.engine-menu) {
+    background: color-mix(in srgb, var(--color-float) 98%, transparent);
+    backdrop-filter: blur(30px) saturate(1.4);
+    max-block-size: min(420px, var(--bits-dropdown-menu-content-available-height, 420px));
+  }
+</style>

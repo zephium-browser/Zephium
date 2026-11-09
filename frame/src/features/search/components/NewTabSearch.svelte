@@ -7,14 +7,20 @@
   import SearchField from "$shared/ui/SearchField";
   import IconButton from "$shared/ui/IconButton";
   import ResultList from "./ResultList.svelte";
+  import EngineMenu from "./EngineMenu.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
   import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     tabId,
+    profile = null,
+    loadMenu,
     onactive,
   }: {
     tabId: string | null;
+    /** The window's profile, whose site icons the field's mark may ask for. */
+    profile?: { id: string; kind: string } | null;
+    loadMenu?: () => Promise<typeof import("$shared/ui/Menu")>;
     /** Whether a query is in the field, so the page can make room for it. */
     onactive?: (active: boolean) => void;
   } = $props();
@@ -40,6 +46,18 @@
   let available = $state(420);
 
   let active = $derived(surface.query.trim().length > 0);
+  let focused = $state(false);
+
+  function picked(next: string | null) {
+    if (next !== null) surface.changed(next);
+    const field = input;
+    if (!field) return;
+    field.focus();
+    if (next !== null) {
+      field.value = next;
+      field.setSelectionRange(next.length, next.length);
+    }
+  }
   let visible = $derived(
     surface.open &&
       active &&
@@ -156,13 +174,23 @@
         style: surface.query ? "padding-inline-end: 40px" : undefined,
         onkeydown: keydown,
         onfocus: () => {
+          focused = true;
           measure();
           surface.focused();
         },
+        onblur: () => (focused = false),
         oncompositionstart: surface.compositionStart,
         oncompositionend: (event) => surface.compositionEnd(event.currentTarget.value),
       }}
-    />
+    >
+      {#snippet lead()}<EngineMenu
+          query={surface.query}
+          awake={focused || active}
+          {profile}
+          {loadMenu}
+          onpick={picked}
+        />{/snippet}
+    </SearchField>
     {#if surface.query}
       <span class="clear">
         <IconButton

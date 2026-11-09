@@ -70,7 +70,7 @@ const prefixStoplist = new Set([
   "archive",
 ]);
 
-export function shortcutPrefix(input: string, shortcuts: readonly Shortcut[]) {
+export function shortcutPrefix<T extends Shortcut>(input: string, shortcuts: readonly T[]) {
   const space = input.indexOf(" ");
   if (space < 2) return null;
   const keyword = input.slice(0, space).toLowerCase();
@@ -84,4 +84,51 @@ export function shortcutPrefix(input: string, shortcuts: readonly Shortcut[]) {
 export function emptyShortcutBackspace(input: string, shortcuts: readonly Shortcut[]) {
   const parsed = shortcutPrefix(input, shortcuts);
   return parsed && !parsed.query ? "" : null;
+}
+
+/** The shortcut a query is headed for, as native reads it: a keyword before
+ *  the first space, else a bang anywhere in it. */
+export function shortcutFor<T extends Shortcut>(input: string, shortcuts: readonly T[]): T | null {
+  const prefixed = shortcutPrefix(input, shortcuts);
+  if (prefixed) return prefixed.shortcut;
+  for (const token of input.split(/\s+/u)) {
+    if (!token.startsWith("!")) continue;
+    const key = token.slice(1).toLowerCase();
+    const found = shortcuts.find(
+      (entry) => entry.enabled && entry.keywords.some((keyword) => keyword.toLowerCase() === key),
+    );
+    if (found) return found;
+  }
+  return null;
+}
+
+/** How a shortcut is typed: its first keyword that works before a space, else
+ *  its first as a bang. */
+export function shortcutKeyword(shortcut: Shortcut, shortcuts: readonly Shortcut[]): string {
+  const keyword = shortcut.keywords.find(
+    (key) => shortcutPrefix(`${key} x`, shortcuts)?.shortcut.id === shortcut.id,
+  );
+  return keyword ?? `!${shortcut.keywords[0] ?? ""}`;
+}
+
+/** The query with whatever shortcut it named taken out, and `keyword` put in
+ *  front of what is left. */
+export function withShortcut(input: string, keyword: string, shortcuts: readonly Shortcut[]) {
+  const prefixed = shortcutPrefix(input, shortcuts);
+  const rest = prefixed
+    ? prefixed.query
+    : input
+        .split(/\s+/u)
+        .filter(
+          (token) =>
+            !token.startsWith("!") ||
+            !shortcuts.some(
+              (entry) =>
+                entry.enabled &&
+                entry.keywords.some((key) => key.toLowerCase() === token.slice(1).toLowerCase()),
+            ),
+        )
+        .join(" ")
+        .trim();
+  return rest ? `${keyword} ${rest}` : `${keyword} `;
 }

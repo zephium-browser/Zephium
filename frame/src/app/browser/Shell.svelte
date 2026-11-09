@@ -71,6 +71,8 @@
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
+  /** The new tab field's menu, kept out of the graph the launcher shares. */
+  const loadMenu = () => import("$shared/ui/Menu");
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
     const profile = tabs.profile()?.id;
@@ -573,6 +575,8 @@
                       retryLabel={m.surface_retry()}
                       >{#snippet children(Search)}<Search
                           tabId={tabs.activeId()}
+                          profile={tabs.profile()}
+                          {loadMenu}
                         />{/snippet}</LazyView
                     >{/key}{/snippet}</NewTab
               >{/snippet}</LazyView
