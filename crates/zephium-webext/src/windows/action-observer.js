@@ -1,9 +1,14 @@
 // Reports native action changes. No tab, permission or action dispatch emulation.
 (() => {
+  // Extensions such as Proton Pass replace the worker's `chrome` global later;
+  // keep the native objects seen at load time.
   const action = chrome.action;
-  if (!action) return;
+  const runtime = chrome.runtime;
+  if (!action || !runtime) return;
   const icons = new Map();
-  const notify = () => chrome.runtime.sendMessage({__zephiumActionChanged: true}).catch(() => {});
+  const notify = () => {
+    try { runtime.sendMessage({__zephiumActionChanged: true}).catch(() => {}); } catch { /* Never reach the extension's own call. */ }
+  };
   for (const method of ['setTitle', 'setBadgeText', 'setIcon', 'setPopup', 'enable', 'disable']) {
     const original = action[method];
     action[method] = function (...args) {
@@ -31,8 +36,8 @@
       return result;
     };
   }
-  chrome.runtime.onMessage.addListener((message, sender, reply) => {
-    if (sender.id === chrome.runtime.id && message?.__zephiumActionSnapshot === true) {
+  runtime.onMessage.addListener((message, sender, reply) => {
+    if (sender.id === runtime.id && message?.__zephiumActionSnapshot === true) {
       reply({icon: icons.get(message.tabId) || icons.get(-1) || null,
         perTabIcons: icons.size > (icons.has(-1) ? 1 : 0)});
     }
