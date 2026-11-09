@@ -115,3 +115,14 @@ test("leaving, the last state stays on screen and answers nothing", async () => 
   expect(native.action).not.toHaveBeenCalled();
   expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(12);
 });
+
+test("a card's close control closes that tab and leaves the switcher open", async () => {
+  const screen = await render(TabSwitcher, { snapshot: state });
+  await screen.getByRole("button", { name: "Close tab" }).nth(3).click();
+  await vi.waitFor(() =>
+    expect(native.action.mock.calls).toEqual([
+      ["7", { type: "select", index: 3 }],
+      ["7", { type: "close" }],
+    ]),
+  );
+});

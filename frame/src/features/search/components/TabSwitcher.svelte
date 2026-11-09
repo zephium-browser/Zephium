@@ -5,7 +5,8 @@
   import { commands, type TabSwitcherAction, type TabSwitcherState } from "$shared/ipc/bindings";
   import { favicons } from "$domain/favicons";
   import FavIcon from "$shared/ui/FavIcon";
-  import { Globe02Icon } from "@hugeicons/core-free-icons";
+  import Icon from "$shared/ui/Icon";
+  import { Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 
   // Mirrors the native plate (desktop/src/overlay/geometry.rs), which is
   // sized to the cards it shows.
@@ -62,7 +63,7 @@
     );
     void tick().then(() => {
       if (live && !disposed)
-        element.querySelectorAll("button").forEach((button) => observer.observe(button));
+        element.querySelectorAll(".card").forEach((card) => observer.observe(card));
     });
     return () => {
       live = false;
@@ -131,6 +132,10 @@
     if (frozen) return;
     if (await send({ type: "select", index })) await send({ type: "commit" });
   }
+  async function closeAt(index: number) {
+    if (frozen) return;
+    if (await send({ type: "select", index })) await send({ type: "close" });
+  }
 </script>
 
 <svelte:window onkeydown={keydown} onkeyup={keyup} />
@@ -145,41 +150,51 @@
     aria-activedescendant={`switcher-${snapshot.selected}`}
   >
     {#each snapshot.entries as entry, index (entry.tab_id)}
-      <button
-        id={`switcher-${index}`}
-        class="card"
-        data-index={index}
-        type="button"
-        role="option"
-        tabindex="-1"
-        aria-selected={index === snapshot.selected}
-        aria-label={`${entry.title || entry.url_host} ${entry.url_host}`}
-        onclick={() => void choose(index)}
-      >
-        <span class="page">
-          {#if entry.preview_url && visible.has(index)}<img
-              src={entry.preview_url}
-              alt=""
-              draggable="false"
-            />{:else}<span class="blank"
-              ><FavIcon
-                size={28}
-                image={favicons.image(entry.favicon)}
-                tone={favicons.tone(entry.favicon)}
-                fallback={Globe02Icon}
-              /></span
-            >{/if}
-        </span>
-        <span class="caption">
-          <FavIcon
-            size={14}
-            image={favicons.image(entry.favicon)}
-            tone={favicons.tone(entry.favicon)}
-            fallback={Globe02Icon}
-          />
-          <span class="title">{entry.title || entry.url_host}</span>
-        </span>
-      </button>
+      <div class="slot">
+        <button
+          id={`switcher-${index}`}
+          class="card"
+          data-index={index}
+          type="button"
+          role="option"
+          tabindex="-1"
+          aria-selected={index === snapshot.selected}
+          aria-label={`${entry.title || entry.url_host} ${entry.url_host}`}
+          onclick={() => void choose(index)}
+        >
+          <span class="page">
+            {#if entry.preview_url && visible.has(index)}<img
+                src={entry.preview_url}
+                alt=""
+                draggable="false"
+              />{:else}<span class="blank"
+                ><FavIcon
+                  size={28}
+                  image={favicons.image(entry.favicon)}
+                  tone={favicons.tone(entry.favicon)}
+                  fallback={Globe02Icon}
+                /></span
+              >{/if}
+          </span>
+          <span class="caption">
+            <FavIcon
+              size={14}
+              image={favicons.image(entry.favicon)}
+              tone={favicons.tone(entry.favicon)}
+              fallback={Globe02Icon}
+            />
+            <span class="title">{entry.title || entry.url_host}</span>
+          </span>
+        </button>
+        <button
+          class="close"
+          type="button"
+          tabindex="-1"
+          aria-label={m.close_tab()}
+          onclick={() => void closeAt(index)}
+          ><Icon icon={Cancel01Icon} size={12} strokeWidth={2} /></button
+        >
+      </div>
     {/each}
   </div>
   {#if failed && !frozen}<p role="alert">{m.panel_action_failed()}</p>{/if}
@@ -235,12 +250,51 @@
     box-shadow: none;
   }
 
+  /* Each card stands in a slot that also holds its close control, which
+     shows over the page's corner while the pointer is on the card. */
+  .slot {
+    position: relative;
+    flex: 0 0 204px;
+  }
+
+  .close {
+    position: absolute;
+    inset-block-start: 12px;
+    inset-inline-end: 12px;
+    display: grid;
+    place-items: center;
+    inline-size: 22px;
+    block-size: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--color-float) 86%, transparent);
+    box-shadow: var(--shadow-raised);
+    color: var(--color-muted);
+    opacity: 0;
+    scale: 0.85;
+    backdrop-filter: blur(12px);
+    transition:
+      opacity var(--motion-instant) var(--ease-smooth),
+      scale var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .close:hover {
+    color: var(--color-text);
+  }
+
+  .slot:hover .close {
+    opacity: 1;
+    scale: 1;
+  }
+
   /* A card is a plate the selection fills; the page sits inside it with the
      card's corner less its inset, and the card's with the plate's less its
      padding. */
   .card {
     display: flex;
-    flex: 0 0 204px;
+    inline-size: 100%;
     flex-direction: column;
     box-sizing: border-box;
     min-inline-size: 0;
@@ -311,7 +365,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .card {
+    .card,
+    .close {
       transition: none;
     }
   }

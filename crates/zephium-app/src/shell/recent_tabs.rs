@@ -95,7 +95,7 @@ impl Shell {
             });
             return;
         }
-        session.retain(|id| self.loaded_recent_tab(id));
+        session.retain(|id| self.switchable_tab(id));
         if session.tabs.is_empty() {
             (self.emit)(Projection::TabSwitcher {
                 session: session.id,
@@ -107,13 +107,15 @@ impl Shell {
         }
     }
 
-    fn loaded_recent_tab(&self, id: ItemId) -> bool {
+    /// Every page of the focused space can be switched to: one asleep wakes
+    /// as it is chosen, as it would from the sidebar. A blank tab has no page
+    /// to go back to.
+    fn switchable_tab(&self, id: ItemId) -> bool {
         self.item_in_focused_scope(id)
-            && !self.residency.dormant_sent.contains(&id)
             && self
                 .items
                 .tab(id)
-                .is_some_and(|tab| tab.has_view() && tab.lifecycle != Lifecycle::Hibernated)
+                .is_some_and(|tab| tab.has_view() || tab.url.is_some())
     }
 
     pub(super) fn recent_tab_order(&self) -> Vec<ItemId> {
@@ -127,10 +129,10 @@ impl Shell {
             .into_iter()
             .flatten()
             .copied()
-            .filter(|id| self.loaded_recent_tab(*id))
+            .filter(|id| self.switchable_tab(*id))
             .collect();
         for id in self.keyboard_tabs(window.space) {
-            if self.loaded_recent_tab(id) && !order.contains(&id) {
+            if self.switchable_tab(id) && !order.contains(&id) {
                 order.push(id);
             }
         }
@@ -207,7 +209,7 @@ impl Shell {
             });
             return;
         }
-        session.retain(|tab| self.loaded_recent_tab(tab));
+        session.retain(|tab| self.switchable_tab(tab));
         match action {
             TabSwitcherAction::Commit | TabSwitcherAction::Cancel => {
                 let selected = session.tabs.get(session.selected).copied();
@@ -232,7 +234,7 @@ impl Shell {
                 if let Some(tab) = session.tabs.get(session.selected).copied() {
                     let _ = self.operation_close(tab);
                 }
-                session.retain(|tab| self.loaded_recent_tab(tab));
+                session.retain(|tab| self.switchable_tab(tab));
             }
         }
         if session.tabs.is_empty() {

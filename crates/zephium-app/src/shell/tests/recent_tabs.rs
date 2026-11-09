@@ -12,7 +12,7 @@ fn loaded(shell: &mut Shell, screen: &Screen, name: &str) -> ItemId {
 }
 
 #[test]
-fn recent_order_tracks_activation_close_and_excludes_sleeping_tabs() {
+fn recent_order_tracks_activation_close_and_keeps_sleeping_tabs() {
     let (mut shell, _, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = loaded(&mut shell, &screen, "one");
@@ -24,7 +24,17 @@ fn recent_order_tracks_activation_close_and_excludes_sleeping_tabs() {
     shell.handle(Command::Close(third));
     assert_eq!(shell.recent_tab_order(), vec![first, second]);
     shell.residency.dormant_sent.push(second);
-    assert_eq!(shell.recent_tab_order(), vec![first]);
+    assert_eq!(shell.recent_tab_order(), vec![first, second]);
+    shell.handle(Command::BeginTabSwitcher {
+        session: 1,
+        reverse: false,
+        keyboard: true,
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 1,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_eq!(active_id(&screen), second);
 }
 
 #[test]
