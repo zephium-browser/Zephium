@@ -469,7 +469,7 @@ test("the engine menu puts a shortcut's keyword in front of the query", async ()
   await screen.getByRole("button", { name: "Search engine and shortcuts" }).click();
   await expect.element(page.getByRole("menuitemcheckbox", { name: "DuckDuckGo" })).toBeVisible();
   await page.getByRole("menuitem", { name: /YouTube/u }).click();
-  await expect.element(field).toHaveValue("yt cats");
+  await expect.element(field).toHaveValue("!yt cats");
   await vi.waitFor(() => expect(document.activeElement).toBe(field.element()));
   expect(screen.container.querySelector("[data-mark]")?.getAttribute("data-mark")).toBe("youtube");
 });

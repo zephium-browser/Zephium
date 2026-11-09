@@ -219,7 +219,7 @@
     "home_url": "https://developer.mozilla.org/",
     "domain": "developer.mozilla.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "npm",
@@ -231,7 +231,7 @@
     "home_url": "https://www.npmjs.com/",
     "domain": "www.npmjs.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "crates",
@@ -244,7 +244,7 @@
     "home_url": "https://crates.io/",
     "domain": "crates.io",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "stackoverflow",
@@ -257,7 +257,7 @@
     "home_url": "https://stackoverflow.com/",
     "domain": "stackoverflow.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "hackernews",
@@ -270,7 +270,7 @@
     "home_url": "https://news.ycombinator.com/",
     "domain": "news.ycombinator.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "translate",
@@ -296,7 +296,7 @@
     "home_url": "https://www.ebay.com/",
     "domain": "www.ebay.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "imdb",
@@ -308,7 +308,7 @@
     "home_url": "https://www.imdb.com/",
     "domain": "www.imdb.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "goodreads",
@@ -321,7 +321,7 @@
     "home_url": "https://www.goodreads.com/",
     "domain": "www.goodreads.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "wolframalpha",
@@ -334,7 +334,7 @@
     "home_url": "https://www.wolframalpha.com/",
     "domain": "www.wolframalpha.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "openstreetmap",
@@ -346,7 +346,7 @@
     "home_url": "https://www.openstreetmap.org/",
     "domain": "www.openstreetmap.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "archwiki",
@@ -359,7 +359,7 @@
     "home_url": "https://wiki.archlinux.org/",
     "domain": "wiki.archlinux.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "rust-docs",
@@ -371,7 +371,7 @@
     "home_url": "https://doc.rust-lang.org/",
     "domain": "doc.rust-lang.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "docs-rs",
@@ -383,7 +383,7 @@
     "home_url": "https://docs.rs/",
     "domain": "docs.rs",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "pypi",
@@ -395,7 +395,7 @@
     "home_url": "https://pypi.org/",
     "domain": "pypi.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "gitlab",
@@ -408,7 +408,7 @@
     "home_url": "https://gitlab.com/",
     "domain": "gitlab.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "twitch",
@@ -421,7 +421,7 @@
     "home_url": "https://www.twitch.tv/",
     "domain": "www.twitch.tv",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "spotify",
@@ -446,7 +446,7 @@
     "home_url": "https://www.startpage.com/",
     "domain": "www.startpage.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "internet-archive",
@@ -459,6 +459,6 @@
     "home_url": "https://archive.org/",
     "domain": "archive.org",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   }
 ]

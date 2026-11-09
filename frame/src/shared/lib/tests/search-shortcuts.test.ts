@@ -62,23 +62,14 @@ describe("where a query goes", () => {
     expect(shortcutFor(fixture.input, entries)?.id ?? null).toBe(fixture.shortcut);
   });
 
-  it("offers every shortcut in a form that reaches it", () => {
-    for (const entry of defaults) {
-      const keyword = shortcutKeyword(entry, defaults);
+  it("offers every shortcut as a bang, which reaches it from anywhere in a query", () => {
+    for (const entry of defaults.filter((item) => item.enabled)) {
+      const keyword = shortcutKeyword(entry);
+      expect(keyword.startsWith("!")).toBe(true);
       expect(shortcutFor(`${keyword} cats`, defaults)?.id).toBe(entry.id);
+      expect(shortcutFor(`cats ${keyword}`, defaults)?.id).toBe(entry.id);
     }
-    expect(
-      shortcutKeyword(
-        defaults.find((entry) => entry.id === "youtube")!,
-        defaults,
-      ),
-    ).toBe("yt");
-    expect(
-      shortcutKeyword(
-        defaults.find((entry) => entry.id === "google")!,
-        defaults,
-      ),
-    ).toBe("!g");
+    expect(shortcutKeyword(defaults.find((entry) => entry.id === "youtube")!)).toBe("!yt");
   });
 
   it("puts a keyword in front of the query in place of the one it named", () => {

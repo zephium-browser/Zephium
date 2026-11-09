@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn all_aliases_keep_bang_support_and_custom_aliases_follow_prefix_rules() {
         let mut registry = ShortcutRegistry::default();
-        for entry in registry.entries() {
+        for entry in registry.entries().iter().filter(|entry| entry.enabled) {
             for keyword in &entry.keywords {
                 let input = format!("!{keyword} cats");
                 let parsed = registry.parse(&input);

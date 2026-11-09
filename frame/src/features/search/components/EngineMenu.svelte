@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { scale } from "svelte/transition";
+  import { scale, slide } from "svelte/transition";
   import { backOut } from "svelte/easing";
-  import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import { ArrowDown01Icon, Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { commands, type SearchShortcut } from "$shared/ipc/bindings";
   import { preferences } from "$domain/preferences";
@@ -19,7 +19,7 @@
     awake,
     profile,
     loadMenu,
-    size = 16,
+    size = 18,
     onpick,
   }: {
     /** Whose icons to ask for; a private window asks for none. */
@@ -112,7 +112,7 @@
         label: entry.name,
         icon: Globe02Icon,
         site: site(entry),
-        hint: shortcutKeyword(entry, shortcuts),
+        hint: shortcutKeyword(entry),
       })),
     ];
   });
@@ -127,7 +127,7 @@
       return;
     }
     const entry = shortcuts.find((item) => item.id === value);
-    if (entry) onpick(withShortcut(query, shortcutKeyword(entry, shortcuts), shortcuts));
+    if (entry) onpick(withShortcut(query, shortcutKeyword(entry), shortcuts));
   }
 </script>
 
@@ -145,10 +145,15 @@
             {size}
             lit
             fallback={Search01Icon}
-          />{:else}<Icon icon={Search01Icon} {size} />{/if}
+          />{:else}<Icon icon={Search01Icon} size={size - 2} />{/if}
       </span>
     {/key}
   </span>
+  {#if shown}<span
+      class="chevron"
+      transition:slide={{ axis: "x", duration: reducedMotion() ? 0 : 180 }}
+      ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
+    >{/if}
 {/snippet}
 
 <span class="host" bind:this={host}>
@@ -177,15 +182,16 @@
 </span>
 
 <style>
-  /* The magnifier's place, a press target a little larger than it. */
+  /* The magnifier's place, a press target a little larger than it; with a
+     place named, a chevron beside the mark says it opens. */
   :global(.engine) {
-    display: grid;
+    display: flex;
     flex: none;
-    place-items: center;
-    inline-size: 28px;
-    block-size: 28px;
-    margin-inline: -6px;
-    padding: 0;
+    align-items: center;
+    min-inline-size: 30px;
+    block-size: 30px;
+    margin-inline: -6px -4px;
+    padding-inline: 6px;
     border: 0;
     border-radius: var(--radius-inset);
     background: transparent;
@@ -219,10 +225,23 @@
     place-items: center;
   }
 
+  .chevron {
+    display: grid;
+    padding-inline-start: 3px;
+    place-items: center;
+    color: var(--color-faint);
+    transition: color var(--motion-instant) var(--ease-smooth);
+  }
+
+  :global(.engine:hover) .chevron,
+  :global(.engine[data-state="open"]) .chevron {
+    color: var(--color-muted);
+  }
+
   /* It opens over the page's sky, which no trace of should read through. */
   :global(.engine-menu) {
     background: color-mix(in srgb, var(--color-float) 98%, transparent);
     backdrop-filter: blur(30px) saturate(1.4);
-    max-block-size: min(420px, var(--bits-dropdown-menu-content-available-height, 420px));
+    max-block-size: min(360px, var(--bits-dropdown-menu-content-available-height, 360px));
   }
 </style>

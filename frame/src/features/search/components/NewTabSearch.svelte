@@ -268,7 +268,7 @@
     box-shadow: none;
   }
 
-  .dock .bar :global(.ui-search[data-size] svg) {
+  .dock .bar :global(.ui-search[data-size] > svg) {
     inline-size: 16px;
     block-size: 16px;
   }

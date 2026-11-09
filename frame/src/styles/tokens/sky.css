@@ -62,7 +62,7 @@
   --sky-name: var(--sky-night-name);
   --sky-glint: rgb(255 255 255);
   --sky-day-lip: rgb(236 244 255 / 34%);
-  --sky-night-lip: rgb(176 196 238 / 30%);
+  --sky-night-lip: rgb(196 210 232 / 28%);
 
   /* Where the picture meets the page's sides: by day it softens into haze,
      by night into the deep of the sky. */
@@ -79,9 +79,9 @@
   --sky-day-card: rgb(255 255 255 / 64%);
   --sky-day-card-rim: rgb(255 255 255 / 90%);
   --sky-day-card-edge: rgb(255 255 255 / 70%);
-  --sky-night-card: rgb(8 22 42 / 64%);
-  --sky-night-card-rim: rgb(176 196 238 / 26%);
-  --sky-night-card-edge: rgb(176 196 238 / 14%);
+  --sky-night-card: rgb(20 30 44 / 68%);
+  --sky-night-card-rim: rgb(200 212 232 / 22%);
+  --sky-night-card-edge: rgb(200 212 232 / 13%);
 
   /* Ink on a control filled with the sky's ink. */
   --sky-on-ink: var(--sky-night-on-ink);

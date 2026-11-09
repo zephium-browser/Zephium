@@ -188,8 +188,8 @@
     "trigger": "bang"
   },
   {
-    "input": "dog !so",
-    "shortcut": "stackoverflow",
+    "input": "dog !gh",
+    "shortcut": "github",
     "query": "dog",
     "trigger": "bang"
   },

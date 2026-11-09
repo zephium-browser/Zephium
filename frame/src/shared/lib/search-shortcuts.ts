@@ -102,13 +102,10 @@ export function shortcutFor<T extends Shortcut>(input: string, shortcuts: readon
   return null;
 }
 
-/** How a shortcut is typed: its first keyword that works before a space, else
- *  its first as a bang. */
-export function shortcutKeyword(shortcut: Shortcut, shortcuts: readonly Shortcut[]): string {
-  const keyword = shortcut.keywords.find(
-    (key) => shortcutPrefix(`${key} x`, shortcuts)?.shortcut.id === shortcut.id,
-  );
-  return keyword ?? `!${shortcut.keywords[0] ?? ""}`;
+/** How a shortcut is offered: as a bang on its first keyword, which reaches
+ *  it from anywhere in a query, so every one is typed the same way. */
+export function shortcutKeyword(shortcut: Shortcut): string {
+  return `!${shortcut.keywords[0] ?? ""}`;
 }
 
 /** The query with whatever shortcut it named taken out, and `keyword` put in
