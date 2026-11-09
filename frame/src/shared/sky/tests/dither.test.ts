@@ -1,14 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  dotSize,
-  edgeLight,
-  frameFor,
-  INKS,
-  paperOf,
-  pictureOf,
-  printSky,
-  swatchesOf,
-} from "../dither";
+import { dotSize, edgeLight, frameFor, INKS, paperOf, pictureOf, printSky } from "../dither";
 
 const flat = (rgb: readonly number[], width = 8, height = 8) => {
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -48,13 +39,17 @@ describe("printSky", () => {
     return seen;
   };
 
-  it("prints only the ink's shades, screening between the two either side of the light", () => {
-    const rgba = new Uint8ClampedArray(64 * 64 * 4);
-    for (let i = 0; i < rgba.length; i += 4) rgba.fill((i / 4) % 256, i, i + 3);
-    const out = print(pictureOf(rgba, 64, 64), frame(40, 40, 40), "night");
-    const shades = new Set(swatchesOf(INKS.night).map((rgb) => rgb.join()));
-    for (const colour of colours(out)) expect(shades.has(colour)).toBe(true);
-    expect(colours(print(flat([128, 128, 128]), frame(40, 40, 40), "night")).size).toBe(2);
+  it("keeps the picture's own colour, screening its light between two steps", () => {
+    for (const scene of ["day", "night"] as const) {
+      const out = print(flat([60, 110, 190]), frame(40, 40, 40), scene);
+      const seen = colours(out);
+      expect(seen.size).toBe(2);
+      for (const colour of seen) {
+        const [r, g, b] = colour.split(",").map(Number) as [number, number, number];
+        expect(r / b).toBeCloseTo(60 / 190, 1);
+        expect(g / b).toBeCloseTo(110 / 190, 1);
+      }
+    }
   });
 
   it("ends in the paper exactly, with no screen left in it", () => {

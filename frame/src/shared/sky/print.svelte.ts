@@ -49,7 +49,7 @@ const FROSTING: Record<
   { flatten: number; veil: readonly [number, number, number, number] }
 > = {
   day: { flatten: 0.5, veil: [255, 255, 255, 0.25] },
-  night: { flatten: 0.3, veil: [14, 15, 19, 0.26] },
+  night: { flatten: 0.3, veil: [10, 30, 54, 0.26] },
 };
 
 let frosts = $state.raw<Partial<Record<Scene, string>>>({});
