@@ -71,8 +71,14 @@ impl StartupProblem {
             Self::DamagedProfile
         } else if error.contains("database is locked") {
             Self::ProfileInUse
-        } else if (cfg!(target_os = "windows")
-            && (error.contains("(os error 32)") || error.contains("(os error 33)")))
+        } else if (cfg!(target_os = "windows") && error.contains("(os error 32)"))
+            || (error.contains("(os error 33)")
+                && [
+                    "privileged runtime lifecycle lock: ",
+                    "private runtime lifecycle lock: ",
+                ]
+                .iter()
+                .any(|operation| error.contains(operation)))
             || (cfg!(target_os = "macos") && error.contains("(os error 35)"))
         {
             Self::StillClosing
@@ -416,6 +422,32 @@ mod tests {
             StartupProblem::classify("unrelated error (os error 330)"),
             StartupProblem::Other
         );
+    }
+
+    #[test]
+    fn lock_violation_is_still_closing_only_for_lifecycle_locks() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            let error = format!("{operation}: locked byte range (os error 33)");
+            let problem = StartupProblem::classify(&error);
+            assert_eq!(problem, StartupProblem::StillClosing);
+            assert!(!problem.offers_log());
+        }
+        for error in [
+            "write generation marker: locked byte range (os error 33)",
+            "write settings: locked byte range (os error 33)",
+            "unrelated lifecycle lock: locked byte range (os error 33)",
+            "private runtime lifecycle lock: unrelated error (os error 330)",
+        ] {
+            let problem = StartupProblem::classify(error);
+            assert_eq!(problem, StartupProblem::Other, "{error}");
+            assert!(problem.offers_log());
+            let message = problem.message_with_log(error, Some(Path::new("logs")));
+            assert!(message.contains(error));
+            assert!(message.contains("A log of what happened is kept in:\nlogs"));
+        }
     }
 
     #[test]
