@@ -237,6 +237,9 @@
   let aside = $state<HTMLElement>();
   let peeking = $state(false);
   let atEdge = false;
+  /** Native follows the pointer over the card too, which the card's own
+   *  events miss while another app has the keyboard. */
+  let overCard = false;
   /** Windows cannot blend the chrome over a page, so it cuts the chrome to
    *  the card, and the cut follows the card as it slides: a little behind it
    *  on the way in and a little ahead on the way out, so nothing past the
@@ -301,7 +304,7 @@
     const settling = Math.max(0, opened + SETTLE_MS - performance.now());
     linger = setTimeout(
       () => {
-        if (pointerIn || atEdge || needed()) return;
+        if (pointerIn || atEdge || overCard || needed()) return;
         if (CUT_TO_CARD) {
           // The cut sets off first, so the card never runs past it.
           void commands.sidebarPeek(false, false, slides());
@@ -327,9 +330,10 @@
     const edge = (event: Event) => {
       if (!(event instanceof CustomEvent) || typeof event.detail?.near !== "boolean") return;
       atEdge = event.detail.near;
+      overCard = event.detail.over === true;
       if (!away) return;
       if (atEdge) peek();
-      else if (peeking && !pointerIn) release();
+      else if (peeking && !pointerIn && !overCard) release();
     };
     window.addEventListener("zephium:sidebar-edge", edge);
     return () => window.removeEventListener("zephium:sidebar-edge", edge);
@@ -472,6 +476,7 @@
     const out = () => {
       pointerIn = false;
       atEdge = false;
+      overCard = false;
       if (away && peeking) release();
     };
     document.documentElement.addEventListener("mouseleave", out);
@@ -620,7 +625,7 @@
     padding-inline: 8px;
     padding-block-end: 8px;
     border-radius: var(--content-radius);
-    background: var(--sidebar-card);
+    background: var(--sidebar-card-sky, none), var(--sidebar-card);
     box-shadow: var(--shadow-overlay);
     translate: calc(-100% - 24px) 0;
   }
@@ -664,7 +669,7 @@
     inset: 0;
     z-index: -1;
     border-radius: var(--content-radius);
-    background: var(--sidebar-card);
+    background: var(--sidebar-card-sky, none), var(--sidebar-card);
     pointer-events: none;
     transition: opacity var(--motion-page) var(--ease-out);
   }

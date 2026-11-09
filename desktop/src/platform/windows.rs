@@ -751,6 +751,12 @@ pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
     });
 }
 
+/// The column is this wide; the hidden sidebar's card stands round it.
+pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::column_width(&owner, width));
+}
+
 pub fn make_chrome(window: &WebviewWindow, _dispatch: MainThreadDispatch) -> SharedChrome {
     Arc::new(ChromeAdapter {
         window: window.clone(),

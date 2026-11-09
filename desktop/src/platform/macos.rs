@@ -687,7 +687,11 @@ pub fn sidebar_card_lights(window: &WebviewWindow, shown: bool) {
 
 /// Native has a new column width; a guide left at another edge goes off.
 pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
-    let _ = window.run_on_main_thread(move || sidebar_resize::column_width(width));
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        sidebar_resize::column_width(width);
+        sidebar_edge::column_width(&owner, width);
+    });
 }
 
 pub async fn configure_sidebar_resize(

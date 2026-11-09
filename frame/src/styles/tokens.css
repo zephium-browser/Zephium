@@ -398,6 +398,18 @@
   --sidebar-card-edge: rgb(255 255 255 / 0.14);
   --sidebar-card: var(--color-chrome);
 
+  /* Out over a page, the card keeps a breath of the new tab's sky: slate
+     from its head, thinning to nothing, and a little cloud light at its
+     foot. Painted once; sliding it is a transform. */
+  --sidebar-card-sky:
+    radial-gradient(130% 34% at 72% 106%, rgb(150 170 200 / 0.07), transparent 72%),
+    linear-gradient(
+      rgb(76 106 146 / 0.2),
+      rgb(58 84 118 / 0.1) 32%,
+      rgb(40 58 84 / 0.035) 62%,
+      transparent 88%
+    );
+
   /* A rim and one wide soft drop, and nothing else. Stacked or tight shadows
      read as weight pressing down rather than as height, which is what makes a
      floating panel look pasted on. The rim is what actually separates the
@@ -777,6 +789,14 @@
   --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --sidebar-card-edge: rgb(24 24 27 / 0.12);
   --sidebar-card: var(--color-chrome);
+  --sidebar-card-sky:
+    radial-gradient(130% 34% at 72% 106%, rgb(255 255 255 / 0.55), transparent 72%),
+    linear-gradient(
+      rgb(112 160 220 / 0.15),
+      rgb(146 186 234 / 0.075) 32%,
+      rgb(186 210 240 / 0.03) 62%,
+      transparent 88%
+    );
   --shadow-popover: var(--shadow-float);
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
   --shine: inset 0 1px 0 0 rgb(255 255 255 / 0.3);

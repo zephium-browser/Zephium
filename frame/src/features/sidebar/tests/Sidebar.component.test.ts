@@ -59,6 +59,21 @@ test.each(["ui-disclosure-panel", "capture"])("an open %s holds the card", async
   expect(aside.dataset.peek).toBe("true");
 });
 
+test("the card stays while native has the pointer over it, and goes when it leaves", async () => {
+  const aside = await peek();
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-edge", { detail: { near: false, over: true } }),
+  );
+  aside.dispatchEvent(new PointerEvent("pointerleave"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-edge", { detail: { near: false, over: false } }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBeUndefined();
+});
+
 test("attention still holds the card until released", async () => {
   const aside = await peek();
   const release = attention.hold();
