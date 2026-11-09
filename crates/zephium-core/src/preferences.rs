@@ -231,7 +231,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "ui.theme-contrast" => crate::theme::contrast_allowed(value),
         "tabs.new-position" => matches!(value, "end" | "after-current"),
         // Where a link handed over by another application opens.
-        "tabs.external-position" => matches!(value, "new-tab" | "end" | "after-current"),
+        "tabs.external-position" => {
+            matches!(value, "new-tab" | "end" | "after-current" | "little")
+        }
         // How long a Today tab may sit unused before it closes into History.
         "tabs.archive" => matches!(value, "never" | "12h" | "1d" | "7d"),
         "tabs.close-button" => matches!(value, "hover" | "always"),
@@ -597,7 +599,7 @@ mod tests {
         for value in ["", "0", "30d", "12 hours", "Never"] {
             assert!(!value_allowed("tabs.archive", value), "{value:?}");
         }
-        for value in ["new-tab", "end", "after-current"] {
+        for value in ["new-tab", "end", "after-current", "little"] {
             assert!(value_allowed("tabs.external-position", value));
         }
         assert!(!value_allowed("tabs.external-position", "window"));

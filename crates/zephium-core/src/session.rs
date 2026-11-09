@@ -294,8 +294,15 @@ pub fn restore(state: SessionState) -> Restored {
     let mut items = Items::default();
     let mut browser_tabs = HashSet::new();
     for i in state.items.into_iter().take(MAX_SESSION_ITEMS) {
-        let (Placement::Favorites { space } | Placement::Space { space, .. }) = i.placement;
-        if spaces.get(space).is_none() {
+        let placement_ok = match i.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                spaces.get(space).is_some()
+            }
+            // A Little window's page is never saved; one in a session came
+            // from somewhere else.
+            Placement::Little { .. } => false,
+        };
+        if !placement_ok {
             continue;
         }
         let kind = match i.kind {
@@ -431,11 +438,13 @@ fn item_in_space_scope(items: &Items, spaces: &Spaces, id: ItemId, space: SpaceI
     let Some(item) = items.get(id).filter(|item| item.tab().is_some()) else {
         return false;
     };
-    let (Placement::Favorites { space: item_space }
-    | Placement::Space {
-        space: item_space, ..
-    }) = item.placement;
-    item_space == space
+    match item.placement {
+        Placement::Favorites { space: item_space }
+        | Placement::Space {
+            space: item_space, ..
+        } => item_space == space,
+        Placement::Little { .. } => false,
+    }
 }
 
 fn valid_split_tree(tree: &Pane, items: &Items, spaces: &Spaces, space: SpaceId) -> bool {

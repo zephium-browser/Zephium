@@ -39,6 +39,7 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
       entries: [
         "browser.html",
         "panel.html",
+        "little.html",
         "onboarding.html",
         "src/**/*.svelte",
         "src/**/*.ts",

@@ -37,7 +37,8 @@ static CHROME_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT_CHROME_GENERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_PRIVILEGED_DELEGATE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CHROME_ORIGIN: Mutex<ChromeOrigin> = Mutex::new(ChromeOrigin::empty());
-const MAX_PRIVILEGED_UI_DELEGATES: usize = 2;
+/// Main chrome, the launcher, and one toolbar per Little window.
+const MAX_PRIVILEGED_UI_DELEGATES: usize = 2 + zephium_app::MAX_LITTLE_WINDOWS;
 
 struct ChromeViewState {
     generation: u64,
@@ -366,6 +367,52 @@ pub fn restart_content_process(window: &WebviewWindow) {
     });
 }
 
+/// Pins a Little window's toolbar WebView to the top `height` points of its
+/// window, so it never overlaps the page stage below it (the cursor-fight
+/// rule). AppKit keeps it there as the window resizes.
+pub fn fit_toolbar(window: &WebviewWindow, height: f64) -> bool {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let scheduled = window.with_webview(move |webview| {
+        use objc2_app_kit::NSAutoresizingMaskOptions as Mask;
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        // SAFETY: Tauri supplies a live WKWebView pointer for the duration
+        // of this main-thread callback.
+        let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+        let Some(superview) = (unsafe { webkit.superview() }) else {
+            let _ = send.send(false);
+            return;
+        };
+        let bounds = superview.bounds();
+        let frame = NSRect::new(
+            NSPoint::new(0.0, (bounds.size.height - height).max(0.0)),
+            NSSize::new(bounds.size.width, height.min(bounds.size.height)),
+        );
+        webkit.setTranslatesAutoresizingMaskIntoConstraints(true);
+        webkit.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewMinYMargin);
+        webkit.setFrame(frame);
+        let _ = send.send(true);
+    });
+    scheduled.is_ok() && receive.try_recv().unwrap_or(false)
+}
+
+/// The size of any window's content area in points, read from AppKit rather
+/// than from a WebView that may have been resized inside it.
+pub fn window_content_size(window: &WebviewWindow) -> Option<zephium_core::geometry::Size> {
+    MainThreadMarker::new()?;
+    let pointer = window.ns_window().ok()?;
+    if pointer.is_null() {
+        return None;
+    }
+    // SAFETY: Tauri returns the live NSWindow it owns; this runs on the main
+    // thread and only reads its content view's bounds.
+    let ns_window: &objc2_app_kit::NSWindow = unsafe { &*pointer.cast() };
+    let bounds = ns_window.contentView()?.bounds();
+    Some(zephium_core::geometry::Size::new(
+        bounds.size.width,
+        bounds.size.height,
+    ))
+}
+
 pub fn harden_privileged(window: &WebviewWindow) -> bool {
     let installed = Arc::new(AtomicU64::new(0));
     let completed = installed.clone();
@@ -535,6 +582,15 @@ impl PresentationChrome for ChromeAdapter {
         done: ChromePresentationCallback,
     ) -> ChromePresentationDispatch {
         crate::apply_chrome_presentation(&self.window, presentation, done)
+    }
+
+    fn apply_little_presentation(
+        &self,
+        window: u64,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::little::apply_presentation(self.window.app_handle(), window, presentation, done)
     }
 }
 

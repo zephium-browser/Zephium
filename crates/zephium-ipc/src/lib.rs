@@ -757,6 +757,8 @@ pub struct PanelState {
     pub seed: Option<String>,
     /// The tab whose address is being edited; it is no destination of its own.
     pub seed_tab: Option<String>,
+    /// An address chosen in this presentation opens in a new Little window.
+    pub little: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -1254,6 +1256,42 @@ pub enum WorkFolderAdmitV1 {
     Refused { not_a_folder: bool },
 }
 
+/// A Little window's chrome: its window and the one page in it, if any yet.
+/// The page's URL and title are untrusted and only ever shown as text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct LittleView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub tab: Option<TabView>,
+    /// Where "Open in Zephium" can put the page: its profile's spaces, in
+    /// sidebar order.
+    pub spaces: Vec<LittleSpaceView>,
+    /// The space "Open in Zephium" uses unless the person picks another.
+    pub space: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LittleSpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// The shell made a Little window; the desktop builds its native window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LittleOpenedView {
+    #[specta(type = f64)]
+    pub window: u64,
+}
+
+/// The shell let a Little window go. `reveal_main` brings the main window
+/// forward because the page just moved into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct LittleClosedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub reveal_main: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
@@ -1294,6 +1332,8 @@ pub enum OperationOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum OperationReason {
     MutationApplied,
+    /// The address went to a Little window, so the main window stays behind.
+    OpenedInLittle,
     StateUnchanged,
     InvalidScope,
     NoFocusedWindow,
@@ -1760,6 +1800,12 @@ pub enum Projection {
     RecentlyClosed(Vec<ClosedTabView>),
     /// The sidebar's player, sent when it changes; `None` hides it.
     MediaPlayer(Option<MediaPlayerView>),
+    LittleOpened(LittleOpenedView),
+    Little(LittleView),
+    LittleClosed(LittleClosedView),
+    /// Links another application handed over opened as tabs, so the main
+    /// window comes forward. A link that opened a Little window does not.
+    ExternalTabsOpened,
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.

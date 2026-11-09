@@ -23,6 +23,7 @@ import type {
   ImportJobView,
   ItemsChanged,
   KeymapChanged,
+  LittleView,
   LayoutChanged,
   MediaPlayerChanged,
   OperationProcessed,
@@ -41,6 +42,7 @@ import type {
 type PayloadEvent<T> = { payload: T };
 type Listener<T> = (event: PayloadEvent<T>) => void;
 type PresentationTab = { tab: TabChanged; active: string | null };
+type LittlePresentation = { tab: TabChanged };
 
 function scopedEvent<T>(name: string) {
   return {
@@ -65,6 +67,8 @@ export const nativeEventNames = {
   pageAssistChanged: "zephium:page-assist-changed",
   accountChanged: "zephium:account-changed",
   panelState: "zephium:panel-state",
+  little: "zephium:little",
+  littlePresentation: "zephium:little-presentation",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
@@ -122,6 +126,8 @@ export const events = {
   notesChanged: scopedEvent<NoteChanges>(nativeEventNames.notesChanged),
   downloadsChanged: scopedEvent<DownloadsChanged>(nativeEventNames.downloadsChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
+  little: scopedEvent<LittleView>(nativeEventNames.little),
+  littlePresentation: scopedEvent<LittlePresentation>(nativeEventNames.littlePresentation),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
     nativeEventNames.browserCredentialCapabilityChanged,
   ),

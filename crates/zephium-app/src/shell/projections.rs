@@ -401,6 +401,10 @@ impl Shell {
     }
 
     pub(super) fn project_tab(&self, id: ItemId) {
+        if let Some(window) = self.little_window_of(id) {
+            self.project_little(window);
+            return;
+        }
         if self
             .windows
             .focused()
@@ -446,7 +450,12 @@ impl Shell {
         }
     }
 
-    fn generic_tab_view(&self, id: ItemId, tab: &TabState, profile: Option<ProfileId>) -> TabView {
+    pub(super) fn generic_tab_view(
+        &self,
+        id: ItemId,
+        tab: &TabState,
+        profile: Option<ProfileId>,
+    ) -> TabView {
         let mut view = self.presentation_tab_view(id, tab, self.tab_icon(id, tab, profile));
         if self
             .presentation

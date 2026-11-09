@@ -3,7 +3,7 @@
 
 use url::Url;
 
-use crate::ids::{ItemId, SpaceId};
+use crate::ids::{ItemId, ProfileId, SpaceId};
 
 pub const MAX_PAGE_TITLE_CHARS: usize = 512;
 
@@ -99,8 +99,9 @@ pub enum SpaceSection {
     Today,
 }
 
-/// Where an item lives: a space's Essentials (`Favorites`), or a section of a
-/// space. Children of a folder share the folder's placement.
+/// Where an item lives: a space's Essentials (`Favorites`), a section of a
+/// space, or a Little window. Children of a folder share the folder's
+/// placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Placement {
     Favorites {
@@ -109,6 +110,12 @@ pub enum Placement {
     Space {
         space: SpaceId,
         section: SpaceSection,
+    },
+    /// The one page of a Little window: never in the sidebar, never saved
+    /// with the session, and out of every space's scope until it moves into
+    /// one.
+    Little {
+        profile: ProfileId,
     },
 }
 

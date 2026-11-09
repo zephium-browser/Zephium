@@ -97,6 +97,7 @@ mod linux_shortcut;
 mod linux_shortcut_portal;
 #[cfg(any(target_os = "linux", test))]
 mod linux_x11_shortcut;
+mod little;
 mod login_item;
 mod material;
 mod media;
@@ -1549,6 +1550,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 struct TabChanged(zephium_ipc::TabView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct LittleChanged(zephium_ipc::LittleView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct FaviconsChanged(zephium_ipc::FaviconsView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -2011,7 +2015,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             divider_grab,
             divider_drag,
             divider_release,
-            swipe::swipe_region
+            swipe::swipe_region,
+            little::little_ready,
+            little::little_action,
+            little::little_space_menu
         ])
         .events(collect_events![
             keymap::KeymapChanged,
@@ -2033,6 +2040,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
+            LittleChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionActionShortcut,
@@ -2424,6 +2432,9 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
         })
     {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
+        for label in little::labels(app) {
+            emit_to_privileged(app, &label, EVENT_UI, &id);
+        }
     }
 }
 
@@ -2533,6 +2544,10 @@ enum CallerPolicy {
     Main,
     Panel,
     Both,
+    /// A Little window's toolbar; the command acts on that window alone.
+    Little,
+    /// Any privileged chrome, for read-only appearance and language state.
+    AnyChrome,
 }
 
 // `WebviewWindow` is injected from Tauri's invoke message (and omitted by
@@ -2542,6 +2557,10 @@ fn caller_allowed(policy: CallerPolicy, label: &str) -> bool {
         CallerPolicy::Main => label == MAIN_LABEL,
         CallerPolicy::Panel => label == overlay::PANEL_LABEL,
         CallerPolicy::Both => matches!(label, MAIN_LABEL | overlay::PANEL_LABEL),
+        CallerPolicy::Little => little::window_of(label).is_some(),
+        CallerPolicy::AnyChrome => {
+            matches!(label, MAIN_LABEL | overlay::PANEL_LABEL) || little::window_of(label).is_some()
+        }
     }
 }
 
@@ -4108,6 +4127,14 @@ fn execute_command_or(
                 dispatch_operation(app, &shell, Command::ShowBrowserPage(page))
             });
     }
+    // Only macOS hosts Little windows; elsewhere the shell opens a new tab.
+    if id == "window.newLittle" && cfg!(target_os = "macos") {
+        return if overlay::request(app, |panel| panel.toggle_little()) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     if id == "launcher.toggle" {
         return if overlay::request(app, |panel| panel.toggle()) {
             accepted_ui_operation()
@@ -4317,6 +4344,7 @@ fn newtab_search(
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        little: false,
     });
     if accepted {
         search_providers::schedule(caller, app, shell.inner().clone(), query, context);
@@ -4382,6 +4410,7 @@ fn newtab_run(
             action,
             background: false,
             replace: None,
+            new_little: false,
         },
     )
 }
@@ -4400,16 +4429,18 @@ fn launcher_search(
     {
         return false;
     }
-    let Some(context) = app
-        .try_state::<overlay::Overlay>()
-        .and_then(|overlay| overlay.search_context(&request_id))
-    else {
+    let Some((context, little)) = app.try_state::<overlay::Overlay>().and_then(|overlay| {
+        overlay
+            .search_context(&request_id)
+            .map(|context| (context, overlay.little()))
+    }) else {
         diagnostic!("launcher: search refused outside a presented session");
         return false;
     };
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        little,
     });
     if !accepted {
         diagnostic!("launcher: search refused by a full actor queue");
@@ -4433,6 +4464,12 @@ fn launcher_run(
     {
         return rejected_operation();
     }
+    // Offered as a command, it turns this launcher into the one it opens.
+    if matches!(&action, zephium_ipc::SearchAction::RunCommand { id } if id == "window.newLittle")
+        && cfg!(target_os = "macos")
+    {
+        return execute_command(&app, "window.newLittle");
+    }
     let (Some(shell), Some(overlay), Some(ledger)) = (
         app.try_state::<Handle>(),
         app.try_state::<overlay::Overlay>(),
@@ -4451,7 +4488,9 @@ fn launcher_run(
     }
     // Only an address can be sent behind the current tab; every other action
     // is about where the user is going next.
-    let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    let background = background
+        && !overlay.little()
+        && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
     // Armed before either path runs, so one action at a time reaches the
     // launcher's outcome, wherever it is carried out.
     if !overlay.arm_action(&operation_id, &context, background) {
@@ -4555,6 +4594,7 @@ fn run_in_shell(
             action,
             background,
             replace: overlay.editing_tab(),
+            new_little: overlay.little(),
         },
     );
     if !accepted {
@@ -4571,7 +4611,7 @@ struct UiInfo {
 #[tauri::command]
 #[specta::specta]
 fn ui_info(caller: WebviewWindow) -> UiInfo {
-    if !authorize(&caller, CallerPolicy::Both, "ui_info") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "ui_info") {
         return UiInfo {
             material: material::Material::None,
         };
@@ -5168,7 +5208,7 @@ fn focus_control(
 #[tauri::command]
 #[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
-    if !authorize(&caller, CallerPolicy::Both, "setting_get") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "setting_get") {
         return None;
     }
     if !SETTING_KEYS.contains(&key.as_str()) {
@@ -5649,7 +5689,7 @@ fn launcher_edit(
     {
         return false;
     }
-    overlay::request(&app, move |panel| panel.edit(tab_id, url))
+    overlay::request(&app, move |panel| panel.edit(tab_id, url, false))
 }
 
 #[tauri::command]
@@ -6003,7 +6043,12 @@ fn build_menu(
     let app_menu = app_menu.item(&build_quit_menu_item(handle)?).build()?;
     let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
-        .item(&item("window.newPrivate")?)
+        .item(&item("window.newPrivate")?);
+    // A File command's key on macOS is its menu key equivalent; only macOS
+    // hosts Little windows.
+    #[cfg(target_os = "macos")]
+    let file = file.item(&item("window.newLittle")?);
+    let file = file
         .item(&item("note.new")?)
         .item(&item("split.choose")?)
         .separator()
@@ -7286,7 +7331,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             install_menu_bar(&handle, &keymap, false)?;
             app.on_menu_event(|app, event| {
-                let _ = execute_command(app, event.id().0.as_str());
+                let id = event.id().0.as_str();
+                if !little::on_menu(app, id) {
+                    let _ = execute_command(app, id);
+                }
             });
             let keys_engine = engine.clone();
             app.state::<keymap::Keymap>()
@@ -7529,6 +7577,13 @@ pub fn run() {
                 Projection::MediaPlayer(player) => {
                     emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
                 }
+                Projection::LittleOpened(opened) => {
+                    external_links::forward_handled();
+                    little::open(&emit_handle, opened)
+                }
+                Projection::Little(view) => little::project(&emit_handle, &view),
+                Projection::LittleClosed(closed) => little::close(&emit_handle, closed),
+                Projection::ExternalTabsOpened => external_links::forward_pending(&emit_handle),
 
             });
 
@@ -7650,6 +7705,11 @@ pub fn run() {
             }
             #[cfg(feature = "work-product")]
             page_assist::install(app.handle(), engine.clone(), store.clone());
+            little::install(
+                app.handle(),
+                engine.clone(),
+                privileged_app_url(app, &tauri::WebviewUrl::App("little.html".into()))?,
+            );
             notes::install(app.handle(), &data_dir, store.clone(), &shell);
             external_links::adopt(app.handle());
             #[cfg(feature = "work-product")]
@@ -8630,6 +8690,7 @@ mod tests {
         for html in [
             crate::frame_sources::INDEX_HTML,
             crate::frame_sources::PANEL_HTML,
+            crate::frame_sources::LITTLE_HTML,
             crate::frame_sources::ONBOARDING_HTML,
         ] {
             assert!(
@@ -8640,6 +8701,7 @@ mod tests {
         for css in [
             include_str!("../../frame/src/styles/global.css"),
             include_str!("../../frame/src/styles/panel.css"),
+            include_str!("../../frame/src/styles/little.css"),
         ] {
             assert!(css.starts_with("@import \"./axes/bootstrap.css\";"));
         }

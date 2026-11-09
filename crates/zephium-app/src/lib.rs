@@ -85,7 +85,7 @@ pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};
 pub use api::AgentLifecycle;
 pub use api::{
     BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
-    Command, ContentPolicyStatusQueryOutcome, EmitFn, PagePermissionPromptDecision,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, LittleAction, PagePermissionPromptDecision,
     PageRequestDecision, PresentationChrome, SharedBlocker, SharedChrome, SharedEngine,
     SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
@@ -94,7 +94,10 @@ pub use lookup::{NoteMatch, TaskMatch};
 pub use onboarding::{finish_onboarding, onboarding_due};
 #[cfg(feature = "work-planning")]
 pub mod work_context;
-pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
+pub use shell::{
+    Shell, WebExtensionStatus, WebExtensionTarget, LITTLE_TOOLBAR_HEIGHT, LITTLE_WINDOW_SIZE,
+    MAX_LITTLE_WINDOWS,
+};
 
 #[doc(hidden)]
 pub use store_reads::{ImportWork, ImportedSite, StoreReadResult};

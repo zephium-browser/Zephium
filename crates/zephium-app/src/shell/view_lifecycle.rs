@@ -482,6 +482,7 @@ impl Shell {
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
     pub(super) fn maintain_views(&mut self) -> bool {
+        self.prune_little_windows();
         self.crash
             .crashes
             .retain(|id, _| self.items.tab(*id).is_some());
@@ -502,7 +503,7 @@ impl Shell {
             .capacity_blocked
             .retain(|id, _| self.items.tab(*id).is_some_and(|tab| !tab.has_view()));
         self.retry_capacity_requests();
-        let shown: std::collections::HashSet<ItemId> = if self.window_visible {
+        let mut shown: std::collections::HashSet<ItemId> = if self.window_visible {
             let mut shown: std::collections::HashSet<ItemId> = self
                 .visible_tree()
                 .map(|t| t.tabs().into_iter().collect())
@@ -523,6 +524,9 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
+        // A Little window is its own window: the main one being minimized
+        // does not hide its page.
+        shown.extend(self.little_pages());
         self.residency
             .recent
             .retain(|id| self.items.tab(*id).is_some());
@@ -763,7 +767,7 @@ impl Shell {
     }
 
     pub(super) fn discard_protected_leaves(&self) -> std::collections::HashSet<ItemId> {
-        let mut protected = std::collections::HashSet::new();
+        let mut protected: std::collections::HashSet<ItemId> = self.little_pages().collect();
         let Some(window) = self.windows.focused() else {
             return protected;
         };

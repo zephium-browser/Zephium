@@ -48,8 +48,14 @@ pub(crate) fn spread(
     let mut unplaced = Vec::new();
     let known: std::collections::HashSet<SpaceId> = spaces.iter().map(|space| space.id).collect();
     for item in items {
-        let (Placement::Favorites { space } | Placement::Space { space, .. }) = item.placement;
-        if known.contains(&space) {
+        let placed = match item.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                known.contains(&space)
+            }
+            // A Little window's page is never saved.
+            Placement::Little { .. } => false,
+        };
+        if placed {
             by_placement.entry(item.placement).or_default().push(item);
         } else {
             unplaced.push(item);

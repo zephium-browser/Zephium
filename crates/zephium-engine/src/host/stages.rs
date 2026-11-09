@@ -267,7 +267,11 @@ impl EngineHost {
             }
             return applied;
         };
-        if !stage_set_frame(&stage, &self.parent, r, motion) {
+        let Some(parent) = self.parent_for(window) else {
+            stage.abort_content_update(update_epoch);
+            return false;
+        };
+        if !stage_set_frame(&stage, parent, r, motion) {
             stage.abort_content_update(update_epoch);
             return false;
         }
@@ -287,6 +291,17 @@ impl EngineHost {
             };
             let mut inserted = false;
             if !stage.has_view(*id) {
+                // A page moving between windows, as a Little window's page
+                // does when it opens in the main window, leaves its old stage
+                // first so no two stages ever claim one native view.
+                for (other, previous) in &self.stages {
+                    if *other != window && previous.has_view(*id) {
+                        previous.remove_view(*id);
+                    }
+                }
+                if !stage.content_update_is_current(update_epoch) {
+                    return !stage.has_terminal_failure();
+                }
                 if let Some(native_view) = webview_nsview(view) {
                     if !stage.insert_view(*id, native_view, view.presentation_permit.clone()) {
                         stage.abort_content_update(update_epoch);
@@ -584,7 +599,7 @@ impl EngineHost {
             return Some(stage.clone());
         }
         let mtm = MainThreadMarker::new()?;
-        let content = content_view(&self.parent)?;
+        let content = content_view(self.parent_for(window)?)?;
         let native_terminal_failure = self.native_terminal_failure.clone();
         let stage = ContentStage::new(
             mtm,
@@ -611,6 +626,51 @@ impl EngineHost {
         stage.cover_pointer();
         self.stages.insert(window, stage.clone());
         Some(stage)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl EngineHost {
+    /// `None` for a window already released: a late layout for it must not
+    /// build a stage in the main window instead.
+    fn parent_for(&self, window: WindowId) -> Option<&ParentHandle> {
+        match self.window_parents.get(&window) {
+            Some(parent) => parent.as_ref(),
+            None => Some(&self.parent),
+        }
+    }
+
+    /// Gives `window` its own native window. Its stage is built inside that
+    /// window's content view on its first layout.
+    pub(crate) fn attach_window(&mut self, window: WindowId, handle: RawWindowHandle) -> bool {
+        if self.window_parents.contains_key(&window) || self.stages.contains_key(&window) {
+            return false;
+        }
+        if !matches!(handle, RawWindowHandle::AppKit(_)) {
+            return false;
+        }
+        self.window_parents
+            .insert(window, Some(ParentHandle(handle)));
+        true
+    }
+
+    /// Retires the stage of a window that is going away. A page still on it
+    /// leaves with the stage and joins another window on its next layout.
+    pub(crate) fn release_window(&mut self, window: WindowId) {
+        if !self
+            .window_parents
+            .get(&window)
+            .is_some_and(Option::is_some)
+        {
+            return;
+        }
+        if let Some(stage) = self.stages.remove(&window) {
+            for id in stage.attached_items().unwrap_or_default() {
+                stage.remove_view(id);
+            }
+            stage.retire();
+        }
+        self.window_parents.insert(window, None);
     }
 }
 

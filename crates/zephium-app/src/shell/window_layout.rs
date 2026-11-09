@@ -32,8 +32,15 @@ impl Shell {
     }
 
     /// A relayout that is one step of a deliberate change of shape, which
-    /// the chrome and the content carry out as a journey.
+    /// the chrome and the content carry out as a journey. Little windows lay
+    /// out with it, since what changed may be their page.
     pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
+        let main = self.relayout_main_with(travel);
+        self.relayout_little_windows();
+        main
+    }
+
+    fn relayout_main_with(&self, travel: bool) -> NativeDispatch {
         let filling = self.window_filling_fullscreen();
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;

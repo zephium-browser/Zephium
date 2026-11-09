@@ -8,6 +8,7 @@ const TITLES: Record<string, () => string> = {
   "browser.settings": m.command_browser_settings,
   "tab.new": m.command_tab_new,
   "window.newPrivate": m.command_window_new_private,
+  "window.newLittle": m.command_window_new_little,
   "window.closePrivate": m.command_window_close_private,
   "window.togglePrivate": m.command_window_toggle_private,
   "window.showRegular": m.command_window_show_regular,

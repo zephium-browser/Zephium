@@ -20,6 +20,9 @@ pub struct Model {
     pub error: bool,
     /// The tab whose address this presentation edits, and that address.
     editing: Option<(String, String)>,
+    /// This presentation chooses a page for a Little window: a new one, or
+    /// the one whose address it edits.
+    little: bool,
 }
 impl Model {
     pub fn session(&self) -> String {
@@ -28,6 +31,10 @@ impl Model {
     /// The tab whose address this presentation edits.
     pub fn editing_tab(&self) -> Option<String> {
         self.editing.as_ref().map(|(tab, _)| tab.clone())
+    }
+    /// Whether this presentation chooses a page for a Little window.
+    pub fn little(&self) -> bool {
+        self.little
     }
     pub fn snapshot(&self) -> PanelState {
         PanelState {
@@ -42,6 +49,7 @@ impl Model {
             corner_radius: RADIUS,
             seed: self.editing.as_ref().map(|(_, url)| url.clone()),
             seed_tab: self.editing_tab(),
+            little: self.little,
         }
     }
     pub fn reject(&mut self) {
@@ -86,6 +94,12 @@ impl Model {
         self.presented = true;
         self.error = false;
         self.editing = None;
+        self.little = false;
+    }
+    /// Opens to choose the address of a new Little window.
+    pub fn search_little(&mut self) {
+        self.search();
+        self.little = self.presented;
     }
     /// Opens on a tab's address, so a chosen result replaces that tab's page.
     pub fn edit(&mut self, tab: String, url: String) {
@@ -94,6 +108,11 @@ impl Model {
             self.editing = Some((tab, url));
         }
     }
+    /// Opens on the address of a Little window's page.
+    pub fn edit_little(&mut self, tab: String, url: String) {
+        self.edit(tab, url);
+        self.little = self.presented;
+    }
     pub fn hide(&mut self) {
         if !self.advance() {
             return;
@@ -101,6 +120,7 @@ impl Model {
         self.presented = false;
         self.error = false;
         self.editing = None;
+        self.little = false;
     }
     /// A launcher is transient: it goes away when focus moves to the browser
     /// or to another application. An owned native surface, such as a menu or
@@ -213,6 +233,29 @@ mod tests {
         m.set_owner(Some(owner("two", "p", "s")));
         assert!(!m.admits(&request));
         assert!(!m.snapshot().visible);
+    }
+
+    #[test]
+    fn editing_a_little_page_is_a_little_presentation() {
+        let mut m = Model::default();
+        m.edit_little("tab".into(), "https://example.com/".into());
+        assert!(m.presented && m.little() && m.editing_tab().is_some());
+        m.edit("tab".into(), "https://example.com/".into());
+        assert!(m.presented && !m.little());
+    }
+    #[test]
+    fn a_little_presentation_ends_with_its_session() {
+        let mut m = Model::default();
+        m.search_little();
+        assert!(m.presented && m.little() && m.snapshot().little);
+        m.hide();
+        assert!(!m.little());
+        m.search_little();
+        m.search();
+        assert!(m.presented && !m.little());
+        m.search_little();
+        m.edit("tab".into(), "https://example.com/".into());
+        assert!(!m.little());
     }
 
     #[test]

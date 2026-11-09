@@ -12,6 +12,7 @@ const snapshot = (revision: string): PanelState => ({
   error: false,
   seed: null,
   seed_tab: null,
+  little: false,
   corner_radius: 20,
 });
 describe("panel presentation and search identity", () => {

@@ -1782,6 +1782,19 @@ impl WebviewEngine {
         });
     }
 
+    /// Gives `window` its own native window, such as a Little window, on the
+    /// main thread before its first layout. `false` leaves it without one.
+    #[cfg(target_os = "macos")]
+    pub fn attach_window(&self, window: WindowId, handle: RawWindowHandle) -> bool {
+        if objc2_foundation::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let result = attached.clone();
+        host::try_with(move |host| result.set(host.attach_window(window, handle)));
+        attached.get()
+    }
+
     /// Installs the profile-scoped download service before raw views are made.
     pub fn initialize_downloads(
         &self,
@@ -3228,6 +3241,28 @@ impl Engine for WebviewEngine {
                 }
                 NativeDispatch::from_scheduled(scheduled)
             }
+        }
+    }
+
+    fn hosts_little_windows(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            self.stage_motion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&window);
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| host.release_window(window));
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            NativeDispatch::Unsupported
         }
     }
 

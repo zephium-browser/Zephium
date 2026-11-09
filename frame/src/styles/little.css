@@ -1,0 +1,77 @@
+@import "./axes/bootstrap.css";
+@import "tailwindcss" source(none);
+@import "./tokens/primitive.css";
+@import "./tokens.css";
+@import "./axes/palette.css";
+@import "./axes/tint.css";
+@import "./axes/density.css";
+@import "./axes/contrast.css";
+@import "./axes/material.css";
+@import "./axes/motion.css";
+@import "./axes/type.css";
+@import "./controls.css";
+
+@source "../features/little";
+@source not "../features/little/tests";
+@source "../app/little/LittleApp.svelte";
+@source "../shared/ui/Icon/Icon.svelte";
+@source "../shared/ui/IconButton/IconButton.svelte";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+html {
+  color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  color: var(--color-text);
+  background: var(--color-canvas);
+  font-synthesis: none;
+  font-kerning: normal;
+  font-optical-sizing: auto;
+  text-rendering: optimizelegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: default;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+/* One toolbar row above the page: native fits this WebView to its height. */
+.little-root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+@media (forced-colors: active) {
+  body,
+  .little-root {
+    background: Canvas;
+    color: CanvasText;
+  }
+}

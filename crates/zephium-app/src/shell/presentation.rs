@@ -191,10 +191,44 @@ impl Shell {
         }
     }
 
+    /// The page in front of the chrome that presents `id`: the page itself in
+    /// a Little window, the focused window's active tab otherwise.
+    fn presentation_active(&self, id: ItemId) -> Option<ItemId> {
+        if self.little_window_of(id).is_some() {
+            return Some(id);
+        }
+        self.windows.focused().and_then(|window| window.active)
+    }
+
+    /// A Little window's page is verified by that window's own toolbar.
+    fn dispatch_chrome_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        match self.little_window_of(presentation.id) {
+            Some(window) => self
+                .chrome
+                .apply_little_presentation(window, presentation, done),
+            None => self.chrome.apply_tab_for_presentation(presentation, done),
+        }
+    }
+
+    fn emit_presented_tab(&self, id: ItemId, tab: TabView) {
+        match self.little_window_of(id) {
+            Some(window) => (self.emit)(Projection::Little(self.little_view(window, Some(tab)))),
+            None => (self.emit)(Projection::Tab(tab)),
+        }
+    }
+
     /// Applies the exact tab projection inside privileged chrome and waits for
     /// its eval callback before allowing the raw child to reveal. This method
     /// never blocks the shell actor or a native UI thread.
-    fn request_chrome_presentation(&mut self, id: ItemId, navigation: NavigationPresentationId) {
+    pub(super) fn request_chrome_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) {
         let Some(pending) = self
             .presentation
             .pending_presentations
@@ -234,10 +268,10 @@ impl Shell {
         self.record_tab_projection_revision(id, &projection_revision);
         self.remember_tab_view(id, &projection);
         self.publish_icons();
-        let active = self.windows.focused().and_then(|window| window.active);
+        let active = self.presentation_active(id);
         let Some(queue) = self.self_queue.clone() else {
             let synchronous_projection = projection.clone();
-            let dispatch = self.chrome.apply_tab_for_presentation(
+            let dispatch = self.dispatch_chrome_presentation(
                 ChromePresentation {
                     settings_visible: self.active_browser_page()
                         == Some(crate::BrowserPage::Settings),
@@ -253,7 +287,7 @@ impl Shell {
                 // A synchronous adapter already applied this exact revision;
                 // mirror it to non-chrome projection observers afterward.
                 // Privileged chrome ignores the equal-revision duplicate.
-                (self.emit)(Projection::Tab(synchronous_projection));
+                self.emit_presented_tab(id, synchronous_projection);
                 self.on_chrome_presentation_applied(
                     id,
                     navigation,
@@ -286,7 +320,7 @@ impl Shell {
             current.chrome_request_in_flight = true;
         }
         let synchronous_projection = projection.clone();
-        let dispatch = self.chrome.apply_tab_for_presentation(
+        let dispatch = self.dispatch_chrome_presentation(
             ChromePresentation {
                 settings_visible: self.active_browser_page() == Some(crate::BrowserPage::Settings),
                 id,
@@ -308,7 +342,7 @@ impl Shell {
         );
         match dispatch {
             ChromePresentationDispatch::Applied => {
-                (self.emit)(Projection::Tab(synchronous_projection));
+                self.emit_presented_tab(id, synchronous_projection);
                 self.on_chrome_presentation_applied(
                     id,
                     navigation,
@@ -365,7 +399,7 @@ impl Shell {
             .last_tab_projection_revision
             .try_borrow()
             .is_ok_and(|revisions| revisions.get(&id) == Some(&projection_revision));
-        let active_exact = self.windows.focused().and_then(|window| window.active) == active;
+        let active_exact = self.presentation_active(id) == active;
         if !revision_exact || !active_exact {
             // The original exact timer remains armed. It will clear the
             // in-flight bit and issue a newer projection; this stale callback

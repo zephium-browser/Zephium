@@ -76,6 +76,19 @@ Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
 `platform/` and `host/` modules, with application policy expressed through ports.
 
+**Little windows (macOS).** With `tabs.external-position = little`, a link from
+another app opens in its own small window. `window.newLittle` opens the launcher
+in Little mode: an address chosen there opens a window, and no window exists
+until then. `url.focus` in a Little window opens the launcher on that page's
+address, and an address chosen replaces the page. Both offer only sites: an open
+tab's row loads its address and leaves the tab in place, and blank tabs,
+commands, notes, destinations and task capture are absent. A private session in
+front keeps the normal launcher rows. The page is `Placement::Little`: out of the
+sidebar, never saved, kept awake while its window is open. Each window is
+`little-<id>` with its own toolbar (`frame/little.html`); the engine moves the
+page's stage into that window. Windows has no Little windows: links open as tabs
+and the command opens a tab.
+
 ## 4. State, commands, and IPC
 
 The typical path is:

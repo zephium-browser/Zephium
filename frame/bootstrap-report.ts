@@ -10,7 +10,7 @@ import type { Plugin } from "vite";
 const BUDGETS = new URL("./bundle-budgets.json", import.meta.url);
 
 /** A page native loads into a privileged WebView. */
-export type Page = "browser" | "panel" | "onboarding";
+export type Page = "browser" | "panel" | "little" | "onboarding";
 
 /** Inspect emitted graphs: source folders alone cannot guarantee startup isolation. */
 export function bootstrapReport(pages: readonly Page[]): Plugin {
@@ -79,10 +79,10 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
           surface: false,
         });
       }
-      const panel = roots.find((root) => root.name === "panel");
-      // The launcher's WebView is resident all day. Anything it can load
-      // at all, not just at startup, is paid again on top of the browser's
-      // copy, so an editor or a tool view must be unreachable from it.
+      // The launcher's WebView is resident all day, and a Little window's
+      // toolbar lives as long as its page. Anything either can load at all,
+      // not just at startup, is paid again on top of the browser's copy, so
+      // an editor or a tool view must be unreachable from them.
       const reachable = new Set<string>();
       const reach = (file: string) => {
         if (reachable.has(file)) return;
@@ -94,10 +94,11 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
             /\/(?:@tiptap|prosemirror-[a-z]+|@xyflow|layerchart)\//u.test(id) ||
             /\/src\/features\/(?:notes|tools|work|history|downloads)\//u.test(id)
           )
-            this.error(`Panel can load ${id}, which the browser already hosts`);
+            this.error(`A side window can load ${id}, which the browser already hosts`);
         for (const child of [...item.imports, ...item.dynamicImports]) reach(child);
       };
-      if (panel) reach(panel.file);
+      for (const root of roots)
+        if (root.name === "panel" || root.name === "little") reach(root.file);
       // A first run has its own page and build; nothing of it may be loadable
       // from the browser, eagerly or lazily, so no later launch carries it.
       const browser = roots.find((root) => root.name === "browser");
@@ -162,8 +163,8 @@ export function bootstrapReport(pages: readonly Page[]): Plugin {
               "src/session/tool-drafts.svelte.ts",
             ].includes(id),
         );
-        if (name === "panel" && forbidden.length)
-          this.error(`Panel eagerly loads browser/tool code: ${forbidden.join(", ")}`);
+        if ((name === "panel" || name === "little") && forbidden.length)
+          this.error(`${name} eagerly loads browser/tool code: ${forbidden.join(", ")}`);
 
         graphs.set(name, { visited, css });
         const js = bytes(visited);
