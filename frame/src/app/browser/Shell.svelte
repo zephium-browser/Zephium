@@ -92,6 +92,10 @@
     handleNativeSection("settings.section.account");
     void browserPage.open("settings");
   }
+  function openSearchSettings() {
+    handleNativeSection("settings.section.search");
+    void browserPage.open("settings");
+  }
   function openAbout() {
     handleNativeSection("settings.section.about");
     void browserPage.open("settings");
@@ -577,6 +581,7 @@
                           tabId={tabs.activeId()}
                           profile={tabs.profile()}
                           {loadMenu}
+                          onsettings={openSearchSettings}
                         />{/snippet}</LazyView
                     >{/key}{/snippet}</NewTab
               >{/snippet}</LazyView

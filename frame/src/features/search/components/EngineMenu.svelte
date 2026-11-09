@@ -1,14 +1,21 @@
 <script lang="ts">
   import { scale, slide } from "svelte/transition";
   import { backOut } from "svelte/easing";
-  import { ArrowDown01Icon, Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import {
+    ArrowDown01Icon,
+    FlashIcon,
+    Globe02Icon,
+    Search01Icon,
+    Settings02Icon,
+  } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
-  import { commands, type SearchShortcut } from "$shared/ipc/bindings";
+  import type { SearchShortcut } from "$shared/ipc/bindings";
   import { preferences } from "$domain/preferences";
   import { favicons } from "$domain/favicons";
   import type { MenuEntry } from "$shared/ui/Menu";
   import Icon from "$shared/ui/Icon";
   import FavIcon from "$shared/ui/FavIcon";
+  import EngineMark, { engineMarkUrl } from "$shared/ui/EngineMark";
   import { reducedMotion } from "$shared/lib/motion";
   import { shortcutFor, shortcutKeyword, withShortcut } from "$shared/lib/search-shortcuts";
 
@@ -21,7 +28,10 @@
     loadMenu,
     size = 18,
     onpick,
+    onsettings,
   }: {
+    /** Opens where the shortcuts are kept, when the page offers it. */
+    onsettings?: () => void;
     /** Whose icons to ask for; a private window asks for none. */
     profile: { id: string; kind: string } | null;
     /** The menu, loaded by whoever composes the page, so its machinery stays
@@ -69,27 +79,43 @@
 
   // The marks of every place a search can go are asked for once, where the
   // profile keeps what it sees; a private window probes nothing.
-  let asked = "";
   $effect(() => {
-    if (!profile || profile.kind === "incognito") return;
-    const origins = [
-      ...new Set(
-        shortcuts.filter((entry) => entry.enabled).map((entry) => new URL(entry.home_url).origin),
-      ),
-    ];
-    const key = `${profile.id} ${origins.join(" ")}`;
-    if (!origins.length || key === asked) return;
-    asked = key;
-    void commands.faviconProbe(profile.id, origins).catch(() => {});
+    favicons.probe(
+      profile,
+      shortcuts.filter((entry) => entry.enabled).map((entry) => entry.home_url),
+    );
   });
 
+  // The engines first, each with its own mark; the shortcuts open beside
+  // them, so the menu stays as short as the choice it mostly is.
   let entries = $derived.by<MenuEntry[]>(() => {
-    const site = (entry: SearchShortcut) => {
-      const mark = markOf(entry);
-      return { image: mark?.image ?? null, tone: mark?.tone };
-    };
     const engines = shortcuts.filter((entry) => ENGINES.includes(entry.id));
     const others = shortcuts.filter((entry) => entry.enabled && !ENGINES.includes(entry.id));
+    const tail: MenuEntry[] = [];
+    if (others.length)
+      tail.push({
+        kind: "submenu",
+        label: m.search_menu_shortcuts(),
+        icon: FlashIcon,
+        entries: others.map((entry): MenuEntry => {
+          const mark = markOf(entry);
+          return {
+            kind: "item",
+            id: `shortcut:${entry.id}`,
+            label: entry.name,
+            icon: Globe02Icon,
+            site: { image: mark?.image ?? null, tone: mark?.tone },
+            hint: shortcutKeyword(entry),
+          };
+        }),
+      });
+    if (onsettings)
+      tail.push({
+        kind: "item",
+        id: "settings",
+        label: m.search_menu_edit(),
+        icon: Settings02Icon,
+      });
     return [
       { kind: "heading", label: m.search_menu_engines() },
       ...engines.map((entry): MenuEntry => ({
@@ -97,27 +123,15 @@
         id: `engine:${entry.id}`,
         label: entry.name,
         icon: Globe02Icon,
-        site: site(entry),
+        image: engineMarkUrl(entry.id),
         checked: entry.id === engine,
       })),
-      ...(others.length
-        ? [
-            { kind: "separator" } as const,
-            { kind: "heading", label: m.search_menu_shortcuts() } as const,
-          ]
-        : []),
-      ...others.map((entry): MenuEntry => ({
-        kind: "item",
-        id: `shortcut:${entry.id}`,
-        label: entry.name,
-        icon: Globe02Icon,
-        site: site(entry),
-        hint: shortcutKeyword(entry),
-      })),
+      ...(tail.length ? [{ kind: "separator" } as const, ...tail] : []),
     ];
   });
 
   function select(id: string) {
+    if (id === "settings") return onsettings?.();
     const [kind, value] = id.split(/:(.*)/su) as [string, string];
     if (kind === "engine") {
       void preferences.set("search.engine", value);
@@ -139,7 +153,10 @@
         in:scale={{ start: 0.55, duration: reducedMotion() ? 0 : 220, easing: backOut }}
         out:scale={{ start: 0.8, duration: reducedMotion() ? 0 : 120 }}
       >
-        {#if shown}<FavIcon
+        {#if shown && engineMarkUrl(shown.id)}<EngineMark
+            engine={shown.id}
+            {size}
+          />{:else if shown}<FavIcon
             image={markOf(shown)?.image ?? null}
             tone={markOf(shown)?.tone}
             {size}

@@ -38,24 +38,31 @@ afterEach(() => {
   native.stored = "";
 });
 
+async function addExample(screen: Awaited<ReturnType<typeof render>>, keyword: string) {
+  await userEvent.click(screen.getByRole("button", { name: "Add shortcut" }));
+  await userEvent.fill(screen.getByRole("textbox", { name: "Name", exact: true }), "Example");
+  await userEvent.fill(screen.getByRole("textbox", { name: "Keyword", exact: true }), keyword);
+  await userEvent.fill(
+    screen.getByRole("textbox", { name: "Search URL with {query}" }),
+    "https://example.com/?q={query}",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Add", exact: true }));
+}
+
 test("toggles, edits, adds, removes and resets persisted shortcuts", async () => {
   await preferences.init();
   const screen = await render(SearchShortcuts);
   await userEvent.click(screen.getByRole("switch", { name: "Enable YouTube" }));
   await expect.poll(() => preferences.searchShortcuts()[0]?.enabled).toBe(false);
-  const keyword = screen.getByRole("textbox", { name: "Keyword" }).nth(0);
+  // Switched off here, it stays in view.
+  await expect.element(screen.getByRole("switch", { name: "Enable YouTube" })).toBeVisible();
+  const keyword = screen.getByRole("textbox", { name: "Keyword, YouTube" });
   await userEvent.fill(keyword, "video");
-  await userEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+  await userEvent.keyboard("{Enter}");
   await expect.poll(() => preferences.searchShortcuts()[0]?.keywords).toEqual(["video"]);
-  await userEvent.fill(screen.getByRole("textbox", { name: "Name", exact: true }), "Example");
-  await userEvent.fill(screen.getByRole("textbox", { name: "Keyword" }).nth(1), "ex");
-  await userEvent.fill(
-    screen.getByRole("textbox", { name: "Search URL with {query}" }),
-    "https://example.com/?q={query}",
-  );
-  await userEvent.click(screen.getByRole("button", { name: "Add shortcut" }));
+  await addExample(screen, "ex");
   await expect.poll(() => preferences.searchShortcuts().length).toBe(2);
-  await userEvent.click(screen.getByRole("button", { name: "Remove shortcut" }));
+  await userEvent.click(screen.getByRole("button", { name: "Remove shortcut, Example" }));
   await expect.poll(() => preferences.searchShortcuts().length).toBe(1);
   await userEvent.click(screen.getByRole("button", { name: "Reset shortcuts to defaults" }));
   await expect.poll(() => native.stored).toBe("");
@@ -65,13 +72,7 @@ test("toggles, edits, adds, removes and resets persisted shortcuts", async () =>
 test("duplicate keywords are refused without saving", async () => {
   await preferences.init();
   const screen = await render(SearchShortcuts);
-  await userEvent.fill(screen.getByRole("textbox", { name: "Name", exact: true }), "Example");
-  await userEvent.fill(screen.getByRole("textbox", { name: "Keyword" }).nth(1), "YT");
-  await userEvent.fill(
-    screen.getByRole("textbox", { name: "Search URL with {query}" }),
-    "https://example.com/?q={query}",
-  );
-  await userEvent.click(screen.getByRole("button", { name: "Add shortcut" }));
+  await addExample(screen, "YT");
   await expect.element(screen.getByRole("alert")).toBeVisible();
   expect(native.stored).toBe("");
 });

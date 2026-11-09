@@ -15,8 +15,10 @@
     tabId,
     profile = null,
     loadMenu,
+    onsettings,
     onactive,
   }: {
+    onsettings?: () => void;
     tabId: string | null;
     /** The window's profile, whose site icons the field's mark may ask for. */
     profile?: { id: string; kind: string } | null;
@@ -188,6 +190,7 @@
           awake={focused || active}
           {profile}
           {loadMenu}
+          {onsettings}
           onpick={picked}
         />{/snippet}
     </SearchField>

@@ -252,9 +252,13 @@
 
   /* Each card stands in a slot that also holds its close control, which
      shows over the page's corner while the pointer is on the card. */
+
+  /* Fixed, whatever the title: a long one ellipses inside its card. */
   .slot {
     position: relative;
     flex: 0 0 204px;
+    min-inline-size: 0;
+    inline-size: 204px;
   }
 
   .close {

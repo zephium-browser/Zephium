@@ -4,6 +4,7 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Select from "$shared/ui/Select";
+  import EngineMark from "$shared/ui/EngineMark";
   import Field from "$shared/ui/Field";
   import Button from "$shared/ui/Button";
   import Switch from "$shared/ui/Switch";
@@ -58,7 +59,9 @@
         { value: "custom", label: m.search_custom(), disabled: !saved },
       ]}
       onchange={(value) => void preferences.set("search.engine", value)}
-    />
+    >
+      {#snippet lead(value)}<EngineMark engine={value} />{/snippet}
+    </Select>
   </SettingsRow>
 
   <SettingsRow

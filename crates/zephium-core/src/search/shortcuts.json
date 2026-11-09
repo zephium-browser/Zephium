@@ -63,7 +63,7 @@
     "home_url": "https://kagi.com/",
     "domain": "kagi.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "perplexity",
@@ -142,7 +142,7 @@
     "home_url": "https://images.google.com/",
     "domain": "images.google.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "google-maps",
@@ -434,7 +434,7 @@
     "home_url": "https://open.spotify.com/",
     "domain": "open.spotify.com",
     "suggestions": null,
-    "enabled": true
+    "enabled": false
   },
   {
     "id": "startpage",

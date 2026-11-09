@@ -111,3 +111,23 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+
+/* A row that opens more beside it ends in a chevron, where a hint would. */
+.ui-menu-chevron {
+  display: grid;
+  flex: none;
+  place-items: center;
+  margin-inline: auto -2px;
+  padding-inline-start: 20px;
+  color: var(--color-faint);
+}
+
+.ui-menu-item[data-highlighted] .ui-menu-chevron,
+.ui-menu-item[data-state="open"] .ui-menu-chevron {
+  color: var(--color-muted);
+}
+
+.ui-menu-icon img {
+  display: block;
+  border-radius: 3px;
+}

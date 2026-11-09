@@ -126,3 +126,19 @@ test("a card's close control closes that tab and leaves the switcher open", asyn
     ]),
   );
 });
+
+test("every card keeps its width, however long its title", async () => {
+  const screen = await render(TabSwitcher, {
+    snapshot: {
+      ...state,
+      entries: state.entries.map((entry, index) => ({
+        ...entry,
+        title: index % 2 ? "A very long title ".repeat(12) : "Short",
+      })),
+    },
+  });
+  const widths = [...screen.container.querySelectorAll<HTMLElement>(".card")].map(
+    (card) => card.getBoundingClientRect().width,
+  );
+  expect(new Set(widths)).toEqual(new Set([204]));
+});

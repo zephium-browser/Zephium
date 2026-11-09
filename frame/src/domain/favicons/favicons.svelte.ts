@@ -2,6 +2,7 @@ import { SvelteMap } from "svelte/reactivity";
 import type { FaviconEntry, IconRef } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { createLifecycle, listenAll, type Unlisten } from "$shared/lib/lifecycle";
+import { forgetProbes } from "./probe";
 
 const SIDE = 32;
 const BYTE_LENGTH = SIDE * SIDE * 4;
@@ -135,6 +136,8 @@ export function mark(
   return url ? forPage(url) : null;
 }
 
+export { probe } from "./probe";
+
 export function tone(ref: IconRef | null | undefined): IconTone {
   if (!ref) return "mid";
   return rasters.get(refKey(ref.origin, ref.revision))?.tone ?? "mid";
@@ -172,6 +175,7 @@ export function dispose() {
   unlisten?.();
   unlisten = null;
   owner = null;
+  forgetProbes();
   rasters.clear();
   sites.clear();
 }
