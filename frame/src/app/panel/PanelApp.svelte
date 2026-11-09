@@ -4,7 +4,7 @@
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import "$styles/panel.css";
   import { onMount, flushSync, tick } from "svelte";
-  import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";
+  import type { PanelState, PanelIntent, TabSwitcherState, ToolKind } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { theme } from "$domain/appearance";
@@ -30,12 +30,22 @@
     );
     return () => clearTimeout(timer);
   });
+  /** The switcher just put away. The window fades out over its last state,
+   *  so that stays until the fade is over; the launcher only takes its place
+   *  then, or as soon as it is called. */
+  let leaving = $state<TabSwitcherState | null>(null);
+  let left: ReturnType<typeof setTimeout> | undefined;
+  const FADE_MS = 200;
   function apply(next: PanelState) {
-    if (acceptPanelState(presentation, next))
-      flushSync(() => {
-        presentation = next;
-        failed = false;
-      });
+    if (!acceptPanelState(presentation, next)) return;
+    const switcher = presentation?.visible ? presentation.switcher : null;
+    clearTimeout(left);
+    flushSync(() => {
+      leaving = !next.visible && switcher ? switcher : null;
+      presentation = next;
+      failed = false;
+    });
+    if (leaving) left = setTimeout(() => (leaving = null), FADE_MS);
   }
   async function intent(value: PanelIntent) {
     try {
@@ -135,6 +145,7 @@
     })();
     return () => {
       disposed = true;
+      clearTimeout(left);
       stop?.();
       stopMotion?.();
       preferences.dispose();
@@ -182,8 +193,11 @@
 >
   {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
   <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-    {#if presentation?.visible && presentation.switcher && Switcher}
-      <Switcher snapshot={presentation.switcher} />
+    {#if Switcher && (presentation?.visible ? presentation.switcher : leaving)}
+      <Switcher
+        snapshot={(presentation?.visible ? presentation.switcher : leaving)!}
+        frozen={!presentation?.visible}
+      />
     {:else if !presentation?.switcher && Launcher}{#key off.join()}<Launcher
           context={presentation}
           onTool={open}

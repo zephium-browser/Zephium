@@ -107,3 +107,11 @@ test("a refused pointer selection does not commit the previously selected tab", 
   await expect.element(screen.getByRole("alert")).toBeVisible();
   expect(native.action).toHaveBeenCalledExactlyOnceWith("7", { type: "select", index: 2 });
 });
+
+test("leaving, the last state stays on screen and answers nothing", async () => {
+  const screen = await render(TabSwitcher, { snapshot: state, frozen: true });
+  await userEvent.keyboard("{Tab}{Enter}{Escape}{Control>}{/Control}");
+  await screen.getByRole("option", { name: "Tab 2 example.test" }).click();
+  expect(native.action).not.toHaveBeenCalled();
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(12);
+});

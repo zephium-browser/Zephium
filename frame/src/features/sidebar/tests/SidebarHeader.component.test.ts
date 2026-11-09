@@ -82,8 +82,11 @@ test("a private window keeps nothing, so offers nothing to clear", async () => {
   expect(offersClearData(await rail({ url: "https://example.com/" }))).toBe(false);
 });
 
-test("the header opens the mouse switcher", async () => {
-  const screen = await render(SidebarHeader, { compact: false, ontoggle: () => {} });
-  await screen.getByRole("button", { name: "Switch tabs" }).click();
-  await vi.waitFor(() => expect(native.switcher).toHaveBeenCalledOnce());
+test("the header leaves switching tabs to its keys", async () => {
+  for (const compact of [false, true]) {
+    const screen = await render(SidebarHeader, { compact, ontoggle: () => {} });
+    expect(screen.container.querySelector('[aria-label="Switch tabs"]')).toBeNull();
+    await screen.unmount();
+  }
+  expect(native.switcher).not.toHaveBeenCalled();
 });

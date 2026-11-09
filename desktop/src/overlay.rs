@@ -1,7 +1,7 @@
 //! A native launcher created on first use and put to sleep while hidden. It hosts search only:
 //! destinations are handed to the browser, which already has their views
 //! loaded, so nothing heavy is ever instantiated a second time here.
-mod geometry;
+pub(crate) mod geometry;
 mod idle;
 mod model;
 #[cfg(target_os = "windows")]
@@ -59,7 +59,9 @@ struct State {
     content_height: f64,
     layout_revision: u64,
     placement: Option<geometry::Placement>,
-    placed_switcher: Option<bool>,
+    /// What the window was last placed for: the launcher, or the switcher
+    /// with this many cards across.
+    placed_for: Option<Option<usize>>,
     pending_document: Option<tauri::Url>,
     focus_revision: u64,
     focus_timer: bool,
@@ -134,7 +136,7 @@ impl Overlay {
                 content_height: geometry::INITIAL_HEIGHT,
                 layout_revision: 0,
                 placement: None,
-                placed_switcher: None,
+                placed_for: None,
                 pending_document,
                 focus_revision: 0,
                 focus_timer: false,
@@ -294,26 +296,10 @@ impl Overlay {
                 let mut state = this.state();
                 state.pending = None;
                 state.model.show_switcher(snapshot);
-                if opening {
-                    state.content_height = 320.0;
-                }
+                state.content_height = geometry::MAX_HEIGHT;
             }
             if opening {
                 this.cancel_search(old);
-                #[cfg(target_os = "macos")]
-                crate::panel::layout(
-                    &PanelLayout {
-                        height: 320.0,
-                        field: zephium_ipc::PanelRect {
-                            x: 40.0,
-                            y: 40.0,
-                            width: 680.0,
-                            height: 240.0,
-                        },
-                        sheet: None,
-                    },
-                    false,
-                );
             }
             this.present();
         });
@@ -535,11 +521,30 @@ impl Overlay {
         // On macOS the window stays up through its fade-out, so a launcher
         // called back inside it arrives without ever having been ordered out.
         let arriving = !shown(&self.window);
-        let switcher = snapshot.switcher.is_some();
-        if !visible(&self.window) || self.state().placed_switcher != Some(switcher) {
+        let placing = snapshot
+            .switcher
+            .as_ref()
+            .map(|s| s.entries.len().clamp(1, geometry::SWITCHER_VISIBLE));
+        if !visible(&self.window) || self.state().placed_for != Some(placing) {
             self.place();
-            self.state().placed_switcher = Some(switcher);
+            self.state().placed_for = Some(placing);
         }
+        // The switcher stands on one plate of its own; the launcher's shapes
+        // come back when it lays itself out again.
+        #[cfg(target_os = "macos")]
+        crate::panel::hold(placing.map(|cards| {
+            let inset = if animated_shapes() {
+                geometry::SHAPE_INSET
+            } else {
+                0.0
+            };
+            zephium_ipc::PanelRect {
+                x: inset,
+                y: inset,
+                width: geometry::switcher_width(cards),
+                height: geometry::SWITCHER_HEIGHT,
+            }
+        }));
         if arriving {
             self.tell_browser("launcher.presented");
         }
@@ -672,6 +677,25 @@ impl Overlay {
         self.state().closed = true;
         idle::destroyed();
     }
+    /// The window's place on a work area: the launcher's, or the switcher's
+    /// sized to the cards it shows.
+    fn placement(&self, work_width: f64, work_height: f64) -> geometry::Placement {
+        let inset = if animated_shapes() {
+            geometry::SHAPE_INSET
+        } else {
+            0.0
+        };
+        let cards = self
+            .state()
+            .model
+            .switcher
+            .as_ref()
+            .map(|s| s.entries.len());
+        match cards {
+            Some(cards) => geometry::Placement::switcher(work_width, work_height, inset, cards),
+            None => geometry::Placement::new(work_width, work_height, inset),
+        }
+    }
     /// Places the launcher on the display under the pointer, where the user is
     /// looking, at the same height every time. Everything is in points: the
     /// pointer, the displays and the frame are AppKit's own, so displays of
@@ -681,15 +705,7 @@ impl Overlay {
         let Some(work) = crate::panel::work_area(&self.window) else {
             return;
         };
-        let placement = geometry::Placement::new(
-            work.width,
-            work.height,
-            if animated_shapes() {
-                geometry::SHAPE_INSET
-            } else {
-                0.0
-            },
-        );
+        let placement = self.placement(work.width, work.height);
         let height = placement.height(self.state().content_height);
         crate::panel::place(
             &self.window,
@@ -732,14 +748,9 @@ impl Overlay {
             return;
         }
         let work = monitor.work_area();
-        let placement = geometry::Placement::new(
+        let placement = self.placement(
             f64::from(work.size.width) / scale,
             f64::from(work.size.height) / scale,
-            if animated_shapes() {
-                geometry::SHAPE_INSET
-            } else {
-                0.0
-            },
         );
         let height = placement.height(self.state().content_height);
         // Windows rescales a window that lands on a display of another scale,
@@ -1144,7 +1155,7 @@ mod action_barrier_tests {
             content_height: geometry::INITIAL_HEIGHT,
             layout_revision: 0,
             placement: None,
-            placed_switcher: None,
+            placed_for: None,
             pending_document: None,
             focus_revision: 0,
             focus_timer: false,

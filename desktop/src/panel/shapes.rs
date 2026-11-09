@@ -2,6 +2,7 @@
 //! field capsule and the result sheet. A glass container merges shapes that
 //! come close, so the sheet can grow out of the capsule and separate from it;
 //! both animate on the compositor and the WebView never resizes for them.
+//! The tab switcher borrows the field as its one plate meanwhile.
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 
@@ -19,6 +20,7 @@ use objc2_quartz_core::CAMediaTimingFunction;
 use zephium_ipc::{PanelLayout, PanelRect};
 
 use crate::material::Material;
+use crate::overlay::geometry::SWITCHER_RADIUS;
 
 /// Liquid Glass shipped with AppKit 26.
 const GLASS_APPKIT: f64 = 2685.0;
@@ -51,6 +53,8 @@ thread_local! {
     /// Revision of the latest layout, so a collapse that finishes after the
     /// sheet was asked back does not hide it.
     static REVISION: Cell<u64> = const { Cell::new(0) };
+    /// The switcher's plate while it stands in the launcher's place.
+    static HELD: Cell<Option<PanelRect>> = const { Cell::new(None) };
 }
 
 fn tint(dark: bool, field: bool) -> Retained<NSColor> {
@@ -193,6 +197,7 @@ pub fn active() -> bool {
 /// Moves the shapes to what the content reports. The sheet grows out of the
 /// capsule when it first appears and returns into it when it goes.
 pub fn apply(layout: &PanelLayout, animate: bool) {
+    HELD.with(|held| held.set(None));
     let revision = REVISION.with(|revision| {
         revision.set(revision.get().wrapping_add(1));
         revision.get()
@@ -243,12 +248,45 @@ pub fn apply(layout: &PanelLayout, animate: bool) {
     });
 }
 
+/// The switcher's plate: the field alone, at the plate's corner. The
+/// launcher's own layout is kept for when it returns.
+pub fn hold(plate: Option<PanelRect>) {
+    HELD.with(|held| held.set(plate));
+    let Some(plate) = plate else {
+        return;
+    };
+    REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
+    SHAPES.with(|shapes| {
+        let shapes = shapes.borrow();
+        let Some(shapes) = shapes.as_ref() else {
+            return;
+        };
+        radius(&shapes.field, shapes.glass, SWITCHER_RADIUS);
+        shapes.field.setFrame(frame(&plate));
+        shapes.sheet.setHidden(true);
+    });
+}
+
 /// The launcher arriving: the capsule grows in from slightly smaller and the
 /// sheet flows out of it, on a curve with a touch of overshoot so it lands
 /// rather than stops. With motion reduced the shapes are simply in place.
+/// The switcher's plate arrives the same way, alone.
 pub fn present(calm: bool) {
-    let Some(layout) = LAST.with(Cell::get) else {
+    let held = HELD.with(Cell::get);
+    let Some(layout) = held
+        .map(|plate| PanelLayout {
+            height: plate.y + plate.height,
+            field: plate,
+            sheet: None,
+        })
+        .or_else(|| LAST.with(Cell::get))
+    else {
         return;
+    };
+    let corner = if held.is_some() {
+        SWITCHER_RADIUS
+    } else {
+        layout.field.height / 2.0
     };
     REVISION.with(|revision| revision.set(revision.get().wrapping_add(1)));
     SHAPES.with(|shapes| {
@@ -258,7 +296,10 @@ pub fn present(calm: bool) {
         };
         let field = frame(&layout.field);
         let sheet = layout.sheet.as_ref().map(frame);
-        radius(&shapes.field, shapes.glass, layout.field.height / 2.0);
+        radius(&shapes.field, shapes.glass, corner);
+        if sheet.is_none() {
+            shapes.sheet.setHidden(true);
+        }
         if calm {
             shapes.field.setFrame(field);
             if let Some(sheet) = sheet {

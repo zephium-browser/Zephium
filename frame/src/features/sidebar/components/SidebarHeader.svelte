@@ -6,7 +6,6 @@
     EllipsisIcon,
     Refresh01Icon,
     SidebarLeftIcon,
-    Layers01Icon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
@@ -37,15 +36,6 @@
     launcher?: boolean;
   } = $props();
 
-  let switcherFailed = $state(false);
-  async function switchTabs() {
-    switcherFailed = false;
-    try {
-      switcherFailed = !(await commands.tabSwitcherOpen());
-    } catch {
-      switcherFailed = true;
-    }
-  }
   let active = $derived(tabs.activeTab());
   // In fullscreen the lights are gone, and so is the room kept for them.
   let lights = $derived(IS_MAC && !fullscreen());
@@ -129,13 +119,6 @@
       <div style:height="8px" aria-hidden="true"></div>
     {/if}
     <ModeTabs compact />
-    {#if pageControls}<IconButton
-        icon={Layers01Icon}
-        label={m.tab_switcher_title()}
-        size={15}
-        buttonSize={26}
-        onclick={() => void switchTabs()}
-      />{/if}
     <div class="flex items-center gap-0.5">
       <!-- Its menu acts on the page and the column's shape; Work has neither. -->
       {#if pageControls}<IconButton
@@ -161,13 +144,6 @@
         : "6px"}
     aria-label={m.ui_navigation()}
   >
-    {#if pageControls}<IconButton
-        icon={Layers01Icon}
-        label={m.tab_switcher_title()}
-        size={15}
-        buttonSize={26}
-        onclick={() => void switchTabs()}
-      />{/if}
     <!-- Beside a tool panel the panel's own close button already gives the
          column back, so a second way to the same shape would only crowd the
          lights; search stands there instead. -->
@@ -220,5 +196,3 @@
     {/if}
   </header>
 {/if}
-
-{#if switcherFailed}<span role="alert">{m.panel_action_failed()}</span>{/if}
