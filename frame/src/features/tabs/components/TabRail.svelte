@@ -21,7 +21,7 @@
   import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
-  import { closeOnMiddleClick } from "../lib/middle-click";
+  import { closeOnMiddleClick, openOnBackgroundMiddleClick } from "../lib/middle-click";
 
   let {
     entries,
@@ -59,6 +59,7 @@
     },
   });
   const motion = new ListMotion({ enter: () => "rise" });
+  const backgroundClick = openOnBackgroundMiddleClick(tabs.open);
 
   const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
   const order = $derived(tabs.spaces().map((entry) => entry.id));
@@ -140,6 +141,7 @@
       class="rail-scroller scroll-edges"
       data-under-panel
       data-glide-scroller
+      {...backgroundClick}
     >
       <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
         {#each entries as tab, index (tab.id)}

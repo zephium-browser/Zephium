@@ -12,6 +12,7 @@ import { sidebarTree } from "../lib/sidebar-model";
 
 const native = vi.hoisted(() => ({
   open: vi.fn(),
+  close: vi.fn(),
   switchTo: vi.fn(),
   step: vi.fn(),
   create: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     tabsBootstrap: async () => {},
     tabsOpen: native.open.mockImplementation(ok),
+    tabsClose: native.close.mockImplementation(ok),
     spacesSwitch: native.switchTo.mockImplementation(ok),
     spacesStep: native.step.mockImplementation(ok),
     spacesCreate: native.create.mockImplementation(ok),
@@ -99,6 +101,32 @@ test("the row names the space and its plus opens a tab, with no pager beside the
   expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(2);
 });
 
+test("middle-click opens a tab only on the empty list background", async () => {
+  const screen = await mount();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
+  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const position = { x: 24, y: background.clientHeight - 20 };
+
+  await userEvent.click(background, { position });
+  expect(native.open).not.toHaveBeenCalled();
+  await userEvent.click(background, { button: "middle", position });
+  expect(native.open).toHaveBeenCalledOnce();
+
+  const row = screen.getByRole("button", { name: "Alpha", exact: true });
+  await userEvent.click(row, { button: "middle" });
+  expect(native.close).toHaveBeenCalledExactlyOnceWith("a");
+  expect(native.open).toHaveBeenCalledOnce();
+
+  // A press on a row may end on the scroller; that is not a background click.
+  row.element().dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+  expect(native.open).toHaveBeenCalledOnce();
+
+  const press = new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true });
+  background.dispatchEvent(press);
+  expect(press.defaultPrevented).toBe(true);
+});
+
 test("the switcher lists every space, checks the one shown and moves to another", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
@@ -122,6 +150,7 @@ test("a row is a name, with the icons of its first tabs and a count of the rest,
     ],
   });
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await expect.element(screen.getByRole("menuitemradio", { name: "Busy" })).toBeVisible();
   const rows = [...screen.container.querySelectorAll<HTMLElement>("[data-space-row]")];
   expect(rows).toHaveLength(3);
   expect(rows[1]!.querySelectorAll(".switch-fav")).toHaveLength(3);
