@@ -73,6 +73,33 @@ test("the tools stay out of reach until the case is pressed", async () => {
     .toHaveAttribute("aria-current", "true");
 });
 
+test("reduced motion removes the closed stack's visibility delay", async () => {
+  const previous = document.documentElement.dataset.reduceMotion;
+  const screen = await render(ToolShelf);
+  screen.container.style.paddingBlockStart = "280px";
+  const stack = screen.container.querySelector<HTMLElement>(".shelf-stack")!;
+  const delays = () =>
+    getComputedStyle(stack)
+      .transitionDelay.split(",")
+      .map((value) => value.trim());
+  try {
+    delete document.documentElement.dataset.reduceMotion;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches)
+      expect(delays().every((delay) => delay === "0s")).toBe(true);
+    else expect(delays().some((delay) => Number.parseFloat(delay) > 0)).toBe(true);
+    const trigger = screen.getByRole("button", { name: /^Tools/ });
+    await trigger.click();
+    await expect.poll(() => stack.inert).toBe(false);
+    document.documentElement.dataset.reduceMotion = "true";
+    await trigger.click();
+    await expect.poll(() => stack.inert).toBe(true);
+    expect(delays().every((delay) => delay === "0s")).toBe(true);
+  } finally {
+    if (previous === undefined) delete document.documentElement.dataset.reduceMotion;
+    else document.documentElement.dataset.reduceMotion = previous;
+  }
+});
+
 test("the profile opens on a switcher of who you are, then the tools", async () => {
   native.profiles.mockResolvedValueOnce({ status: "ok" as const, data: ROSTER });
   await page.viewport(1200, 800);

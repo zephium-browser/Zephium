@@ -11,11 +11,13 @@
   let {
     mind = $bindable(null),
     server = $bindable(null),
+    discovering = $bindable(true),
     onsubmit,
   }: {
     mind?: Mind | null;
     /** A model server already running here, connected if chosen. */
     server?: WorkLocalServerV1 | null;
+    discovering?: boolean;
     onsubmit: () => void;
   } = $props();
 
@@ -30,13 +32,17 @@
         if (live) hosted = account.available && account.hosted_models !== false;
       })
       .catch(() => {});
+    if (!discovering) discovering = true;
     // Asks only this computer's own ports.
     void Promise.resolve()
       .then(() => commands.workLocalServers())
       .then((found) => {
         if (live) server = found.find((entry) => entry.models > 0) ?? null;
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (live) discovering = false;
+      });
     return () => (live = false);
   });
 

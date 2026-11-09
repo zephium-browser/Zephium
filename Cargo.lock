@@ -7304,6 +7304,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "time",
  "toml 0.9.12+spec-1.1.0",
  "windows",
  "zephium-blocker",
@@ -7614,7 +7615,7 @@ dependencies = [
 
 [[package]]
 name = "zephium-desktop"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "async-io",
  "base64 0.22.1",
@@ -7641,6 +7642,7 @@ dependencies = [
  "serde_json",
  "specta",
  "specta-typescript",
+ "tao",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

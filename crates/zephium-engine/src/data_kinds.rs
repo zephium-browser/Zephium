@@ -130,29 +130,35 @@ pub(crate) fn webview2_kinds(kinds: EngineDataKinds) -> i32 {
 }
 
 /// Hosts a listing names, one entry per host, in the order a person reads
-/// them. A name that is not a host is dropped.
-pub(crate) fn merge_sites(raw: impl IntoIterator<Item = (String, bool, bool)>) -> Vec<EngineSite> {
-    let mut sites: Vec<EngineSite> = Vec::new();
+/// them. A name that is not a host is dropped. The flag reports whether the
+/// response bound omitted any hosts.
+pub(crate) fn merge_sites(
+    raw: impl IntoIterator<Item = (String, bool, bool)>,
+) -> (Vec<EngineSite>, bool) {
+    let mut sites = std::collections::BTreeMap::<String, EngineSite>::new();
     for (name, cookies, storage) in raw {
         let name = name.trim().trim_start_matches('.').to_ascii_lowercase();
         if !zephium_core::browsing_data::is_site_name(&name) {
             continue;
         }
-        match sites.iter_mut().find(|site| site.name == name) {
-            Some(site) => {
+        match sites.entry(name.clone()) {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let site = entry.get_mut();
                 site.cookies |= cookies;
                 site.storage |= storage;
             }
-            None => sites.push(EngineSite {
-                name,
-                cookies,
-                storage,
-            }),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(EngineSite {
+                    name,
+                    cookies,
+                    storage,
+                });
+            }
         }
     }
-    sites.sort_by(|a, b| a.name.cmp(&b.name));
-    sites.truncate(MAX_ENGINE_SITES);
-    sites
+    let partial = sites.len() > MAX_ENGINE_SITES;
+    let sites = sites.into_values().take(MAX_ENGINE_SITES).collect();
+    (sites, partial)
 }
 
 #[cfg(test)]
@@ -248,7 +254,7 @@ mod tests {
 
     #[test]
     fn a_listing_names_each_host_once_sorted_and_only_hosts() {
-        let sites = merge_sites([
+        let (sites, partial) = merge_sites([
             ("Zed.example".to_owned(), true, false),
             (".example.com".to_owned(), false, true),
             ("example.com".to_owned(), true, false),
@@ -256,8 +262,48 @@ mod tests {
             ("Local Files".to_owned(), false, true),
             ("a.example".to_owned(), false, true),
         ]);
+        assert!(!partial);
         let names: Vec<_> = sites.iter().map(|site| site.name.as_str()).collect();
         assert_eq!(names, ["a.example", "example.com", "zed.example"]);
         assert!(sites[1].cookies && sites[1].storage);
+    }
+
+    #[test]
+    fn listing_reports_partial_only_when_distinct_valid_sites_are_omitted() {
+        let raw = std::iter::repeat_n(("Local Files".to_owned(), true, true), 16_384)
+            .chain((0..MAX_ENGINE_SITES).map(|at| (format!("site{at}.example"), true, false)));
+        let (sites, partial) = merge_sites(raw);
+        assert_eq!(sites.len(), MAX_ENGINE_SITES);
+        assert!(!partial);
+        let duplicate = sites[0].name.clone();
+        let raw = sites
+            .into_iter()
+            .map(|site| (site.name, site.cookies, site.storage))
+            .chain([
+                (duplicate, false, true),
+                ("extra.example".to_owned(), true, true),
+            ]);
+        let (sites, partial) = merge_sites(raw);
+        assert_eq!(sites.len(), MAX_ENGINE_SITES);
+        assert!(partial);
+    }
+
+    #[test]
+    fn a_large_site_listing_merges_within_a_bounded_time() {
+        let start = std::time::Instant::now();
+        let raw = (0..65_536).rev().flat_map(|at| {
+            [
+                (format!("site{at:05}.example"), true, false),
+                (format!(".SITE{at:05}.example"), false, true),
+            ]
+        });
+        let (sites, partial) = merge_sites(raw);
+        assert!(partial);
+        assert_eq!(sites.len(), MAX_ENGINE_SITES);
+        assert!(sites.windows(2).all(|pair| pair[0].name < pair[1].name));
+        assert!(sites.iter().all(|site| site.cookies && site.storage));
+        // A keyed merge has ample room even in debug builds. The former
+        // linear search compares billions of hosts for this input.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
     }
 }

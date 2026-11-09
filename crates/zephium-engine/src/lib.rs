@@ -1190,6 +1190,7 @@ impl RetirementGate {
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::HistoryEntries { id, .. }
             | event @ EngineEvent::NativeTabCloseRequested { id }
+            | event @ EngineEvent::MediaReturnRequested { id }
             | event @ EngineEvent::PageOpenBlocked { id, .. }
             | event @ EngineEvent::ExternalAppRequested { id, .. }
             | event @ EngineEvent::HttpAuthRequested { id, .. }
@@ -1267,6 +1268,17 @@ impl RetirementGate {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::ViewDiscardRefused { id, profile, probe }),
+            EngineEvent::DormancyRefused {
+                id,
+                profile,
+                request,
+            } => self
+                .profile_is_active(profile)
+                .then_some(EngineEvent::DormancyRefused {
+                    id,
+                    profile,
+                    request,
+                }),
             EngineEvent::PageMemory { id, profile, bytes } => self
                 .profile_is_active(profile)
                 .then_some(EngineEvent::PageMemory { id, profile, bytes }),
@@ -1746,6 +1758,19 @@ pub fn install_container(fixed: gtk::Fixed) -> Result<(), String> {
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, String> {
     platform::imp::enforce_runtime_security_floor()
+}
+
+/// Reports active downloads across all profiles. Call on the native main thread;
+/// false means the host could not admit the query and will not call `done`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn downloads_in_progress(done: impl FnOnce(bool) + 'static) -> bool {
+    host::try_with(move |host| {
+        done(
+            host.downloads
+                .as_ref()
+                .is_some_and(|downloads| downloads.in_progress()),
+        );
+    })
 }
 
 impl WebviewEngine {
@@ -2588,11 +2613,7 @@ impl Engine for WebviewEngine {
         self.run(|| host::best_effort_with(|host| host.release_spare()));
     }
 
-    fn suspends_hidden_views(&self) -> bool {
-        cfg!(target_os = "windows")
-    }
-
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, request: u64) {
         // `set_dormant` replaces the host's desired set. Once any profile is
         // retired, even an empty or filtered replacement could resume one of
         // its surviving controllers after a teardown failure, so suppress the
@@ -2618,7 +2639,7 @@ impl Engine for WebviewEngine {
                         .iter()
                         .all(|(_, token)| token.load(Ordering::Acquire))
                     {
-                        h.set_dormant(ids);
+                        h.set_dormant(ids, request);
                     }
                 });
             }
@@ -4425,7 +4446,7 @@ mod tests {
             ),
             NativeDispatch::Rejected
         );
-        engine.set_dormant(vec![id]);
+        engine.set_dormant(vec![id], 1);
         assert_eq!(
             engine.set_user_content(
                 ContentScope::Profile(profile),

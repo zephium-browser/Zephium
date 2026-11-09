@@ -5,6 +5,7 @@ pub const KEYS: &[&str] = &[
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
+    "sidebar.width",
     "ui.accent",
     "ui.material",
     "ui.reduce-motion",
@@ -190,6 +191,9 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
         "sidebar.mode" => matches!(value, "default" | "compact" | "hidden"),
+        "sidebar.width" => value
+            .parse::<u16>()
+            .is_ok_and(|width| (180..=460).contains(&width) && value == width.to_string()),
         "ui.accent" => matches!(
             value,
             "graphite" | "sky" | "sage" | "rose" | "amber" | "teal" | "lavender" | "orchid"
@@ -466,6 +470,15 @@ mod tests {
     #[test]
     fn settings_are_closed_and_values_are_bounded() {
         assert!(value_allowed("sidebar.mode", "compact"));
+        assert!(KEYS.contains(&"sidebar.width"));
+        for width in ["180", "240", "360", "460"] {
+            assert!(value_allowed("sidebar.width", width));
+        }
+        for width in [
+            "", "56", "179", "461", "NaN", "Infinity", "240.5", "0240", " 240", "+240",
+        ] {
+            assert!(!value_allowed("sidebar.width", width), "{width:?}");
+        }
         assert!(value_allowed("ui.accent", "sage"));
         assert!(value_allowed("ui.accent", "orchid"));
         assert!(!value_allowed("ui.accent", "purple"));

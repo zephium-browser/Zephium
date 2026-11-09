@@ -72,6 +72,11 @@ pub(crate) fn set_language(preference: Option<&str>) -> bool {
     true
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) fn shutdown_reason() -> String {
+    text("shutdown_saving_session", "Saving your browsing session")
+}
+
 /// The menu text for `key`, or `english` while the interface is English or
 /// the key has no translation.
 fn text(key: &str, english: &str) -> String {
@@ -168,6 +173,7 @@ mod tests {
             include_str!("help.rs"),
             include_str!("recently_closed.rs"),
             include_str!("resource_close.rs"),
+            include_str!("updates.rs"),
         ];
         let labels = sources.iter().flat_map(|source| {
             source

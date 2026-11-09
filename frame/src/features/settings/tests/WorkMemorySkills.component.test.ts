@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import MemoryPage from "../components/sections/MemoryPage.svelte";
@@ -103,4 +103,31 @@ test("skills turn off, a person's skill is saved from its fields, and a customis
   await screen.getByRole("button", { name: /Job search/u }).click();
   await screen.getByRole("button", { name: "Use the built-in" }).click();
   expect(native.skill).toHaveBeenLastCalledWith(PROFILE, { kind: "delete", name: "job-search" });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete document.documentElement.dataset.reduceMotion;
+});
+
+test.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])("skill reveal honors OS reduced motion %s and app reduced motion %s", async (os, app) => {
+  const matchMedia = window.matchMedia.bind(window);
+  vi.spyOn(window, "matchMedia").mockImplementation((query) =>
+    query === "(prefers-reduced-motion: reduce)"
+      ? { ...matchMedia(query), matches: os }
+      : matchMedia(query),
+  );
+  document.documentElement.dataset.reduceMotion = String(app);
+  const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+  const screen = await render(SkillsPage);
+  await screen.getByRole("button", { name: /Weekly review/u }).click();
+  expect(scroll).toHaveBeenCalledWith({
+    block: "nearest",
+    behavior: os || app ? "instant" : "smooth",
+  });
 });

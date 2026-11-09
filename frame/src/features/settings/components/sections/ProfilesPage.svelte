@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { Add01Icon } from "@hugeicons/core-free-icons";
   import type { ProfileEntryView } from "$shared/ipc/bindings";
   import { drawn, profiles } from "$domain/profiles";
@@ -22,6 +22,12 @@
   let editing = $state.raw<ProfileEntryView | null>(null);
   let switching = $state<string | null>(null);
   let failed = $state<string | null>(null);
+  let seenDeletion = $state(untrack(profiles.lastDeleted));
+  const deleted = $derived(profiles.lastDeleted());
+  const showDeletion = $derived(deleted !== null && deleted !== seenDeletion);
+  $effect(() => {
+    if (showDeletion && editing?.id === deleted) sheetOpen = false;
+  });
   /** A new profile starts on the first colour no other profile wears. */
   const nextColor = $derived(
     Array.from({ length: AVATAR_COLORS }, (_, index) => (index + 1) % AVATAR_COLORS).find(
@@ -31,12 +37,14 @@
 
   let andSwitch = $state(false);
   function create(fromSidebar = false) {
+    seenDeletion = deleted;
     andSwitch = fromSidebar;
     editing = null;
     sheetOpen = true;
   }
 
   function edit(profile: ProfileEntryView) {
+    seenDeletion = deleted;
     editing = profile;
     sheetOpen = true;
   }
@@ -94,6 +102,7 @@
       </button>
     </li>
   </ul>
+  <p class="note deletion-status" role="status">{showDeletion ? m.profiles_delete_done() : ""}</p>
   <p class="note">{m.profiles_list_note()}</p>
 </section>
 
@@ -221,5 +230,9 @@
     color: var(--color-muted);
     font-size: var(--text-label);
     line-height: 1.5;
+  }
+
+  .deletion-status:empty {
+    margin: 0;
   }
 </style>

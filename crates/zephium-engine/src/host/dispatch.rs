@@ -257,6 +257,10 @@ enum HostTaskKey {
     // of ordinary work cannot drop it and leave a hidden page awake.
     #[cfg(target_os = "windows")]
     SuspendRetry(ItemId),
+    // Closing a page opened only to reach a profile, once its call answered:
+    // a full queue of ordinary work must not leave it running.
+    #[cfg(target_os = "windows")]
+    TemporarySpare(ProfileId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
     #[cfg(target_os = "macos")]
@@ -528,6 +532,12 @@ pub(crate) fn install(
             dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            dormant_request: 0,
+            #[cfg(target_os = "windows")]
+            dormant_cycles: std::collections::HashMap::new(),
+            #[cfg(target_os = "windows")]
+            temporary_page: None,
             #[cfg(target_os = "windows")]
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
@@ -1248,6 +1258,18 @@ where
 }
 
 #[cfg(target_os = "windows")]
+pub(super) fn with_temporary_spare_release<F>(profile: ProfileId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::TemporarySpare(profile)),
+        f,
+    )
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1672,10 +1694,9 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                             "windows-work-shutdown: stage=process_wait_start obligations={} provenance_valid={process_provenance_valid}; content=redacted",
                             browser_processes.len());
                     }
-                    let process_exit_proven = process_provenance_valid
-                        && crate::platform::imp::wait_for_browser_process_shutdown(
+                    let (process_exit_proven, process_exit_clean) = crate::platform::imp::wait_for_browser_process_shutdown(
                             browser_processes,
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(20),
                         );
                     #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
                     {
@@ -1683,7 +1704,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=process_wait_complete proven={process_exit_proven}; content=redacted");
                     }
-                    if !process_exit_proven {
+                    if !process_provenance_valid || !process_exit_proven {
                         eprintln!(
                             "privacy: WebView2 full process-group shutdown could not be proven"
                         );
@@ -1707,7 +1728,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=private_cleanup_complete clean={cleaned}; content=redacted");
                     }
-                    finish(cleaned);
+                    finish(cleaned && process_exit_clean);
                 });
             if let Err(error) = spawned {
                 eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
@@ -1767,6 +1788,42 @@ mod tests {
             key: Some(key),
             task: Box::new(|_: &mut EngineHost| {}),
         }
+    }
+
+    #[test]
+    fn failed_windows_browser_exit_cleans_up_without_authorizing_clean_shutdown() {
+        let native = include_str!("../platform/windows/mod.rs");
+        let record = native
+            .split("fn record(&self, event: BrowserProcessExitEvent)")
+            .nth(1)
+            .unwrap()
+            .split("fn wait_until")
+            .next()
+            .unwrap();
+        assert!(record.contains(
+            "data.failed = matches!(event, BrowserProcessExitEvent::Exited { failed: true, .. })"
+        ));
+        let clean = native
+            .split("fn exited_cleanly(&self)")
+            .nth(1)
+            .unwrap()
+            .split("fn run_after_exit")
+            .next()
+            .unwrap();
+        assert!(clean.contains("!data.failed"));
+        let shutdown = include_str!("dispatch.rs")
+            .split("let (process_exit_proven, process_exit_clean)")
+            .nth(1)
+            .unwrap()
+            .split("if let Err(error) = spawned")
+            .next()
+            .unwrap();
+        assert!(
+            shutdown.find("cleanup_after_proven_exit()").unwrap()
+                < shutdown
+                    .find("finish(cleaned && process_exit_clean)")
+                    .unwrap()
+        );
     }
 
     #[test]

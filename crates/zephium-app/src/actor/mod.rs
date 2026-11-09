@@ -1177,8 +1177,8 @@ impl Handle {
     }
 
     /// Requests an ordered shutdown without waiting for queue capacity on the
-    /// caller (normally the UI thread). Only `RetryableFailure` leaves the
-    /// actor and native engine available for another attempt.
+    /// caller (normally the UI thread). An admitted shutdown is terminal even
+    /// when storage fails; `RetryableFailure` only reports refused admission.
     pub fn shutdown(&self) -> ShutdownRequest {
         self.shutdown_with_deadline(self.shutdown_deadline())
     }
@@ -1651,6 +1651,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 TimerWake::Audio => match timer_queue.try_push(Command::AudioWake) {
                     Ok(()) | Err(TryPushError::Sealed(_)) => {}
                     Err(TryPushError::Full(_)) => timer_queue.schedule_audio(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    ),
+                    Err(TryPushError::Closed(_)) => break,
+                },
+                TimerWake::VisitTitles => match timer_queue.try_push(Command::VisitTitlesWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_visit_titles(
                         std::time::Instant::now() + std::time::Duration::from_millis(25),
                     ),
                     Err(TryPushError::Closed(_)) => break,

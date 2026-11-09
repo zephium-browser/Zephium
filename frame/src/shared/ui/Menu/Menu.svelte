@@ -81,7 +81,9 @@
         {:else if entry.kind === "heading"}
           <div class="ui-menu-heading" role="presentation">{entry.label}</div>
         {:else}
-          <DropdownMenu.Item
+          {@const Item = "checked" in entry ? DropdownMenu.CheckboxItem : DropdownMenu.Item}
+          <Item
+            {..."checked" in entry ? { checked: entry.checked === true } : {}}
             class="ui-menu-item"
             textValue={entry.label}
             disabled={entry.disabled}
@@ -96,7 +98,7 @@
             {entry.label}
             {#if entry.hint}<span class="ui-menu-hint" aria-hidden="true">{entry.hint}</span>{/if}
             {#if choice}<Mark on={entry.checked === true} />{/if}
-          </DropdownMenu.Item>
+          </Item>
         {/if}
       {/each}
     </DropdownMenu.Content>

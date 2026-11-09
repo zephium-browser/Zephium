@@ -316,3 +316,60 @@ fn autofill_on_a_page_that_is_not_encrypted_waits_for_the_person() {
     });
     assert_eq!(filled(&engine), 2);
 }
+
+#[test]
+fn closing_a_source_tab_releases_its_document_immediately() {
+    for background in [false, true] {
+        let (mut shell, _engine, screen) = setup();
+        shell.handle(Command::Bootstrap);
+        let page = active_id(&screen);
+        navigate_and_commit(&mut shell, page, "docs.example");
+        shell.handle(Command::Run("page.viewSource".into()));
+        shell.handle(extracted(page, "<html>held only by the source tab</html>"));
+        let tab = active_id(&screen);
+        let document = Arc::downgrade(&source_of(&mut shell, tab).unwrap());
+        if background {
+            shell.handle(Command::Space(Box::new(crate::SpaceCommand::Create {
+                name: "Other space".into(),
+                look: Default::default(),
+            })));
+            assert!(!shell.item_in_focused_scope(tab));
+            shell.close_in_any_space(tab);
+        } else {
+            shell.handle(Command::Close(tab));
+        }
+        assert!(shell.items.tab(tab).is_none());
+        assert!(
+            document.upgrade().is_none(),
+            "closed source document is released"
+        );
+    }
+}
+
+#[test]
+fn removing_a_profile_releases_only_its_source_documents() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    navigate_and_commit(&mut shell, page, "docs.example");
+    shell.handle(Command::Run("page.viewSource".into()));
+    shell.handle(extracted(page, "<html>persistent</html>"));
+    let persistent = active_id(&screen);
+    let kept = Arc::downgrade(&source_of(&mut shell, persistent).unwrap());
+
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let page = active_id(&screen);
+    navigate_and_commit(&mut shell, page, "private.example");
+    shell.handle(Command::Run("page.viewSource".into()));
+    shell.handle(extracted(page, "<html>private</html>"));
+    let tab = active_id(&screen);
+    let released = Arc::downgrade(&source_of(&mut shell, tab).unwrap());
+    shell.end_private_session();
+
+    assert!(shell.items.tab(tab).is_none());
+    assert!(released.upgrade().is_none());
+    assert!(
+        kept.upgrade().is_some(),
+        "another profile keeps its document"
+    );
+}

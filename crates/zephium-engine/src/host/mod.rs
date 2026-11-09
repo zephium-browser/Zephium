@@ -21,7 +21,7 @@ mod content_styles;
 mod discard;
 mod dispatch;
 #[cfg(target_os = "macos")]
-mod download_files;
+pub(crate) mod download_files;
 #[cfg(target_os = "windows")]
 #[path = "download_files_windows.rs"]
 mod download_files;
@@ -183,6 +183,10 @@ struct Spare {
 struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     automatic_pip_sequence: Rc<Cell<u64>>,
+    // A tab left while its page was still leaving element fullscreen offers
+    // its video once the page is out.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    automatic_pip_after_fullscreen: std::cell::RefCell<Option<Rc<dyn Fn() -> bool>>>,
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
@@ -716,6 +720,17 @@ pub(crate) struct EngineHost {
     dormant: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     desired_dormant: std::collections::HashSet<ItemId>,
+    /// The shell's number for the desired set above, echoed by a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_request: u64,
+    /// The request under which each desired page last entered that set: its
+    /// dormancy cycle. Only an attempt of the current cycle counts a refusal.
+    #[cfg(target_os = "windows")]
+    dormant_cycles: std::collections::HashMap<ItemId, u64>,
+    /// The warm page `reach_durable_profile` opened for calls still running,
+    /// and how many of them use it.
+    #[cfg(target_os = "windows")]
+    temporary_page: Option<(ProfileId, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
@@ -751,7 +766,7 @@ pub(crate) struct EngineHost {
     /// while no tab of that profile is open; released when the sync ends.
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     work_profile_cookie_sources:
-        HashMap<zephium_agentic::ContextId, construction::WindowsWorkEnvironmentBootstrap>,
+        HashMap<zephium_agentic::ContextId, construction::WindowsEnvironmentBootstrap>,
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     anonymous_work_environments:
         HashMap<zephium_agentic::ContextRunId, work_windows::AnonymousWorkEnvironment>,

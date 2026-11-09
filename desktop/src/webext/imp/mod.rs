@@ -996,7 +996,7 @@ pub(in crate::webext) async fn open_options(shell: &Handle, id: &str) -> Result<
 }
 
 pub(in crate::webext) fn answer_access(
-    shell: &Handle,
+    dispatch: impl FnOnce(zephium_app::Command),
     extensions: &WebExtensions,
     request: zephium_ipc::WebExtensionAccessRequestView,
     allowed: bool,
@@ -1026,10 +1026,17 @@ pub(in crate::webext) fn answer_access(
                     entry.hosts.push(pattern);
                 }
             }
-            extensions.save_existing(profile, &registry)?;
+            if let Err(error) = extensions.save_existing(profile, &registry) {
+                dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+                    profile,
+                    request: number,
+                    allowed: false,
+                });
+                return Err(error);
+            }
         }
     }
-    shell.dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+    dispatch(zephium_app::Command::AnswerWebExtensionAccess {
         profile,
         request: number,
         allowed,

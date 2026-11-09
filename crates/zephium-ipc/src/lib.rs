@@ -996,6 +996,9 @@ pub struct SiteDataView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowsingDataResponse {
     Cleared,
+    /// Removed, but some of the site's data may remain: the engine would not
+    /// delete everything, or could not reach every place it is kept.
+    PartlyCleared,
     Sites {
         sites: Vec<SiteDataView>,
         /// The engine can only name sites by some of what it holds: sites
@@ -1744,6 +1747,9 @@ pub enum Projection {
     /// should itself be fullscreen until this turns false. Only engines that
     /// present fullscreen inside the browser window send it.
     HostFullscreen(bool),
+    /// The browser window should come to the front, as the person asked for
+    /// one of its pages from outside it.
+    RaiseWindow,
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),

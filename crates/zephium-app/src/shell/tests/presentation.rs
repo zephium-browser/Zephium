@@ -724,7 +724,7 @@ fn unsupported_acknowledgement_is_an_exact_view_lifecycle_failure() {
 }
 
 #[test]
-fn retryable_shutdown_rearms_a_presentation_wake_rejected_by_the_barrier() {
+fn terminal_shutdown_does_not_rearm_a_rejected_presentation_wake() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
@@ -774,24 +774,19 @@ fn retryable_shutdown_rearms_a_presentation_wake_rejected_by_the_barrier() {
         .presentation_deadlines
         .contains_key(&id));
 
-    let (retry_ack, retry_done) = sync_channel(1);
-    shell.retryable_shutdown_failure(retry_ack);
-
-    assert_eq!(
-        retry_done.recv().unwrap(),
-        ShutdownOutcome::RetryableFailure
-    );
-    assert_eq!(shell.presentation.pending_presentations[&id], pending);
-    assert_eq!(
-        queue
-            .inner
-            .timer_state
-            .lock()
-            .unwrap()
-            .presentation_deadlines[&id]
-            .navigation,
-        navigation
-    );
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert!(!queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .presentation_deadlines
+        .contains_key(&id));
 }
 
 #[test]

@@ -7,10 +7,11 @@
 //! gets a host of its own that ends after the first reply.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::ptr::NonNull;
 use std::rc::{Rc, Weak as RcWeak};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -21,7 +22,7 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::Message;
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSError, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer};
 use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionMessagePort};
 use serde_json::Value;
 
@@ -38,6 +39,8 @@ const MAX_OUTBOUND_FRAMES: usize = 32;
 const MAX_QUEUED_BYTES: usize = 128 * 1024 * 1024;
 const MAX_INBOUND_EVENTS: usize = 8;
 const MAX_INBOUND_BYTES: usize = 2 * MAX_FROM_HOST;
+/// Well inside the time WebKit lets a background sit idle before unloading it.
+const KEEP_AWAKE_SECONDS: f64 = 20.0;
 static PHYSICAL_HOSTS: AtomicUsize = AtomicUsize::new(0);
 static QUEUED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,6 +49,7 @@ type Reply = RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>;
 thread_local! {
     static CONNECTIONS: RefCell<HashMap<usize, Rc<Connection>>> = RefCell::new(HashMap::new());
     static HOST_COUNTS: RefCell<HashMap<(usize, String), std::sync::Weak<AtomicUsize>>> = RefCell::new(HashMap::new());
+    static KEEP_AWAKE: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
 }
 
 static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
@@ -89,7 +93,80 @@ pub(crate) fn connect(
         port.setMessageHandler(Some(&on_message));
         port.setDisconnectHandler(Some(&on_disconnect));
     }
+    keep_awake();
     Ok(())
+}
+
+/// Chrome keeps a background running while a host is connected to it; WebKit
+/// unloads it when idle all the same, and the host's session goes with it (a
+/// desktop app's unlock handshake, rebuilt late on the next popup). While any
+/// port is open its background is woken before it can count as idle.
+fn keep_awake() {
+    if KEEP_AWAKE.with(|timer| timer.borrow().is_some()) {
+        return;
+    }
+    let tick = RcBlock::new(|timer: NonNull<NSTimer>| {
+        let open = CONNECTIONS.with(|connections| {
+            awake(
+                connections.borrow().values().map(|connection| {
+                    (
+                        (connection.shared.clone(), connection.extension.clone()),
+                        connection.port.is_some(),
+                    )
+                }),
+                |(shared, extension)| (shared.as_ptr() as usize, extension.clone()),
+            )
+        });
+        let Some(open) = open else {
+            // SAFETY: WebKit passes the live timer that is firing, on the main
+            // thread that scheduled it; invalidating it there is permitted.
+            unsafe { timer.as_ref().invalidate() };
+            KEEP_AWAKE.with(|timer| timer.borrow_mut().take());
+            return;
+        };
+        for (shared, extension) in open {
+            let Some(shared) = shared.upgrade() else {
+                continue;
+            };
+            let context = shared
+                .loaded
+                .borrow()
+                .get(&extension)
+                .map(|loaded| loaded.context.clone());
+            if let Some(context) = context {
+                let done = RcBlock::new(|_error: *mut NSError| {});
+                // SAFETY: the context is retained and loaded, and timers fire
+                // on the main thread WebKit requires; the block outlives the call.
+                unsafe { context.loadBackgroundContentWithCompletionHandler(&done) };
+            }
+        }
+    });
+    // SAFETY: called on the main thread; the block is copied by the timer.
+    let timer =
+        unsafe { NSTimer::timerWithTimeInterval_repeats_block(KEEP_AWAKE_SECONDS, true, &tick) };
+    timer.setTolerance(KEEP_AWAKE_SECONDS / 4.0);
+    // Common modes, so an open menu or modal sheet doesn't hold the tick back
+    // past WebKit's idle limit.
+    // SAFETY: the main run loop and the common-modes constant are valid for
+    // the life of the process, and the timer was created on this thread.
+    unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+    KEEP_AWAKE.with(|slot| *slot.borrow_mut() = Some(timer));
+}
+
+/// One entry per extension and profile with a port open; `None` stops the
+/// timer. One-off messages keep nothing awake.
+fn awake<T>(
+    connections: impl IntoIterator<Item = (T, bool)>,
+    key: impl Fn(&T) -> (usize, String),
+) -> Option<Vec<T>> {
+    let mut seen = HashSet::new();
+    let open: Vec<_> = connections
+        .into_iter()
+        .filter(|(_, port)| *port)
+        .map(|(item, _)| item)
+        .filter(|item| seen.insert(key(item)))
+        .collect();
+    (!open.is_empty()).then_some(open)
 }
 
 /// Sends one message for `runtime.sendNativeMessage` and replies with the
@@ -752,6 +829,82 @@ fn valid_host_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_ports_keep_one_background_awake_per_extension_and_profile() {
+        let key = |item: &(usize, &str)| (item.0, item.1.to_string());
+        let open = awake(
+            [
+                ((1, "bitwarden"), true),
+                ((1, "bitwarden"), true),
+                ((2, "bitwarden"), true),
+                ((1, "proton"), false),
+            ],
+            key,
+        );
+        assert_eq!(open, Some(vec![(1, "bitwarden"), (2, "bitwarden")]));
+        assert!(awake([((1, "proton"), false)], key).is_none());
+        assert!(awake(Vec::<((usize, &str), bool)>::new(), key).is_none());
+    }
+
+    #[test]
+    fn keep_awake_follows_native_port_lifecycle() {
+        let tick = |connections: &[((usize, &'static str), bool)]| {
+            awake(connections.iter().copied(), |(profile, extension)| {
+                (*profile, extension.to_string())
+            })
+            .map(|mut open| {
+                open.sort_unstable();
+                open
+            })
+        };
+        let mut connections = vec![((1, "bitwarden"), true)];
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden")]),
+            "the first port starts keeping its background awake"
+        );
+
+        connections.extend([
+            ((1, "bitwarden"), true),
+            ((2, "bitwarden"), true),
+            ((2, "proton"), true),
+            ((3, "proton"), false),
+        ]);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden"), (2, "bitwarden"), (2, "proton")]),
+            "a tick wakes each profile-extension pair once, ignoring one-off messages"
+        );
+
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(1, "bitwarden"), (2, "bitwarden"), (2, "proton")]),
+            "closing one of several ports to the same background keeps it awake"
+        );
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            Some(vec![(2, "bitwarden"), (2, "proton")])
+        );
+        connections.remove(0);
+        assert_eq!(tick(&connections), Some(vec![(2, "proton")]));
+        connections.remove(0);
+        assert_eq!(
+            tick(&connections),
+            None,
+            "the tick after the last port closes stops even with a one-off message pending"
+        );
+
+        connections.clear();
+        connections.push(((1, "bitwarden"), false));
+        assert_eq!(
+            tick(&connections),
+            None,
+            "a one-off never starts keep-awake"
+        );
+    }
     use serde_json::json;
 
     const EXTENSION: &str = "aeblfdkhhhdcdjpifhhbdiojplfjncoa";

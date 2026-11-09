@@ -58,6 +58,12 @@ jobs:
                       (.event == "push" or .event == "workflow_dispatch")))] | length > 0'
           done
 
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Verify the complete draft and updater manifest
+        run: cargo run --locked -p xtask -- check-release-assets dist "${TAG}" "${GITHUB_REPOSITORY}"
+
       - name: Verify final asset provenance
         run: |
           set -euo pipefail
