@@ -7109,6 +7109,8 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                         && window.label() == MAIN_LABEL
                     {
+                        #[cfg(target_os = "macos")]
+                        platform::imp::sidebar_card_lights(&window, false);
                         if let Some(shell) = window.app_handle().try_state::<Handle>() {
                             shell.dispatch(Command::PeekSidebar {
                                 peek: false,
@@ -8353,6 +8355,27 @@ mod tests {
         assert!(
             reset.find("Command::PeekSidebar").unwrap()
                 < reset.find("Command::SetChromeModal").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_resets_macos_sidebar_controls() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains(
+            "#[cfg(target_os = \"macos\")]\n                        platform::imp::sidebar_card_lights(&window, false);"
+        ));
+        assert!(
+            reset.find("sidebar_card_lights(&window, false)").unwrap()
+                < reset.find("try_state::<Handle>()").unwrap()
         );
     }
 
