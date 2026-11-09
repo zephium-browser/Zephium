@@ -366,6 +366,35 @@ pub fn user_data_directory_matches(expected: &Path, actual: &Path) -> io::Result
     Ok(canonical_user_data_directory(expected)? == canonical_user_data_directory(actual)?)
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn acquire_lifecycle_lock<T>(
+    operation: &str,
+    mut open: impl FnMut() -> io::Result<T>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> io::Result<T> {
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(10);
+    let backoff = Duration::from_millis(100);
+    loop {
+        let error = match open() {
+            Ok(lease) => return Ok(lease),
+            Err(error) => error,
+        };
+        let remaining = timeout.saturating_sub(elapsed());
+        // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another handle may
+        // outlive the single-instance notification window during shutdown.
+        if !matches!(error.raw_os_error(), Some(32 | 33)) || remaining.is_zero() {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{operation}: {error}"),
+            ));
+        }
+        sleep(backoff.min(remaining));
+    }
+}
+
 pub const fn security_floor_review_is_current(unix_seconds: u64) -> bool {
     unix_seconds >= LATEST_REVIEWED_PUBLISHED_UNIX_SECONDS
         && unix_seconds < SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
@@ -384,6 +413,116 @@ pub const fn production_release_security_is_current(unix_seconds: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    #[test]
+    fn lifecycle_lock_retries_contention_until_open_succeeds() {
+        for code in [32, 33] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let mut attempts = 0;
+            let lease = acquire_lifecycle_lock(
+                "privileged runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    if attempts <= 3 {
+                        Err(io::Error::from_raw_os_error(code))
+                    } else {
+                        Ok("lease")
+                    }
+                },
+                || elapsed.get(),
+                |delay| {
+                    assert_eq!(delay, Duration::from_millis(100));
+                    elapsed.set(elapsed.get() + delay);
+                },
+            )
+            .unwrap();
+            assert_eq!(lease, "lease");
+            assert_eq!(attempts, 4);
+            assert_eq!(elapsed.get(), Duration::from_millis(300));
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_stops_after_ten_seconds_with_operation_and_os_error() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            for code in [32, 33] {
+                let elapsed = Cell::new(Duration::ZERO);
+                let mut attempts = 0;
+                let error = acquire_lifecycle_lock::<()>(
+                    operation,
+                    || {
+                        attempts += 1;
+                        Err(io::Error::from_raw_os_error(code))
+                    },
+                    || elapsed.get(),
+                    |delay| elapsed.set(elapsed.get() + delay),
+                )
+                .unwrap_err();
+                assert_eq!(attempts, 101);
+                assert_eq!(elapsed.get(), Duration::from_secs(10));
+                assert_eq!(error.kind(), io::Error::from_raw_os_error(code).kind());
+                assert_eq!(
+                    error.to_string(),
+                    format!("{operation}: {}", io::Error::from_raw_os_error(code))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_does_not_retry_other_errors() {
+        for code in [2, 5, 112] {
+            let mut attempts = 0;
+            let error = acquire_lifecycle_lock::<()>(
+                "private runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    Err(io::Error::from_raw_os_error(code))
+                },
+                || Duration::ZERO,
+                |_| panic!("unrelated errors must not wait"),
+            )
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "private runtime lifecycle lock: {}",
+                    io::Error::from_raw_os_error(code)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_bounds_backoff_by_remaining_time() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+        let error = acquire_lifecycle_lock::<()>(
+            "privileged runtime lifecycle lock",
+            || {
+                attempts += 1;
+                // Time spent opening the file counts against the deadline.
+                elapsed.set(elapsed.get() + Duration::from_millis(9990));
+                Err(io::Error::from_raw_os_error(32))
+            },
+            || elapsed.get(),
+            |delay| {
+                assert_eq!(delay, Duration::from_millis(10));
+                elapsed.set(elapsed.get() + delay);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(error
+            .to_string()
+            .starts_with("privileged runtime lifecycle lock:"));
+    }
 
     const OVERDUE: u64 = SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
         + crate::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS;
