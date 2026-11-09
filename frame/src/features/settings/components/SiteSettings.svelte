@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  // A reopened settings page still shares native's single permissions reader.
+  let pending = Promise.resolve();
+</script>
+
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
   import type {
@@ -33,7 +38,6 @@
   let busy = $state<string | null>(null);
   let failed = $state(false);
   let generation = 0;
-  let pending = Promise.resolve();
 
   let groups = $derived(
     (view?.kinds ?? [])
@@ -98,7 +102,6 @@
     view = null;
     busy = null;
     failed = false;
-    // Native admits only one list request at a time.
     if (profile) pending = pending.then(() => load(profile, scope));
     return () => {
       generation += 1;

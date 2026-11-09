@@ -1,5 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { render } from "vitest-browser-svelte";
+import { cleanup, render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import "$styles/global.css";
 import type { SitePermissionsView } from "$shared/ipc/bindings";
@@ -18,6 +18,7 @@ vi.mock("$domain/tabs", async () => {
   return { tabs: { profile: () => ({ id: active.get("id") }) } };
 });
 afterEach(() => {
+  cleanup();
   vi.resetAllMocks();
   native.set.mockResolvedValue(true);
   native.switchProfile("personal");
@@ -122,6 +123,27 @@ test("switching profiles hides the old controls and ignores a late change failur
   await expect.element(page.getByText("Sites you allow or block will appear here.")).toBeVisible();
   await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
   expect(native.set).toHaveBeenCalledTimes(1);
+});
+
+test("reopening settings waits for the previous instance's permissions read", async () => {
+  let finish!: (reply: SitePermissionsView) => void;
+  const first = new Promise<SitePermissionsView>((resolve) => (finish = resolve));
+  native.list.mockReturnValueOnce(first).mockResolvedValueOnce({ ...saved, entries: [] });
+  const previous = await render(SiteSettings);
+  await expect.poll(() => native.list.mock.calls.length).toBe(1);
+  await previous.unmount();
+
+  native.switchProfile("work");
+  await render(SiteSettings);
+  try {
+    expect(native.list).toHaveBeenCalledTimes(1);
+  } finally {
+    finish(saved);
+  }
+
+  await expect.element(page.getByText("Sites you allow or block will appear here.")).toBeVisible();
+  await expect.element(page.getByText("https://meet.example")).not.toBeInTheDocument();
+  expect(native.list).toHaveBeenCalledTimes(2);
 });
 
 test("an empty, a private and an unreadable profile each say why there is no list", async () => {
