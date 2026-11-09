@@ -453,6 +453,7 @@ fn configure_with_credential_denied(
                 |uri| {
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
+                        || zephium_core::navigation::is_extension_frame_document(&uri)
                         || zephium_core::navigation::external_app_link(&uri).is_some()
                 },
             ) {
