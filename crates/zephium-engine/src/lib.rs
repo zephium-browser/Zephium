@@ -1686,9 +1686,9 @@ impl TabPreviewRequest {
 
     fn capture(&self, host: &mut host::EngineHost) {
         if let Some((id, url, done)) = self.take() {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             host.capture_tab_preview(id, url, done);
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
             {
                 let _ = (host, id, url);
                 done(None);

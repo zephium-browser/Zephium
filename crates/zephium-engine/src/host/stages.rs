@@ -435,7 +435,7 @@ impl EngineHost {
         }
         // one native pass: frame, tree and visibility land atomically, so a
         // switch can never flash the previous pane
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if let Some(motion) = _motion {
             stage.hint_motion(motion);
         }

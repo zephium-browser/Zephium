@@ -18,6 +18,7 @@ use wry::WebViewExtUnix;
 
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
+use zephium_core::ports::engine::StageMotion;
 use zephium_core::split::{self, Pane};
 
 use crate::motion_curve::EMPHASIZED;
@@ -25,7 +26,7 @@ use crate::pane_geometry::rounded_native_size;
 
 use super::guide::{Guide, GuideStyle};
 
-const CARD_RADIUS: f64 = 12.0;
+const CARD_RADIUS: f64 = 8.0;
 const CARD_AWAY: f64 = 24.0;
 const SLIDE: Duration = Duration::from_millis(400);
 
@@ -47,6 +48,75 @@ impl CardMotion {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Slide {
+    started: Instant,
+    from: f64,
+    target: Rect,
+    width: f64,
+    layout_x: f64,
+    x: f64,
+    beside: bool,
+}
+
+impl Slide {
+    fn at(self, now: Instant) -> (f64, bool) {
+        let elapsed = now.saturating_duration_since(self.started);
+        if elapsed >= SLIDE {
+            return (self.target.x, true);
+        }
+        let progress = EMPHASIZED.at(elapsed.as_secs_f64() / SLIDE.as_secs_f64());
+        (self.from + (self.target.x - self.from) * progress, false)
+    }
+
+    fn viewport(self) -> Rect {
+        let x = if self.beside {
+            self.x.max(self.target.x)
+        } else {
+            self.x
+        };
+        Rect::new(
+            x,
+            self.target.y,
+            self.target.x + self.target.width - x,
+            self.target.height,
+        )
+    }
+}
+
+fn can_slide(old: Rect, target: Rect, root: (i32, i32), animations: bool) -> bool {
+    animations
+        && old.y == target.y
+        && old.height == target.height
+        && old.x != target.x
+        && old.x + old.width == target.x + target.width
+        && [old, target].into_iter().all(|region| {
+            native_pane(
+                Rect::new(0.0, 0.0, region.width, region.height),
+                (region.x, region.y),
+                (region.width, region.height),
+                root,
+            )
+            .is_some()
+        })
+}
+
+fn viewport(state: &State) -> Rect {
+    state.slide.map_or_else(
+        || Rect::new(state.origin.0, state.origin.1, state.size.0, state.size.1),
+        Slide::viewport,
+    )
+}
+
+fn animations_enabled(state: &Rc<RefCell<State>>) -> bool {
+    state
+        .try_borrow()
+        .ok()
+        .map(|state| state.fixed.clone())
+        .and_then(|fixed| fixed.settings())
+        .is_some_and(|settings| settings.is_gtk_enable_animations())
+}
+
 #[derive(Clone)]
 struct HostView {
     view: webkit2gtk::WebView,
@@ -58,6 +128,9 @@ struct State {
     gap: f64,
     origin: (f64, f64),
     size: (f64, f64),
+    root_size: (i32, i32),
+    pending_motion: Option<StageMotion>,
+    slide: Option<Slide>,
     hidden: bool,
     tree: Option<Pane>,
     views: HashMap<ItemId, HostView>,
@@ -79,12 +152,16 @@ pub struct Stage {
 
 impl Stage {
     pub fn new(fixed: gtk::Fixed, gap: f64) -> Self {
+        let root = fixed.allocation();
         let stage = Self {
             state: Rc::new(RefCell::new(State {
                 fixed: fixed.clone(),
                 gap,
                 origin: (0.0, 0.0),
                 size: (0.0, 0.0),
+                root_size: (root.width(), root.height()),
+                pending_motion: None,
+                slide: None,
                 hidden: true,
                 tree: None,
                 views: HashMap::new(),
@@ -101,13 +178,18 @@ impl Stage {
         };
         let state = Rc::downgrade(&stage.state);
         let scheduled = Rc::downgrade(&stage.sync_scheduled);
-        fixed.connect_size_allocate(move |_, _| {
+        fixed.connect_size_allocate(move |_, allocation| {
             let (Some(state), Some(scheduled)) = (state.upgrade(), scheduled.upgrade()) else {
                 return;
             };
             // A native shrink can precede the shell's updated content region.
             // Recheck containment before any stale allocation can paint.
             if let Ok(mut state) = state.try_borrow_mut() {
+                let size = (allocation.width(), allocation.height());
+                if state.root_size != size {
+                    state.slide = None;
+                    state.root_size = size;
+                }
                 state.revision = state.revision.wrapping_add(1).max(1);
             } else {
                 schedule_sync(&state, &scheduled);
@@ -121,9 +203,48 @@ impl Stage {
     /// One native pass for frame, tree and visibility; `None` region hides
     /// the whole stage.
     pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) -> bool {
-        {
+        let animations = animations_enabled(&self.state);
+        let guide = {
             let Ok(mut s) = self.state.try_borrow_mut() else {
                 return false;
+            };
+            let old = Rect::new(s.origin.0, s.origin.1, s.size.0, s.size.1);
+            let changed = region != Some(old) || s.tree != tree || s.visible != visible;
+            let motion = s.pending_motion.take();
+            let compatible = !s.hidden && s.tree == tree && s.visible == visible;
+            let now = Instant::now();
+            s.slide = match region {
+                Some(target)
+                    if animations
+                        && compatible
+                        && s.slide.is_some_and(|slide| slide.target == target) =>
+                {
+                    s.slide
+                }
+                Some(target)
+                    if compatible
+                        && motion == Some(StageMotion::Slide)
+                        && can_slide(old, target, s.root_size, animations) =>
+                {
+                    let (from, width, layout_x) =
+                        s.slide.map_or((old.x, old.width, old.x), |slide| {
+                            (slide.at(now).0, slide.width, slide.layout_x)
+                        });
+                    Some(Slide {
+                        started: now,
+                        from,
+                        target,
+                        width: width.max(target.width),
+                        layout_x: if target.width > width {
+                            target.x
+                        } else {
+                            layout_x
+                        },
+                        x: from,
+                        beside: s.chrome_overlay.is_some() && target.x > from,
+                    })
+                }
+                _ => None,
             };
             s.hidden = region.is_none();
             if let Some(r) = region {
@@ -133,9 +254,20 @@ impl Stage {
             s.tree = tree;
             s.visible = visible.to_vec();
             s.revision = s.revision.wrapping_add(1).max(1);
+            changed.then(|| s.guide.clone())
+        };
+        if let Some(guide) = guide {
+            guide.hide();
         }
         sync(&self.state, &self.sync_scheduled);
+        schedule_card_tick(&self.state, &self.sync_scheduled);
         true
+    }
+
+    pub fn hint_motion(&self, motion: StageMotion) {
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            state.pending_motion = Some(motion);
+        }
     }
 
     pub fn has_view(&self, id: ItemId) -> bool {
@@ -305,6 +437,7 @@ impl Stage {
     }
 
     pub fn raise_chrome(&self, raised: bool, card: Rect, slide: bool) -> bool {
+        let slide = slide && animations_enabled(&self.state);
         if raised
             && (![card.x, card.y, card.width, card.height]
                 .into_iter()
@@ -367,13 +500,19 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
             ready,
             overlay,
             away,
+            clip,
+            travelling,
         )) = state.try_borrow().ok().map(|state| {
             (
                 state.revision,
                 state.fixed.clone(),
                 state.gap,
-                state.origin,
-                state.size,
+                state
+                    .slide
+                    .map_or(state.origin, |slide| (slide.x, slide.target.y)),
+                state
+                    .slide
+                    .map_or(state.size, |slide| (slide.width, slide.target.height)),
                 state.hidden,
                 state.tree.clone(),
                 state
@@ -385,6 +524,8 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                 state.ready.clone(),
                 state.chrome_overlay,
                 state.card_away,
+                viewport(&state),
+                state.slide.map(|slide| slide.layout_x),
             )
         })
         else {
@@ -401,8 +542,14 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
             .map(|(id, view)| {
                 let pane = panes.iter().find(|(pid, _)| *pid == id).and_then(|(_, r)| {
                     rounded_native_size(r.width, r.height, 1.0)?;
-                    native_pane(*r, origin, size, (root.width(), root.height()))
-                        .map(|r| (r, (r.width(), r.height())))
+                    // A deliberate slide holds its wider viewport beyond the
+                    // stage edge. Paint and input remain cut to `clip`.
+                    let rect = if let Some(anchor) = travelling {
+                        native_slide_pane(*r, origin, size, anchor)
+                    } else {
+                        native_pane(*r, origin, size, (root.width(), root.height()))
+                    };
+                    rect.map(|r| (r, (r.width(), r.height())))
                 });
                 let mapped = !hidden && pane.is_some() && visible.contains(&id);
                 (id, view, pane, mapped)
@@ -491,6 +638,12 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                     continue 'attempt;
                 }
             }
+            if let Some(window) = view.view.window() {
+                window.shape_combine_region(None, 0, 0);
+                if !revision_is_current(state, revision) {
+                    continue 'attempt;
+                }
+            }
             if !view.view.is_child_visible() {
                 view.view.set_child_visible(true);
                 if !revision_is_current(state, revision) {
@@ -568,7 +721,7 @@ fn sync(state: &Rc<RefCell<State>>, sync_scheduled: &Rc<Cell<bool>>) {
                 revoke_and_unmap_for_retry(state, revision, &view.view);
                 continue 'attempt;
             }
-            if !apply_input_clip(&fixed, &view.view, overlay, away, || {
+            if !apply_input_clip(&fixed, &view.view, overlay, away, clip, || {
                 view_may_reveal(state, revision, *id, view)
             }) {
                 revoke_and_unmap_for_retry(state, revision, &view.view);
@@ -653,7 +806,7 @@ fn schedule_card_tick(state: &Rc<RefCell<State>>, scheduled: &Rc<Cell<bool>>) {
         let Ok(mut state) = state.try_borrow_mut() else {
             return;
         };
-        if state.card_tick_scheduled || state.card_motion.is_none() {
+        if state.card_tick_scheduled || (state.card_motion.is_none() && state.slide.is_none()) {
             return;
         }
         state.card_tick_scheduled = true;
@@ -661,84 +814,53 @@ fn schedule_card_tick(state: &Rc<RefCell<State>>, scheduled: &Rc<Cell<bool>>) {
     };
     let weak = Rc::downgrade(state);
     let weak_scheduled = Rc::downgrade(scheduled);
-    fixed.add_tick_callback(move |_, _| {
+    fixed.add_tick_callback(move |fixed, _| {
         let (Some(state), Some(scheduled)) = (weak.upgrade(), weak_scheduled.upgrade()) else {
             return gtk::glib::ControlFlow::Break;
         };
+        let animations = fixed
+            .settings()
+            .is_some_and(|settings| settings.is_gtk_enable_animations());
         {
             let Ok(mut state) = state.try_borrow_mut() else {
                 return gtk::glib::ControlFlow::Continue;
             };
-            let Some(motion) = state.card_motion else {
-                state.card_tick_scheduled = false;
-                return gtk::glib::ControlFlow::Break;
-            };
-            let (away, finished) = motion.at(Instant::now());
-            state.card_away = away;
-            if finished {
-                state.card_motion = None;
-                if motion.to >= 1.0 {
-                    state.chrome_overlay = None;
+            if let Some(motion) = state.card_motion {
+                let (away, finished) = motion.at(if animations {
+                    Instant::now()
+                } else {
+                    motion.started + SLIDE
+                });
+                state.card_away = away;
+                if finished {
+                    state.card_motion = None;
+                    if motion.to >= 1.0 {
+                        state.chrome_overlay = None;
+                    }
                 }
+            }
+            if let Some(mut slide) = state.slide {
+                let (x, finished) = slide.at(if animations {
+                    Instant::now()
+                } else {
+                    slide.started + SLIDE
+                });
+                slide.x = x;
+                state.slide = (!finished).then_some(slide);
             }
             state.revision = state.revision.wrapping_add(1).max(1);
         }
-        sync_card(&state, &scheduled);
+        sync(&state, &scheduled);
         let Ok(mut state) = state.try_borrow_mut() else {
             return gtk::glib::ControlFlow::Continue;
         };
-        if state.card_motion.is_some() {
+        if state.card_motion.is_some() || state.slide.is_some() {
             gtk::glib::ControlFlow::Continue
         } else {
             state.card_tick_scheduled = false;
             gtk::glib::ControlFlow::Break
         }
     });
-}
-
-fn sync_card(state: &Rc<RefCell<State>>, scheduled: &Rc<Cell<bool>>) {
-    'attempt: for _ in 0..4 {
-        let Some((revision, fixed, overlay, away, views)) = state.try_borrow().ok().map(|state| {
-            (
-                state.revision,
-                state.fixed.clone(),
-                state.chrome_overlay,
-                state.card_away,
-                state
-                    .views
-                    .iter()
-                    .map(|(id, view)| (*id, view.clone()))
-                    .collect::<Vec<_>>(),
-            )
-        }) else {
-            schedule_sync(state, scheduled);
-            return;
-        };
-        for (id, view) in views {
-            if !view.view.is_child_visible() || !view.view.is_sensitive() {
-                continue;
-            }
-            if !apply_input_clip(&fixed, &view.view, overlay, away, || {
-                view_may_reveal(state, revision, id, &view)
-            }) {
-                revoke_and_unmap_for_retry(state, revision, &view.view);
-                if !revision_is_current(state, revision) {
-                    continue 'attempt;
-                }
-                continue;
-            }
-            view.view.queue_draw();
-            if !view_may_reveal(state, revision, id, &view) {
-                revoke_and_unmap_for_retry(state, revision, &view.view);
-                continue 'attempt;
-            }
-        }
-        if revision_is_current(state, revision) {
-            return;
-        }
-    }
-    schedule_sync(state, scheduled);
-    conceal_views_until_retry(state);
 }
 
 fn install_view_clip(
@@ -761,9 +883,17 @@ fn install_view_clip(
         }) {
             return Propagation::Proceed;
         }
-        let (fixed, overlay, away) = (state.fixed.clone(), state.chrome_overlay, state.card_away);
+        if !state.ready.contains(&id) || !draw_permit.load(Ordering::Acquire) {
+            return Propagation::Proceed;
+        }
+        let (fixed, overlay, away, clip) = (
+            state.fixed.clone(),
+            state.chrome_overlay,
+            state.card_away,
+            viewport(&state),
+        );
         drop(state);
-        if let Some(region) = card_clip_region(&fixed, view, overlay, away) {
+        if let Some(region) = pane_clip_region(&fixed, view, overlay, away, clip) {
             clip_cairo(cr, &region);
             draw_webkit(view, cr);
             return Propagation::Stop;
@@ -775,25 +905,31 @@ fn install_view_clip(
         let Some(state) = weak.upgrade() else {
             return;
         };
-        let Some((revision, fixed, overlay, away)) = state.try_borrow().ok().and_then(|state| {
-            state
-                .views
-                .get(&id)
-                .filter(|owned| {
-                    owned.view == *view && Arc::ptr_eq(&owned.presentation_permit, &permit)
-                })
-                .map(|_| {
-                    (
-                        state.revision,
-                        state.fixed.clone(),
-                        state.chrome_overlay,
-                        state.card_away,
-                    )
-                })
-        }) else {
+        let Some((revision, fixed, overlay, away, clip)) =
+            state.try_borrow().ok().and_then(|state| {
+                state
+                    .views
+                    .get(&id)
+                    .filter(|owned| {
+                        owned.view == *view
+                            && Arc::ptr_eq(&owned.presentation_permit, &permit)
+                            && state.ready.contains(&id)
+                            && permit.load(Ordering::Acquire)
+                    })
+                    .map(|_| {
+                        (
+                            state.revision,
+                            state.fixed.clone(),
+                            state.chrome_overlay,
+                            state.card_away,
+                            viewport(&state),
+                        )
+                    })
+            })
+        else {
             return;
         };
-        if !apply_input_clip(&fixed, view, overlay, away, || {
+        if !apply_input_clip(&fixed, view, overlay, away, clip, || {
             revision_is_current(&state, revision)
         }) {
             revoke_and_unmap_for_retry(&state, revision, view);
@@ -828,6 +964,67 @@ fn clip_cairo(cr: &cairo::Context, region: &cairo::Region) {
         );
     }
     cr.clip();
+}
+
+fn pane_clip_region(
+    fixed: &gtk::Fixed,
+    view: &webkit2gtk::WebView,
+    card: Option<Rect>,
+    away: f64,
+    viewport: Rect,
+) -> Option<cairo::Region> {
+    let root = fixed.allocation();
+    let empty = || Some(cairo::Region::create());
+    let Some(bounds) = native_pane(
+        Rect::new(0.0, 0.0, viewport.width, viewport.height),
+        (viewport.x, viewport.y),
+        (viewport.width, viewport.height),
+        (root.width(), root.height()),
+    ) else {
+        return empty();
+    };
+    let page = view.allocation();
+    let position = if fixed.has_window() {
+        Some((page.x(), page.y()))
+    } else {
+        page.x()
+            .checked_sub(root.x())
+            .zip(page.y().checked_sub(root.y()))
+    };
+    let Some((px, py)) = position else {
+        return empty();
+    };
+    let Some((left, top)) = bounds.x().checked_sub(px).zip(bounds.y().checked_sub(py)) else {
+        return empty();
+    };
+    let region = card_clip_region(fixed, view, card, away);
+    if left <= 0
+        && top <= 0
+        && i64::from(left) + i64::from(bounds.width()) >= i64::from(page.width())
+        && i64::from(top) + i64::from(bounds.height()) >= i64::from(page.height())
+    {
+        return region;
+    }
+    let region = region.unwrap_or_else(|| {
+        cairo::Region::create_rectangle(&cairo::RectangleInt::new(
+            0,
+            0,
+            page.width(),
+            page.height(),
+        ))
+    });
+    if region
+        .intersect_rectangle(&cairo::RectangleInt::new(
+            left,
+            top,
+            bounds.width(),
+            bounds.height(),
+        ))
+        .is_err()
+    {
+        return empty();
+    }
+    Some(region)
 }
 
 fn card_clip_region(
@@ -898,6 +1095,7 @@ fn apply_input_clip(
     view: &webkit2gtk::WebView,
     card: Option<Rect>,
     away: f64,
+    viewport: Rect,
     current: impl Fn() -> bool,
 ) -> bool {
     if !current() {
@@ -907,7 +1105,7 @@ fn apply_input_clip(
         // WebKit's accelerated Wayland paint ignores GDK's visual shape.
         // The draw callback clips Cairo too; X11 needs the native shape to
         // uncover the chrome beneath a child window's old opaque pixels.
-        let region = card_clip_region(fixed, view, card, away);
+        let region = pane_clip_region(fixed, view, card, away, viewport);
         window.shape_combine_region(region.as_ref(), 0, 0);
         if !current() {
             return false;
@@ -923,6 +1121,25 @@ fn apply_input_clip(
         window.input_shape_combine_region(&region, 0, 0);
     }
     current()
+}
+
+fn native_slide_pane(
+    pane: Rect,
+    origin: (f64, f64),
+    size: (f64, f64),
+    anchor: f64,
+) -> Option<gtk::Allocation> {
+    let base = native_pane(pane, (anchor, origin.1), size, (i32::MAX, i32::MAX))?;
+    let shift = origin.0.round() - anchor.round();
+    if !shift.is_finite() || shift < f64::from(i32::MIN) || shift > f64::from(i32::MAX) {
+        return None;
+    }
+    Some(gtk::Allocation::new(
+        base.x().checked_add(shift as i32)?,
+        base.y(),
+        base.width(),
+        base.height(),
+    ))
 }
 
 fn native_pane(
@@ -1088,6 +1305,38 @@ mod tests {
     use gtk::prelude::ContainerExtManual;
     use webkit2gtk::WebViewExt as _;
 
+    mod fixed_imp {
+        use gtk::glib;
+        use gtk::subclass::prelude::*;
+
+        #[derive(Default)]
+        pub struct TestFixed;
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for TestFixed {
+            const NAME: &'static str = "ZephiumStageTestFixed";
+            type Type = super::TestFixed;
+            type ParentType = gtk::Fixed;
+        }
+
+        impl ObjectImpl for TestFixed {}
+        impl WidgetImpl for TestFixed {
+            fn preferred_width(&self) -> (i32, i32) {
+                (0, 0)
+            }
+            fn preferred_height(&self) -> (i32, i32) {
+                (0, 0)
+            }
+        }
+        impl ContainerImpl for TestFixed {}
+        impl FixedImpl for TestFixed {}
+    }
+
+    gtk::glib::wrapper! {
+        pub struct TestFixed(ObjectSubclass<fixed_imp::TestFixed>)
+            @extends gtk::Fixed, gtk::Container, gtk::Widget;
+    }
+
     #[test]
     fn parking_coordinate_places_the_complete_child_left_of_the_root() {
         assert_eq!(parked_x(720), Some(-721));
@@ -1119,6 +1368,48 @@ mod tests {
         assert_eq!(closing.at(middle), (away, false));
         assert!(closing.at(middle + Duration::from_millis(100)).0 > away);
         assert_eq!(closing.at(middle + SLIDE), (1.0, true));
+    }
+
+    #[test]
+    fn slides_admit_horizontal_changes_only_and_keep_fractional_split_sizes_constant() {
+        let old = Rect::new(240.25, 16.25, 719.75, 703.75);
+        let target = Rect::new(8.25, 16.25, 951.75, 703.75);
+        assert!(can_slide(old, target, (960, 720), true));
+        assert!(!can_slide(old, target, (960, 720), false));
+        for invalid in [
+            Rect::new(f64::NAN, 16.25, 951.75, 703.75),
+            Rect::new(8.25, 20.25, 951.75, 703.75),
+            Rect::new(8.25, 16.25, 951.75, 700.0),
+            Rect::new(8.25, 16.25, 952.75, 703.75),
+            Rect::new(-8.0, 16.25, 968.0, 703.75),
+        ] {
+            assert!(!can_slide(old, invalid, (960, 720), true));
+        }
+        let tree = Pane::Branch {
+            axis: split::Axis::Row,
+            ratio: 0.37,
+            a: Box::new(Pane::Leaf(ItemId::from(1))),
+            b: Box::new(Pane::Leaf(ItemId::from(2))),
+        };
+        let panes = split::layout(&tree, Rect::new(0.0, 0.0, target.width, target.height), 8.0);
+        let mut baseline = None;
+        for frame in 0..=120 {
+            let x = target.x + (old.x - target.x) * f64::from(frame) / 120.0;
+            let sizes = panes
+                .iter()
+                .map(|(_, pane)| {
+                    let r = native_slide_pane(
+                        *pane,
+                        (x, target.y),
+                        (target.width, target.height),
+                        target.x,
+                    )
+                    .expect("held slide pane");
+                    (r.width(), r.height())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(sizes, *baseline.get_or_insert_with(|| sizes.clone()));
+        }
     }
 
     #[test]
@@ -1390,11 +1681,12 @@ mod tests {
         );
     }
 
-    fn wait_for_card_motion(stage: &Stage) {
+    fn wait_for_motion(stage: &Stage) {
         let context = gtk::glib::MainContext::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         context.block_on(async {
-            while stage.state.borrow().card_motion.is_some() {
+            while stage.state.borrow().card_motion.is_some() || stage.state.borrow().slide.is_some()
+            {
                 assert!(
                     Instant::now() < deadline,
                     "native card motion did not settle"
@@ -1418,7 +1710,7 @@ mod tests {
 
         let window = gtk::ApplicationWindow::new(&application);
         window.set_default_size(960, 720);
-        let fixed = gtk::Fixed::new();
+        let fixed: gtk::Fixed = gtk::glib::Object::new::<TestFixed>().upcast();
         let chrome = gtk::DrawingArea::new();
         chrome.connect_draw(|_, cr| {
             cr.set_source_rgb(0.0, 1.0, 0.0);
@@ -1652,7 +1944,7 @@ mod tests {
                 .started,
             started
         );
-        wait_for_card_motion(&stage);
+        wait_for_motion(&stage);
         expect_native_pixels(
             &window,
             &[
@@ -1664,7 +1956,7 @@ mod tests {
         assert_eq!(window.focused_widget(), focus_before_motion);
         assert_eq!(stage.state.borrow().card_away, 0.0);
         assert!(stage.raise_chrome(false, card, true));
-        wait_for_card_motion(&stage);
+        wait_for_motion(&stage);
         expect_native_pixels(
             &window,
             &[
@@ -1682,6 +1974,109 @@ mod tests {
             Some(Pane::Leaf(sibling_id)),
             &[sibling_id],
         ));
+
+        let narrow = Rect::new(240.0, 0.0, 712.0, 720.0);
+        let wide = Rect::new(8.0, 0.0, 944.0, 720.0);
+        assert!(stage.apply(Some(narrow), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        window.set_focus(Some(&sibling));
+        let moving_focus = window.focused_widget();
+        let sizes = Rc::new(RefCell::new(Vec::new()));
+        let recorded = sizes.clone();
+        let previous = Cell::new((712, 720));
+        let size_handler = sibling.connect_size_allocate(move |_, allocation| {
+            let size = (allocation.width(), allocation.height());
+            if previous.replace(size) != size {
+                recorded.borrow_mut().push(size);
+            }
+        });
+        let unmaps = Rc::new(Cell::new(0));
+        let recorded_unmaps = unmaps.clone();
+        let unmap_handler =
+            sibling.connect_unmap(move |_| recorded_unmaps.set(recorded_unmaps.get() + 1));
+        stage.hint_motion(StageMotion::Slide);
+        assert!(stage.apply(Some(wide), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        let started = stage.state.borrow().slide.expect("content slide").started;
+        assert_eq!(sibling.allocated_width(), 944);
+        assert_eq!(sibling.allocation().x(), 240);
+        assert!(stage.apply(Some(wide), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        assert_eq!(
+            stage.state.borrow().slide.expect("retained slide").started,
+            started
+        );
+        expect_native_pixels(&window, &[(500, 100, [255, 0, 0]), (956, 100, [0, 255, 0])]);
+        wait_for_motion(&stage);
+        assert_eq!(sibling.allocation(), gtk::Allocation::new(8, 0, 944, 720));
+        assert_eq!(*sizes.borrow(), [(944, 720)]);
+        stage.hint_motion(StageMotion::Slide);
+        assert!(stage.apply(Some(narrow), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        assert_eq!(sibling.allocated_width(), 944);
+        wait_for_motion(&stage);
+        assert_eq!(sibling.allocation(), gtk::Allocation::new(240, 0, 712, 720));
+        assert_eq!(*sizes.borrow(), [(944, 720), (712, 720)]);
+        assert_eq!(window.focused_widget(), moving_focus);
+        assert_eq!(
+            unmaps.get(),
+            0,
+            "moving ready pages keep their native mapping"
+        );
+
+        stage.hint_motion(StageMotion::Slide);
+        assert!(stage.apply(Some(wide), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        gtk::glib::MainContext::default().block_on(async {
+            loop {
+                let slide = stage.state.borrow().slide.expect("in-flight native slide");
+                if slide.x != slide.from {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "native slide did not advance");
+                gtk::glib::timeout_future(Duration::from_millis(16)).await;
+            }
+        });
+        let interrupted = stage.state.borrow().slide.expect("interrupted slide");
+        stage.hint_motion(StageMotion::Slide);
+        assert!(stage.apply(Some(narrow), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        let reversed = stage.state.borrow().slide.expect("reverse slide");
+        assert_eq!(reversed.from, interrupted.at(reversed.started).0);
+        assert_eq!(reversed.width, interrupted.width);
+        assert_eq!(reversed.layout_x, interrupted.layout_x);
+        wait_for_motion(&stage);
+        assert_eq!(
+            *sizes.borrow(),
+            [(944, 720), (712, 720), (944, 720), (712, 720)]
+        );
+        assert_eq!(window.focused_widget(), moving_focus);
+        assert_eq!(unmaps.get(), 0);
+        sibling.disconnect(size_handler);
+        sibling.disconnect(unmap_handler);
+        assert!(stage.apply(Some(wide), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        assert!(
+            stage.state.borrow().slide.is_none(),
+            "no motion hint applies immediately"
+        );
+        stage.hint_motion(StageMotion::Slide);
+        assert!(stage.apply(Some(narrow), Some(Pane::Leaf(sibling_id)), &[sibling_id]));
+        assert!(stage.state.borrow().slide.is_some());
+        assert!(stage.apply(Some(narrow), Some(Pane::Leaf(id)), &[id]));
+        assert!(
+            stage.state.borrow().slide.is_none(),
+            "a tab switch retires the old journey"
+        );
+        assert!(!sibling.is_mapped());
+        assert!(stage.apply(
+            Some(Rect::new(240.0, 0.0, 720.0, 720.0)),
+            Some(Pane::Leaf(sibling_id)),
+            &[sibling_id]
+        ));
+        assert!(stage.raise_chrome(true, card, false));
+        assert!(stage.set_pending(sibling_id));
+        assert!(!sibling.window().expect("pending native window").is_shaped());
+        assert!(!sibling.is_sensitive());
+        assert!(sibling.is_child_visible());
+        sibling_permit.store(true, Ordering::Release);
+        assert!(stage.set_ready(sibling_id));
+        expect_native_pixels(&window, &[(340, 100, [0, 255, 0]), (640, 100, [255, 0, 0])]);
+        assert!(stage.raise_chrome(false, card, false));
 
         // The root can shrink before the shell publishes its smaller region.
         fixed.size_allocate(&gtk::Allocation::new(0, 0, 800, 600));
@@ -1707,7 +2102,17 @@ mod tests {
         assert!(!sibling.is_mapped());
         assert!(!sibling.is_sensitive());
 
+        stage.set_resize_guide(Some(Rect::new(230.0, 0.0, 2.0, 600.0)));
+        let guide = fixed
+            .children()
+            .into_iter()
+            .find(|widget| {
+                widget.is::<gtk::DrawingArea>() && widget != chrome.upcast_ref::<gtk::Widget>()
+            })
+            .expect("native stage guide");
+        assert!(guide.is_child_visible());
         assert!(stage.apply(None, None, &[]));
+        assert!(!guide.is_child_visible());
         window.show_all();
         while gtk::events_pending() {
             gtk::main_iteration_do(false);

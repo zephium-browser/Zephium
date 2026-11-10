@@ -831,5 +831,5 @@ mod tests;
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 pub(crate) mod anonymous_session_probe;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod tab_preview;

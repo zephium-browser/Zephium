@@ -27,6 +27,11 @@ pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
     let _ = window.run_on_main_thread(move || sidebar_edge::watch(&owner, hidden));
 }
 
+pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::column_width(&owner, width));
+}
+
 mod zero_fixed {
     use super::*;
 

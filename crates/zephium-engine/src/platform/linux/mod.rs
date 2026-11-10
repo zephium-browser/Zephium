@@ -5,6 +5,7 @@ mod content_filter;
 mod find;
 mod guide;
 mod stage;
+pub(crate) mod tab_preview;
 
 pub(crate) fn open_external_app(_url: &str) -> bool {
     false

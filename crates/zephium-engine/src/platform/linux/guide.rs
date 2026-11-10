@@ -108,6 +108,38 @@ impl Guide {
     /// A later WebKit child may map above an already visible guide.
     pub(super) fn raise(&self) {
         if self.0.zone.get().is_some() && self.0.area.is_child_visible() {
+            let fixed = &self.0.fixed;
+            let area = &self.0.area;
+            if area.parent().as_ref() != Some(fixed.upcast_ref::<gtk::Widget>()) {
+                self.0.conceal();
+                return;
+            }
+            if fixed.children().last() != Some(area.upcast_ref::<gtk::Widget>()) {
+                // Wayland follows GtkFixed paint order, not GdkWindow.raise.
+                // Reinsert only after a later child, never on each guide move.
+                self.0.advance();
+                let revision = self.0.revision.get();
+                area.set_child_visible(false);
+                if self.0.revision.get() != revision
+                    || area.parent().as_ref() != Some(fixed.upcast_ref::<gtk::Widget>())
+                {
+                    return;
+                }
+                fixed.remove(area);
+                // Restore ownership after a reentrant hide, without showing it.
+                if area.parent().is_none() {
+                    fixed.put(area, 0, 0);
+                }
+                if self.0.revision.get() != revision
+                    || area.parent().as_ref() != Some(fixed.upcast_ref::<gtk::Widget>())
+                {
+                    return;
+                }
+                if !self.0.refresh() {
+                    self.0.conceal();
+                    return;
+                }
+            }
             if let Some(window) = self.0.area.window() {
                 window.raise();
             }
@@ -283,7 +315,6 @@ fn paint(cr: &cairo::Context, width: f64, height: f64, style: GuideStyle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gtk::gdk;
     use std::time::{Duration, Instant};
     use webkit2gtk::{WebContextExt, WebViewExt};
 
@@ -394,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires private X11 readback/input and an admitted sandboxed WebKitGTK runtime"]
+    #[ignore = "requires private X11 readback/input and sandboxed ephemeral WebKitGTK views"]
     fn guide_paints_above_ephemeral_webkit_and_remains_input_transparent_x11() {
         assert_eq!(
             std::env::var("GDK_BACKEND").as_deref(),
@@ -447,29 +478,32 @@ mod tests {
             let (_, root_x, root_y) = root.origin();
             pointer.warp(&root.screen(), root_x + 150, root_y + 120);
             root.display().sync();
-            let (target, x, y) = pointer.window_at_position();
+            let (target, _, _) = pointer.window_at_position();
             assert_eq!(
                 target,
                 later.window(),
                 "the guide must not win native hit testing"
             );
-            let target = target.expect("page input window");
-            assert!(gdk::test_simulate_button(
-                &target,
-                x,
-                y,
-                1,
-                gdk::ModifierType::empty(),
-                gdk::EventType::ButtonPress
-            ));
-            assert!(gdk::test_simulate_button(
-                &target,
-                x,
-                y,
-                1,
-                gdk::ModifierType::empty(),
-                gdk::EventType::ButtonRelease
-            ));
+            #[link(name = "xdo")]
+            unsafe extern "C" {
+                fn xdo_new(display: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+                fn xdo_click_window(
+                    handle: *const std::ffi::c_void,
+                    window: usize,
+                    button: i32,
+                ) -> i32;
+                fn xdo_free(handle: *mut std::ffi::c_void);
+            }
+            // XTest follows real hit testing; XSendEvent is not a WebKit input event.
+            // SAFETY: the test owns this private X11 display and libxdo handle.
+            let clicked = unsafe {
+                let handle = xdo_new(std::ptr::null());
+                assert!(!handle.is_null(), "private X11 input connection");
+                let result = xdo_click_window(handle, 0, 1);
+                xdo_free(handle);
+                result
+            };
+            assert_eq!(clicked, 0);
             pump_until(|| later.title().as_deref() == Some("clicked"));
         }
         assert!(guide.show(Rect::new(149.0, 50.0, 2.0, 160.0), GuideStyle::Resize));

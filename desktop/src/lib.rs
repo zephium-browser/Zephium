@@ -5768,7 +5768,7 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;

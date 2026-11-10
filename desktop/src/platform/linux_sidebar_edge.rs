@@ -3,18 +3,27 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use tauri::{Manager, WebviewWindow};
+use zephium_core::layout::HIDDEN_CARD_INSET;
 
 const MONITOR_KEY: &str = "zephium-linux-sidebar-edge";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+struct EdgeStatus {
+    near: bool,
+    over: bool,
+}
 
 #[derive(Default)]
 struct EdgeState {
     hidden: bool,
     near: bool,
+    over: bool,
+    card_edge: f64,
     last: Option<f64>,
 }
 
 impl EdgeState {
-    fn set_hidden(&mut self, hidden: bool) -> Option<bool> {
+    fn set_hidden(&mut self, hidden: bool) -> Option<EdgeStatus> {
         if self.hidden == hidden {
             return None;
         }
@@ -22,30 +31,45 @@ impl EdgeState {
         self.moved(None)
     }
 
-    fn moved(&mut self, x: Option<f64>) -> Option<bool> {
+    fn set_width(&mut self, width: f64) -> Option<EdgeStatus> {
+        if !width.is_finite() || width <= 0.0 {
+            return None;
+        }
+        self.card_edge = width + 3.0 * HIDDEN_CARD_INSET;
+        let over = self.last.is_some_and(|x| x <= self.card_edge);
+        self.changed(self.near, over)
+    }
+
+    fn moved(&mut self, x: Option<f64>) -> Option<EdgeStatus> {
         let x = x.filter(|x| self.hidden && x.is_finite() && *x >= 0.0);
         let near = x.is_some_and(|x| {
             crate::edge_reach::at_edge(x, self.last.map_or(0.0, |last| x - last), self.near)
         });
+        let over = x.is_some_and(|x| x <= self.card_edge);
         self.last = x;
-        if near == self.near {
+        self.changed(near, over)
+    }
+
+    fn changed(&mut self, near: bool, over: bool) -> Option<EdgeStatus> {
+        if near == self.near && over == self.over {
             return None;
         }
         self.near = near;
-        Some(near)
+        self.over = over;
+        Some(EdgeStatus { near, over })
     }
 }
 
 struct Observer {
     state: RefCell<EdgeState>,
-    emit: Box<dyn Fn(bool)>,
+    emit: Box<dyn Fn(EdgeStatus)>,
 }
 
 impl Observer {
-    fn update(&self, update: impl FnOnce(&mut EdgeState) -> Option<bool>) {
+    fn update(&self, update: impl FnOnce(&mut EdgeState) -> Option<EdgeStatus>) {
         let change = update(&mut self.state.borrow_mut());
-        if let Some(near) = change {
-            (self.emit)(near);
+        if let Some(status) = change {
+            (self.emit)(status);
         }
     }
 
@@ -54,8 +78,7 @@ impl Observer {
             .widget()
             .and_then(|widget| widget.downcast::<gtk::Window>().ok())
             .is_some_and(|window| {
-                window.is_active()
-                    && window.is_mapped()
+                window.is_mapped()
                     && x.is_finite()
                     && y.is_finite()
                     && x >= 0.0
@@ -91,7 +114,7 @@ struct Monitor {
 }
 
 impl Monitor {
-    fn new(window: &gtk::ApplicationWindow, emit: impl Fn(bool) + 'static) -> Self {
+    fn new(window: &gtk::ApplicationWindow, emit: impl Fn(EdgeStatus) + 'static) -> Self {
         let observer = Rc::new(Observer {
             state: RefCell::new(EdgeState::default()),
             emit: Box::new(emit),
@@ -120,6 +143,10 @@ impl Monitor {
         }
     }
 
+    fn set_width(&self, width: f64) {
+        self.observer.update(|state| state.set_width(width));
+    }
+
     fn set_hidden(&self, hidden: bool) {
         let changed = self.observer.state.borrow().hidden != hidden;
         self.controller.set_propagation_phase(if hidden {
@@ -134,12 +161,12 @@ impl Monitor {
     }
 }
 
-pub(super) fn watch(window: &WebviewWindow, hidden: bool) {
+fn monitor(window: &WebviewWindow, create: bool) -> Option<Rc<Monitor>> {
     let Ok(native) = window.gtk_window() else {
-        return;
+        return None;
     };
     if native.in_destruction() {
-        return;
+        return None;
     }
     // The window owns one monitor. GTK's controller holds only a weak widget
     // pointer; callbacks own state, never the native window or controller.
@@ -148,67 +175,90 @@ pub(super) fn watch(window: &WebviewWindow, hidden: bool) {
     let monitor = match monitor {
         // SAFETY: this module alone uses the key, always for Rc<Monitor>.
         Some(monitor) => unsafe { monitor.as_ref().clone() },
-        None if !hidden => return,
+        None if !create => return None,
         None => {
             let app = window.app_handle().clone();
             let label = window.label().to_owned();
-            let monitor = Rc::new(Monitor::new(&native, move |near| {
-                crate::emit_to_privileged(
-                    &app,
-                    &label,
-                    "zephium:sidebar-edge",
-                    &serde_json::json!({ "near": near }),
-                );
+            let monitor = Rc::new(Monitor::new(&native, move |status| {
+                crate::emit_to_privileged(&app, &label, "zephium:sidebar-edge", &status);
             }));
             // SAFETY: the private typed key is released with the native window.
             unsafe { native.set_data(MONITOR_KEY, monitor.clone()) };
             monitor
         }
     };
-    monitor.set_hidden(hidden);
+    Some(monitor)
+}
+
+pub(super) fn watch(window: &WebviewWindow, hidden: bool) {
+    if let Some(monitor) = monitor(window, hidden) {
+        monitor.set_hidden(hidden);
+    }
+}
+
+pub(super) fn column_width(window: &WebviewWindow, width: f64) {
+    if let Some(monitor) = monitor(window, true) {
+        monitor.set_width(width);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EdgeState;
+    use super::{EdgeState, EdgeStatus};
+
+    fn status(near: bool, over: bool) -> Option<EdgeStatus> {
+        Some(EdgeStatus { near, over })
+    }
 
     #[test]
     fn visible_sidebars_do_not_track_motion_and_toggles_clear_the_edge() {
         let mut state = EdgeState::default();
+        state.set_width(200.0);
         assert_eq!(state.moved(Some(0.0)), None);
         assert_eq!(state.last, None);
         assert_eq!(state.set_hidden(true), None);
-        assert_eq!(state.moved(Some(0.0)), Some(true));
+        assert_eq!(state.moved(Some(0.0)), status(true, true));
         assert_eq!(state.set_hidden(true), None);
-        assert_eq!(state.set_hidden(false), Some(false));
+        assert_eq!(state.set_hidden(false), status(false, false));
         assert_eq!(state.moved(Some(0.0)), None);
         assert_eq!(state.set_hidden(false), None);
     }
 
     #[test]
-    fn edge_transitions_are_deduplicated_and_keep_hysteresis() {
+    fn edge_and_card_transitions_are_deduplicated_independently() {
         let mut state = EdgeState::default();
+        state.set_width(40.0);
         state.set_hidden(true);
-        assert_eq!(state.moved(Some(40.0)), None);
-        assert_eq!(state.moved(Some(8.0)), Some(true));
+        assert_eq!(state.moved(Some(40.0)), status(false, true));
+        assert_eq!(state.moved(Some(8.0)), status(true, true));
         assert_eq!(state.moved(Some(8.0)), None);
         assert_eq!(state.moved(Some(16.0)), None);
-        assert_eq!(state.moved(Some(30.0)), Some(false));
-        assert_eq!(state.moved(Some(30.0)), None);
+        assert_eq!(state.moved(Some(30.0)), status(false, true));
+        assert_eq!(state.moved(Some(64.0)), None);
+        assert_eq!(state.moved(Some(65.0)), status(false, false));
+        assert_eq!(state.moved(Some(65.0)), None);
+        assert_eq!(state.set_width(41.0), status(false, true));
+        assert_eq!(state.set_width(41.0), None);
+        assert_eq!(state.set_width(40.0), status(false, false));
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert_eq!(state.set_width(invalid), None);
+            assert_eq!(state.card_edge, 64.0);
+        }
     }
 
     #[test]
-    fn leaving_or_losing_focus_clears_velocity_before_reentry() {
+    fn leaving_or_losing_focus_clears_card_and_velocity_before_reentry() {
         let mut state = EdgeState::default();
+        state.set_width(40.0);
         state.set_hidden(true);
         assert_eq!(state.moved(Some(80.0)), None);
-        assert_eq!(state.moved(Some(40.0)), Some(true));
-        assert_eq!(state.moved(None), Some(false));
+        assert_eq!(state.moved(Some(40.0)), status(true, true));
+        assert_eq!(state.moved(None), status(false, false));
         assert_eq!(state.moved(None), None);
-        assert_eq!(state.moved(Some(40.0)), None);
+        assert_eq!(state.moved(Some(40.0)), status(false, true));
         for invalid in [f64::NAN, f64::INFINITY, -1.0] {
-            assert_eq!(state.moved(Some(0.0)), Some(true));
-            assert_eq!(state.moved(Some(invalid)), Some(false));
+            assert_eq!(state.moved(Some(0.0)), status(true, true));
+            assert_eq!(state.moved(Some(invalid)), status(false, false));
             assert_eq!(state.last, None);
         }
     }
@@ -253,7 +303,13 @@ mod native_tests {
         window.add(&view);
         let changes = Rc::new(RefCell::new(Vec::new()));
         let received = changes.clone();
-        let monitor = Monitor::new(&window, move |near| received.borrow_mut().push(near));
+        let monitor = Monitor::new(&window, move |status| received.borrow_mut().push(status));
+        monitor.set_width(40.0);
+        let inside = EdgeStatus {
+            near: true,
+            over: true,
+        };
+        let outside = EdgeStatus::default();
         let order = Rc::new(RefCell::new(Vec::new()));
         let captured = order.clone();
         monitor
@@ -282,11 +338,11 @@ mod native_tests {
         monitor.set_hidden(true);
         assert_eq!(
             *changes.borrow(),
-            [true],
+            [inside],
             "sample an already-resting pointer"
         );
         monitor.set_hidden(true);
-        assert_eq!(*changes.borrow(), [true], "repeated state is inert");
+        assert_eq!(*changes.borrow(), [inside], "repeated state is inert");
 
         order.borrow_mut().clear();
         pointer.warp(&screen, origin_x + 100, origin_y + 100);
@@ -302,7 +358,7 @@ mod native_tests {
             .expect("consuming child event");
         assert!(capture < child);
         drop(events);
-        assert_eq!(*changes.borrow(), [true, false]);
+        assert_eq!(*changes.borrow(), [inside, outside]);
         pointer.warp(&screen, origin_x + 4, origin_y + 100);
         until(|| monitor.observer.state.borrow().near);
         pointer.warp(&screen, origin_x + 450, origin_y + 100);
@@ -320,12 +376,26 @@ mod native_tests {
             !monitor.observer.state.borrow().near,
             "focus loss clears edge"
         );
-        native.focus(0);
-        until(|| window.is_active());
+        assert!(
+            !monitor.observer.state.borrow().over,
+            "focus loss clears card"
+        );
+        pointer.warp(&screen, origin_x + 30, origin_y + 100);
+        until(|| monitor.observer.state.borrow().over);
+        assert!(!window.is_active(), "hover must not activate the window");
+        assert!(!monitor.observer.state.borrow().near);
+        monitor.set_width(1.0);
+        assert!(
+            !monitor.observer.state.borrow().over,
+            "resize updates resting pointer"
+        );
+        monitor.set_width(40.0);
+        assert!(monitor.observer.state.borrow().over);
         pointer.warp(&screen, origin_x + 6, origin_y + 100);
         until(|| monitor.observer.state.borrow().near);
         window.hide();
         assert!(!monitor.observer.state.borrow().near, "unmap clears edge");
+        assert!(!monitor.observer.state.borrow().over, "unmap clears card");
         window.show();
         native.focus(0);
         until(|| window.is_active());
@@ -336,6 +406,7 @@ mod native_tests {
             window.destroy();
             other.destroy();
         }
+        assert!(!monitor.observer.state.borrow().over);
         assert!(!monitor.observer.state.borrow().hidden);
         assert!(!monitor.observer.state.borrow().near);
         let weak_controller = monitor.controller.downgrade();
