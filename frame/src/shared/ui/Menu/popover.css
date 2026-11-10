@@ -5,10 +5,6 @@
 @import "./surface.css";
 
 .ui-menu {
-  /* The ends of a list that scrolls wear the menu's own wash, so they read
-     as the panel and not a band laid on it. */
-  --color-menu-step: var(--color-menu);
-
   display: flex;
   flex-direction: column;
 
@@ -147,9 +143,10 @@
   background-color: var(--scroll-thumb-hover);
 }
 
-/* The ends of a list that scrolls, laid over its first and last rows: a
-   chevron on the menu's own material that glides the list while the pointer
-   rests on it. */
+/* The ends of a list that scrolls, over its first and last rows: a small
+   capsule holding a chevron, which glides the list while the pointer rests
+   anywhere along that edge. No band across the panel: a wash laid on a
+   translucent menu shows as a second sheet at its corners. */
 .ui-menu-step {
   position: sticky;
   z-index: 1;
@@ -157,7 +154,6 @@
   flex: none;
   place-items: center;
   block-size: 22px;
-  margin-inline: calc(var(--menu-pad, 6px) * -1);
   color: var(--color-muted);
   opacity: 0;
   visibility: hidden;
@@ -167,16 +163,25 @@
     visibility 0s linear var(--motion-fast);
 }
 
+.ui-menu-step::before {
+  content: "";
+  position: absolute;
+  inset-block: 3px;
+  inset-inline: calc(50% - 16px);
+  z-index: -1;
+  border-radius: var(--radius-capsule);
+  background: var(--color-float);
+  box-shadow: var(--shadow-raised);
+}
+
 .ui-menu-step[data-dir="up"] {
   inset-block-start: 0;
   margin-block-end: -22px;
-  background: linear-gradient(to bottom, var(--color-menu-step) 45%, transparent);
 }
 
 .ui-menu-step[data-dir="down"] {
   inset-block-end: 0;
   margin-block-start: -22px;
-  background: linear-gradient(to top, var(--color-menu-step) 45%, transparent);
 }
 
 .ui-menu-step[data-shown] {
@@ -192,9 +197,8 @@
   color: var(--color-text);
 }
 
-/* An opaque menu's ends are the solid colour it is painted in. */
-.ui-menu[data-menu-material="opaque"] {
-  --color-menu-step: var(--color-float);
+.ui-menu-step:hover::before {
+  background: linear-gradient(var(--row-hover) 0 0) var(--color-float);
 }
 
 /* A row that opens more beside it ends in a chevron, where a hint would. */
