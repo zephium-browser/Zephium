@@ -48,6 +48,15 @@ impl ControlKeys {
             }
         }
     }
+
+    fn released(&mut self, key: u32, modifiers: gdk::ModifierType, control: Option<bool>) {
+        self.key(key, false, modifiers);
+        if let Some(control) = control {
+            // A held key inherited on focus-in has no known left/right side.
+            // Releasing the other Control must not discard that held key.
+            self.observe(control);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -55,6 +64,20 @@ struct Tracker {
     keys: ControlKeys,
     windows: Vec<glib::WeakRef<gtk::ApplicationWindow>>,
     reconcile_queued: bool,
+    keymap: Option<gdk::Keymap>,
+}
+
+impl Tracker {
+    fn active(&self) -> bool {
+        self.windows
+            .iter()
+            .filter_map(glib::WeakRef::upgrade)
+            .any(|window| !window.in_destruction() && window.is_mapped() && window.is_active())
+    }
+}
+
+fn keymap_control(keymap: &gdk::Keymap) -> bool {
+    keymap.modifier_state() & gdk::ModifierType::CONTROL_MASK.bits() != 0
 }
 
 fn publish(tracker: &Tracker) {
@@ -74,16 +97,12 @@ fn reconcile_focus(tracker: &Rc<RefCell<Tracker>>) {
         let Some(tracker) = weak.upgrade() else {
             return;
         };
-        let windows = {
+        let active = {
             let mut tracker = tracker.borrow_mut();
             tracker.reconcile_queued = false;
             tracker.windows.retain(|window| window.upgrade().is_some());
-            tracker.windows.clone()
+            tracker.active()
         };
-        let active = windows
-            .iter()
-            .filter_map(glib::WeakRef::upgrade)
-            .any(|window| !window.in_destruction() && window.is_mapped() && window.is_active());
         if !active {
             let mut tracker = tracker.borrow_mut();
             tracker.keys.observe(false);
@@ -103,6 +122,25 @@ pub(super) fn install(window: &gtk::ApplicationWindow) {
         tracker.windows.retain(|window| window.upgrade().is_some());
         tracker.windows.push(window.downgrade());
     }
+    if tracker.borrow().keymap.is_none() {
+        if let Some(keymap) = gdk::Keymap::for_display(&WidgetExt::display(window)) {
+            tracker.borrow_mut().keymap = Some(keymap.clone());
+            let weak = Rc::downgrade(&tracker);
+            keymap.connect_state_changed(move |keymap| {
+                let Some(tracker) = weak.upgrade() else {
+                    return;
+                };
+                let mut tracker = tracker.borrow_mut();
+                if tracker.active() {
+                    // X11 XKB and Wayland publish the effective modifier state
+                    // here. This also settles a release whose GTK event was
+                    // delivered before the native modifier-state update.
+                    tracker.keys.observe(keymap_control(keymap));
+                    publish(&tracker);
+                }
+            });
+        }
+    }
     let controller = gtk::EventControllerKey::new(window);
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let pressed = tracker.clone();
@@ -115,14 +153,14 @@ pub(super) fn install(window: &gtk::ApplicationWindow) {
     let released = tracker.clone();
     controller.connect_key_released(move |_, key, _, modifiers| {
         let mut tracker = released.borrow_mut();
-        tracker.keys.key(key, false, modifiers);
+        let control = tracker.keymap.as_ref().map(keymap_control);
+        tracker.keys.released(key, modifiers, control);
         publish(&tracker);
     });
     let focused = tracker.clone();
     window.connect_focus_in_event(move |window, _| {
-        let control = gdk::Keymap::for_display(&WidgetExt::display(window)).is_some_and(|keymap| {
-            keymap.modifier_state() & gdk::ModifierType::CONTROL_MASK.bits() != 0
-        });
+        let control = gdk::Keymap::for_display(&WidgetExt::display(window))
+            .is_some_and(|keymap| keymap_control(&keymap));
         let mut tracker = focused.borrow_mut();
         tracker.keys.observe(control);
         publish(&tracker);
@@ -200,6 +238,50 @@ mod tests {
     }
 
     #[test]
+    fn inherited_control_survives_the_other_control_release() {
+        let mut keys = ControlKeys::default();
+        keys.observe(true);
+        keys.key(
+            *gdk::keys::constants::Control_R,
+            true,
+            gdk::ModifierType::CONTROL_MASK,
+        );
+        keys.released(
+            *gdk::keys::constants::Control_R,
+            gdk::ModifierType::CONTROL_MASK,
+            Some(true),
+        );
+        assert!(keys.down());
+        keys.released(
+            *gdk::keys::constants::Control_L,
+            gdk::ModifierType::CONTROL_MASK,
+            Some(false),
+        );
+        assert!(!keys.down());
+    }
+
+    #[test]
+    fn native_state_update_settles_inherited_release_in_either_order() {
+        for native_update_first in [false, true] {
+            let mut keys = ControlKeys::default();
+            keys.observe(true);
+            if native_update_first {
+                keys.observe(false);
+            }
+            keys.released(
+                *gdk::keys::constants::Control_L,
+                gdk::ModifierType::CONTROL_MASK,
+                Some(!native_update_first),
+            );
+            if !native_update_first {
+                assert!(keys.down());
+                keys.observe(false);
+            }
+            assert!(!keys.down());
+        }
+    }
+
+    #[test]
     fn focus_loss_clears_known_and_inherited_modifiers() {
         let mut keys = ControlKeys {
             left: true,
@@ -218,7 +300,7 @@ mod tests {
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use std::ffi::{c_char, c_void, CStr};
+    use std::ffi::{c_char, c_void, CStr, CString};
     use std::time::{Duration, Instant};
     use webkit2gtk::WebContextExt;
 
@@ -243,7 +325,15 @@ mod native_tests {
     struct Keyboard(*mut c_void);
     impl Keyboard {
         fn key(&self, key: &CStr, pressed: bool) {
-            // SAFETY: this test owns the private X11 connection and static key name.
+            let display = gdk::Display::default().expect("private X11 display");
+            let keymap = gdk::Keymap::for_display(&display).expect("private X11 keymap");
+            let keyval = gdk::keys::Key::from_name(key.to_str().expect("static key name"));
+            let entries = keymap.entries_for_keyval(*keyval);
+            let keycode = entries.first().expect("mapped test key").keycode();
+            // Named libxdo modifier sequences also synthesize their mask's
+            // first key (Left Control). A numeric keycode sends only this key.
+            let key = CString::new(keycode.to_string()).expect("numeric keycode");
+            // SAFETY: this test owns the private X11 connection and key string.
             let result = unsafe {
                 if pressed {
                     xdo_send_keysequence_window_down(self.0, 0, key.as_ptr(), 0)
@@ -338,6 +428,42 @@ mod native_tests {
         outside.window().expect("outside native window").focus(0);
         until(|| outside.is_active() && !control_down());
         keyboard.key(c"Control_L", false);
+
+        // Presses outside monitored windows are inherited on focus-in. A
+        // release must use the aggregate state, including the unknown side.
+        let keymap =
+            gdk::Keymap::for_display(&WidgetExt::display(&main)).expect("native keyboard keymap");
+        for both_before_focus in [false, true] {
+            outside.window().expect("outside native window").focus(0);
+            until(|| outside.is_active() && !control_down());
+            keyboard.key(c"Control_L", true);
+            if both_before_focus {
+                keyboard.key(c"Control_R", true);
+            }
+            until(|| keymap_control(&keymap));
+            assert!(!control_down(), "unmonitored focus cannot activate Control");
+            main.window().expect("main native window").focus(0);
+            until(|| main.is_active() && control_down());
+            if !both_before_focus {
+                keyboard.key(c"Control_R", true);
+                until(|| TRACKER.with(|tracker| tracker.borrow().keys.right));
+            }
+            let released = Rc::new(std::cell::Cell::new(false));
+            let observed = released.clone();
+            let handler = main.connect_key_release_event(move |_, event| {
+                if event.keyval() == gdk::keys::constants::Control_R {
+                    assert!(control_down(), "inherited Left Control remains held");
+                    observed.set(true);
+                }
+                glib::Propagation::Proceed
+            });
+            keyboard.key(c"Control_R", false);
+            until(|| released.get());
+            assert!(control_down());
+            main.disconnect(handler);
+            keyboard.key(c"Control_L", false);
+            until(|| !keymap_control(&keymap) && !control_down());
+        }
         main.window().expect("main native window").focus(0);
         until(|| main.is_active());
         keyboard.key(c"Control_L", true);
