@@ -55,14 +55,14 @@
     list: () => list,
     region: () => scroller,
     reorder: () => ({ essential: false }),
-    drop: ({ id, x, y, over, before }) => {
+    drop: ({ id, x, y, over, before, page }) => {
       const essential = !!over?.closest("[data-essentials-drop]");
       // A tab that cannot be kept goes back where it was.
       if (essential && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && (essential || over?.closest("[data-tabs-drop]")))
         void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
       else if (essential) void tabDrag.move(id, true, before);
-      else tabs.dropTab(id, x, y);
+      else if (page) tabs.dropTab(id, x, y);
     },
   });
   const motion = new ListMotion({ enter: () => "rise" });
