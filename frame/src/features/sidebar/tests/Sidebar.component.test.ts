@@ -17,6 +17,7 @@ vi.mock("$shared/platform", () => {
 });
 const native = vi.hoisted(() => ({
   set: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  guide: vi.fn(async (_width: number | null) => true),
 }));
 vi.mock("$shared/lib/motion", async (original) => ({
   ...(await original<typeof import("$shared/lib/motion")>()),
@@ -33,6 +34,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     sidebarSetWidth: async () => {},
     sidebarSetHidden: async () => {},
     sidebarResize: async () => false,
+    sidebarResizeGuide: native.guide,
   });
 });
 
@@ -142,8 +144,9 @@ test("keyboard focus between sidebar controls keeps the card visible", async () 
   expect(aside.dataset.peek).toBeUndefined();
 });
 
-test("the hidden card resizes live without becoming a window drag region or snapping", async () => {
+test("the hidden card resizes once on release from a guide, without a window drag or a snap", async () => {
   const aside = await peek();
+  const guide = native.guide;
   const handle = aside.querySelector<HTMLElement>('[aria-label="Resize sidebar"]')!;
   expect(handle.getAttribute("aria-disabled")).toBe("false");
   expect(handle.dataset.tauriDragRegion).toBe("false");
@@ -158,17 +161,21 @@ test("the hidden card resizes live without becoming a window drag region or snap
   handle.dispatchEvent(
     new PointerEvent("pointermove", { bubbles: true, clientX: 340, pointerId: 1 }),
   );
-  await tick();
-  expect(aside.style.width).toBe("340px");
+  // The card holds its width while native draws the guide where it will land.
+  await expect.poll(() => guide.mock.lastCall?.[0]).toBe(340);
+  expect(aside.style.width).toBe("240px");
   expect(sidebar.sidebarResizeActive()).toBe(true);
   await leave(aside);
   expect(aside.dataset.peek).toBe("true");
   handle.dispatchEvent(
     new PointerEvent("pointermove", { bubbles: true, clientX: 56, pointerId: 1 }),
   );
-  await tick();
-  expect(aside.style.width).toBe("180px");
+  await expect.poll(() => guide.mock.lastCall?.[0]).toBe(180);
+  expect(aside.style.width).toBe("240px");
   handle.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 56, pointerId: 1 }));
+  await tick();
+  expect(guide).toHaveBeenLastCalledWith(null);
+  expect(aside.style.width).toBe("180px");
   expect(sidebar.sidebarResizeActive()).toBe(false);
   expect(sidebar.sidebarMode()).toBe("hidden");
   expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");

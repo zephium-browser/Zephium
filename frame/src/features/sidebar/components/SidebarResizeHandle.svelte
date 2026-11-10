@@ -102,14 +102,15 @@
   }
   function updateGuide(value: number) {
     if (isHidden()) {
+      // The card keeps its width while the guide moves; release resizes it
+      // once, as the column does, and never snaps it to the rail.
       pending = Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-      applyDragWidth(pending);
-      return;
+    } else {
+      pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      // Preview where release lands, including the snap to the rail.
+      const landing = resolveDragWidth(pending);
+      pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
     }
-    pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-    // Preview where release lands, including the snap to the rail.
-    const landing = resolveDragWidth(pending);
-    pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
     guide = pending;
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
