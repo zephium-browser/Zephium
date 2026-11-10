@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 impl EngineHost {
     pub(crate) fn capture_tab_preview(

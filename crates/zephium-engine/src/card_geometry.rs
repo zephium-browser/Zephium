@@ -1,5 +1,5 @@
 //! Where a hidden sidebar's card stands in physical pixels, and where its
-//! shadow lies in a page's own window. Pure, so the Windows stage and the
+//! shadow lies in a page's own window. Pure, so the native stages and the
 //! tests share one answer.
 
 use zephium_core::geometry::Rect;
