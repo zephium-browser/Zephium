@@ -11,6 +11,7 @@
   import {
     COMPACT_WIDTH,
     effectiveWidth,
+    fullColumnShown,
     holdShown,
     isCompact,
     isHidden,
@@ -65,7 +66,13 @@
   // Escape leaves a field typed in first, then the tool; whatever is open
   // inside the tool (a menu, a sheet) takes it before either.
   function escape(event: KeyboardEvent) {
-    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || tool === null)
+    if (
+      event.key !== "Escape" ||
+      event.defaultPrevented ||
+      event.isComposing ||
+      fullColumnShown() ||
+      tool === null
+    )
       return;
     if (
       !aside ||
@@ -91,8 +98,8 @@
   }
   // A tool in full keeps the column as Work does, as the rail beside it;
   // put away, the column stays put away.
-  let railed = $derived(inWork || (browserPage.toolPage() && !isHidden()));
-  let compact = $derived(railed || tool !== null || isCompact());
+  let railed = $derived(!fullColumnShown() && (inWork || (browserPage.toolPage() && !isHidden())));
+  let compact = $derived(!fullColumnShown() && (railed || tool !== null || isCompact()));
   // Work's rail and Settings' sections want the column in view; a tool opened
   // while the column is put away comes out on the card instead.
   $effect(() => {
@@ -587,7 +594,7 @@
        keeps the window's row across the rail and its panel. -->
   {#if !settings}<SidebarHeader
       compact={headerCompact}
-      launcher={tool !== null}
+      launcher={tool !== null && !fullColumnShown()}
       ontoggle={toggleShape}
       pageControls={!railed}
       search={!railed || inWork}
@@ -605,7 +612,7 @@
       </div>
     {:else}{#key compact}<div
           class="sidebar-browser-column"
-          class:sidebar-tool-rail={tool !== null}
+          class:sidebar-tool-rail={tool !== null && !fullColumnShown()}
         >
           {@render browserBody(compact)}
           {@render dock(compact)}
@@ -613,6 +620,8 @@
       {#if tool !== null}{#key tool}<div
             class="sidebar-tool-host sidebar-tool-panel"
             data-sheet={tool}
+            hidden={fullColumnShown()}
+            inert={fullColumnShown()}
           >
             {@render toolPanel(tool)}
           </div>{/key}{/if}{/if}
