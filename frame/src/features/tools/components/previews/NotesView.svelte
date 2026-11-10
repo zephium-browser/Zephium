@@ -7,13 +7,8 @@
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import LazyView from "$shared/ui/LazyView";
   import Icon from "$shared/ui/Icon";
-  import Menu, { type MenuEntry } from "$shared/ui/Menu";
-  import {
-    Delete02Icon,
-    Globe02Icon,
-    MoreHorizontalIcon,
-    PinIcon,
-  } from "@hugeicons/core-free-icons";
+  import type { MenuEntry } from "$shared/ui/Menu";
+  import { Delete02Icon, Globe02Icon, PinIcon } from "@hugeicons/core-free-icons";
   import ArrowLeft01Icon from "@hugeicons/core-free-icons/ArrowLeft01Icon";
   import Copy01Icon from "@hugeicons/core-free-icons/Copy01Icon";
   import DeletePutBackIcon from "@hugeicons/core-free-icons/DeletePutBackIcon";
@@ -128,6 +123,9 @@
     caption={false}
     scrolls={false}
     onexpand={() => void expand()}
+    more={note ? noteEntries : listEntries}
+    moreLabel={note ? m.note_more() : m.note_list_more()}
+    onmore={(action) => void act(action)}
     searchLabel={m.note_search()}
     searchOpen={!note}
     searchFocus={false}
@@ -159,16 +157,6 @@
           ><Icon icon={note.summary?.pinned ? PinOffIcon : PinIcon} size={15} /></button
         >
       {/if}
-      <Menu
-        label={note ? m.note_more() : m.note_list_more()}
-        entries={note ? noteEntries : listEntries}
-        side="bottom"
-        align="end"
-        triggerClass="notes-action"
-        onselect={(action) => void act(action)}
-      >
-        {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
-      </Menu>
     {/snippet}
     <LazyView
       loader={loadNotes}

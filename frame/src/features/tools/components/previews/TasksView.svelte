@@ -8,7 +8,7 @@
   import LazyView from "$shared/ui/LazyView";
   import Icon from "$shared/ui/Icon";
   import Menu, { type MenuEntry } from "$shared/ui/Menu";
-  import { ArrowDown01Icon, Delete02Icon, MoreHorizontalIcon } from "@hugeicons/core-free-icons";
+  import { ArrowDown01Icon, Delete02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import ToolFrame from "../ToolFrame.svelte";
 
@@ -100,6 +100,9 @@
   caption={false}
   scrolls={false}
   onexpand={expand}
+  more={overflow}
+  moreLabel={m.task_more()}
+  onmore={act}
   searchLabel={m.tool_search_tasks()}
   searchFocus={false}
   onsearchdismiss={() => props.edit({ query: "" })}
@@ -123,18 +126,6 @@
       {#snippet trigger()}<span
           >{session.trash ? m.resource_show_trash() : SCOPE_LABEL[scope]()}</span
         ><Icon icon={ArrowDown01Icon} size={13} />{/snippet}
-    </Menu>
-  {/snippet}
-  {#snippet actions()}
-    <Menu
-      label={m.task_more()}
-      entries={overflow}
-      side="bottom"
-      align="end"
-      triggerClass="task-overflow"
-      onselect={act}
-    >
-      {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
     </Menu>
   {/snippet}
   <LazyView
@@ -210,32 +201,8 @@
     background: var(--color-fill-hover);
   }
 
-  :global(.task-scope:focus-visible),
-  :global(.task-overflow:focus-visible) {
+  :global(.task-scope:focus-visible) {
     outline: 2px solid var(--color-ring);
     outline-offset: -2px;
-  }
-
-  :global(.task-overflow) {
-    display: grid;
-    place-items: center;
-    flex: none;
-    width: 28px;
-    height: 28px;
-    border: 0;
-    border-radius: var(--radius-row);
-    background: transparent;
-    color: var(--color-muted);
-    cursor: default;
-    outline: none;
-    transition:
-      background-color var(--motion-instant) var(--ease-smooth),
-      color var(--motion-instant) var(--ease-smooth);
-  }
-
-  :global(.task-overflow:hover),
-  :global(.task-overflow[data-state="open"]) {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
   }
 </style>

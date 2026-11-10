@@ -84,20 +84,18 @@ test("the tasks panel keeps search in view without taking focus from the page", 
   });
   await expect.element(screen.getByRole("region", { name: "Tasks", exact: true })).toBeVisible();
 
-  // The scope is the title; the header carries More and the page, and ends
-  // with the way to close the panel.
+  // The scope is the title; More holds the tool's own actions, the page and
+  // closing.
   await expect.element(screen.getByRole("button", { name: /Show/u })).toBeVisible();
   const header = screen.container.querySelector(".shared-tool-header")!;
-  expect([...header.querySelectorAll("button")].map((button) => button.ariaLabel)).toEqual([
-    "Show",
-    "More actions",
-    "Open as a page",
-    "Close tool",
-  ]);
+  expect(
+    [...header.querySelectorAll('button:not([role="menuitem"])')].map((button) => button.ariaLabel),
+  ).toEqual(["Show", "More actions"]);
   expect(header.querySelector(".shared-tool-icon")).toBeNull();
   await screen.getByRole("button", { name: "More actions", exact: true }).click();
   await expect.element(screen.getByRole("menuitem", { name: "Trash" })).toBeVisible();
-  expect(screen.getByRole("menuitem", { name: "Close tasks" }).elements()).toHaveLength(0);
+  await expect.element(screen.getByRole("menuitem", { name: "Open as a page" })).toBeVisible();
+  await expect.element(screen.getByRole("menuitem", { name: "Close tool" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
 
   const field = screen.getByRole("searchbox", { name: "Search tasks", exact: true });

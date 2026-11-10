@@ -172,13 +172,12 @@ test("Escape closes the panel when chrome focus is outside its content", async (
   expect(onclose).toHaveBeenCalledOnce();
 });
 
-test("the header offers a visible close button even while a reply is working", async () => {
+test("the header's More menu closes the panel even while a reply is working", async () => {
   const onclose = vi.fn();
   native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
   const screen = await render(PanelStage, { profile: PROFILE, onclose });
-  const close = screen.getByRole("button", { name: "Close tool", exact: true });
-  await expect.element(close).toBeVisible();
-  await close.click();
+  await screen.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Close tool" }).click();
   expect(onclose).toHaveBeenCalledOnce();
 });
 

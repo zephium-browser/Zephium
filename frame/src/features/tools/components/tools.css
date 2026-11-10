@@ -214,3 +214,14 @@
   background: var(--color-fill-hover);
   color: var(--color-text);
 }
+
+/* The tool's More menu: its own actions, then the page and closing. */
+.ui-disclosure-panel.tool-more[data-align] {
+  min-width: 208px;
+}
+
+.tool-more-rule {
+  height: 1px;
+  margin: 4px var(--menu-item-inset);
+  background: var(--color-border);
+}
