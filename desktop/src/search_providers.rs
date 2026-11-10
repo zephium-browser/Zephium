@@ -351,12 +351,22 @@ mod tests {
     #[test]
     fn shortcut_suggestions_use_only_the_selected_provider_and_safe_query() {
         let registry = ShortcutRegistry::default();
-        for input in ["g browsers", "browsers !g", "!GOOGLE browsers"] {
+        for input in ["!g browsers", "browsers !g", "!GOOGLE browsers"] {
             let (engine, parsed) =
                 suggestion_query(&registry, input, Some(SearchEngine::Bing)).unwrap();
             assert_eq!(engine, SearchEngine::Google);
             assert_eq!(parsed.query, "browsers");
         }
+        let (engine, parsed) =
+            suggestion_query(&registry, "ddg browsers", Some(SearchEngine::Bing)).unwrap();
+        assert_eq!(engine, SearchEngine::DuckDuckGo);
+        assert_eq!(parsed.query, "browsers");
+        // A one-letter keyword is a bang only: as a bare prefix it is too easily
+        // the start of an ordinary query, which goes to the default engine whole.
+        let (engine, parsed) =
+            suggestion_query(&registry, "g browsers", Some(SearchEngine::Bing)).unwrap();
+        assert_eq!(engine, SearchEngine::Bing);
+        assert_eq!(parsed.query, "g browsers");
         for input in [
             "yt rust",
             "cats !unknown",

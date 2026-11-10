@@ -26,7 +26,9 @@ pub const SWITCHER_PAD: f64 = 12.0;
 pub const SWITCHER_COLUMNS: usize = 4;
 pub const SWITCHER_ROWS: usize = 3;
 pub const SWITCHER_PEEK: f64 = 36.0;
-/// The plate's corner, concentric with a card's 14 at its padding.
+/// The plate's corner, concentric with a card's 14 at its padding. Only the
+/// macOS plate is drawn natively.
+#[cfg(target_os = "macos")]
 pub const SWITCHER_RADIUS: f64 = 26.0;
 
 /// How many cards across and rows down the plate shows for `tabs` tabs and

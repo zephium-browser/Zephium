@@ -1,4 +1,4 @@
-use super::capture_stream::{BoundedCaptureStream, SharedCaptureStream};
+use super::semantic_screenshot::{BoundedCaptureStream, SharedCaptureStream};
 use crate::platform::preview_image;
 use std::{cell::RefCell, rc::Rc};
 use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG;

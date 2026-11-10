@@ -2741,5 +2741,12 @@ mod frame_judge_tests {
     }
 }
 
-mod capture_stream;
+#[cfg(feature = "agentic-browser")]
 pub(crate) mod tab_preview;
+/// Without the image codec there is nothing to make a preview with.
+#[cfg(not(feature = "agentic-browser"))]
+pub(crate) mod tab_preview {
+    pub(crate) fn capture(_view: &wry::WebView, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        done(None);
+    }
+}

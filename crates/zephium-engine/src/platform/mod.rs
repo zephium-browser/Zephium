@@ -71,5 +71,7 @@ pub(crate) const PAGE_GROUND_DARK: (u8, u8, u8) = (0x1a, 0x1a, 0x1d);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) const PAGE_GROUND_LIGHT: (u8, u8, u8) = (0xf1, 0xf1, 0xf3);
 
-#[cfg(any(target_os = "windows", test))]
+// The codec is the engine's one optional image dependency, which every
+// production build enables.
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 pub(crate) mod preview_image;
