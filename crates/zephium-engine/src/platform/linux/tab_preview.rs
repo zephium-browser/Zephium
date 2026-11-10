@@ -89,10 +89,17 @@ fn input_dimensions((width, height): (i32, i32)) -> bool {
         && i64::from(width) * i64::from(height) <= INPUT_PIXELS
 }
 
-fn thumbnail(surface: cairo::Surface, expected: (i32, i32)) -> Option<Vec<u8>> {
+fn thumbnail(surface: cairo::Surface, allocation: (i32, i32)) -> Option<Vec<u8>> {
     let source = cairo::ImageSurface::try_from(surface).ok()?;
     let physical = (source.width(), source.height());
-    if !input_dimensions(physical) || physical != expected {
+    // Visible snapshots exclude non-overlay scrollbars, so their pixel size
+    // may be smaller than the widget allocation. Retain that allocation as
+    // an upper bound along with the independent side and pixel budgets.
+    if !input_dimensions(physical)
+        || !input_dimensions(allocation)
+        || physical.0 > allocation.0
+        || physical.1 > allocation.1
+    {
         return None;
     }
     let fit = (f64::from(OUTPUT_SIDE) / f64::from(physical.0.max(physical.1))).min(1.0);
@@ -201,12 +208,60 @@ mod tests {
                 "preview must contain the page pixels"
             );
         }
+        page.load_html(
+            "<!doctype html><title>overflow</title><style>\
+             html{overflow:scroll;background:#204080}\
+             body{margin:0;width:1600px;height:1200px}\
+             ::-webkit-scrollbar{width:20px;height:20px}\
+             </style>",
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while page.title().as_deref() != Some("overflow") {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            assert!(Instant::now() < deadline, "overflow page did not load");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        capture_page(&page, Box::new(move |result| sender.send(result).unwrap()));
+        let bytes = loop {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            if let Ok(result) = receiver.try_recv() {
+                break result.expect("native JPEG preview with scrollbars");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "overflow snapshot did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(bytes.len() <= OUTPUT_BYTES);
+        let loader = gtk::gdk_pixbuf::PixbufLoader::with_type("jpeg").unwrap();
+        loader.write(&bytes).unwrap();
+        loader.close().unwrap();
+        let image = loader.pixbuf().unwrap();
+        assert_eq!((image.width(), image.height()), (480, 356));
+        let pixels = image.read_pixel_bytes();
+        let offset = usize::try_from(178 * image.rowstride() + 240 * image.n_channels()).unwrap();
+        for (actual, expected) in pixels[offset..offset + 3].iter().zip([32u8, 64, 128]) {
+            assert!(
+                actual.abs_diff(expected) <= 3,
+                "overflow preview must contain the page pixels"
+            );
+        }
         for scale in [1.0, 2.0] {
             let source = cairo::ImageSurface::create(cairo::Format::Rgb24, 1200, 800).unwrap();
             source.set_device_scale(scale, scale);
             let expected = (1200, 800);
             assert!(thumbnail(source.as_ref().clone(), expected).is_some());
             assert!(thumbnail(source.as_ref().clone(), (30, 40)).is_none());
+            assert!(thumbnail(source.as_ref().clone(), (1199, 800)).is_none());
+            assert!(thumbnail(source.as_ref().clone(), (1200, 799)).is_none());
+            assert!(thumbnail(source.as_ref().clone(), (4096, 4096)).is_none());
         }
         window.close();
     }
