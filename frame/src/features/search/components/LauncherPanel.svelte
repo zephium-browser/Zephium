@@ -1,3 +1,7 @@
+<script module lang="ts">
+  export { default as TabSwitcher } from "./TabSwitcher.svelte";
+</script>
+
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
@@ -277,6 +281,10 @@
     // isComposing already false; that key still reports the IME's 229.
     if (event.defaultPrevented || surface.composing || event.isComposing || event.keyCode === 229)
       return;
+    if (event.key === "Backspace" && event.target === input && surface.backspace()) {
+      event.preventDefault();
+      return;
+    }
     const mod = IS_MAC ? event.metaKey : event.ctrlKey;
     const key = event.key.toLowerCase();
     if (mod && key === "k") {
@@ -375,7 +383,7 @@
   data-native-clip={nativeClip}
   style:--inset={`${inset}px`}
 >
-  <div class="capsule">
+  <div class="capsule" data-shortcut={surface.activeShortcut?.id}>
     <span class="lead" aria-hidden="true"
       >{#if lead.image}<FavIcon image={lead.image} tone={lead.tone} size={16} lit />{:else}<Icon
           icon={lead.icon}
@@ -393,7 +401,9 @@
       autocorrect="off"
       spellcheck={false}
       placeholder={m.panel_search_placeholder()}
-      aria-label={m.panel_search_placeholder()}
+      aria-label={surface.activeShortcut
+        ? m.search_shortcut_label({ name: surface.activeShortcut.name })
+        : m.panel_search_placeholder()}
       role="combobox"
       aria-haspopup={menu ? "menu" : "listbox"}
       aria-controls={menu ? ACTIONS_ID : "launcher-results"}

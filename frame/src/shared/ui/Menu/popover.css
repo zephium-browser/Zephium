@@ -19,6 +19,12 @@
     ui-menu-in var(--motion-base) var(--ease-out);
 }
 
+/* A list opened beside a row stays a list to scroll, never a column the
+   height of the window. */
+.ui-menu.ui-menu-sub {
+  max-height: min(344px, var(--bits-floating-available-height, 344px));
+}
+
 .ui-menu[data-state="closed"] {
   animation: ui-menu-out var(--motion-instant) var(--ease-exit) forwards;
 }
@@ -71,7 +77,7 @@
 
   /* Full bleed, because a divider that stops short of the edge reads as a
      misaligned row rather than as a break in the list. */
-  margin: 5px calc(var(--menu-pad) * -1);
+  margin: 5px calc(var(--menu-pad, 6px) * -1);
   background: var(--color-menu-separator);
 }
 
@@ -95,13 +101,122 @@
   transition: color var(--motion-instant) var(--ease-smooth);
 }
 
+/* A hint already takes the free space, so the mark column after it sits
+   against it at the row's end rather than halving that space. */
+.ui-menu-hint + .ui-menu-mark {
+  margin-inline-start: 0;
+}
+
 .ui-menu-item[data-highlighted] .ui-menu-hint {
   color: var(--color-muted);
 }
 
 /* A menu long enough to need scrolling keeps its own padding in the scroller:
-   Select brings a viewport of its own, a dropdown has no reason to. */
-.ui-menu-scroll {
+   Select brings a viewport of its own, a dropdown has no reason to. Doubled
+   over the surface's own clip, wherever its stylesheet lands in the order. */
+.ui-menu.ui-menu-scroll {
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: 22px;
+}
+
+/* A hairline of a thumb in a gutter just wide enough for it, clear of the
+   rounded corners, brighter under the pointer. */
+.ui-menu-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-track {
+  margin-block: 10px;
+  background: transparent;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-inline-start-width: 2px;
+  border-radius: var(--radius-capsule);
+  background-color: var(--scroll-thumb);
+  background-clip: padding-box;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+
+/* The ends of a list that scrolls, over its first and last rows: a small
+   capsule holding a chevron, which glides the list while the pointer rests
+   anywhere along that edge. No band across the panel: a wash laid on a
+   translucent menu shows as a second sheet at its corners. */
+.ui-menu-step {
+  position: sticky;
+  z-index: 1;
+  display: grid;
+  flex: none;
+  place-items: center;
+  block-size: 22px;
+  color: var(--color-muted);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-smooth),
+    visibility 0s linear var(--motion-fast);
+}
+
+.ui-menu-step::before {
+  content: "";
+  position: absolute;
+  inset-block: 3px;
+  inset-inline: calc(50% - 16px);
+  z-index: -1;
+  border-radius: var(--radius-capsule);
+  background: var(--color-float);
+  box-shadow: var(--shadow-raised);
+}
+
+.ui-menu-step[data-dir="up"] {
+  inset-block-start: 0;
+  margin-block-end: -22px;
+}
+
+.ui-menu-step[data-dir="down"] {
+  inset-block-end: 0;
+  margin-block-start: -22px;
+}
+
+.ui-menu-step[data-shown] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--motion-fast) var(--ease-smooth),
+    visibility 0s;
+}
+
+.ui-menu-step:hover {
+  color: var(--color-text);
+}
+
+.ui-menu-step:hover::before {
+  background: linear-gradient(var(--row-hover) 0 0) var(--color-float);
+}
+
+/* A row that opens more beside it ends in a chevron, where a hint would. */
+.ui-menu-chevron {
+  display: grid;
+  flex: none;
+  place-items: center;
+  margin-inline: auto -2px;
+  padding-inline-start: 20px;
+  color: var(--color-faint);
+}
+
+.ui-menu-item[data-highlighted] .ui-menu-chevron,
+.ui-menu-item[data-state="open"] .ui-menu-chevron {
+  color: var(--color-muted);
+}
+
+.ui-menu-icon img {
+  display: block;
+  border-radius: 3px;
 }

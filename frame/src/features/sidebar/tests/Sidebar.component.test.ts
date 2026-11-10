@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { cleanup, render } from "vitest-browser-svelte";
 import { userEvent } from "vitest/browser";
+import { flushSync, tick } from "svelte";
 import * as sidebar from "$session/sidebar-mode.svelte";
 import * as attention from "$session/attention.svelte";
+import * as tools from "$session/tools.svelte";
 import { commands } from "$shared/ipc/bindings";
 import { IS_WINDOWS } from "$shared/platform";
-import { flushSync } from "svelte";
 import SidebarHost from "./SidebarHost.svelte";
 
 // Browser-mode module exports snapshot getters. Select the platform before
@@ -14,6 +15,9 @@ vi.mock("$shared/platform", () => {
   const windows = import.meta.env.VITE_SIDEBAR_WINDOWS === "true";
   return { IS_WINDOWS: windows, IS_MAC: !windows };
 });
+const native = vi.hoisted(() => ({
+  set: vi.fn(async () => ({ accepted: true, operation_id: null })),
+}));
 vi.mock("$shared/lib/motion", async (original) => ({
   ...(await original<typeof import("$shared/lib/motion")>()),
   duration: () => 300,
@@ -24,7 +28,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     settingGet: async (key) => (key === "sidebar.mode" ? "hidden" : null),
-    settingSet: async () => ({ operation_id: null, accepted: true }),
+    settingSet: native.set,
     sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarSetHidden: async () => {},
@@ -35,6 +39,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 afterEach(async () => {
   await cleanup();
   sidebar.holdShown(false);
+  tools.close();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -61,6 +66,34 @@ test("a live Essential without a panel does not hold the card open", async () =>
   await userEvent.click(aside.querySelector<HTMLButtonElement>(".essential button")!);
   await leave(aside);
   expect(aside.dataset.peek).toBeUndefined();
+});
+
+test("the card stays while native has the pointer over it, and goes when it leaves", async () => {
+  const aside = await peek();
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-edge", { detail: { near: false, over: true } }),
+  );
+  aside.dispatchEvent(new PointerEvent("pointerleave"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-edge", { detail: { near: false, over: false } }),
+  );
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBeUndefined();
+});
+
+test("a tool on the card stays while the pointer is on it and leaves with it", async () => {
+  const aside = await peek();
+  tools.open("notes");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  aside.dispatchEvent(new PointerEvent("pointerenter"));
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(aside.dataset.peek).toBe("true");
+  await leave(aside);
+  expect(aside.dataset.peek).toBeUndefined();
+  expect(tools.activeTool()).toBe("notes");
 });
 
 test.each(["ui-disclosure-panel", "capture"])("an open %s holds the card", async (panel) => {
@@ -107,6 +140,54 @@ test("keyboard focus between sidebar controls keeps the card visible", async () 
   (control as HTMLElement).blur();
   await vi.advanceTimersByTimeAsync(1000);
   expect(aside.dataset.peek).toBeUndefined();
+});
+
+test("the hidden card resizes live without becoming a window drag region or snapping", async () => {
+  const aside = await peek();
+  const handle = aside.querySelector<HTMLElement>('[aria-label="Resize sidebar"]')!;
+  expect(handle.getAttribute("aria-disabled")).toBe("false");
+  expect(handle.dataset.tauriDragRegion).toBe("false");
+  expect(handle.classList.contains("pointer-events-none")).toBe(false);
+  // Synthetic pointer events have no browser pointer to capture.
+  const capture = vi.spyOn(handle, "setPointerCapture").mockImplementation(() => {});
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 240, pointerId: 1 }),
+  );
+  expect(capture).toHaveBeenCalledWith(1);
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 340, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("340px");
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  await leave(aside);
+  expect(aside.dataset.peek).toBe("true");
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 56, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("180px");
+  handle.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 56, pointerId: 1 }));
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");
+});
+
+test("Escape closes an open tool, after first leaving a field typed in", async () => {
+  await sidebar.init();
+  const screen = await render(SidebarHost);
+  const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+  tools.open("notes");
+  await expect.element(screen.getByRole("textbox", { name: "Tool field" })).toBeVisible();
+  const field = aside.querySelector<HTMLInputElement>('input[aria-label="Tool field"]')!;
+  field.focus();
+  await userEvent.keyboard("{Escape}");
+  expect(document.activeElement).not.toBe(field);
+  expect(tools.activeTool()).toBe("notes");
+  await userEvent.keyboard("{Escape}");
+  expect(tools.activeTool()).toBeNull();
+  await expect.element(screen.getByRole("textbox", { name: "Sidebar field" })).toBeVisible();
 });
 
 describe(IS_WINDOWS ? "Windows" : "macOS", () => {

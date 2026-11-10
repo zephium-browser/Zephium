@@ -10,7 +10,7 @@
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
-  import type { TabView } from "$shared/ipc/bindings";
+  import { commands, type TabView } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
   import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
@@ -71,6 +71,8 @@
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
+  /** The new tab field's menu, kept out of the graph the launcher shares. */
+  const loadMenu = () => import("$shared/ui/Menu");
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
     const profile = tabs.profile()?.id;
@@ -82,12 +84,16 @@
   }
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
-    handleNativeSection("settings.section.newtab");
+    handleNativeSection("settings.section.general");
     void browserPage.open("settings");
   }
   function openAccount(intent: "account" | "credits") {
     askSettings(intent === "credits" ? "credits" : null);
     handleNativeSection("settings.section.account");
+    void browserPage.open("settings");
+  }
+  function openSearchSettings() {
+    handleNativeSection("settings.section.search");
     void browserPage.open("settings");
   }
   function openAbout() {
@@ -141,6 +147,10 @@
   let paneled = $derived(
     toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
   );
+  // A tool in full keeps the same rail beside its page, under the window's
+  // own head, as Work does.
+  let toolPage = $derived(browserPage.toolPage());
+  let besideRail = $derived(paneled || toolPage);
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
@@ -210,6 +220,9 @@
   let railEssentials = $derived(
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
+  // Beside a tool the rail keeps only the current tab; the switcher holds the rest.
+  let railCurrent = $derived(railTabs.filter((tab) => tab.id === tabs.activeId()));
+  const openSwitcher = () => void commands.tabSwitcherOpen().catch(() => false);
   let railClosable = $derived(
     new Set(tree.today.flatMap((entry) => (entry.kind === "tab" ? [entry.tab.id] : []))),
   );
@@ -354,8 +367,8 @@
   {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
     >{#snippet browserBody(compact)}
-      {#if compact && (inWork || paneled)}
-        {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
+      {#if compact && (inWork || besideRail)}
+        {#if !inWork && !(toolPage && !paneled)}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if paneled && IS_WINDOWS}
           {#if browserPage.currentPage() === "settings"}<ModeTabs compact standalone />{/if}
           <div class="rail-search"><SidebarSearch /></div>
@@ -368,7 +381,14 @@
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
           {#if compact}
-            <TabRail entries={railTabs} closable={railClosable} onSelect={selectTab} />
+            <TabRail
+              entries={besideRail && !inWork ? railCurrent : railTabs}
+              closable={railClosable}
+              onSelect={selectTab}
+              switcher={besideRail && !inWork ? openSwitcher : undefined}
+              spaces={!inWork}
+              roomy={besideRail || inWork}
+            />
           {:else}
             <!--
             The switch sits above the address field because it governs the
@@ -433,6 +453,7 @@
             profile={tabs.profile()?.id ?? ""}
           />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
+          roomy={besideRail}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
         >
@@ -573,6 +594,8 @@
                       retryLabel={m.surface_retry()}
                       >{#snippet children(Search)}<Search
                           tabId={tabs.activeId()}
+                          {loadMenu}
+                          onsettings={openSearchSettings}
                         />{/snippet}</LazyView
                     >{/key}{/snippet}</NewTab
               >{/snippet}</LazyView

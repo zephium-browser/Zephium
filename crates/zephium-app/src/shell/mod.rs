@@ -35,9 +35,11 @@ mod private;
 mod profile_deletion;
 mod profile_roster;
 mod projections;
+mod recent_tabs;
 mod scope;
 mod search;
 mod site_permissions;
+mod tab_previews;
 mod tabs;
 mod time;
 mod user_content_status;
@@ -248,6 +250,8 @@ pub struct Shell {
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
     windows: Windows,
+    recent_tabs: recent_tabs::RecentTabs,
+    tab_previews: tab_previews::TabPreviews,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
@@ -519,6 +523,11 @@ impl Shell {
             sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
+                shortcuts: store
+                    .app_setting("search.shortcuts")
+                    .as_deref()
+                    .and_then(zephium_core::search::ShortcutRegistry::from_setting)
+                    .unwrap_or_default(),
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
                     .app_setting("search.engine")
@@ -577,6 +586,8 @@ impl Shell {
             bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
+            recent_tabs: Default::default(),
+            tab_previews: Default::default(),
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
@@ -656,6 +667,24 @@ impl Shell {
             self.note_browsing_activity();
         }
         match cmd {
+            Command::BeginTabSwitcher {
+                session,
+                reverse,
+                keyboard,
+            } => self.begin_tab_switcher(session, reverse, keyboard),
+            Command::TabSwitcher { session, action } => self.tab_switcher_action(session, action),
+            Command::RevealTabSwitcher { session } => self.reveal_tab_switcher(session),
+            Command::CaptureTabPreview => self.capture_tab_preview(),
+            Command::TabPreviewReady { request, bytes } => self.tab_preview_ready(request, bytes),
+            Command::ReadTabPreview {
+                window,
+                tab,
+                revision,
+                done,
+            } => {
+                let bytes = self.read_tab_preview(window, tab, revision);
+                let _ = done.send(bytes);
+            }
             Command::WorkDocument(submission) => self.work_document(submission),
             Command::WorkEnvironmentChanged(change) => {
                 if self.windows.focused().is_some_and(|window| {
@@ -1340,6 +1369,7 @@ impl Shell {
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
             Command::PanelLoaded => {
                 self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+                self.project_tab_switcher();
             }
             Command::RunSearchAction {
                 context,
@@ -2014,6 +2044,8 @@ impl Shell {
         } else {
             ShutdownOutcome::Unclean
         };
+        self.recent_tabs = Default::default();
+        self.tab_previews = Default::default();
         self.shutdown_result = Some(outcome);
         let _ = ack.send(outcome);
     }

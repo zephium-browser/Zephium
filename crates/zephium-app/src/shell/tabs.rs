@@ -546,6 +546,8 @@ impl Shell {
             let Some(item) = pending.pop() else {
                 break;
             };
+            self.recent_tabs.forget(item);
+            self.tab_previews.forget(item);
             self.sources.retain(|held| held != item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));

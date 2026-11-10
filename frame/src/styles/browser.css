@@ -354,11 +354,6 @@
 .sidebar-tool-rail {
   flex: 0 0 56px;
 }
-/* Beside a full-height panel the rail keeps only the lights' row. */
-.sidebar-lights {
-  flex: none;
-  height: var(--titlebar-height);
-}
 .settings-sidebar-navigation {
   position: relative;
   min-height: 0;
@@ -367,8 +362,7 @@
   flex-direction: column;
   padding: 0 8px;
 }
-/* Headed like a tool panel: its name, and the way out. */
-/* The panel runs the full height, so its title shares the lights' row. */
+/* Headed like a tool: its name, and the way out, in the lights' row. */
 .settings-panel-header {
   display: flex;
   align-items: center;
@@ -376,6 +370,11 @@
   min-height: var(--titlebar-height);
   margin-block: 4px 6px;
   padding-inline: 4px 0;
+}
+.settings-panel-header[data-lights] {
+  min-height: var(--titlebar-height);
+  margin-block: 0 8px;
+  padding-inline-start: calc(var(--traffic-light-inset) + 2px);
 }
 .settings-panel-header h2 {
   flex: 1;
@@ -898,16 +897,43 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: var(--radius-control);
-  background: var(--color-fill);
-  animation: tool-host-in var(--motion-page) var(--ease-emphasized) backwards;
 }
-/* A tool grows out of the rail it was opened from. */
-@keyframes tool-host-in {
+/* Settings is the column's own page: its sections come in from the side the
+   tabs leave to. A tool is a sheet beside the rail, a shade raised from the
+   column's material with the page's corners, grown out of the rail it was
+   opened from. Transforms and opacity only. */
+.sidebar-sheet {
+  animation: sidebar-sheet-in var(--motion-page) var(--ease-emphasized) backwards;
+}
+.sidebar-tool-panel {
+  margin-block-end: var(--sidebar-inset);
+  border-radius: var(--content-radius);
+  background: var(--color-fill);
+  box-shadow:
+    var(--shine-top),
+    inset 0 0 0 0.5px var(--color-border);
+  animation: sidebar-panel-in var(--motion-page) var(--ease-emphasized) backwards;
+}
+@keyframes sidebar-sheet-in {
   from {
     opacity: 0;
-    translate: -8px 0;
+    translate: 20px 0;
   }
+}
+@keyframes sidebar-panel-in {
+  from {
+    opacity: 0;
+    translate: -10px 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-sheet,
+  .sidebar-tool-panel {
+    animation: none;
+  }
+}
+:root[data-reduce-motion="true"] :is(.sidebar-sheet, .sidebar-tool-panel) {
+  animation: none;
 }
 
 /* A list that scrolls dissolves at whichever edge still has more of it, and

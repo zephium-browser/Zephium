@@ -26,6 +26,8 @@ use zephium_core::session::{
 };
 use zephium_core::zoom::SavedLevel;
 
+type HeldTabPreview = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
+
 type HeldErasure = (ProfileId, Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>);
 type HeldBlockerUpdate = (
     ProfileId,
@@ -365,6 +367,7 @@ pub(crate) struct FakeEngine {
     fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
     fullscreen_exits: Mutex<Vec<ItemId>>,
     layout_regions: Mutex<Vec<Option<Rect>>>,
+    tab_preview_completions: Mutex<Vec<HeldTabPreview>>,
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
@@ -503,6 +506,11 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn capture_tab_preview(&self, id: ItemId, _url: String, done: HeldTabPreview) {
+        self.log(format!("capture-preview {id}"));
+        self.tab_preview_completions.lock().unwrap().push(done);
+    }
+
     fn browsing_data_call(
         &self,
         partition: Partition,
@@ -2270,7 +2278,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::WebExtensionAccessRemoved(_) => {}
         Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}
-        Projection::PanelOwner(_) => {}
+        Projection::PanelOwner(_) | Projection::TabSwitcher { .. } => {}
         Projection::UiCommand(_) => {}
         Projection::FindResult(_) => {}
         Projection::Search(_) => {}
@@ -2627,5 +2635,6 @@ mod blocker_sites;
 
 mod webext;
 
+mod recent_tabs;
 #[cfg(target_os = "windows")]
 mod webext_windows;

@@ -2,7 +2,7 @@
   import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
-  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { IS_WINDOWS } from "$shared/platform";
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
@@ -10,7 +10,6 @@
   import { tick, untrack } from "svelte";
   import {
     COMPACT_WIDTH,
-    PANEL_GAP,
     effectiveWidth,
     holdShown,
     isCompact,
@@ -20,8 +19,6 @@
     toggleMode,
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
-  import { newTabImage } from "$session/newtab-background.svelte";
-  import { FROSTS, scene } from "$shared/sky";
   import { uiCommands as ui } from "$domain/ui-commands";
   import SidebarHeader from "./SidebarHeader.svelte";
   import * as shapeMorph from "../lib/shape-morph";
@@ -40,13 +37,9 @@
     dock: Snippet<[boolean]>;
   } = $props();
   let settings = $derived(browserPage.currentPage() === "settings");
-  const SETTINGS_PANEL = 264;
-  let taskPage = $derived(
-    browserPage.currentPage() === "tasks" || browserPage.currentPage() === "notes",
-  );
-  // Work gives the window to its canvas: the column is always the rail there.
+  // Work gives the window to its canvas: the column is always the rail there,
+  // and only there.
   let inWork = $derived(browserPage.currentPage() === "work");
-  let railPage = $derived(taskPage || inWork);
   // Work keeps the column as its compact rail, always: a panel open in Browse
   // closes on the way in, and a tool asked for while in Work opens over its
   // canvas instead of beside it.
@@ -63,16 +56,47 @@
       settledInWork = work;
     });
   });
-  // Settings opens like a tool: the column keeps its tab rail, and its sections
-  // stand in the panel beside it while the page shows the section. Tasks and
-  // Notes are part of browsing too: a tab is one click away and choosing it
-  // returns to that page.
+  // A tool stands in a panel beside the rail, which keeps the spaces, the
+  // current tab, the way to all the others and the kept sites. Settings takes
+  // the whole column for its sections.
+  let tool = $derived(inWork ? null : tools.activeTool());
   let navigating = $derived(settings);
-  let paneled = $derived(settings || tools.activeTool() !== null);
-  let compact = $derived(navigating || railPage || isCompact() || tools.activeTool() !== null);
-  // Work, Tasks, Settings and the tools want the column in view as their rail.
+  let paneled = $derived(settings || tool !== null);
+  // Escape leaves a field typed in first, then the tool; whatever is open
+  // inside the tool (a menu, a sheet) takes it before either.
+  function escape(event: KeyboardEvent) {
+    if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || tool === null)
+      return;
+    if (
+      !aside ||
+      aside.querySelector(
+        '.sidebar-tool-panel [data-open="true"], .ui-disclosure-panel[data-open="true"]',
+      )
+    )
+      return;
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      aside.contains(active) &&
+      (active.isContentEditable ||
+        active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement)
+    ) {
+      event.preventDefault();
+      active.blur();
+      return;
+    }
+    event.preventDefault();
+    tools.close();
+  }
+  // A tool in full keeps the column as Work does, as the rail beside it;
+  // put away, the column stays put away.
+  let railed = $derived(inWork || (browserPage.toolPage() && !isHidden()));
+  let compact = $derived(railed || tool !== null || isCompact());
+  // Work's rail and Settings' sections want the column in view; a tool opened
+  // while the column is put away comes out on the card instead.
   $effect(() => {
-    holdShown(navigating || railPage || tools.activeTool() !== null);
+    holdShown(navigating || inWork);
   });
 
   // Hidden, the column waits off to the side, beneath the page, and comes
@@ -103,7 +127,11 @@
       getComputedStyle(document.documentElement).getPropertyValue("--ease-emphasized").trim() ||
       "ease-out",
   });
+  let workBefore = untrack(() => inWork);
   $effect(() => {
+    const work = untrack(() => inWork);
+    const fromWork = hidden && workBefore && !work;
+    workBefore = work;
     if (!hidden && untrack(() => away && peeking && overPage && !reducedMotion())) {
       // Shown from the card, the card is the column at once, its window
       // controls with it, while native slides the page out from beside it;
@@ -137,7 +165,9 @@
       return;
     }
     if (untrack(() => away)) return;
-    if (reducedMotion()) {
+    // Back from Work, the rail it held out goes straight back to being the
+    // card: the column it would open into is never seen.
+    if (reducedMotion() || fromWork) {
       away = true;
       return;
     }
@@ -214,6 +244,9 @@
   let chromeRaised = false;
   let peekGeneration = 0;
   let atEdge = false;
+  /** Native follows the pointer over the card too, which the card's own
+   *  events miss while another app has the keyboard. */
+  let overCard = false;
   /** Windows cannot blend the chrome over a page, so it cuts the chrome to
    *  the card, and the cut follows the card as it slides: a little behind it
    *  on the way in and a little ahead on the way out, so nothing past the
@@ -290,14 +323,14 @@
     const openPanel = !!aside.querySelector(
       '.ui-disclosure-panel[data-open="true"], .capture[data-open="true"]',
     );
-    return focused || openPanel;
+    return focused || openPanel || toolWaiting;
   };
   function release() {
     clearTimeout(linger);
     const settling = Math.max(0, opened + SETTLE_MS - performance.now());
     linger = setTimeout(
       () => {
-        if (pointerIn || atEdge || needed()) return;
+        if (pointerIn || atEdge || overCard || needed()) return;
         if (CUT_TO_CARD) {
           // The cut sets off first, so the card never runs past it.
           lowerChrome(slides());
@@ -323,12 +356,27 @@
     const edge = (event: Event) => {
       if (!(event instanceof CustomEvent) || typeof event.detail?.near !== "boolean") return;
       atEdge = event.detail.near;
+      overCard = event.detail.over === true;
       if (!away) return;
       if (atEdge) peek();
-      else if (peeking && !pointerIn) release();
+      else if (peeking && !pointerIn && !overCard) release();
     };
     window.addEventListener("zephium:sidebar-edge", edge);
     return () => window.removeEventListener("zephium:sidebar-edge", edge);
+  });
+  // A tool opened while the column is put away comes out on the card, and
+  // from then on the card keeps its own rules: it stays while the pointer is
+  // on it or something in it is being typed in, and goes when they leave.
+  // Opened from the keyboard, it waits for the pointer's first visit.
+  let toolWaiting = false;
+  $effect(() => {
+    const open = tool !== null;
+    if (!away) return;
+    untrack(() => {
+      toolWaiting = open && !pointerIn;
+      if (open) peek();
+      else if (peeking && !pointerIn && !atEdge) release();
+    });
   });
   $effect(() => {
     const wanted = attention.wanted();
@@ -336,6 +384,12 @@
     untrack(() => {
       if (wanted) peek();
       else if (peeking && !pointerIn && !atEdge) release();
+    });
+  });
+  $effect(() => {
+    const resizing = sidebarResizeActive();
+    untrack(() => {
+      if (!resizing && away && peeking && !pointerIn && !atEdge) release();
     });
   });
   $effect(() => {
@@ -427,13 +481,7 @@
       shown = next;
     });
   });
-  let width = $derived(
-    navigating
-      ? COMPACT_WIDTH + PANEL_GAP + SETTINGS_PANEL
-      : railPage && tools.activeTool() === null
-        ? COMPACT_WIDTH
-        : effectiveWidth(),
-  );
+  let width = $derived(railed ? COMPACT_WIDTH : effectiveWidth());
 
   // Dispatch runs untracked and behind a sequence guard. Handlers read the
   // state they mutate (the sidebar shape, the tab projection), so a tracked
@@ -447,6 +495,7 @@
   let pointerIn = $state(false);
   function entered() {
     pointerIn = true;
+    toolWaiting = false;
     // Back on the card as it leaves, it comes back.
     if (away && !peeking && lowered !== undefined) peek();
     else if (away) clearTimeout(linger);
@@ -456,6 +505,7 @@
     const out = () => {
       pointerIn = false;
       atEdge = false;
+      overCard = false;
       if (away && peeking) release();
     };
     document.documentElement.addEventListener("mouseleave", out);
@@ -482,13 +532,14 @@
   const HIDING_SHOWN_MS = 1600;
 
   function toggleShape() {
-    if (tools.activeTool() !== null) return tools.close();
     toggleMode();
     // Put away from its own button, the column comes straight back as the
     // card it now is, and leaves with the pointer as any card does.
     if (isHidden()) attention.pulse(HIDING_SHOWN_MS);
   }
 </script>
+
+<svelte:window onkeydown={escape} />
 
 <aside
   bind:this={aside}
@@ -500,10 +551,6 @@
   style:left={leaving ? `${leaving.left}px` : undefined}
   style:top={leaving ? `${leaving.top}px` : undefined}
   style:height={leaving ? `${leaving.height}px` : undefined}
-  style:--sidebar-frost={(away || handing) && !newTabImage()
-    ? `url("${FROSTS[scene()]}")`
-    : undefined}
-  data-custom-background={newTabImage() !== null || undefined}
   data-handing={handing ?? undefined}
   data-covering={covering || undefined}
   data-tauri-drag-region="deep"
@@ -532,18 +579,18 @@
   }}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !railPage && tools.activeTool() === null}<SidebarResizeHandle
+  {#if !navigating && !railed && tool === null}<SidebarResizeHandle
       {width}
-      disabled={reshaping || hidden}
+      disabled={reshaping}
     />{/if}
-  <!-- Settings stands beside the rail with no head: its panel runs the full
-       height and the rail keeps only the lights' row. A tool keeps the head,
-       with search and the page's own controls. -->
+  <!-- Settings runs the column's full height under the lights' row. A tool
+       keeps the window's row across the rail and its panel. -->
   {#if !settings}<SidebarHeader
       compact={headerCompact}
-      launcher={paneled}
+      launcher={tool !== null}
       ontoggle={toggleShape}
-      pageControls={!inWork}
+      pageControls={!railed}
+      search={!railed || inWork}
     />{/if}
   <div
     bind:this={columns}
@@ -551,16 +598,24 @@
     data-glide-host
     data-launch={motion.launchState()}
   >
-    {#key compact}<div class="sidebar-browser-column" class:sidebar-tool-rail={paneled}>
-        {#if settings && IS_MAC}<div class="sidebar-lights" aria-hidden="true"></div>{/if}
-        {@render browserBody(compact)}
-        {@render dock(compact)}
-      </div>{/key}
-    {#if settings}<div class="sidebar-tool-host">
-        {@render settingsNavigation()}
-      </div>{:else if tools.activeTool() !== null}<div class="sidebar-tool-host">
-        {@render toolPanel(tools.activeTool()!)}
-      </div>{/if}
+    {#if settings}<div class="sidebar-browser-column">
+        <div class="sidebar-tool-host sidebar-sheet" data-sheet="settings">
+          {@render settingsNavigation()}
+        </div>
+      </div>
+    {:else}{#key compact}<div
+          class="sidebar-browser-column"
+          class:sidebar-tool-rail={tool !== null}
+        >
+          {@render browserBody(compact)}
+          {@render dock(compact)}
+        </div>{/key}
+      {#if tool !== null}{#key tool}<div
+            class="sidebar-tool-host sidebar-tool-panel"
+            data-sheet={tool}
+          >
+            {@render toolPanel(tool)}
+          </div>{/key}{/if}{/if}
   </div>
 </aside>
 
@@ -585,9 +640,15 @@
     }
   }
 
+  /* A stack opened from the rail spills over the page beside it, so the
+     column rises over that page for as long as it is open. */
+  .browser-sidebar:not([data-hidden]):has(:global(.ui-disclosure-panel[data-open="true"])) {
+    z-index: 2;
+  }
+
   /* Hidden, the column is a card that waits beside the window and slides
-     over the page. It wears the sky's frost, a picture stretched rather than
-     a blur drawn, so bringing it out costs one transform. */
+     over the page: a solid sheet of the window's own colour with its own
+     edge, so bringing it out costs one transform. */
   .browser-sidebar[data-hidden] {
     position: absolute;
     inset-block: 8px;
@@ -600,17 +661,9 @@
     padding-inline: 8px;
     padding-block-end: 8px;
     border-radius: var(--content-radius);
-    background: var(--sidebar-frost) center / cover;
+    background: var(--sidebar-card);
     box-shadow: var(--shadow-overlay);
     translate: calc(-100% - 24px) 0;
-  }
-
-  .browser-sidebar[data-custom-background][data-hidden] {
-    background: var(--color-chrome);
-  }
-
-  .browser-sidebar[data-custom-background][data-handing]::before {
-    background: none;
   }
 
   /* On its way out beside the new tab: where it stood, out of the row. */
@@ -640,8 +693,8 @@
     transition: opacity calc(var(--motion-page) * 0.6) var(--ease-out);
   }
 
-  /* Handed over from the card, the column lets the card's frost go as the
-     page slides out from beside it. */
+  /* Handed over from the card, the column lets the card's sheet go as the
+     page slides out from beside it, down to the window's own material. */
   .browser-sidebar[data-handing] {
     isolation: isolate;
   }
@@ -652,7 +705,7 @@
     inset: 0;
     z-index: -1;
     border-radius: var(--content-radius);
-    background: var(--sidebar-frost) center / cover;
+    background: var(--sidebar-card);
     pointer-events: none;
     transition: opacity var(--motion-page) var(--ease-out);
   }

@@ -4,10 +4,11 @@
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import "$styles/panel.css";
   import { onMount, flushSync, tick } from "svelte";
-  import type { PanelState, PanelIntent, ToolKind } from "$shared/ipc/bindings";
+  import type { PanelState, PanelIntent, TabSwitcherState, ToolKind } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { theme } from "$domain/appearance";
+  import { preferences } from "$domain/preferences";
   import { favicons } from "$domain/favicons";
   import { acceptPanelState } from "$features/panel";
   import { loadLauncherPanel } from "$features/search";
@@ -17,6 +18,7 @@
 
   let presentation = $state<PanelState | null>(null);
   let Launcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["default"] | null>(null);
+  let Switcher = $state<Awaited<ReturnType<typeof loadLauncherPanel>>["TabSwitcher"] | null>(null);
   let failed = $state(false);
   let captures = $state(0);
   $effect(() => {
@@ -28,12 +30,22 @@
     );
     return () => clearTimeout(timer);
   });
+  /** The switcher just put away. The window fades out over its last state,
+   *  so that stays until the fade is over; the launcher only takes its place
+   *  then, or as soon as it is called. */
+  let leaving = $state<TabSwitcherState | null>(null);
+  let left: ReturnType<typeof setTimeout> | undefined;
+  const FADE_MS = 200;
   function apply(next: PanelState) {
-    if (acceptPanelState(presentation, next))
-      flushSync(() => {
-        presentation = next;
-        failed = false;
-      });
+    if (!acceptPanelState(presentation, next)) return;
+    const switcher = presentation?.visible ? presentation.switcher : null;
+    clearTimeout(left);
+    flushSync(() => {
+      leaving = !next.visible && switcher ? switcher : null;
+      presentation = next;
+      failed = false;
+    });
+    if (leaving) left = setTimeout(() => (leaving = null), FADE_MS);
   }
   async function intent(value: PanelIntent) {
     try {
@@ -87,6 +99,11 @@
         // Listening comes first, so a setting changed while the reads below
         // are in flight is heard rather than lost between read and listener.
         [stop, stopMotion] = await Promise.all([listener, motionListener]);
+        if (disposed) {
+          stop();
+          stopMotion();
+          return;
+        }
         // The launcher is loaded while the window is still hidden, and native
         // shows nothing before `panelReady`, so the first frame is never empty.
         // Nothing below waits on anything else, so the wait is the slowest one.
@@ -101,9 +118,11 @@
             commands.settingGet("tasks.enabled").catch(() => null),
             ...theme.customizationKeys.map((key) => commands.settingGet(key).catch(() => null)),
           ]),
+          preferences.init(),
         ]);
         if (disposed) return;
         Launcher = launcher.default;
+        Switcher = launcher.TabSwitcher;
         theme.customizationKeys.forEach((key, index) => {
           const value = look[index];
           if (!liveLook.includes(key) && value != null) theme.customize(key, value);
@@ -126,8 +145,10 @@
     })();
     return () => {
       disposed = true;
+      clearTimeout(left);
       stop?.();
       stopMotion?.();
+      preferences.dispose();
       favicons.dispose();
       theme.dispose();
     };
@@ -172,7 +193,12 @@
 >
   {#if failed}<div class="panel-error" role="alert">{m.panel_action_failed()}</div>{/if}
   <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-    {#if Launcher}{#key off.join()}<Launcher
+    {#if Switcher && (presentation?.visible ? presentation.switcher : leaving)}
+      <Switcher
+        snapshot={(presentation?.visible ? presentation.switcher : leaving)!}
+        frozen={!presentation?.visible}
+      />
+    {:else if !presentation?.switcher && Launcher}{#key off.join()}<Launcher
           context={presentation}
           onTool={open}
           onCapture={off.includes("tasks") ? undefined : capture}

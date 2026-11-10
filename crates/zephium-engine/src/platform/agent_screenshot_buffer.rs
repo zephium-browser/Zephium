@@ -10,9 +10,12 @@
 //! and cursor rules independent of COM makes every allocation and boundary
 //! executable on non-Windows CI without capturing or retaining page pixels.
 
+#[cfg(feature = "agentic-browser")]
 use zephium_agentic::SemanticScreenshotBudget;
 
+#[cfg(feature = "agentic-browser")]
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+#[cfg(feature = "agentic-browser")]
 const IHDR_DATA_BYTES: u32 = 13;
 const MIN_BUFFER_GROWTH: usize = 64 * 1024;
 
@@ -30,6 +33,7 @@ pub(super) enum ScreenshotSeekOrigin {
     End,
 }
 
+#[cfg(feature = "agentic-browser")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PngHeaderFailure {
     Malformed,
@@ -138,6 +142,7 @@ impl BoundedScreenshotBuffer {
     }
 }
 
+#[cfg(feature = "agentic-browser")]
 pub(super) fn bounded_png_dimensions(
     png: &[u8],
     budget: SemanticScreenshotBudget,
@@ -183,6 +188,7 @@ pub(super) fn bounded_png_dimensions(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "agentic-browser")]
     fn png_header(width: u32, height: u32) -> [u8; 33] {
         let mut header = [0_u8; 33];
         header[..8].copy_from_slice(PNG_SIGNATURE);
@@ -236,6 +242,7 @@ mod tests {
         assert_eq!(buffer.take_bytes(), vec![1, 2, 0, 0, 0, 0]);
     }
 
+    #[cfg(feature = "agentic-browser")]
     #[test]
     fn png_dimensions_are_read_only_from_bounded_ihdr() {
         let header = png_header(1280, 800);

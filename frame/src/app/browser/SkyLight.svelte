@@ -1,21 +1,19 @@
 <script lang="ts">
-  import { scene, skyPlacement } from "$shared/sky";
-  import EDGE_LIGHT from "$shared/sky/assets/edge-light.json";
+  import { scene, skyEdgeLight, skyPlacement } from "$shared/sky";
 
   /** Whether a new tab is in front, so the window takes the sky's light. */
   let { shown }: { shown: boolean } = $props();
 
   let placement = $derived(skyPlacement());
-  // The picture's left edge, band by band, laid where those bands lie beside
-  // the page: a gradient holds its first and last colours beyond its stops,
-  // so the light runs on above and below the picture without an edge.
+  // The printed sky's left edge, band by band down the page, laid beside it.
   let edge = $derived.by(() => {
-    if (!placement) return null;
-    const bands = EDGE_LIGHT[scene()];
-    const { y, h } = placement;
+    const light = skyEdgeLight();
+    if (!placement || !light || light.scene !== scene()) return null;
+    const { bands } = light;
+    const h = placement.height;
     const stops = bands.map(
       ([r, g, b], band) =>
-        `rgb(${r} ${g} ${b}) ${(y + ((band + 0.5) * h) / bands.length).toFixed(1)}px`,
+        `rgb(${r} ${g} ${b}) ${(((band + 0.5) * h) / bands.length).toFixed(1)}px`,
     );
     return `linear-gradient(${stops.join(", ")})`;
   });

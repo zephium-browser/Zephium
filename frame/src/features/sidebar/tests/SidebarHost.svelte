@@ -6,7 +6,7 @@
 
 <Sidebar>
   {#snippet settingsNavigation()}{/snippet}
-  {#snippet toolPanel()}{/snippet}
+  {#snippet toolPanel()}<input aria-label="Tool field" />{/snippet}
   {#snippet dock()}{/snippet}
   {#snippet browserBody()}
     <ul>

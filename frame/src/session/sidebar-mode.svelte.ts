@@ -27,8 +27,7 @@ const WIDTH_SETTING = "sidebar.width";
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
-let drag: { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number } | null =
-  null;
+let drag = $state.raw<{ mode: SidebarMode; expanded: number } | null>(null);
 let resizeSettlement = $state(0);
 // One ordering counter, seeded above every earlier owner: an earlier
 // document, and an earlier copy of this module in the same document, which a
@@ -54,7 +53,7 @@ export function holdShown(value: boolean) {
   if (mode === "hidden") publish(true);
 }
 export const expanded = () => expandedWidth;
-/** The chrome gap between the rail and an open utility panel. */
+/** The gap between the rail and a tool's panel beside it. */
 export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
@@ -68,7 +67,8 @@ export const effectiveWidth = () =>
 
 export const hasPanel = () => panelExtent > 0;
 
-/** A utility panel borrows width beside the rail without changing the persisted mode. */
+/** A tool's panel stands beside the rail, without changing the persisted width
+ *  or mode. */
 export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
@@ -131,10 +131,16 @@ function publish(travel = false) {
 }
 
 export function applyDragWidth(value: number) {
-  if (drag) {
-    drag.pending = value;
+  if (!Number.isFinite(value)) return;
+  if (isHidden()) {
+    const width = clampExpanded(value);
+    if (drag && width === expandedWidth) return;
+    if (drag) expandedWidth = width;
+    else rememberWidth(width);
+    void commands.sidebarSetWidth(width, false, resizeRevision);
     return;
   }
+  if (drag) return;
   const next = resolveDragWidth(value);
   if (next.mode === mode && next.expanded === expandedWidth) {
     if (next.mode === "default") rememberWidth(next.expanded);
@@ -148,28 +154,37 @@ export function applyDragWidth(value: number) {
   if (modeChanged) save(mode);
 }
 
-/** The non-native capture fallback also keeps the rendered layout unchanged. */
 export function beginSidebarResize() {
   if (drag) return;
-  drag = { mode, desired: desiredMode, expanded: expandedWidth, pending: effectiveWidth() };
+  drag = { mode, expanded: expandedWidth };
 }
 
 export function finishSidebarResize(value: number) {
   if (!drag) return;
   drag = null;
   adoptResizeWidth(value);
-  // The page travels to the new edge, as it does from the native guide.
-  void commands.sidebarSetWidth(effectiveWidth(), true, resizeRevision);
+  void commands.sidebarSetWidth(effectiveWidth(), !isHidden(), resizeRevision);
 }
 
 export function cancelSidebarResize() {
+  const original = drag;
   drag = null;
+  if (original?.mode === "hidden" && expandedWidth !== original.expanded) {
+    expandedWidth = original.expanded;
+    void commands.sidebarSetWidth(expandedWidth, false, resizeRevision);
+  }
 }
 
 /** Native has admitted one final width; adopt its display shape without another layout command. */
 export function adoptResizeWidth(value: number, revision = resizeRevision) {
   if (revision !== resizeRevision) return;
   if (!Number.isFinite(value)) return;
+  if (isHidden()) {
+    drag = null;
+    rememberWidth(clampExpanded(value));
+    resizeSettlement++;
+    return;
+  }
   // A fast drag overshoots the bounds; it lands on the nearest one.
   const next = resolveDragWidth(Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
   if (next.mode === "hidden") {
@@ -190,6 +205,16 @@ let resizeListenerInstalled = false;
 function installResizeListener() {
   if (resizeListenerInstalled) return;
   resizeListenerInstalled = true;
+  window.addEventListener("zephium:sidebar-resize-progress", (event) => {
+    if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
+      return;
+    const { width, revision, active } = event.detail;
+    if (revision !== resizeRevision || !isHidden() || !Number.isFinite(width)) return;
+    if (active === true) {
+      beginSidebarResize();
+      expandedWidth = clampExpanded(width);
+    } else if (active === false) cancelSidebarResize();
+  });
   window.addEventListener("zephium:sidebar-width-selected", (event) => {
     if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
       return;

@@ -20,6 +20,7 @@ pub struct Model {
     pub error: bool,
     /// The tab whose address this presentation edits, and that address.
     editing: Option<(String, String)>,
+    pub switcher: Option<zephium_ipc::TabSwitcherState>,
 }
 impl Model {
     pub fn session(&self) -> String {
@@ -31,6 +32,7 @@ impl Model {
     }
     pub fn snapshot(&self) -> PanelState {
         PanelState {
+            switcher: self.switcher.clone(),
             window_id: self.owner.as_ref().map(|owner| owner.window.clone()),
             revision: format!("{:016x}", self.publication),
             session_id: self.session(),
@@ -86,6 +88,7 @@ impl Model {
         self.presented = true;
         self.error = false;
         self.editing = None;
+        self.switcher = None;
     }
     /// Opens on a tab's address, so a chosen result replaces that tab's page.
     pub fn edit(&mut self, tab: String, url: String) {
@@ -94,6 +97,13 @@ impl Model {
             self.editing = Some((tab, url));
         }
     }
+    pub fn show_switcher(&mut self, switcher: zephium_ipc::TabSwitcherState) {
+        if self.switcher.as_ref().map(|s| &s.session_id) != Some(&switcher.session_id) {
+            self.search();
+        }
+        self.publication = self.publication.saturating_add(1);
+        self.switcher = Some(switcher);
+    }
     pub fn hide(&mut self) {
         if !self.advance() {
             return;
@@ -101,6 +111,7 @@ impl Model {
         self.presented = false;
         self.error = false;
         self.editing = None;
+        self.switcher = None;
     }
     /// A launcher is transient: it goes away when focus moves to the browser
     /// or to another application. An owned native surface, such as a menu or
@@ -119,9 +130,11 @@ impl Model {
         }
         self.presented = false;
         self.owner = owner;
+        self.switcher = None;
     }
     pub fn context(&self, request_id: &str) -> Option<SearchContext> {
-        if !self.presented
+        if self.switcher.is_some()
+            || !self.presented
             || request_id.is_empty()
             || request_id.len() > 64
             || !request_id
@@ -155,6 +168,29 @@ mod tests {
             space: space.into(),
         }
     }
+    #[test]
+    fn switcher_and_search_replace_each_other_and_hidden_state_releases_entries() {
+        let mut model = Model::default();
+        model.set_owner(Some(owner("one", "p", "s")));
+        model.search();
+        let context = model.context("1").unwrap();
+        model.show_switcher(zephium_ipc::TabSwitcherState {
+            session_id: "1".into(),
+            window_id: "one".into(),
+            entries: Vec::new(),
+            selected: 0,
+            keyboard: true,
+        });
+        assert!(model.presented);
+        assert!(!model.admits(&context));
+        assert!(model.snapshot().switcher.is_some());
+        model.search();
+        assert!(model.snapshot().switcher.is_none());
+        model.hide();
+        assert!(!model.snapshot().visible);
+        assert!(model.snapshot().switcher.is_none());
+    }
+
     #[test]
     fn requests_before_document_ready_preserve_latest_intent_and_dismissal() {
         let mut model = Model::default();
