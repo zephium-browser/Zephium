@@ -235,6 +235,13 @@ impl<T> EventLoopRunner<T> {
     self.move_state_to(RunnerState::Idle);
   }
 
+  pub(crate) unsafe fn end_session(&self) {
+    if !matches!(self.control_flow.get(), ControlFlow::ExitWithCode(_)) {
+      self.control_flow.set(ControlFlow::ExitWithCode(1));
+    }
+    self.loop_destroyed();
+  }
+
   pub(crate) unsafe fn loop_destroyed(&self) {
     self.move_state_to(RunnerState::Destroyed);
   }

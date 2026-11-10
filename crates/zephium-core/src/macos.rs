@@ -29,9 +29,9 @@ pub const SAFARI_SECURITY_FLOOR: ProductVersion = ProductVersion::new(26, 6, 1);
 pub const SAFARI_REVIEWED_MAJOR: u32 = 27;
 
 pub const SONOMA_RECOMMENDED: ProductVersion = ProductVersion::new(14, 8, 9);
-pub const SEQUOIA_RECOMMENDED: ProductVersion = ProductVersion::new(15, 8, 2);
-pub const TAHOE_RECOMMENDED: ProductVersion = ProductVersion::new(26, 7, 2);
-pub const GOLDEN_GATE_RECOMMENDED: ProductVersion = ProductVersion::new(27, 2, 0);
+pub const SEQUOIA_RECOMMENDED: ProductVersion = ProductVersion::new(15, 8, 3);
+pub const TAHOE_RECOMMENDED: ProductVersion = ProductVersion::new(26, 7, 3);
+pub const GOLDEN_GATE_RECOMMENDED: ProductVersion = ProductVersion::new(27, 2, 1);
 /// Sonoma's newest Safari. Safari 27 shipped for Sequoia and Tahoe only.
 pub const SONOMA_SAFARI_RECOMMENDED: ProductVersion = ProductVersion::new(26, 6, 1);
 /// Safari 27 for Sequoia and Tahoe, and the Safari macOS 27 ships with.
@@ -43,18 +43,18 @@ pub const TAHOE_SECURITY_FLOOR_TEXT: &str = "26.7.2";
 pub const GOLDEN_GATE_SECURITY_FLOOR_TEXT: &str = "27.2.0";
 pub const SAFARI_SECURITY_FLOOR_TEXT: &str = "26.6.1";
 pub const SONOMA_RECOMMENDED_TEXT: &str = "14.8.9";
-pub const SEQUOIA_RECOMMENDED_TEXT: &str = "15.8.2";
-pub const TAHOE_RECOMMENDED_TEXT: &str = "26.7.2";
-pub const GOLDEN_GATE_RECOMMENDED_TEXT: &str = "27.2.0";
+pub const SEQUOIA_RECOMMENDED_TEXT: &str = "15.8.3";
+pub const TAHOE_RECOMMENDED_TEXT: &str = "26.7.3";
+pub const GOLDEN_GATE_RECOMMENDED_TEXT: &str = "27.2.1";
 pub const SONOMA_SAFARI_RECOMMENDED_TEXT: &str = "26.6.1";
 pub const SAFARI_RECOMMENDED_TEXT: &str = "27.2";
 pub const SECURITY_FLOOR_PUBLISHED_ON: &str = "2026-10-26";
 /// 2026-10-26T00:00:00Z. A wall clock before the reviewed Apple security
 /// release cannot establish that this floor was published and must fail closed.
 pub const SECURITY_FLOOR_PUBLISHED_UNIX_SECONDS: u64 = 1_792_972_800;
-pub const RECOMMENDED_RELEASE_PUBLISHED_ON: &str = "2026-10-26";
-/// 2026-10-26T00:00:00Z.
-pub const RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS: u64 = 1_792_972_800;
+pub const RECOMMENDED_RELEASE_PUBLISHED_ON: &str = "2026-11-09";
+/// 2026-11-09T00:00:00Z.
+pub const RECOMMENDED_RELEASE_PUBLISHED_UNIX_SECONDS: u64 = 1_794_182_400;
 pub const SECURITY_FLOOR_SOURCE_URL: &str = "https://support.apple.com/en-us/100100";
 pub const SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/149527";
 pub const SONOMA_SAFARI_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/148286";
@@ -65,11 +65,15 @@ pub const SEQUOIA_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/1
 // Reviewed 2026-10-27: Apple's October 26 releases fix WebKit memory-safety
 // and sandbox issues. Sonoma has no newer offered Safari and stays at 26.6.1.
 // macOS 27.2 evidence: https://support.apple.com/en-us/149521
-// Reviewed again 2026-11-02: the only later release is Xcode 27.2 (October
-// 29); nothing newer for macOS or Safari, so the floors stand.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
-/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
+// Reviewed again 2026-11-10: recommend November 9's macOS security updates.
+// Their advisories contain no WebKit entries or active-exploitation notice,
+// so the engine floors and Safari recommendations stay unchanged.
+// macOS 27.2.1: https://support.apple.com/en-us/149718
+// Tahoe 26.7.3: https://support.apple.com/en-us/149719
+// Sequoia 15.8.3: https://support.apple.com/en-us/149720
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-17";
+/// 2026-11-18T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_960_000;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);
@@ -449,11 +453,11 @@ mod tests {
         for (os, safari) in [
             ("14.8.9", "26.6.1"),
             ("14.9.0", "26.6.2"),
-            ("15.8.2", "27.2"),
-            ("15.8.3", "27.2.1"),
-            ("26.7.2", "27.2"),
-            ("26.7.3", "27.3"),
-            ("27.2.0", "27.2"),
+            ("15.8.3", "27.2"),
+            ("15.8.4", "27.2.1"),
+            ("26.7.3", "27.2"),
+            ("26.7.4", "27.3"),
+            ("27.2.1", "27.2"),
         ] {
             assert_eq!(
                 assess_at_review(os, safari, BUILD, BUILD),
@@ -509,7 +513,7 @@ mod tests {
     fn current_floor_and_future_runtime_advisories_remain_distinct() {
         assert_eq!(
             assess_runtime(
-                "26.7.2",
+                "26.7.3",
                 "27.2",
                 BUILD,
                 BUILD,
@@ -531,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             assess_runtime(
-                "15.8.2",
+                "15.8.3",
                 "28.0",
                 BUILD,
                 BUILD,
@@ -542,7 +546,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            assess_runtime("26.7.2", "27.2", BUILD, BUILD, OVERDUE,),
+            assess_runtime("26.7.3", "27.2", BUILD, BUILD, OVERDUE,),
             Ok(RuntimeSecurityAdvisories::from_advisory(
                 RuntimeSecurityAdvisory::review_overdue(),
             ))
@@ -575,6 +579,33 @@ mod tests {
         ] {
             assert!(assess_at_review("26.7.1", "27.0", malformed, BUILD).is_err());
             assert!(assess_at_review("26.7.1", "27.0", BUILD, malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn november_security_review_covers_release_and_recommends_macos_updates() {
+        let reviewed_at = 1_794_268_800; // 2026-11-10T00:00:00Z.
+        assert!(security_floor_review_is_current(reviewed_at));
+        assert!(security_floor_review_is_current(1_794_959_999));
+        assert!(!security_floor_review_is_current(1_794_960_000));
+        for (previous, recommended) in [
+            ("15.8.2", "15.8.3"),
+            ("26.7.2", "26.7.3"),
+            ("27.2.0", "27.2.1"),
+        ] {
+            assert_eq!(
+                assess_runtime(previous, "27.2", BUILD, BUILD, reviewed_at),
+                Ok(RuntimeSecurityAdvisories::from_advisory(
+                    RuntimeSecurityAdvisory::update_recommended(
+                        RuntimeSecurityUpdateTarget::OperatingSystem,
+                    ),
+                )),
+                "{previous} must recommend the November security update"
+            );
+            assert_eq!(
+                assess_runtime(recommended, "27.2", BUILD, BUILD, reviewed_at),
+                Ok(RuntimeSecurityAdvisories::new()),
+            );
         }
     }
 

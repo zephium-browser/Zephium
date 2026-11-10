@@ -19,6 +19,7 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 // Extensions ask for access one request at a time; later ones wait.
 let accessQueue = $state<WebExtensionAccessRequestView[]>([]);
 let answering = $state(false);
+let accessFailure = $state<string | null>(null);
 // An installed extension whose in-page Remove button was clicked; the browser's
 // own remove control asks to confirm.
 let removalAsked = $state<string | null>(null);
@@ -33,6 +34,7 @@ export const isInstalling = () => preparing || confirming || settling !== null;
 export const error = () => failure;
 export const accessRequest = () => accessQueue[0] ?? null;
 export const isAnswering = () => answering;
+export const accessError = () => accessFailure;
 export const named = (id: string) => installed.find((extension) => extension.id === id) ?? null;
 export const byInstall = (install: string) =>
   installed.find((extension) => extension.install_id === install) ?? null;
@@ -80,10 +82,16 @@ export async function answerAccess(allowed: boolean): Promise<void> {
   const current = accessQueue[0];
   if (current === undefined || answering) return;
   answering = true;
-  const result = await commands.webExtensionAnswerAccess(current, allowed);
-  answering = false;
-  accessQueue = accessQueue.slice(1);
-  if (result.status !== "ok") failure = result.error;
+  accessFailure = null;
+  try {
+    const result = await commands.webExtensionAnswerAccess(current, allowed);
+    if (result.status === "ok") accessQueue = accessQueue.slice(1);
+    else accessFailure = result.error;
+  } catch (error) {
+    accessFailure = String(error);
+  } finally {
+    answering = false;
+  }
 }
 
 export async function refresh(): Promise<void> {

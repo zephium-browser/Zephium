@@ -22,6 +22,9 @@
     if (outcome === "cleared") {
       clearRequest.dismiss();
       notices.show(m.site_data_cleared({ site: target.host }), "data");
+    } else if (outcome === "partial") {
+      clearRequest.dismiss();
+      notices.show(m.site_data_cleared_partly({ site: target.host }), "data");
     } else {
       failure = outcome;
     }

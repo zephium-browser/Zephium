@@ -22,6 +22,8 @@
     tab,
     active,
     grouped = false,
+    selected = false,
+    multiSelecting = false,
     depth = 0,
     closable = true,
     class: className = "",
@@ -39,11 +41,13 @@
     tab: TabView;
     active: boolean;
     grouped?: boolean;
+    selected?: boolean;
+    multiSelecting?: boolean;
     depth?: number;
     closable?: boolean;
     class?: string;
     splitCandidate: boolean;
-    onSelect: (id: string) => void;
+    onSelect: (id: string, event: MouseEvent) => void;
     onClose: (id: string) => void;
     onContextMenu: (event: MouseEvent, tab: TabView) => void;
     onPointerDown: (event: PointerEvent, tab: TabView) => void;
@@ -72,6 +76,7 @@
   data-audio-host
   class={["browse-tab", grouped && "browse-tab-grouped", className]}
   data-selected={active}
+  data-multi-selected={selected || undefined}
   data-split-candidate={splitCandidate}
   data-cascade={cascade < CASCADE_ROWS || undefined}
   style:--cascade={cascade}
@@ -81,13 +86,14 @@
     class="tab-open"
     style:padding-inline-start={`${indent}px`}
     aria-current={active ? "page" : undefined}
+    aria-pressed={multiSelecting ? selected : undefined}
     aria-label={tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
     onpointerup={onPointerUp}
     onpointercancel={onPointerCancel}
-    onclick={() => onSelect(tab.id)}
+    onclick={(event) => onSelect(tab.id, event)}
     {...closable ? closeOnMiddleClick(() => onClose(tab.id)) : {}}
   >
     <FavIcon
@@ -177,6 +183,17 @@
 
   .browse-tab[data-split-candidate="true"] {
     box-shadow: inset 0 0 0 1px var(--color-accent);
+  }
+
+  .browse-tab[data-multi-selected="true"],
+  .browse-tab[data-multi-selected="true"]:hover {
+    background: color-mix(in srgb, var(--color-accent) 16%, var(--row-active));
+    box-shadow: inset 0 0 0 1px var(--color-accent);
+    color: var(--color-text);
+  }
+
+  .browse-tab[data-multi-selected="true"][data-selected="true"] {
+    box-shadow: inset 0 0 0 2px var(--color-accent);
   }
 
   .tab-open {
@@ -270,6 +287,11 @@
   }
 
   @media (forced-colors: active) {
+    .browse-tab[data-multi-selected="true"] {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
+
     .tab-label {
       mask-image: none;
     }

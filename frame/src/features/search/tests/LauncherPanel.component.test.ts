@@ -117,6 +117,27 @@ test("Enter before any answer arrives runs once, against that exact request", as
   expect(native.run).toHaveBeenCalledTimes(1);
 });
 
+test("ArrowUp from the typed action selects and runs the last suggestion", async () => {
+  const bookmark: SearchResult = {
+    kind: "bookmark",
+    title: "Gmail",
+    detail: "mail.google.com",
+    icon: null,
+    action: { type: "OpenUrl", url: "https://mail.google.com/" },
+  };
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await screen.getByRole("combobox").fill("gma");
+  const owner = await reply("gma", [search("gma"), bookmark]);
+  await userEvent.keyboard("{ArrowUp}");
+  await expect
+    .element(screen.getByRole("option", { name: /Gmail/u }))
+    .toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(bookmark.action, owner, false),
+  );
+});
+
 test("an obsolete answer cannot put its rows back on screen", async () => {
   const screen = await render(LauncherPanel, { props: { context, destinations } });
   await screen.getByRole("combobox").fill("rust");

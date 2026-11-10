@@ -277,7 +277,7 @@ fn essentials_from_another_browser_join_the_kept_sites_once_each_unloaded() {
             let _ = send.send(added);
         }),
     });
-    assert_eq!(receive.recv().unwrap(), Some(2));
+    assert_eq!(receive.recv().unwrap(), Some((2, false)));
     let sites = kept(&shell);
     assert_eq!(
         sites
@@ -316,7 +316,7 @@ fn data_safety_import_retains_its_admitted_profile_across_focus_changes() {
                 url: format!("https://kind{index}.example/"),
                 title: "Imported".into(),
             }])),
-            done: crate::ImportCompletion::new(|added| assert_eq!(added, Some(1))),
+            done: crate::ImportCompletion::new(|added| assert_eq!(added, Some((1, false)))),
         });
     }
     assert_eq!(

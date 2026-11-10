@@ -411,6 +411,7 @@ impl Shell {
                 adoption,
             } => self.adopt_linked_native_tab(id, child, foreground, adoption),
             EngineEvent::NativeTabCloseRequested { id } => self.close_owned_native_tab(id),
+            EngineEvent::MediaReturnRequested { id } => self.return_to_media(id),
             EngineEvent::PageOpenBlocked { id, url } => {
                 let url = url
                     .and_then(|url| url::Url::parse(&url).ok())
@@ -493,6 +494,11 @@ impl Shell {
             EngineEvent::ViewDiscardRefused { id, profile, probe } => {
                 self.on_view_discard_refused(id, profile, probe)
             }
+            EngineEvent::DormancyRefused {
+                id,
+                profile,
+                request,
+            } => self.on_dormancy_refused(id, profile, request),
             EngineEvent::PageMemory { id, profile, bytes } => {
                 self.on_page_memory(id, profile, bytes)
             }
@@ -678,7 +684,16 @@ impl Shell {
                 if !self.items.set_title(id, title.clone()) {
                     return;
                 }
-                self.amend_recorded_visit_title(id, &title);
+                if self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                }) {
+                    self.pending_visit_titles.insert(id);
+                    if let Some(queue) = &self.self_queue {
+                        queue.schedule_visit_titles(
+                            std::time::Instant::now() + std::time::Duration::from_secs(1),
+                        );
+                    }
+                }
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -799,6 +814,7 @@ impl Shell {
             EngineEvent::ContentRulesSettled { profile, .. }
             | EngineEvent::ViewDiscarded { profile, .. }
             | EngineEvent::ViewDiscardRefused { profile, .. }
+            | EngineEvent::DormancyRefused { profile, .. }
             | EngineEvent::PageMemory { profile, .. }
             | EngineEvent::ProfileProcessExited { profile, .. }
             | EngineEvent::ProfileRestartRequired { profile } => Some(*profile),
@@ -850,6 +866,7 @@ impl Shell {
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NativeTabCloseRequested { id }
+            | EngineEvent::MediaReturnRequested { id }
             | EngineEvent::PageOpenBlocked { id, .. }
             | EngineEvent::ExternalAppRequested { id, .. }
             | EngineEvent::HttpAuthRequested { id, .. }
@@ -884,11 +901,37 @@ impl Shell {
 
     /// A visit is recorded when its URL commits, which is before the document
     /// publishes a title, so the row holds a URL-derived placeholder until the
-    /// real one arrives. Replace it while that visit is still the newest.
-    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) {
-        let Some((recorded_url, _)) = self.last_visits.get(&id) else {
-            return;
+    /// real one arrives. Coalesce titles until the next title wake and
+    /// replace it while that visit is still within its 60-second amend window.
+    pub(super) fn flush_visit_titles(&mut self) {
+        for id in std::mem::take(&mut self.pending_visit_titles) {
+            let Some(title) = self.items.tab(id).map(|tab| tab.title.clone()) else {
+                continue;
+            };
+            if !self.amend_recorded_visit_title(id, &title)
+                && self.last_visits.get(&id).is_some_and(|(_, recorded)| {
+                    recorded.elapsed() < std::time::Duration::from_secs(60)
+                })
+            {
+                self.pending_visit_titles.insert(id);
+            }
+        }
+        if !self.pending_visit_titles.is_empty() {
+            if let Some(queue) = &self.self_queue {
+                queue.schedule_visit_titles(
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                );
+            }
+        }
+    }
+
+    fn amend_recorded_visit_title(&mut self, id: ItemId, title: &str) -> bool {
+        let Some((recorded_url, recorded)) = self.last_visits.get(&id) else {
+            return true;
         };
+        if recorded.elapsed() >= std::time::Duration::from_secs(60) {
+            return true;
+        }
         let recorded_url = recorded_url.clone();
         if self
             .items
@@ -896,17 +939,17 @@ impl Shell {
             .and_then(|tab| tab.url.as_ref())
             .is_none_or(|url| url.as_str() != recorded_url)
         {
-            return;
+            return true;
         }
         let Some(profile) = self.profile_of_item(id).filter(|profile| {
             self.profiles
                 .get(*profile)
                 .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
         }) else {
-            return;
+            return true;
         };
         self.store
-            .amend_visit_title(profile, recorded_url, title.to_owned());
+            .amend_visit_title(profile, recorded_url, title.to_owned())
     }
 
     fn should_record_visit(&mut self, id: ItemId, url: &str) -> bool {
@@ -924,6 +967,7 @@ impl Shell {
             }
         }
         self.last_visits.insert(id, (url.to_owned(), now));
+        self.pending_visit_titles.remove(&id);
         true
     }
 }

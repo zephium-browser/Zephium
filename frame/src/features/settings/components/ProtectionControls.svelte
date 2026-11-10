@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as m from "$shared/i18n/messages";
   import { onMount } from "svelte";
   import { blocker } from "$domain/blocker";
   import SettingsGroup from "$shared/ui/SettingsGroup";
@@ -11,12 +12,12 @@
   let message = $state("");
   let standing = $derived(
     status.protection === "pending"
-      ? "Protection starting… You can keep browsing."
+      ? m.settings_protection_starting()
       : status.protection === "active"
-        ? "Protection is active."
+        ? m.settings_protection_active()
         : status.protection === "disabled"
-          ? "Protection is off for this profile."
-          : "Protection needs attention. The last working rules are retained when available.",
+          ? m.settings_protection_off()
+          : m.settings_protection_attention(),
   );
   onMount(() => {
     void blocker.refresh();
@@ -27,25 +28,26 @@
     message = "";
     try {
       const result = await action();
-      if (result.state === "pending") message = "The change is still being applied.";
+      if (result.state === "pending") message = m.settings_protection_change_pending();
       else if (
         result.state !== "processed" ||
         !["applied", "no_op"].includes(result.disposition.outcome)
       )
-        message = "Could not confirm this change. Check the status or retry.";
+        message = m.settings_protection_change_failed();
     } finally {
       busy = false;
     }
   }
 </script>
 
-<SettingsGroup
-  title="Ad & tracker protection"
-  description="These controls change live protection for this profile. Site pauses and saved element hides are available from the page’s quick menu."
->
-  <SettingsRow title="Block ads and trackers" description={standing} settingId="privacy.blocking">
+<SettingsGroup title={m.settings_protection()} description={m.settings_protection_help()}>
+  <SettingsRow
+    title={m.settings_protection_enabled()}
+    description={standing}
+    settingId="privacy.blocking"
+  >
     <Switch
-      label="Block ads and trackers"
+      label={m.settings_protection_enabled()}
       labelHidden
       checked={status.desired_enabled === true}
       disabled={busy ||
@@ -56,25 +58,27 @@
     />
   </SettingsRow>
   <SettingsRow
-    title="Filter lists"
-    description="EasyList, EasyPrivacy, and uBlock Origin's filters and quick fixes from their official HTTPS publishers. Updates are validated before activation, with a built-in offline fallback."
+    title={m.settings_protection_lists()}
+    description={m.settings_protection_lists_help()}
   >
     <Button
       disabled={busy || !status.can_refresh_sources}
       onclick={() => void change(blocker.refreshSources)}
-      >{status.source_phase === "refreshing" ? "Updating…" : "Check for updates"}</Button
+      >{status.source_phase === "refreshing"
+        ? m.settings_protection_updating()
+        : m.settings_protection_check_updates()}</Button
     >
   </SettingsRow>
   {#if status.retryable && status.desired_generation}
     <SettingsRow
-      title="Retry protection"
-      description="Retry preparing the current rules without interrupting browsing."
+      title={m.settings_protection_retry()}
+      description={m.settings_protection_retry_help()}
       ><Button
         disabled={busy}
         onclick={() => {
           if (status.desired_generation)
             void change(() => blocker.retry(status.desired_generation!));
-        }}>Retry</Button
+        }}>{m.settings_protection_retry_action()}</Button
       ></SettingsRow
     >
   {/if}

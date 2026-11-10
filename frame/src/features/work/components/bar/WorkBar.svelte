@@ -102,6 +102,9 @@
     element.style.blockSize = `${Math.min(element.scrollHeight, 132)}px`;
   }
   $effect(() => {
+    // Let the engine size the focused field without collapsing it on each key.
+    // Older system WebKit versions still need the measured fallback.
+    if (CSS.supports("field-sizing", "content")) return;
     void value;
     grow();
   });
@@ -225,8 +228,7 @@
           {placeholder}
           maxlength="8192"
           {disabled}
-          onkeydown={keydown}
-          oninput={grow}></textarea>
+          onkeydown={keydown}></textarea>
         <div class="trail">
           {#if trailing && engaged}{@render trailing()}
           {:else if model && engaged}<span class="model" title={m.work_bar_model()}>{model}</span
@@ -456,6 +458,7 @@
   }
 
   textarea {
+    field-sizing: content;
     flex: 1;
     min-inline-size: 0;
     box-sizing: border-box;

@@ -32,6 +32,7 @@
 
   let session = $state.raw(untrack(() => new BookmarksSession(profile)));
   let renaming = $state<string | null>(null);
+  let pendingFolder = $state.raw<{ owner: BookmarksSession; id: string } | null>(null);
   let draft = $state("");
   /** A folder whose removal waits for a second press, because it takes its
    *  contents with it. */
@@ -286,10 +287,24 @@
   });
 
   async function addFolder() {
-    const id = await session.addFolder(m.bookmarks_new_folder_name());
-    const created = session.items.find((item) => item.id === id);
-    if (created) startRename(created);
+    const owner = session;
+    const id = await owner.addFolder(m.bookmarks_new_folder_name());
+    if (owner === session && typeof id === "string") pendingFolder = { owner, id };
   }
+
+  $effect(() => {
+    const pending = pendingFolder;
+    if (!pending) return;
+    if (pending.owner !== session) {
+      pendingFolder = null;
+      return;
+    }
+    if (session.loading) return;
+    pendingFolder = null;
+    if (session.error !== null) return;
+    const created = session.items.find((item) => item.id === pending.id);
+    if (created) startRename(created);
+  });
 
   const focusAndSelect = (node: HTMLInputElement) => {
     node.focus();

@@ -50,6 +50,7 @@ pub(crate) enum ImportStateView {
     Queued,
     Running,
     Done,
+    Partial,
     Failed,
     Skipped,
 }
@@ -74,6 +75,25 @@ pub(crate) struct ImportKindProgressView {
     done: u32,
     total: Option<u32>,
     problem: Option<ImportProblemView>,
+}
+
+impl ImportKindProgressView {
+    fn settle(&mut self, result: Option<(u32, bool)>, source_partial: bool) {
+        match result {
+            Some((added, partial)) => {
+                self.done = added;
+                self.state = if source_partial || partial {
+                    ImportStateView::Partial
+                } else {
+                    ImportStateView::Done
+                };
+            }
+            None => {
+                self.state = ImportStateView::Failed;
+                self.problem = Some(ImportProblemView::Storage);
+            }
+        }
+    }
 }
 
 /// The running import, whole, each time it moves.
@@ -305,23 +325,14 @@ async fn run(
                 progress.state = ImportStateView::Failed;
                 progress.problem = Some(problem(&error));
             }
-            Ok((work, total)) => {
+            Ok((work, total, partial)) => {
                 progress.total = Some(total);
                 if cancelled.load(Ordering::Acquire) {
                     progress.state = ImportStateView::Skipped;
                     job.cancelled = true;
                 } else {
                     sites.note(&work);
-                    match write(app, destination, work).await {
-                        Some(added) => {
-                            progress.done = added;
-                            progress.state = ImportStateView::Done;
-                        }
-                        None => {
-                            progress.state = ImportStateView::Failed;
-                            progress.problem = Some(ImportProblemView::Storage);
-                        }
-                    }
+                    progress.settle(write(app, destination, work).await, partial);
                 }
             }
         }
@@ -438,7 +449,7 @@ async fn read(
     browser: Browser,
     profile: &str,
     kind: ImportKindView,
-) -> Result<(zephium_app::ImportWork, u32), ImportError> {
+) -> Result<(zephium_app::ImportWork, u32, bool), ImportError> {
     let profile = profile.to_owned();
     tauri::async_runtime::spawn_blocking(move || {
         let locations = Locations::from_env().ok_or(ImportError::Missing)?;
@@ -460,10 +471,10 @@ async fn read(
                         })
                         .collect();
                 let total = u32::try_from(sites.len()).unwrap_or(u32::MAX);
-                Ok((zephium_app::ImportWork::Essentials(sites), total))
+                Ok((zephium_app::ImportWork::Essentials(sites), total, false))
             }
             ImportKindView::Bookmarks => {
-                let nodes = zephium_import::bookmarks(&locations, browser, &profile)?;
+                let (nodes, partial) = zephium_import::bookmarks(&locations, browser, &profile)?;
                 let total = links(&nodes);
                 // One folder per source, and per profile when there are several,
                 // so imports from two Chrome profiles stay apart.
@@ -472,7 +483,11 @@ async fn read(
                 } else {
                     format!("Imported from {}", browser.name())
                 };
-                Ok((zephium_app::ImportWork::Bookmarks { folder, nodes }, total))
+                Ok((
+                    zephium_app::ImportWork::Bookmarks { folder, nodes },
+                    total,
+                    partial,
+                ))
             }
             ImportKindView::History => {
                 let now = std::time::SystemTime::now()
@@ -480,7 +495,7 @@ async fn read(
                     .map_or(0, |elapsed| elapsed.as_secs() as i64);
                 let visits = zephium_import::history(&locations, browser, &profile, now)?;
                 let total = u32::try_from(visits.len()).unwrap_or(u32::MAX);
-                Ok((zephium_app::ImportWork::History(visits), total))
+                Ok((zephium_app::ImportWork::History(visits), total, false))
             }
         }
     })
@@ -502,7 +517,7 @@ async fn write(
     app: &tauri::AppHandle,
     destination: zephium_app::ImportDestination,
     work: zephium_app::ImportWork,
-) -> Option<u32> {
+) -> Option<(u32, bool)> {
     let shell = app.try_state::<Handle>()?.inner().clone();
     let (send, receive) = tokio::sync::oneshot::channel();
     if !shell.dispatch(Command::Import {
@@ -528,6 +543,34 @@ fn publish(app: &tauri::AppHandle, job: &ImportJobView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_and_storage_limits_report_partial_even_when_nothing_was_added() {
+        for added in [0, 1] {
+            for (source, storage) in [(true, false), (false, true), (true, true), (false, false)] {
+                let mut progress = ImportKindProgressView {
+                    kind: ImportKindView::Bookmarks,
+                    state: ImportStateView::Running,
+                    done: 0,
+                    total: Some(2),
+                    problem: None,
+                };
+                progress.settle(Some((added, storage)), source);
+                assert_eq!(progress.done, added);
+                assert_eq!(
+                    progress.state,
+                    if source || storage {
+                        ImportStateView::Partial
+                    } else {
+                        ImportStateView::Done
+                    }
+                );
+                progress.settle(None, source);
+                assert_eq!(progress.state, ImportStateView::Failed);
+                assert_eq!(progress.problem, Some(ImportProblemView::Storage));
+            }
+        }
+    }
 
     #[test]
     fn links_count_through_folders() {

@@ -60,6 +60,7 @@ struct State {
     page_left: Option<f64>,
     dark: bool,
     previous_focus: HWND,
+    reactivation_focus: HWND,
     laying_out: bool,
     hot_button: HWND,
     // The last button the pointer was on, which outlives the hover itself.
@@ -167,6 +168,7 @@ pub fn install(window: &WebviewWindow) -> bool {
             page_left: None,
             dark: true,
             previous_focus: HWND::default(),
+            reactivation_focus: HWND::default(),
             laying_out: false,
             hot_button: HWND::default(),
             last_hot: HWND::default(),
@@ -1260,6 +1262,18 @@ unsafe extern "system" fn owner_proc(
             return LRESULT(HTMAXBUTTON as isize);
         }
     }
+    if msg == WM_ACTIVATE && w.0 & 0xffff == WA_INACTIVE as usize {
+        let focus = reactivation_keyboard_focus();
+        (*p).reactivation_focus = if IsChild(hwnd, focus).as_bool() {
+            focus
+        } else {
+            HWND::default()
+        };
+    }
+    // Wry's parent subclass gives activation focus to chrome. Restore the
+    // previous child afterwards, without keeping a pointer to State across it.
+    let restore =
+        (msg == WM_ACTIVATE && activation_restores_focus(w)).then(|| (*p).reactivation_focus);
     let result = DefSubclassProc(hwnd, msg, w, l);
     // Keep the owned caption hidden through all synchronous size/focus messages.
     // WM_SIZE alone is too early: Windows may still be animating the owner.
@@ -1287,7 +1301,48 @@ unsafe extern "system" fn owner_proc(
     if msg == WM_WINDOWPOSCHANGED {
         pointer_moved(hwnd);
     }
+    if let Some(target) = restore {
+        // Focus callbacks can destroy the owner, so do not read State after this.
+        restore_reactivation_focus(hwnd, target);
+    }
     result
+}
+
+unsafe fn reactivation_keyboard_focus() -> HWND {
+    #[cfg(test)]
+    if let Some(focus) = focus_tests::keyboard_focus() {
+        return focus;
+    }
+    GetFocus()
+}
+
+unsafe fn restore_reactivation_focus(owner: HWND, target: HWND) {
+    #[cfg(test)]
+    let foreground = focus_tests::foreground().unwrap_or_else(|| GetForegroundWindow());
+    #[cfg(not(test))]
+    let foreground = GetForegroundWindow();
+    if can_restore_focus(owner, target, foreground) {
+        set_reactivation_focus(target);
+    }
+}
+
+unsafe fn set_reactivation_focus(target: HWND) {
+    #[cfg(test)]
+    if focus_tests::record_focus_target(target) {
+        return;
+    }
+    let _ = SetFocus(Some(target));
+}
+
+fn activation_restores_focus(activation: WPARAM) -> bool {
+    activation.0 & 0xffff != WA_INACTIVE as usize && activation.0 >> 16 == 0
+}
+
+fn can_restore_focus(owner: HWND, target: HWND, foreground: HWND) -> bool {
+    // SAFETY: Win32 validates these borrowed handles; a closed, hidden or
+    // reparented page must not regain keyboard focus.
+    foreground == owner
+        && unsafe { IsChild(owner, target).as_bool() && IsWindowVisible(target).as_bool() }
 }
 unsafe extern "system" fn strip_proc(
     hwnd: HWND,
@@ -1612,8 +1667,90 @@ unsafe extern "system" fn button_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 #[cfg(test)]
+#[path = "windows_caption_focus_tests.rs"]
+mod focus_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn activation_does_not_restore_a_minimized_or_inactive_window() {
+        assert!(activation_restores_focus(WPARAM(WA_ACTIVE as usize)));
+        assert!(activation_restores_focus(WPARAM(WA_CLICKACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(WA_INACTIVE as usize)));
+        assert!(!activation_restores_focus(WPARAM(
+            (1 << 16) | WA_ACTIVE as usize
+        )));
+    }
+
+    #[test]
+    fn reactivation_accepts_only_a_visible_live_child_of_its_owner() {
+        // SAFETY: these off-screen, non-activating windows belong to the test
+        // thread and are destroyed before it exits; no profile is opened.
+        unsafe {
+            let owner = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let child = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                50,
+                50,
+                Some(owner),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let other = CreateWindowExW(
+                WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE,
+                -10000,
+                -10000,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(can_restore_focus(owner, child, owner));
+            assert!(!can_restore_focus(owner, child, other));
+            SetParent(child, Some(other)).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            SetParent(child, Some(owner)).unwrap();
+            assert!(!can_restore_focus(owner, owner, owner));
+            assert!(!can_restore_focus(owner, other, owner));
+            assert!(!can_restore_focus(owner, HWND::default(), owner));
+            let _ = ShowWindow(child, SW_HIDE);
+            assert!(!can_restore_focus(owner, child, owner));
+            let _ = ShowWindow(child, SW_SHOWNA);
+            assert!(can_restore_focus(owner, child, owner));
+            DestroyWindow(child).unwrap();
+            assert!(!can_restore_focus(owner, child, owner));
+            DestroyWindow(other).unwrap();
+            DestroyWindow(owner).unwrap();
+        }
+    }
     #[test]
     fn complete_button_rectangles_hit_at_fractional_dpi_and_negative_monitor_coordinates() {
         for dpi in [96, 120, 144, 192] {

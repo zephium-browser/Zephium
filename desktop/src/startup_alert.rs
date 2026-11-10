@@ -14,13 +14,12 @@ const SHOW_LOG: &str = "Show log folder";
 const CLOSE: &str = "Close";
 
 /// SQLite's own messages, and the Windows errors for access denied, sharing
-/// violation, handle disk full and disk full.
-const UNWRITABLE: [&str; 7] = [
+/// handle disk full and disk full.
+const UNWRITABLE: [&str; 6] = [
     "database or disk is full",
     "unable to open database file",
     "attempt to write a readonly database",
     "(os error 5)",
-    "(os error 32)",
     "(os error 39)",
     "(os error 112)",
 ];
@@ -49,6 +48,7 @@ pub(crate) enum StartupProblem {
     DataFolderUnavailable,
     /// Another Zephium process still holds the profile.
     ProfileInUse,
+    StillClosing,
     Other,
 }
 
@@ -71,6 +71,17 @@ impl StartupProblem {
             Self::DamagedProfile
         } else if error.contains("database is locked") {
             Self::ProfileInUse
+        } else if (cfg!(target_os = "windows") && error.contains("(os error 32)"))
+            || (error.contains("(os error 33)")
+                && [
+                    "privileged runtime lifecycle lock: ",
+                    "private runtime lifecycle lock: ",
+                ]
+                .iter()
+                .any(|operation| error.contains(operation)))
+            || (cfg!(target_os = "macos") && error.contains("(os error 35)"))
+        {
+            Self::StillClosing
         } else if UNWRITABLE.iter().any(|stable| error.contains(stable)) {
             Self::DataFolderUnavailable
         } else {
@@ -136,6 +147,7 @@ impl StartupProblem {
                  and that the folder isn't read-only or blocked by security software, then open \
                  Zephium again. Nothing was deleted.\n\nDetails: {detail}"
             ),
+            Self::StillClosing => "Zephium is still closing. Wait a moment, then open it again.".to_owned(),
             Self::ProfileInUse => "Zephium's data is still in use by another copy of Zephium that \
                  hasn't finished closing. Wait a few seconds and open it again; if it keeps \
                  happening, end Zephium in Task Manager or restart your computer."
@@ -357,7 +369,6 @@ mod tests {
             "unable to open database file",
             "attempt to write a readonly database",
             "Access is denied. (os error 5)",
-            "The process cannot access the file because it is being used by another process. (os error 32)",
             "There is not enough space on the disk. (os error 112)",
         ] {
             assert_eq!(
@@ -371,6 +382,72 @@ mod tests {
             StartupProblem::classify("The system cannot find the path specified. (os error 50)"),
             StartupProblem::Other
         );
+    }
+
+    #[test]
+    fn lock_contention_explains_that_zephium_is_still_closing() {
+        #[cfg(target_os = "windows")]
+        let error = "The process cannot access the file. (os error 32)";
+        #[cfg(target_os = "macos")]
+        let error = "Resource temporarily unavailable (os error 35)";
+        let problem = StartupProblem::classify(error);
+        assert_eq!(
+            problem.message_with_log(error, None),
+            "Zephium is still closing. Wait a moment, then open it again."
+        );
+        assert_eq!(
+            StartupProblem::classify("unrelated error (os error 350)"),
+            StartupProblem::Other
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn lifecycle_lock_timeout_keeps_the_still_closing_message() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            for code in [32, 33] {
+                let error = format!("{operation}: {}", std::io::Error::from_raw_os_error(code));
+                let problem = StartupProblem::classify(&error);
+                assert_eq!(problem, StartupProblem::StillClosing);
+                assert_eq!(
+                    problem.message_with_log(&error, None),
+                    "Zephium is still closing. Wait a moment, then open it again."
+                );
+            }
+        }
+        assert_eq!(
+            StartupProblem::classify("unrelated error (os error 330)"),
+            StartupProblem::Other
+        );
+    }
+
+    #[test]
+    fn lock_violation_is_still_closing_only_for_lifecycle_locks() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            let error = format!("{operation}: locked byte range (os error 33)");
+            let problem = StartupProblem::classify(&error);
+            assert_eq!(problem, StartupProblem::StillClosing);
+            assert!(!problem.offers_log());
+        }
+        for error in [
+            "write generation marker: locked byte range (os error 33)",
+            "write settings: locked byte range (os error 33)",
+            "unrelated lifecycle lock: locked byte range (os error 33)",
+            "private runtime lifecycle lock: unrelated error (os error 330)",
+        ] {
+            let problem = StartupProblem::classify(error);
+            assert_eq!(problem, StartupProblem::Other, "{error}");
+            assert!(problem.offers_log());
+            let message = problem.message_with_log(error, Some(Path::new("logs")));
+            assert!(message.contains(error));
+            assert!(message.contains("A log of what happened is kept in:\nlogs"));
+        }
     }
 
     #[test]

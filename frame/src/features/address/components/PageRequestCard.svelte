@@ -6,7 +6,11 @@
     LockIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
-  import type { PageRequestAnswer, PageRequestView } from "$shared/ipc/bindings";
+  import type {
+    OperationAdmission,
+    PageRequestAnswer,
+    PageRequestView,
+  } from "$shared/ipc/bindings";
   import { commands } from "$shared/ipc/bindings";
   import { settle } from "$domain/operations";
   import Icon from "$shared/ui/Icon";
@@ -30,17 +34,17 @@
   });
 
   function signIn() {
-    if (!auth || !username) return;
+    if (!auth || !username || answering) return;
     const credentials = { username, password };
     username = "";
     password = "";
-    void commands.tabsAnswerSignIn(tab, auth.request, credentials).catch(() => {});
+    void applyAnswer(commands.tabsAnswerSignIn(tab, auth.request, credentials));
   }
 
   function cancelSignIn() {
-    if (!auth) return;
+    if (!auth || answering) return;
     password = "";
-    void commands.tabsAnswerSignIn(tab, auth.request, null).catch(() => {});
+    void applyAnswer(commands.tabsAnswerSignIn(tab, auth.request, null));
   }
 
   // The card sits inside the address form, so Enter must not submit that.
@@ -111,11 +115,15 @@
   let popupSite = $derived(request.kind === "popup" ? request.site : null);
 
   // The answer names the request shown, so it never lands on a newer one.
-  async function answer(value: PageRequestAnswer) {
+  function answer(value: PageRequestAnswer) {
     if (answering) return;
+    return applyAnswer(commands.tabsAnswerPageRequest(tab, serial, value));
+  }
+
+  async function applyAnswer(admission: Promise<OperationAdmission>) {
     answering = true;
     failed = false;
-    const result = await settle(commands.tabsAnswerPageRequest(tab, serial, value));
+    const result = await settle(admission);
     answering = false;
     failed = result.outcome === "failed" || result.outcome === "rejected";
   }
@@ -133,7 +141,9 @@
     </div>
   </div>
   {#if auth}
-    {#if auth.retry}
+    {#if failed}
+      <p class="notice" role="alert">{m.page_request_failed()}</p>
+    {:else if auth.retry}
       <p class="notice" role="alert">{m.page_request_sign_in_retry()}</p>
     {/if}
     {#if auth.insecure}
@@ -157,10 +167,10 @@
       />
     </div>
     <div class="actions">
-      <Button size="compact" variant="ghost" onclick={cancelSignIn}>
+      <Button size="compact" variant="ghost" disabled={answering} onclick={cancelSignIn}>
         {m.page_request_cancel()}
       </Button>
-      <Button size="compact" variant="primary" disabled={!username} onclick={signIn}>
+      <Button size="compact" variant="primary" disabled={answering || !username} onclick={signIn}>
         {m.page_request_sign_in_submit()}
       </Button>
     </div>

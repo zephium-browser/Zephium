@@ -47,7 +47,6 @@ const WEBKIT_ARTIFACT_DIGEST_DOMAIN: &[u8] = b"zephium-webkit-content-rules";
 #[cfg(feature = "webkit")]
 const MAX_WEBKIT_URL_FILTER_BYTES: usize = 8 * 1024;
 /// Its wildcard rules never reach WebKit or its pruning.
-#[cfg(feature = "webkit")]
 const NAVIGATION_CHECKED_SOURCE: &str = "ublock-badware";
 #[cfg(feature = "runtime")]
 const MAX_RUNTIME_REGEXES: usize = 4_096;
@@ -257,6 +256,8 @@ pub struct Compiler {
     webkit_pruning: bool,
     #[cfg(feature = "webkit")]
     navigation_checked: bool,
+    #[cfg(feature = "runtime")]
+    badware_apart: bool,
 }
 
 impl Compiler {
@@ -270,7 +271,18 @@ impl Compiler {
             webkit_pruning: true,
             #[cfg(feature = "webkit")]
             navigation_checked: cfg!(feature = "runtime"),
+            #[cfg(feature = "runtime")]
+            badware_apart: false,
         }
+    }
+
+    /// Whether a runtime matcher leaves the badware list's blocking rules to
+    /// the navigation check's matcher, which the policy also asks about what
+    /// this one allows. The list's exceptions and cosmetics stay here.
+    #[cfg(feature = "runtime")]
+    pub const fn with_badware_apart(mut self, apart: bool) -> Self {
+        self.badware_apart = apart;
+        self
     }
 
     /// Whether the badware list's page and frame wildcard rules are judged
@@ -404,8 +416,22 @@ impl Compiler {
                 CompileTarget::Runtime => {
                     #[cfg(feature = "runtime")]
                     {
-                        let (runtime, blocking_entries, coverage) =
-                            compile_runtime(&mut prepared, self.limits)?;
+                        let shadowed = badware_shadowed_rules(&prepared);
+                        let badware_apart = self.badware_apart
+                            && prepared
+                                .iter()
+                                .any(|source| source.id.as_str() == NAVIGATION_CHECKED_SOURCE);
+                        if badware_apart {
+                            let mut apart = Sha256::new();
+                            apart.update(b"zephium-runtime-badware-apart-v1");
+                            apart.update(digest.as_bytes());
+                            digest = PolicyDigest(apart.finalize());
+                        }
+                        let (runtime, blocking_entries, mut coverage) =
+                            compile_runtime(&mut prepared, self.limits, badware_apart)?;
+                        coverage.badware_shadowed_rules = shadowed.rules;
+                        coverage.badware_shadow_work = shadowed.work;
+                        coverage.badware_shadow_count_truncated = shadowed.truncated;
                         (Some(runtime), Some(coverage), None, None, blocking_entries)
                     }
                     #[cfg(not(feature = "runtime"))]
@@ -926,6 +952,160 @@ fn is_ignored_line(format: SourceFormat, line: &str) -> bool {
     }
 }
 
+/// The work [`badware_shadowed_rules`] may spend: string comparisons, each
+/// charged one unit per 64 bytes it may read. The shipped lists take a few
+/// hundred.
+#[cfg(feature = "runtime")]
+pub(crate) const BADWARE_SHADOW_WORK_BUDGET: usize = 200_000;
+
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BadwareShadowCount {
+    pub(crate) rules: usize,
+    pub(crate) work: usize,
+    /// The budget ran out: `rules` counts only what was reached.
+    pub(crate) truncated: bool,
+}
+
+/// See [`RuntimeCoverage::badware_shadowed_rules`].
+#[cfg(feature = "runtime")]
+fn badware_shadowed_rules(prepared: &[PreparedSource]) -> BadwareShadowCount {
+    use adblock::filters::network::{FilterPart, NetworkFilter, NetworkFilterMaskHelper};
+    // A rule for subresources: its host, if it names one, and the literal
+    // start of its path, up to the first wildcard.
+    struct Parsed {
+        exception: bool,
+        badfilter: bool,
+        id: u64,
+        host: Option<String>,
+        path: String,
+    }
+    let parse = |source: &PreparedSource, line: &str| {
+        let filter = NetworkFilter::parse(line, false, parse_options(source.format)).ok()?;
+        if !filter.mask.intersects(WEBVIEW2_AUDITED_REQUEST_TYPES) {
+            return None;
+        }
+        let path = match &filter.filter {
+            FilterPart::Simple(part) => part.split(['*', '^']).next().unwrap_or("").to_owned(),
+            FilterPart::Empty | FilterPart::AnyOf(_) => String::new(),
+        };
+        Some(Parsed {
+            exception: filter.mask.is_exception(),
+            badfilter: filter.is_badfilter(),
+            // Leaves out `$badfilter`, so a badfilter has its target's ID.
+            id: filter.get_id(),
+            host: filter.hostname.as_deref().map(str::to_ascii_lowercase),
+            path,
+        })
+    };
+    let badware = |source: &&PreparedSource| source.id.as_str() == NAVIGATION_CHECKED_SOURCE;
+    let blocks: Vec<Parsed> = prepared
+        .iter()
+        .filter(badware)
+        .flat_map(|source| source.rules.lines().filter_map(|line| parse(source, line)))
+        .filter(|rule| !rule.exception && !rule.badfilter)
+        .collect();
+    if blocks.is_empty() {
+        return BadwareShadowCount::default();
+    }
+    let ids: std::collections::HashSet<u64> = blocks.iter().map(|rule| rule.id).collect();
+    // Each block's path under its host and under every domain above it,
+    // sorted, so an exception looks up blocks on related hosts only, and
+    // within each host only the paths that may overlap its own.
+    let mut by_host: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    let mut below: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for block in &blocks {
+        let Some(host) = block.host.as_deref() else {
+            continue;
+        };
+        by_host.entry(host).or_default().push(&block.path);
+        for (dot, _) in host.match_indices('.') {
+            below.entry(&host[dot + 1..]).or_default().push(&block.path);
+        }
+    }
+    // Each bucket's paths, sorted, with the length of its longest.
+    fn sorted<'a>(
+        buckets: std::collections::HashMap<&'a str, Vec<&'a str>>,
+    ) -> std::collections::HashMap<&'a str, (Vec<&'a str>, usize)> {
+        buckets
+            .into_iter()
+            .map(|(host, mut paths)| {
+                paths.sort_unstable();
+                paths.dedup();
+                let longest = paths.iter().map(|path| path.len()).max().unwrap_or(0);
+                (host, (paths, longest))
+            })
+            .collect()
+    }
+    let (by_host, below) = (sorted(by_host), sorted(below));
+    // A diagnostic count: past its budget it stops, as a lower bound, and the
+    // compile goes on.
+    let work = std::cell::Cell::new(0usize);
+    let charge = |one: &str, other: &str| {
+        let units = 1 + one.len().min(other.len()) / 64;
+        work.set(work.get().saturating_add(units));
+    };
+    let compare = |one: &str, other: &str| {
+        charge(one, other);
+        one.cmp(other)
+    };
+    // A path in `paths` that starts with `path`, or that `path` starts with;
+    // no prefix of `path` longer than the longest path can be one.
+    let may_overlap = |(paths, longest): &(Vec<&str>, usize), path: &str| {
+        let longer = paths.partition_point(|block| compare(block, path).is_lt());
+        paths.get(longer).is_some_and(|block| {
+            charge(block, path);
+            block.starts_with(path)
+        }) || (0..=path.len().min(*longest))
+            .filter(|&end| path.is_char_boundary(end))
+            .take_while(|_| work.get() <= BADWARE_SHADOW_WORK_BUDGET)
+            .any(|end| {
+                paths
+                    .binary_search_by(|block| compare(block, &path[..end]))
+                    .is_ok()
+            })
+    };
+    // An exception that names a related host (the same, one above or one
+    // below) on a path that may overlap.
+    let overlaps = |exception: &Parsed| {
+        let Some(host) = exception.host.as_deref() else {
+            return false;
+        };
+        let same_or_above =
+            std::iter::once(host).chain(host.match_indices('.').map(|(dot, _)| &host[dot + 1..]));
+        same_or_above
+            .filter_map(|domain| by_host.get(domain))
+            .chain(below.get(host))
+            .any(|paths| may_overlap(paths, &exception.path))
+    };
+    let mut count = BadwareShadowCount::default();
+    let others = prepared
+        .iter()
+        .filter(|source| !badware(source))
+        .flat_map(|source| {
+            source
+                .rules
+                .lines()
+                .filter(|line| line.starts_with("@@") || line.contains("badfilter"))
+                .filter_map(|line| parse(source, line))
+        });
+    for rule in others {
+        let shadowed = if rule.badfilter {
+            ids.contains(&rule.id)
+        } else {
+            rule.exception && overlaps(&rule)
+        };
+        if work.get() > BADWARE_SHADOW_WORK_BUDGET {
+            count.truncated = true;
+            break;
+        }
+        count.rules += usize::from(shadowed);
+    }
+    count.work = work.get();
+    count
+}
+
 fn parse_options(format: SourceFormat) -> ParseOptions {
     ParseOptions {
         format: format.adblock(),
@@ -1041,23 +1221,48 @@ fn normalize_domain_predicate(value: &str) -> Option<String> {
 fn compile_runtime(
     prepared: &mut [PreparedSource],
     limits: CompileLimits,
+    badware_apart: bool,
 ) -> Result<(Engine, usize, RuntimeCoverage), CompileError> {
     let mut filters = FilterSet::new(false);
     for source in prepared {
-        filters.add_filter_list(
-            std::mem::take(&mut source.rules),
-            parse_options(source.format),
-        );
+        let mut rules = std::mem::take(&mut source.rules);
+        if badware_apart && source.id.as_str() == NAVIGATION_CHECKED_SOURCE {
+            rules = without_blocking_rules(&rules, source.format)?;
+        }
+        filters.add_filter_list(rules, parse_options(source.format));
     }
     let engine = Engine::new_with_filter_set(filters);
-    let (blocking_entries, coverage) = prepare_and_validate_runtime_engine(&engine, limits)?;
+    // Apart, the badware matcher holds blocks this one may lack.
+    let (blocking_entries, coverage) =
+        prepare_and_validate_runtime_engine(&engine, limits, !badware_apart)?;
     Ok((engine, blocking_entries, coverage))
+}
+
+/// `rules`' exceptions and `$badfilter` rules, which act on every list's
+/// blocks as in one matcher.
+#[cfg(feature = "runtime")]
+fn without_blocking_rules(rules: &str, format: SourceFormat) -> Result<String, CompileError> {
+    use adblock::filters::network::NetworkFilterMaskHelper as _;
+    let mut kept = String::new();
+    for line in rules.lines() {
+        let ParsedLine::Network(filter) = parse_filter(line, true, parse_options(format))
+            .map_err(|_| CompileError::UpstreamInvariant)?
+        else {
+            return Err(CompileError::AdmissionInvariant);
+        };
+        if filter.mask.is_exception() || filter.is_badfilter() {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    Ok(kept)
 }
 
 #[cfg(feature = "runtime")]
 pub(crate) fn prepare_and_validate_runtime_engine(
     engine: &Engine,
     limits: CompileLimits,
+    require_blocks: bool,
 ) -> Result<(usize, RuntimeCoverage), CompileError> {
     let preparation_limits = NetworkMatcherPreparationLimits {
         max_regexes: MAX_RUNTIME_REGEXES.min(limits.max_rules()),
@@ -1073,7 +1278,7 @@ pub(crate) fn prepare_and_validate_runtime_engine(
         .map_err(map_runtime_preparation_error)?;
     let blocking_entries = engine
         .source_independent_blocking_filter_entry_count_for_types(WEBVIEW2_AUDITED_REQUEST_TYPES);
-    if blocking_entries == 0 {
+    if require_blocks && blocking_entries == 0 {
         return Err(CompileError::NoNativeBlockingRules);
     }
     Ok((
@@ -1091,6 +1296,9 @@ pub(crate) fn prepare_and_validate_runtime_engine(
             regex_size_limit_bytes: preparation.regex_size_limit_bytes,
             regex_dfa_size_limit_bytes: preparation.regex_dfa_size_limit_bytes,
             max_filter_checks_per_request: preparation.max_filter_checks_per_request,
+            badware_shadowed_rules: 0,
+            badware_shadow_work: 0,
+            badware_shadow_count_truncated: false,
         },
     ))
 }
@@ -1215,6 +1423,18 @@ fn compile_webkit_with(
                 .map_err(|_| CompileError::UpstreamInvariant)?;
             let mut unsplit = Vec::new();
             for mut native in equivalent {
+                // Domain alternatives are sets; canonical cache records require
+                // uniqueness. Preserve first-seen order before pruning/hashing.
+                for domains in [
+                    &mut native.trigger.if_domain,
+                    &mut native.trigger.unless_domain,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    let mut seen = HashSet::with_capacity(domains.len());
+                    domains.retain(|domain| seen.insert(domain.clone()));
+                }
                 if let Some(pattern) =
                     crate::webkit::simplify_canonical_host_boundary(&native.trigger.url_filter)
                 {

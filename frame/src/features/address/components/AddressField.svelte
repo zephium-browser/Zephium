@@ -392,6 +392,9 @@
 
     {#if finding}
       <span class="find-count" role="status" aria-live="polite">{findCount}</span>
+      {#if find.failed()}
+        <span class="find-count" role="alert">{m.find_step_failed()}</span>
+      {/if}
       <IconButton
         icon={ArrowUp01Icon}
         label={m.find_previous()}

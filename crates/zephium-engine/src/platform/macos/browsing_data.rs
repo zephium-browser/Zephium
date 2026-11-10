@@ -26,9 +26,6 @@ use crate::data_kinds::{
     merge_sites, webkit_plan, WebKitDataType, WebKitStep, WEBKIT_CACHE, WEBKIT_SITE_DATA,
 };
 
-/// Records scanned from one listing before the rest are left out.
-const MAX_RECORDS: usize = 16_384;
-
 /// The native identifier of the profile's own store. Work's store is named by
 /// a different, derived identifier and never by this one.
 pub(crate) fn profile_store_identifier(profile: ProfileId) -> [u8; 16] {
@@ -138,6 +135,10 @@ fn run(
     }
 }
 
+fn matching_records<T>(records: impl Iterator<Item = T>, keep: impl Fn(&T) -> bool) -> Vec<T> {
+    records.filter(keep).collect()
+}
+
 /// Removes `types` from the records of `store` whose name `keep` admits.
 fn remove_records(
     store: &Retained<WKWebsiteDataStore>,
@@ -151,11 +152,9 @@ fn remove_records(
     let fetched = RcBlock::new(move |records: NonNull<NSArray<WKWebsiteDataRecord>>| {
         // SAFETY: WebKit owns the array for the callback's duration.
         let records = unsafe { records.as_ref() };
-        let chosen: Vec<Retained<WKWebsiteDataRecord>> = records
-            .iter()
-            .take(MAX_RECORDS)
-            .filter(|record| keep(&unsafe { record.displayName() }.to_string()))
-            .collect();
+        let chosen = matching_records(records.iter(), |record| {
+            keep(&unsafe { record.displayName() }.to_string())
+        });
         if chosen.is_empty() {
             proceed();
             return;
@@ -190,7 +189,6 @@ pub(crate) fn sites(profile: ProfileId, done: EngineDataCompletion) {
         let cookies = data_type(WebKitDataType::Cookies);
         let raw: Vec<(String, bool, bool)> = records
             .iter()
-            .take(MAX_RECORDS)
             .map(|record| {
                 // SAFETY: the record is alive for the callback.
                 let (name, types) = unsafe { (record.displayName(), record.dataTypes()) };
@@ -199,10 +197,8 @@ pub(crate) fn sites(profile: ProfileId, done: EngineDataCompletion) {
                 (name.to_string(), has_cookies, has_storage)
             })
             .collect();
-        finish_once(&done, || EngineDataReply::Sites {
-            sites: merge_sites(raw),
-            partial: false,
-        });
+        let (sites, partial) = merge_sites(raw);
+        finish_once(&done, || EngineDataReply::Sites { sites, partial });
     });
     // SAFETY: main thread; the set and block are alive for the call.
     unsafe {
@@ -230,6 +226,16 @@ pub(crate) fn forget_site(profile: ProfileId, site: String, done: EngineDataComp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_removal_filters_the_whole_listing_without_truncating_matches() {
+        let records = std::iter::repeat_n("", 16_384)
+            .chain(std::iter::repeat_n("other.example", 16_384))
+            .chain(std::iter::repeat_n("wanted.example", 16_385));
+        let chosen = matching_records(records, |name| host_is_on_site(name, "wanted.example"));
+        assert_eq!(chosen.len(), 16_385);
+        assert!(chosen.iter().all(|name| *name == "wanted.example"));
+    }
 
     #[test]
     fn the_profile_store_is_never_the_work_store_or_another_profiles() {

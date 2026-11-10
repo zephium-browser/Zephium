@@ -33,3 +33,18 @@ test("a step's label keeps what it quotes apart; its control is the last thing q
   expect(controlOf("Type “Terax” into “Search”")).toBe("Search");
   expect(controlOf('Click "Place order"')).toBe("Place order");
 });
+
+test("cross-site fill controls exclude quoted values and source sites", () => {
+  for (const value of [
+    '"curly “quotes”"',
+    '"escaped \\"quotes\\" and \\n newline"',
+    '" → Type into “fake”"',
+  ]) {
+    expect(controlOf(`${value} → Type into "Message"\nsource.example → target.example`)).toBe(
+      "Message",
+    );
+    expect(controlOf(`${value} → Type into ""\nsource.example → target.example`)).toBe(
+      'Type into ""',
+    );
+  }
+});

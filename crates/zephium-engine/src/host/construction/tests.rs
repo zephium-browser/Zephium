@@ -302,3 +302,98 @@ fn a_webview2_origin_that_is_no_site_is_unknown_rather_than_the_tab() {
         )
     );
 }
+
+#[test]
+fn a_new_browser_keeps_its_bootstrap_until_the_first_controller_is_proven() {
+    let construction = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    // The environment hands back a built bootstrap; it closes it itself only
+    // on failure or a missed deadline. Dropping the bootstrap closes it.
+    let ensure = construction
+        .split_once("fn ensure_windows_profile_environment_impl(")
+        .expect("construction lost the environment bootstrap")
+        .1;
+    let hand_back = ensure
+        .find(
+            "if failure.is_none() && std::time::Instant::now() < deadline {
+                let view = built",
+        )
+        .expect("every caller must get the built bootstrap back, not only Work");
+    let close = ensure
+        .find("wry::WebViewExtWindows::close(view)")
+        .expect("construction lost the failed bootstrap close");
+    assert!(hand_back < close);
+    let drop_impl = construction
+        .split_once("impl Drop for WindowsEnvironmentBootstrap {")
+        .expect("the bootstrap lost its closing Drop")
+        .1;
+    assert!(drop_impl[..drop_impl
+        .find(
+            "
+}"
+        )
+        .unwrap()]
+        .contains("WebViewExtWindows::close(&mut self.view)"));
+
+    // A tab or spare holds it in a local through every early return, and lets
+    // it go only after its own controller is built and cross-checked.
+    let tabs = construction
+        .split_once("fn build_view_inner(")
+        .expect("construction lost build_view_inner")
+        .1
+        .split_once("/// Why a profile's WebView2 environment could not be established.")
+        .expect("construction lost build_view_inner's end")
+        .0;
+    assert_eq!(tabs.matches("environment_bootstrap").count(), 3);
+    let held = tabs
+        .find("Ok(bootstrap) => environment_bootstrap = bootstrap")
+        .expect("tabs must keep the bootstrap the environment hands back");
+    let built = tabs
+        .find("builder.build_as_child(")
+        .expect("construction lost its native build");
+    let proven = tabs
+        .find("controller process did not match its captured environment")
+        .expect("construction lost its controller cross-check");
+    let released = tabs
+        .find("drop(environment_bootstrap);")
+        .expect("tabs must release the bootstrap");
+    assert!(held < built && built < proven && proven < released);
+
+    // Extension management and agent controllers do the same.
+    for (name, source, controller, count) in [
+        (
+            "extensions",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/webext_windows.rs"
+            )),
+            "self.extension_view(",
+            2,
+        ),
+        (
+            "agent contexts",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/host/agent_context.rs"
+            )),
+            "browser_process(view.view())",
+            1,
+        ),
+    ] {
+        let holds: Vec<_> = source
+            .match_indices("let environment_bootstrap = self")
+            .collect();
+        assert_eq!(holds.len(), count, "{name} must keep every bootstrap");
+        for (held, _) in holds {
+            let rest = &source[held..];
+            let built = rest.find(controller).expect(name);
+            let released = rest.find("drop(environment_bootstrap);").expect(name);
+            assert!(
+                built < released,
+                "{name} released its bootstrap before its controller"
+            );
+        }
+    }
+}

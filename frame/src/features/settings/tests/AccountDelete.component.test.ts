@@ -1,0 +1,190 @@
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { page } from "vitest/browser";
+import { render } from "vitest-browser-svelte";
+import "$styles/global.css";
+import { accountSession as session } from "$domain/account";
+import type { AccountV1 } from "$shared/ipc/bindings";
+import { accountFixture } from "$shared/testing/account";
+import { emitNativeEvent } from "$shared/testing/native-events";
+import AccountDelete from "../components/account/AccountDelete.svelte";
+
+const native = vi.hoisted(() => ({
+  account: null as AccountV1 | null,
+  send: vi.fn(),
+  remove: vi.fn(),
+}));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  const view = async () => ({ account: native.account!, fault: null, retry_after: null });
+  return mockBindings({
+    accountGet: view,
+    accountRefresh: view,
+    accountDeletionCode: native.send,
+    accountDelete: native.remove,
+  });
+});
+
+beforeEach(async () => {
+  native.account = accountFixture({ signed_in: true, email: "ada@example.com" });
+  native.send.mockReset().mockImplementation(async () => ({
+    account: native.account,
+    fault: null,
+    retry_after: null,
+  }));
+  await session.retain();
+});
+afterEach(async () => {
+  native.account = accountFixture();
+  await session.refresh();
+  session.release();
+});
+
+test("the emailed deletion code can be entered after leaving and returning to Account", async () => {
+  await page.viewport(900, 800);
+  const screen = await render(AccountDelete);
+  await screen.getByRole("button", { name: "Delete…", exact: true }).click();
+  await page.getByRole("button", { name: "Email me a code" }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await screen.getByRole("button", { name: "Delete…", exact: true }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toBeVisible();
+  await page.getByLabelText("Code from the email").fill("123456");
+  await screen.unmount();
+
+  const again = await render(AccountDelete);
+  await again.getByRole("button", { name: "Delete…", exact: true }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
+  await page.screenshot({ path: "../../../../../target/account-deletion-qa/after-remount.png" });
+  expect(native.send).toHaveBeenCalledTimes(1);
+  await page.getByLabelText("Code from the email").fill("123456");
+  native.remove.mockImplementation(async () => {
+    native.account = accountFixture();
+    return { account: native.account, fault: null, retry_after: null };
+  });
+  await page.getByRole("button", { name: "Delete account", exact: true }).click();
+  await expect.poll(() => native.remove.mock.calls).toEqual([["123456"]]);
+  await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+test.each(["signed_out", "email", "server"])(
+  "a pending deletion step is cleared after an account %s change",
+  async (change) => {
+    await session.sendDeletionCode();
+    expect(session.awaitingDeletionCode()).toBe(true);
+    native.account = {
+      ...native.account!,
+      ...(change === "signed_out"
+        ? { signed_in: false }
+        : change === "email"
+          ? { email: "grace@example.com" }
+          : { server: "https://accounts.example.com" }),
+    };
+    await session.refresh();
+    expect(session.awaitingDeletionCode()).toBe(false);
+  },
+);
+
+test("a failed send does not advance the deletion form", async () => {
+  native.send.mockResolvedValue({ account: native.account, fault: "server", retry_after: null });
+  expect(await session.sendDeletionCode()).toBe(false);
+  expect(session.awaitingDeletionCode()).toBe(false);
+});
+
+test("an unrecognized account response does not retain a pending deletion step", async () => {
+  await session.sendDeletionCode();
+  expect(session.awaitingDeletionCode()).toBe(true);
+  native.account = { ...native.account!, version: 2 };
+  await session.refresh();
+  expect(session.awaitingDeletionCode()).toBe(false);
+});
+
+test.each(["server", "email"] as const)(
+  "a deletion-code reply for a different %s does not advance that account's form",
+  async (change) => {
+    let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+    native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const sending = session.sendDeletionCode();
+    await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+    native.account = {
+      ...native.account!,
+      ...(change === "email"
+        ? { email: "grace@example.com" }
+        : { server: "https://accounts.example.com" }),
+    };
+    finish({ account: native.account, fault: null, retry_after: null });
+    await sending;
+    expect(session.awaitingDeletionCode()).toBe(false);
+    await session.sendDeletionCode();
+    expect(session.awaitingDeletionCode()).toBe(true);
+  },
+);
+
+test("requesting a replacement code is explicit and clears the typed digits", async () => {
+  await session.sendDeletionCode();
+  const screen = await render(AccountDelete);
+  await screen.getByRole("button", { name: "Delete…", exact: true }).click();
+  await page.getByLabelText("Code from the email").fill("123456");
+  await page.getByRole("button", { name: "Send a new code", exact: true }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
+  expect(native.send).toHaveBeenCalledTimes(2);
+});
+
+test.each(["signed_out", "email", "server", "version"])(
+  "an account %s event invalidates an in-flight deletion-code reply",
+  async (change) => {
+    const original = native.account!;
+    let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+    native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    const sending = session.sendDeletionCode();
+    await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+    native.account = {
+      ...original,
+      ...(change === "signed_out"
+        ? { signed_in: false }
+        : change === "email"
+          ? { email: "grace@example.com" }
+          : change === "server"
+            ? { server: "https://accounts.example.com" }
+            : { version: 2 }),
+    };
+    emitNativeEvent("accountChanged", { version: 1 });
+    await vi.waitFor(() => {
+      if (change === "version") expect(session.unavailable()).toBe(true);
+      else expect(session.account()).toEqual(native.account);
+    });
+    finish({ account: original, fault: null, retry_after: null });
+    expect(await sending).toBe(false);
+    expect(session.awaitingDeletionCode()).toBe(false);
+    if (change !== "version") expect(session.account()).toEqual(native.account);
+    expect(session.pending()).toBeNull();
+  },
+);
+
+test("leaving Account during a code request retains its successful stage", async () => {
+  const original = native.account!;
+  let finish!: (reply: { account: AccountV1; fault: null; retry_after: null }) => void;
+  native.send.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  const sending = session.sendDeletionCode();
+  await vi.waitFor(() => expect(native.send).toHaveBeenCalledOnce());
+  session.release();
+  try {
+    finish({ account: original, fault: null, retry_after: null });
+    expect(await sending).toBe(true);
+  } finally {
+    await session.retain();
+  }
+  expect(session.awaitingDeletionCode()).toBe(true);
+  expect(native.send).toHaveBeenCalledOnce();
+});
+
+test("typed deletion digits do not follow an account change", async () => {
+  await session.sendDeletionCode();
+  const screen = await render(AccountDelete);
+  await screen.getByRole("button", { name: "Delete…", exact: true }).click();
+  await page.getByLabelText("Code from the email").fill("123456");
+  native.account = { ...native.account!, email: "grace@example.com" };
+  await session.refresh();
+  await expect.element(page.getByLabelText("Code from the email")).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Email me a code" }).click();
+  await expect.element(page.getByLabelText("Code from the email")).toHaveValue("");
+});

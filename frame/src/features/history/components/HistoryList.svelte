@@ -74,6 +74,7 @@
   }
 
   function keydown(event: KeyboardEvent) {
+    if (event.target instanceof Element && event.target.closest("button")) return;
     const jumps: Record<string, () => void> = {
       ArrowDown: () => move(1),
       ArrowUp: () => move(-1),
@@ -140,7 +141,7 @@
         onpointermove={() => (selected = row.id)}
         onclick={(event) => onopen(row.visit.url, event.metaKey || event.ctrlKey)}
         onkeydown={(event) => {
-          if (event.key === " ") {
+          if (event.target === event.currentTarget && event.key === " ") {
             event.preventDefault();
             onopen(row.visit.url, false);
           }
@@ -231,7 +232,7 @@
 
   .count {
     font-weight: 400;
-    color: var(--color-faint);
+    color: var(--color-muted);
   }
 
   /* A table, not a row of floated parts: the host, the time and the delete
@@ -279,14 +280,14 @@
     text-overflow: ellipsis;
     text-align: end;
     font-size: var(--text-label);
-    color: var(--color-faint);
+    color: var(--color-muted);
   }
 
   time {
     text-align: end;
     font-size: var(--text-label);
     font-variant-numeric: tabular-nums;
-    color: var(--color-faint);
+    color: var(--color-muted);
   }
 
   /* Its column is always there, so revealing it never shifts the row under

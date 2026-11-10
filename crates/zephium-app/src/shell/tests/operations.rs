@@ -1241,20 +1241,16 @@ fn a_hidden_sidebar_gives_the_page_the_window_and_comes_over_it_on_request() {
         peek: false,
         slide: false,
     });
-    // Shown from its card, the sidebar keeps its chrome over the page while
-    // the page slides out from under it; the frame lowers it after.
+    // Pinning ends the native peek without waiting for the frame.
     shell.handle(Command::PeekSidebar {
         peek: true,
         slide: false,
     });
     shell.handle(Command::SetSidebarHidden(false));
-    shell.handle(Command::PeekSidebar {
-        peek: false,
-        slide: false,
-    });
     assert_eq!(
         raises(&engine),
         [
+            format!("raise@{window} false"),
             format!("raise@{window} true"),
             format!("raise@{window} false"),
             format!("raise@{window} true"),
@@ -1560,6 +1556,19 @@ fn find_follows_the_page_in_front_and_answers_only_for_it() {
             active: Some(1),
         }]
     );
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Find(request("needle", true)));
+    assert_eq!(
+        results.lock().unwrap().last().unwrap(),
+        &zephium_ipc::FindResultView {
+            query: "needle".into(),
+            matches: 0,
+            active: None,
+        }
+    );
+    assert!(shell.find_target.is_none());
 }
 
 #[test]

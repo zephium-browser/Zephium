@@ -591,12 +591,12 @@ export const commands = {
 	 *  its language's own hour cycle.
 	 */
 	systemClock24h: () => __TAURI_INVOKE<boolean | null>("system_clock_24h"),
-	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
+	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;
 	 *  a check already in flight, or an update already waiting, is reported as is.
 	 */
-	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
+	updateCheck: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_check"),
 	/**  Installs the parked update and relaunches through the orderly shutdown. */
 	updateRelaunch: () => __TAURI_INVOKE<boolean>("update_relaunch"),
 	/**  Closes Zephium as a quit does, then starts it again. */
@@ -1264,7 +1264,12 @@ export type BrowsingDataError = "invalid" | "unavailable" | "capacity" |
 /**  How far back a browsing data clear reaches. */
 export type BrowsingDataRange = "hour" | "day" | "week" | "four_weeks" | "everything";
 
-export type BrowsingDataResponse = { kind: "cleared" } | { kind: "sites"; sites: SiteDataView[];
+export type BrowsingDataResponse = { kind: "cleared" } |
+/**
+ *  Removed, but some of the site's data may remain: the engine would not
+ *  delete everything, or could not reach every place it is kept.
+ */
+{ kind: "partly_cleared" } | { kind: "sites"; sites: SiteDataView[];
 /**
  *  The engine can only name sites by some of what it holds: sites
  *  with only storage and no cookies are missing from the list.
@@ -1705,7 +1710,7 @@ export type ImportSourceView = {
 	needs_permission: boolean,
 };
 
-export type ImportStateView = "queued" | "running" | "done" | "failed" | "skipped";
+export type ImportStateView = "queued" | "running" | "done" | "partial" | "failed" | "skipped";
 
 export type ItemId = string;
 
@@ -3459,11 +3464,13 @@ export type UpdateHighlights = {
 	items: string[],
 };
 
+export type UpdateRetryReason = "previousInstallIncomplete" | "workNotSaved" | "activityCheckFailed";
+
 export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 
-export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
-export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {

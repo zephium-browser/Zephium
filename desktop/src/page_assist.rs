@@ -1619,7 +1619,9 @@ mod handoff {
     use std::time::Duration;
     use zephium_core::ids::{ItemId, ProfileId, SpaceId};
     use zephium_core::work::authoring::WorkAuthoringIntent;
-    use zephium_core::work::context::{WorkContextSelectionItem, WorkContextSelectionV1};
+    use zephium_core::work::context::{
+        url_revision, WorkContextSelectionItem, WorkContextSelectionV1,
+    };
     use zephium_core::work::environment::{
         WorkEnvironmentCall, WorkEnvironmentEdit, WorkEnvironmentIntent, WorkEnvironmentReference,
         WorkEnvironmentReply, WorkEnvironmentSnapshot,
@@ -1745,7 +1747,7 @@ mod handoff {
             {
                 items.push(WorkContextSelectionItem {
                     element: element.id,
-                    revision: url.clone(),
+                    revision: url_revision(url),
                 });
             }
         }

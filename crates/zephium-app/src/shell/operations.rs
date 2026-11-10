@@ -420,13 +420,28 @@ impl Shell {
             let _ = self.engine.find(previous, None);
             self.find_target = None;
         }
-        let (Some(page), Some(request)) = (page, request) else {
+        let Some(request) = request else {
             return;
         };
-        if self.engine.find(page, Some(request))
+        let Some(page) = page else {
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
+            return;
+        };
+        if self.engine.find(page, Some(request.clone()))
             != zephium_core::ports::engine::NativeDispatch::Rejected
         {
             self.find_target = Some(page);
+        } else {
+            self.find_target = None;
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
         }
     }
 
@@ -1048,6 +1063,8 @@ impl Shell {
             ),
             "space.next" => self.operation_space(crate::SpaceCommand::Step(1)),
             "space.previous" => self.operation_space(crate::SpaceCommand::Step(-1)),
+            "profile.next" => self.operation_step_profile(true),
+            "profile.previous" => self.operation_step_profile(false),
             id if id.starts_with("space.select.") => id["space.select.".len()..]
                 .parse::<usize>()
                 .ok()
