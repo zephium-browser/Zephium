@@ -74,13 +74,18 @@
   /** The site the query is headed for: one it names, else the engine. */
   let shown = $derived(named ?? (awake || open ? fallback : null));
 
-  // The chevron coming or going moves the field's text, and WebKit leaves
-  // the caret where the text was until the field itself lays out again.
+  // The chevron coming or going moves the field's text. The system draws
+  // the caret where WebKit last reported the selection, which only a change
+  // of selection reports again, so the selection steps away and back.
   function recaret() {
     const field = host?.closest(".ui-search")?.querySelector("input");
     if (!field || document.activeElement !== field) return;
-    field.style.textIndent = "0.01px";
-    requestAnimationFrame(() => field.style.removeProperty("text-indent"));
+    const { value, selectionStart, selectionEnd, selectionDirection } = field;
+    if (selectionStart === null || selectionEnd === null) return;
+    field.value = `${value} `;
+    field.setSelectionRange(value.length + 1, value.length + 1);
+    field.value = value;
+    field.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? "none");
   }
 
   const markOf = (entry: SearchShortcut | null) =>
