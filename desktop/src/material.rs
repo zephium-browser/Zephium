@@ -46,7 +46,9 @@ impl Preference {
 pub fn windows_material(preference: Preference, high_contrast: bool, launcher: bool) -> Material {
     if high_contrast || preference == Preference::None {
         Material::None
-    } else if launcher || preference == Preference::Acrylic {
+    } else if launcher || matches!(preference, Preference::Auto | Preference::Acrylic) {
+        // Automatic is Acrylic: the window shows what is behind it, where
+        // Mica only takes the wallpaper's hue and reads as a solid sheet.
         Material::Acrylic
     } else if preference == Preference::MicaAlt {
         Material::MicaAlt
@@ -451,7 +453,7 @@ mod tests {
     #[test]
     fn windows_choices_select_the_requested_backdrop() {
         for (preference, expected) in [
-            (Preference::Auto, Material::Mica),
+            (Preference::Auto, Material::Acrylic),
             (Preference::Mica, Material::Mica),
             (Preference::MicaAlt, Material::MicaAlt),
             (Preference::Acrylic, Material::Acrylic),
