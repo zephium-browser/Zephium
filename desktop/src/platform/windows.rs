@@ -1,5 +1,6 @@
 #[path = "windows_caption.rs"]
 mod caption;
+pub(crate) use caption::replay as replay_caption;
 #[path = "windows_menus.rs"]
 mod menus;
 #[path = "windows_pointer.rs"]

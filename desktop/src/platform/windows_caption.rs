@@ -46,6 +46,16 @@ const STEP: u32 = WM_APP + 0x43;
 struct Pacer {
     running: Arc<AtomicBool>,
 }
+impl Pacer {
+    fn post_step(&self, queued: &AtomicBool, post: impl FnOnce() -> bool) -> bool {
+        if !queued.swap(true, Ordering::AcqRel) && !post() {
+            queued.store(false, Ordering::Release);
+            self.running.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+}
 impl Drop for Pacer {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Release);
@@ -676,6 +686,18 @@ unsafe fn announce(p: *mut State, shown: bool, duration: u32) {
         return;
     }
     (*p).announced = shown;
+    emit_caption(p, shown, duration);
+}
+/// Replays the current caption to a newly mounted listener on the UI thread.
+pub fn replay(window: &WebviewWindow) {
+    let target = window.clone();
+    let _ = window.run_on_main_thread(move || unsafe {
+        if let Some(p) = state_of(&target) {
+            emit_caption(p, (*p).announced, 0);
+        }
+    });
+}
+unsafe fn emit_caption(p: *mut State, shown: bool, duration: u32) {
     let Some(window) = &(*p).window else {
         return;
     };
@@ -727,17 +749,25 @@ unsafe fn transition_in(p: *mut State, expanded: bool, animate: bool) {
 }
 /// Starts the motion's frame pacer, or its timer if no thread can be had.
 unsafe fn start_motion(p: *mut State) {
-    if (*p).pacer.is_some() {
+    if (*p)
+        .pacer
+        .as_ref()
+        .is_some_and(|pacer| pacer.running.load(Ordering::Acquire))
+    {
         return;
     }
+    // Drop the stopped owner before publishing a replacement worker.
+    (*p).pacer = None;
     let running = Arc::new(AtomicBool::new(true));
     let queued = (*p).step_queued.clone();
     let strip = (*p).strip.0 as isize;
-    let pacing = running.clone();
+    let pacing = Pacer {
+        running: running.clone(),
+    };
     let spawned = std::thread::Builder::new()
         .name("caption-motion".into())
         .spawn(move || {
-            while pacing.load(Ordering::Acquire) {
+            while pacing.running.load(Ordering::Acquire) {
                 let waited = std::time::Instant::now();
                 // SAFETY: waits for the compositor's next presented frame.
                 let flushed = unsafe { DwmFlush() }.is_ok();
@@ -746,18 +776,16 @@ unsafe fn start_motion(p: *mut State) {
                 if !flushed || waited.elapsed() < std::time::Duration::from_millis(1) {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                if !pacing.load(Ordering::Acquire) {
+                if !pacing.running.load(Ordering::Acquire) {
                     break;
                 }
-                if !queued.swap(true, Ordering::AcqRel) {
-                    // SAFETY: posting fails once the window is gone, which
-                    // ends the pacer.
-                    let posted = unsafe {
-                        PostMessageW(Some(HWND(strip as *mut _)), STEP, WPARAM(0), LPARAM(0))
-                    };
-                    if posted.is_err() {
-                        break;
-                    }
+                if !pacing.post_step(&queued, || {
+                    // SAFETY: posting to the input host does not dereference
+                    // its state. Failure retires this worker's ownership.
+                    unsafe { PostMessageW(Some(HWND(strip as *mut _)), STEP, WPARAM(0), LPARAM(0)) }
+                        .is_ok()
+                }) {
+                    break;
                 }
             }
         });
@@ -1835,6 +1863,29 @@ mod focus_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_step_post_releases_queue_and_pacer_ownership() {
+        let pacer = Pacer {
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let queued = AtomicBool::new(false);
+        assert!(!pacer.post_step(&queued, || false));
+        assert!(!queued.load(Ordering::Acquire));
+        assert!(!pacer.running.load(Ordering::Acquire));
+
+        let replacement = Pacer {
+            running: Arc::new(AtomicBool::new(true)),
+        };
+        let mut posted = false;
+        assert!(replacement.post_step(&queued, || {
+            posted = true;
+            true
+        }));
+        assert!(posted);
+        assert!(queued.load(Ordering::Acquire));
+        assert!(replacement.running.load(Ordering::Acquire));
+        assert!(replacement.post_step(&queued, || panic!("only one queued step")));
+    }
     #[test]
     fn activation_does_not_restore_a_minimized_or_inactive_window() {
         assert!(activation_restores_focus(WPARAM(WA_ACTIVE as usize)));

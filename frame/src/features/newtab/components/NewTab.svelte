@@ -220,6 +220,7 @@
       };
     };
     window.addEventListener("zephium:caption", moved);
+    void commands.captionReplay().catch(() => {});
     return () => window.removeEventListener("zephium:caption", moved);
   });
   const CAPTION_CLEARANCE = 6;

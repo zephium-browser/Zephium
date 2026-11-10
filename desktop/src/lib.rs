@@ -1954,6 +1954,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             windows_privacy::windows_reputation_managed,
             ui_info,
             ui_ready,
+            caption_replay,
             menu_popup,
             add_menu_popup,
             tab_menu_popup,
@@ -4610,6 +4611,15 @@ fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
         return false;
     }
     gate.mark_frontend_ready(&caller)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn caption_replay(caller: WebviewWindow) {
+    if authorize(&caller, CallerPolicy::Main, "caption_replay") {
+        #[cfg(target_os = "windows")]
+        platform::imp::replay_caption(&caller);
+    }
 }
 
 fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalPosition<f64>> {
