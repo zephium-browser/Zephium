@@ -195,7 +195,10 @@
   class={[
     // Mostly in the gap beside the column, as the native target on macOS,
     // so the tab list's edge and scrollbar stay usable.
-    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
+    "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none outline-none",
+    // On the hidden card it stays over the card's own padding, which is all
+    // the card there is to hold: past its edge is the page.
+    isHidden() ? "right-0" : "-right-1.5",
     // The native control owns the pointer; the tab list's edge stays usable.
     nativeCapture && "pointer-events-none",
   ]}

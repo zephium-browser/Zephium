@@ -253,7 +253,10 @@ impl Control {
         let hidden = !self.ivars().enabled.get()
             || (self.ivars().capture.get().is_none() && frame.size.width + 0.5 < edge);
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x + edge - HOT_INSET, frame.origin.y),
+            NSPoint::new(
+                frame.origin.x + hot_start(edge, self.ivars().hidden_card.get()),
+                frame.origin.y,
+            ),
             NSSize::new(HOT_WIDTH, frame.size.height),
         );
         let current = self.frame();
@@ -740,6 +743,17 @@ fn resize_edge(width: f64, hidden_card: bool) -> f64 {
         }
 }
 
+/// Where the hot zone starts. Beside a column it reaches into the gap before
+/// the page; on a card it covers the card's own padding, so aiming at the
+/// edge never leaves the card and sends it away.
+fn hot_start(edge: f64, hidden_card: bool) -> f64 {
+    if hidden_card {
+        edge - HOT_WIDTH
+    } else {
+        edge - HOT_INSET
+    }
+}
+
 fn card_width(width: f64) -> f64 {
     width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
 }
@@ -752,6 +766,12 @@ mod tests {
     fn capture_tracks_the_cards_outer_edge_including_its_padding() {
         assert_eq!(resize_edge(240.0, false), 248.0);
         assert_eq!(resize_edge(240.0, true), 264.0);
+    }
+
+    #[test]
+    fn a_cards_hot_zone_stays_inside_the_card() {
+        assert_eq!(hot_start(264.0, true) + HOT_WIDTH, 264.0);
+        assert_eq!(hot_start(248.0, false), 246.0);
     }
 
     #[test]
