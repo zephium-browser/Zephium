@@ -24,7 +24,7 @@ use crate::overlay::geometry::SWITCHER_RADIUS;
 
 /// Liquid Glass shipped with AppKit 26.
 const GLASS_APPKIT: f64 = 2685.0;
-/// Taller than any launcher window. The shapes live in a canvas pinned to the
+/// Taller and wider than any launcher or switcher window. The shapes live in a canvas pinned to the
 /// window's top edge, so resizing the window never moves them.
 const CANVAS: f64 = 2048.0;
 /// Shapes closer than this merge. Below the resting gap between capsule and
@@ -142,10 +142,12 @@ pub fn install(window: &NSWindow, reduce_transparency: bool, dark: bool) -> Mate
     }
     window.setHasShadow(false);
 
+    // As wide as it is tall, whatever the window is when it is made: the
+    // switcher's plate is wider than the launcher it was made for.
     let bounds = content.bounds();
     let canvas_frame = NSRect::new(
         NSPoint::new(0.0, bounds.size.height - CANVAS),
-        NSSize::new(bounds.size.width, CANVAS),
+        NSSize::new(CANVAS, CANVAS),
     );
     let glass = material == Material::LiquidGlass;
     let (canvas, host, field, sheet) = if glass {
