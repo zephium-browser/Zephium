@@ -447,6 +447,11 @@ test("editing an address asks for that address and never for an empty field firs
   await new Promise((done) => setTimeout(done, 100));
   expect(native.search.mock.calls.map(([query]) => query)).toEqual(["https://example.com/"]);
   await expect.element(screen.getByRole("combobox")).toHaveValue("https://example.com/");
+  const input = screen.getByRole("combobox").element() as HTMLInputElement;
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+  await userEvent.keyboard("https://github.com/");
+  await expect.element(screen.getByRole("combobox")).toHaveValue("https://github.com/");
 });
 
 test("sleeping past the resume deadline clears a query even when its timer never fired", async () => {
