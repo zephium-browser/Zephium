@@ -374,7 +374,7 @@
 .settings-panel-header[data-lights] {
   min-height: var(--titlebar-height);
   margin-block: 0 8px;
-  padding-inline-start: calc(var(--traffic-light-inset) + 10px);
+  padding-inline-start: calc(var(--traffic-light-inset) + 2px);
 }
 .settings-panel-header h2 {
   flex: 1;
