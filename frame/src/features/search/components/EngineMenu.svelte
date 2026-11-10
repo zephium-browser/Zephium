@@ -24,7 +24,6 @@
   let {
     query,
     awake,
-    profile,
     loadMenu,
     size = 18,
     onpick,
@@ -32,8 +31,6 @@
   }: {
     /** Opens where the shortcuts are kept, when the page offers it. */
     onsettings?: () => void;
-    /** Whose icons to ask for; a private window asks for none. */
-    profile: { id: string; kind: string } | null;
     /** The menu, loaded by whoever composes the page, so its machinery stays
      *  out of every graph that only shares this field. */
     loadMenu?: () => Promise<MenuModule>;
@@ -74,20 +71,10 @@
   /** The site the query is headed for: one it names, else the engine. */
   let shown = $derived(named ?? (awake || open ? fallback : null));
 
+  // A site's mark is shown only once the profile has it from a visit: the
+  // menu never reaches a site to fetch one.
   const markOf = (entry: SearchShortcut | null) =>
     entry ? favicons.forPage(entry.home_url) : null;
-
-  // The marks of every place a search can go are asked for once the menu is
-  // on its way, or for the one a query names, and kept where the profile
-  // keeps what it sees; a private window probes nothing.
-  $effect(() => {
-    const places = MenuView ? shortcuts.filter((entry) => entry.enabled) : named ? [named] : [];
-    if (places.length)
-      favicons.probe(
-        profile,
-        places.map((entry) => entry.home_url),
-      );
-  });
 
   // The engines first, each with its own mark; the shortcuts open beside
   // them, so the menu stays as short as the choice it mostly is.

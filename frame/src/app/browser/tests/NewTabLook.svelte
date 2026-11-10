@@ -3,7 +3,6 @@
   import { loadNewTab } from "$features/newtab";
   import { loadNewTabSearch } from "$features/search";
   import LazyView from "$shared/ui/LazyView";
-  import { tabs } from "$domain/tabs";
 
   let {
     ontasks,
@@ -32,7 +31,6 @@
                 retryLabel="retry"
                 >{#snippet children(Search)}<Search
                     tabId="tab"
-                    profile={tabs.profile()}
                     loadMenu={() => import("$shared/ui/Menu")}
                   />{/snippet}</LazyView
               >{/snippet}</NewTab

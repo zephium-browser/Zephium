@@ -594,7 +594,6 @@
                       retryLabel={m.surface_retry()}
                       >{#snippet children(Search)}<Search
                           tabId={tabs.activeId()}
-                          profile={tabs.profile()}
                           {loadMenu}
                           onsettings={openSearchSettings}
                         />{/snippet}</LazyView

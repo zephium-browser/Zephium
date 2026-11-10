@@ -2,7 +2,6 @@
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
   import { favicons } from "$domain/favicons";
-  import { tabs } from "$domain/tabs";
   import type { SearchShortcut } from "$shared/ipc/bindings";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import Switch from "$shared/ui/Switch";
@@ -24,13 +23,6 @@
   const touched = new SvelteSet<string>();
   let on = $derived(entries.filter((entry) => entry.enabled || touched.has(entry.id)));
   let off = $derived(entries.filter((entry) => !entry.enabled && !touched.has(entry.id)));
-
-  $effect(() => {
-    favicons.probe(
-      tabs.profile(),
-      entries.map((entry) => entry.home_url),
-    );
-  });
 
   async function save(next: SearchShortcut[] | "") {
     invalid = false;

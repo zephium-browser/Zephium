@@ -13,15 +13,12 @@
 
   let {
     tabId,
-    profile = null,
     loadMenu,
     onsettings,
     onactive,
   }: {
     onsettings?: () => void;
     tabId: string | null;
-    /** The window's profile, whose site icons the field's mark may ask for. */
-    profile?: { id: string; kind: string } | null;
     loadMenu?: () => Promise<typeof import("$shared/ui/Menu")>;
     /** Whether a query is in the field, so the page can make room for it. */
     onactive?: (active: boolean) => void;
@@ -190,7 +187,6 @@
       {#snippet lead()}<EngineMenu
           query={surface.query}
           awake={focused || parked || active}
-          {profile}
           {loadMenu}
           {onsettings}
           onpick={picked}
