@@ -206,6 +206,19 @@ mod tests {
     const FIXTURE_ROLE: &str = "ZEPHIUM_MCP_PROCESS_TREE_FIXTURE";
     const DESCENDANT: &str = "mcp-fixture-descendant=";
 
+    #[cfg(unix)]
+    fn waited_pid(info: &libc::siginfo_t) -> libc::pid_t {
+        #[cfg(target_os = "linux")]
+        // SAFETY: waitid filled this zero-initialized child-status structure.
+        unsafe {
+            info.si_pid()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            info.si_pid
+        }
+    }
+
     #[test]
     #[ignore = "invoked by the process-tree parent test"]
     #[expect(
@@ -291,7 +304,7 @@ mod tests {
                         },
                         0
                     );
-                    if info.si_pid == i32::try_from(leader).unwrap() {
+                    if waited_pid(&info) == i32::try_from(leader).unwrap() {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -351,7 +364,7 @@ mod tests {
         // Release cleanup even if the ownership assertion fails.
         drop(release);
         assert_eq!(result, 0, "leader was reaped before escalation");
-        assert_eq!(info.si_pid, i32::try_from(leader).unwrap());
+        assert_eq!(waited_pid(&info), i32::try_from(leader).unwrap());
         tokio::time::timeout(
             Duration::from_secs(5),
             tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
