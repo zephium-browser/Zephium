@@ -11,7 +11,7 @@ pub use agent_context_port::{
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(any(target_os = "windows", test))]
 mod caption_keys;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod card_geometry;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod data_kinds;
@@ -25,7 +25,7 @@ mod haptics;
 mod history_list;
 mod host;
 mod layout_queue;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod motion_curve;
 mod navigation_epoch;
 mod network;
@@ -3260,7 +3260,7 @@ impl Engine for WebviewEngine {
     }
 
     fn set_resize_guide(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
             let queued_retirement = self.retirement.clone();
             let queued_delivery = self.event_delivery.clone();
@@ -3276,7 +3276,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = (window, zone);
             NativeDispatch::Unsupported
@@ -3290,7 +3290,7 @@ impl Engine for WebviewEngine {
         card: Rect,
         slide: bool,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let queued_retirement = self.retirement.clone();
             let queued_delivery = self.event_delivery.clone();
@@ -3306,7 +3306,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (window, raised, card, slide);
             NativeDispatch::Unsupported

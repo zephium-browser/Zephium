@@ -3,6 +3,7 @@
 
 mod content_filter;
 mod find;
+mod guide;
 mod stage;
 
 pub(crate) fn open_external_app(_url: &str) -> bool {

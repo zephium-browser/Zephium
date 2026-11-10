@@ -19,6 +19,14 @@ use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::Shortcut;
 use zephium_engine::MainThreadDispatch;
 
+#[path = "linux_sidebar_edge.rs"]
+mod sidebar_edge;
+
+pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::watch(&owner, hidden));
+}
+
 mod zero_fixed {
     use super::*;
 
@@ -97,7 +105,10 @@ impl fmt::Display for LinuxInitError {
                 write!(formatter, "Tauri GTK window is unavailable: {error}")
             }
             Self::DefaultVBoxUnavailable(error) => {
-                write!(formatter, "Tauri GTK composition box is unavailable: {error}")
+                write!(
+                    formatter,
+                    "Tauri GTK composition box is unavailable: {error}"
+                )
             }
             Self::PrivilegedChildCount(count) => write!(
                 formatter,
@@ -110,37 +121,38 @@ impl fmt::Display for LinuxInitError {
             Self::MissingWebContext => {
                 formatter.write_str("privileged WebKitGTK view has no WebContext")
             }
-            Self::PersistentWebView => formatter.write_str(
-                "privileged WebKitGTK view was not constructed in ephemeral mode",
-            ),
+            Self::PersistentWebView => formatter
+                .write_str("privileged WebKitGTK view was not constructed in ephemeral mode"),
             Self::PersistentWebContext => formatter.write_str(
                 "privileged WebKitGTK view was not constructed with an ephemeral WebContext",
             ),
             Self::SandboxDisabled => {
                 formatter.write_str("privileged WebKitGTK process sandbox is disabled")
             }
-            Self::ProcessSwapDisabled => formatter
-                .write_str("privileged WebKitGTK cross-site process swapping is disabled"),
+            Self::ProcessSwapDisabled => {
+                formatter.write_str("privileged WebKitGTK cross-site process swapping is disabled")
+            }
             Self::ChromeParentMismatch => formatter.write_str(
                 "privileged WebKitGTK view is not a direct child of Tauri's composition box",
             ),
-            Self::VBoxParentMismatch => formatter.write_str(
-                "Tauri's composition box is not a direct child of its GTK window",
-            ),
+            Self::VBoxParentMismatch => formatter
+                .write_str("Tauri's composition box is not a direct child of its GTK window"),
             Self::ChromeReparentPostcondition => formatter.write_str(
                 "privileged WebKitGTK view did not enter the Zephium composition container",
             ),
             Self::FixedParentPostcondition => formatter.write_str(
                 "Zephium composition container did not become the GTK window's direct child",
             ),
-            Self::TopLevelAlreadyExposed => formatter.write_str(
-                "privileged GTK window was visible before native hardening completed",
-            ),
+            Self::TopLevelAlreadyExposed => formatter
+                .write_str("privileged GTK window was visible before native hardening completed"),
             Self::TopLevelExposed => formatter.write_str(
                 "native composition unexpectedly exposed the privileged top-level window",
             ),
             Self::ContainerInstall(error) => {
-                write!(formatter, "could not install the engine GTK container: {error}")
+                write!(
+                    formatter,
+                    "could not install the engine GTK container: {error}"
+                )
             }
             Self::CompositionRollbackFailed(original) => write!(
                 formatter,

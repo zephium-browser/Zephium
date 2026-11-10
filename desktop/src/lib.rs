@@ -77,7 +77,7 @@ mod data_export;
 mod default_browser;
 mod diagnostic_report;
 mod diagnostics;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod edge_reach;
 mod external_links;
 #[cfg(feature = "work-product")]
@@ -5745,7 +5745,7 @@ fn sidebar_set_hidden(caller: WebviewWindow, shell: State<'_, Handle>, hidden: b
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_hidden") {
         return;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     platform::imp::sidebar_hidden(&caller, hidden);
     shell.dispatch(Command::SetSidebarHidden(hidden));
 }
@@ -5812,11 +5812,11 @@ fn sidebar_resize_guide(
     {
         return false;
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         shell.dispatch(Command::SidebarResizeGuide(width))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, width);
         false

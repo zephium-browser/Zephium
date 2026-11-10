@@ -360,7 +360,7 @@ impl EngineHost {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) fn raise_chrome(&mut self, window: WindowId, raised: bool, card: Rect, slide: bool) {
         if let Some(stage) = self.stages.get(&window) {
             #[cfg(target_os = "macos")]
@@ -370,6 +370,8 @@ impl EngineHost {
             }
             #[cfg(target_os = "windows")]
             stage.raise_chrome(raised, card, slide);
+            #[cfg(target_os = "linux")]
+            let _ = stage.raise_chrome(raised, card, slide);
         }
     }
 
@@ -490,7 +492,7 @@ impl EngineHost {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn set_resize_guide(&mut self, window: WindowId, zone: Option<Rect>) {
         if let Some(stage) = self.ensure_stage(window) {
             stage.set_resize_guide(zone);

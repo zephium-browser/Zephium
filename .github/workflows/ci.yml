@@ -214,6 +214,16 @@ jobs:
           scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
           platform::linux::native_composition_tests::linux_composition_transaction_preserves_hidden_state_and_rolls_back_exactly
           -- --exact --ignored --test-threads=1
+      - name: Native GTK sidebar edge input
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          platform::linux::sidebar_edge::native_tests::capture_observes_consumed_webview_motion_and_clears_lifecycle_state
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK guide painting and input
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-engine --locked --lib
+          platform::linux::guide::tests::guide_paints_above_ephemeral_webkit_and_remains_input_transparent_x11
+          -- --exact --ignored --test-threads=1
       - name: Native X11 shortcut lifecycle
         run: >-
           scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib

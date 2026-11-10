@@ -80,6 +80,7 @@ impl StartupProblem {
                 .iter()
                 .any(|operation| error.contains(operation)))
             || (cfg!(target_os = "macos") && error.contains("(os error 35)"))
+            || (cfg!(target_os = "linux") && error.contains("(os error 11)"))
         {
             Self::StillClosing
         } else if UNWRITABLE.iter().any(|stable| error.contains(stable)) {
@@ -390,6 +391,8 @@ mod tests {
         let error = "The process cannot access the file. (os error 32)";
         #[cfg(target_os = "macos")]
         let error = "Resource temporarily unavailable (os error 35)";
+        #[cfg(target_os = "linux")]
+        let error = "Resource temporarily unavailable (os error 11)";
         let problem = StartupProblem::classify(error);
         assert_eq!(
             problem.message_with_log(error, None),

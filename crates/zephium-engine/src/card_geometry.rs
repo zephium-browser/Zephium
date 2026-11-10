@@ -26,6 +26,7 @@ pub(crate) fn card_pixels(card: Rect, client: (i32, i32), scale: f64) -> Option<
 
 /// The card's rectangle in the coordinates of a page window placed at
 /// `container` in the same space, as `(offset, size)`.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn in_container(card: PixelRect, container: PixelRect) -> ((i32, i32), (i32, i32)) {
     (
         (card.0 - container.0, card.1 - container.1),
