@@ -557,7 +557,9 @@ impl Overlay {
         }
         #[cfg(target_os = "macos")]
         crate::panel::show(&self.window);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        do_show_with_activation(&self.window, None, None);
+        #[cfg(target_os = "windows")]
         {
             let _ = self.window.show();
             let _ = self.window.set_focus();
