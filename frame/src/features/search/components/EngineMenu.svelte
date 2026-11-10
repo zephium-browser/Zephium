@@ -74,30 +74,19 @@
   /** The site the query is headed for: one it names, else the engine. */
   let shown = $derived(named ?? (awake || open ? fallback : null));
 
-  // The chevron coming or going moves the field's text. The system draws
-  // the caret where WebKit last reported the selection, which only a change
-  // of selection reports again, so the selection steps away and back.
-  function recaret() {
-    const field = host?.closest(".ui-search")?.querySelector("input");
-    if (!field || document.activeElement !== field) return;
-    const { value, selectionStart, selectionEnd, selectionDirection } = field;
-    if (selectionStart === null || selectionEnd === null) return;
-    field.value = `${value} `;
-    field.setSelectionRange(value.length + 1, value.length + 1);
-    field.value = value;
-    field.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? "none");
-  }
-
   const markOf = (entry: SearchShortcut | null) =>
     entry ? favicons.forPage(entry.home_url) : null;
 
-  // The marks of every place a search can go are asked for once, where the
-  // profile keeps what it sees; a private window probes nothing.
+  // The marks of every place a search can go are asked for once the menu is
+  // on its way, or for the one a query names, and kept where the profile
+  // keeps what it sees; a private window probes nothing.
   $effect(() => {
-    favicons.probe(
-      profile,
-      shortcuts.filter((entry) => entry.enabled).map((entry) => entry.home_url),
-    );
+    const places = MenuView ? shortcuts.filter((entry) => entry.enabled) : named ? [named] : [];
+    if (places.length)
+      favicons.probe(
+        profile,
+        places.map((entry) => entry.home_url),
+      );
   });
 
   // The engines first, each with its own mark; the shortcuts open beside
@@ -183,8 +172,7 @@
   {#if shown}<span
       class="chevron"
       transition:slide={{ axis: "x", duration: reducedMotion() ? 0 : 180 }}
-      onintroend={recaret}
-      onoutroend={recaret}><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
+      ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
     >{/if}
 {/snippet}
 

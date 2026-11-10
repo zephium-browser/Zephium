@@ -49,6 +49,8 @@
 
   let active = $derived(surface.query.trim().length > 0);
   let focused = $state(false);
+  // A parked caret stands in for the focus, so the field keeps its awake look.
+  let parked = $state(false);
 
   function picked(next: string | null) {
     if (next !== null) surface.changed(next);
@@ -126,7 +128,7 @@
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
-    const unpark = input ? parkCaret(input) : () => {};
+    const unpark = input ? parkCaret(input, (value) => (parked = value)) : () => {};
     return () => {
       window.removeEventListener("resize", measure);
       unpark();
@@ -187,7 +189,7 @@
     >
       {#snippet lead()}<EngineMenu
           query={surface.query}
-          awake={focused || active}
+          awake={focused || parked || active}
           {profile}
           {loadMenu}
           {onsettings}
