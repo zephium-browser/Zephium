@@ -415,7 +415,10 @@ fn event_loop(
                         // this function: application code must never run while
                         // capability publication or shutdown is locked.
                         if let Some(target) = target.upgrade() {
-                            target.activate(ActivationContext::default());
+                            target.activate(ActivationContext {
+                                activation_token: None,
+                                timestamp: Some(event.time),
+                            });
                         }
                     }
                 }
