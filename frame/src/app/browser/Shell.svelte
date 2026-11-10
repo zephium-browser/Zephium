@@ -143,9 +143,11 @@
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");
-  // Settings stands beside the rail the way a tool panel does.
+  // Settings and a tool in full stand beside the rail the way a tool panel does.
   let paneled = $derived(
-    toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
+    toolHost.activeTool() !== null ||
+      browserPage.currentPage() === "settings" ||
+      browserPage.toolPage(),
   );
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.

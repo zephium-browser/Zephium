@@ -10,8 +10,8 @@
   import type { MenuEntry } from "$shared/ui/Menu";
   import {
     Add01Icon,
-    ArrowExpand01Icon,
     Cancel01Icon,
+    FullScreenIcon,
     MoreHorizontalIcon,
     Search01Icon,
   } from "@hugeicons/core-free-icons";
@@ -82,7 +82,7 @@
             kind: "item" as const,
             id: "frame:expand",
             label: m.tool_open_full(),
-            icon: ArrowExpand01Icon,
+            icon: FullScreenIcon,
           },
         ]
       : []),

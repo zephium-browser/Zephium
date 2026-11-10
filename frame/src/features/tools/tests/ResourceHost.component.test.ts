@@ -94,7 +94,7 @@ test("the tasks panel keeps search in view without taking focus from the page", 
   expect(header.querySelector(".shared-tool-icon")).toBeNull();
   await screen.getByRole("button", { name: "More actions", exact: true }).click();
   await expect.element(screen.getByRole("menuitem", { name: "Trash" })).toBeVisible();
-  await expect.element(screen.getByRole("menuitem", { name: "Open as a page" })).toBeVisible();
+  await expect.element(screen.getByRole("menuitem", { name: "Full mode" })).toBeVisible();
   await expect.element(screen.getByRole("menuitem", { name: "Close tool" })).toBeVisible();
   await userEvent.keyboard("{Escape}");
 

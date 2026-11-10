@@ -89,7 +89,10 @@
     event.preventDefault();
     tools.close();
   }
-  let compact = $derived(inWork || tool !== null || isCompact());
+  // A tool in full keeps the column as Work does, as the rail beside it;
+  // put away, the column stays put away.
+  let railed = $derived(inWork || (browserPage.toolPage() && !isHidden()));
+  let compact = $derived(railed || tool !== null || isCompact());
   // Work's rail and Settings' sections want the column in view; a tool opened
   // while the column is put away comes out on the card instead.
   $effect(() => {
@@ -452,7 +455,7 @@
       shown = next;
     });
   });
-  let width = $derived(inWork ? COMPACT_WIDTH : effectiveWidth());
+  let width = $derived(railed ? COMPACT_WIDTH : effectiveWidth());
 
   // Dispatch runs untracked and behind a sequence guard. Handlers read the
   // state they mutate (the sidebar shape, the tab projection), so a tracked
@@ -550,7 +553,7 @@
   }}
   class="browser-sidebar relative flex shrink-0 flex-col text-text select-none"
 >
-  {#if !navigating && !inWork && tool === null}<SidebarResizeHandle
+  {#if !navigating && !railed && tool === null}<SidebarResizeHandle
       {width}
       disabled={reshaping}
     />{/if}
