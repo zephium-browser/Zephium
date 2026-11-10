@@ -9,11 +9,16 @@
   import { Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 
   // Mirrors the native plate (desktop/src/overlay/geometry.rs), which is
-  // sized to the cards it shows.
-  const VISIBLE = 4;
+  // sized to the cards it shows: up to four across and three down, with the
+  // next row peeking in when there are more.
+  const COLUMNS = 4;
+  const ROWS = 3;
   const CARD = 204;
+  const CARD_HEIGHT = 156;
   const GAP = 4;
   const PAD = 12;
+  const PEEK = 36;
+  const PREVIEWS = COLUMNS * (ROWS + 1);
 
   let {
     snapshot,
@@ -35,7 +40,21 @@
   // Native draws the plate behind the cards where it has a material of its
   // own; otherwise the window is the plate and the page tints it.
   let detached = $derived(material === "liquid_glass" || material === "vibrancy");
-  let across = $derived(Math.min(VISIBLE, Math.max(1, snapshot.entries.length)));
+  let count = $derived(Math.max(1, snapshot.entries.length));
+  let across = $derived(Math.min(COLUMNS, count));
+  let down = $derived(Math.min(ROWS, Math.ceil(count / COLUMNS)));
+  let more = $derived(Math.ceil(count / COLUMNS) > ROWS);
+  let plate = $derived({
+    width: 2 * PAD + across * CARD + (across - 1) * GAP,
+    height: 2 * PAD + down * CARD_HEIGHT + (down - 1) * GAP + (more ? GAP + PEEK : 0),
+  });
+  let above = $state(false);
+  let below = $state(false);
+  function edges() {
+    if (!row) return;
+    above = row.scrollTop > 1;
+    below = row.scrollTop + row.clientHeight < row.scrollHeight - 1;
+  }
   let failed = $state(false);
   let row = $state<HTMLElement>();
   let queue = Promise.resolve(true);
@@ -56,7 +75,7 @@
         }
         for (const change of changes) {
           const index = Number((change.target as HTMLElement).dataset.index);
-          if (change.intersectionRatio > 0.5 && visible.size < VISIBLE + 2) visible.add(index);
+          if (change.intersectionRatio > 0.5 && visible.size < PREVIEWS) visible.add(index);
         }
       },
       { root: element, threshold: 0.5 },
@@ -70,13 +89,19 @@
       observer.disconnect();
     };
   });
+  // Scrolled by hand: scrollIntoView would also move the window's own
+  // document, sliding cards off the plate native draws behind them.
   $effect(() => {
     const selected = snapshot.selected;
+    void entryIds;
     void tick().then(() => {
-      if (!disposed)
-        row
-          ?.querySelector(`#switcher-${selected}`)
-          ?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      const card = row?.querySelector<HTMLElement>(`#switcher-${selected}`);
+      if (disposed || !row || !card) return;
+      const top = card.offsetTop - PAD;
+      const bottom = card.offsetTop + card.offsetHeight + PAD - row.clientHeight;
+      if (row.scrollTop > top) row.scrollTop = top;
+      else if (row.scrollTop < bottom) row.scrollTop = bottom;
+      edges();
     });
   });
 
@@ -114,9 +139,13 @@
     if (frozen || event.isComposing) return;
     let intent: TabSwitcherAction | undefined;
     if (event.key === "Tab") intent = { type: "step", reverse: event.shiftKey };
-    else if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"].includes(event.key))
-      intent = { type: "step", reverse: event.key === "ArrowLeft" || event.key === "ArrowUp" };
-    else if (event.key === "Escape") intent = { type: "cancel" };
+    else if (event.key === "ArrowLeft" || event.key === "ArrowRight")
+      intent = { type: "step", reverse: event.key === "ArrowLeft" };
+    else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const index = snapshot.selected + (event.key === "ArrowUp" ? -across : across);
+      if (index >= 0 && index < snapshot.entries.length) intent = { type: "select", index };
+      else intent = { type: "step", reverse: event.key === "ArrowUp" };
+    } else if (event.key === "Escape") intent = { type: "cancel" };
     else if (event.key === "Enter") intent = { type: "commit" };
     else if (event.ctrlKey && event.key.toLowerCase() === "w") intent = { type: "close" };
     if (intent) {
@@ -143,7 +172,12 @@
   <div
     bind:this={row}
     class="cards"
-    style:inline-size={detached ? `${2 * PAD + across * CARD + (across - 1) * GAP}px` : undefined}
+    style:inline-size={detached ? `${plate.width}px` : undefined}
+    style:block-size={detached ? `${plate.height}px` : undefined}
+    style:--across={across}
+    data-above={above || undefined}
+    data-below={below || undefined}
+    onscroll={edges}
     role="listbox"
     tabindex="0"
     aria-label={m.tab_switcher_title()}
@@ -168,12 +202,14 @@
                 alt=""
                 draggable="false"
               />{:else}<span class="blank"
-                ><FavIcon
-                  size={28}
-                  image={favicons.image(entry.favicon)}
-                  tone={favicons.tone(entry.favicon)}
-                  fallback={Globe02Icon}
-                /></span
+                ><span class="badge"
+                  ><FavIcon
+                    size={24}
+                    image={favicons.image(entry.favicon)}
+                    tone={favicons.tone(entry.favicon)}
+                    fallback={Globe02Icon}
+                  /></span
+                ><span class="host">{entry.url_host}</span></span
               >{/if}
           </span>
           <span class="caption">
@@ -204,9 +240,11 @@
   /* One plate, as wide as the cards on it: each card the top of its page as
      it was last seen, landscape like the page itself, its name under it. */
   section {
+    position: fixed;
+    inset: 0;
     display: grid;
     box-sizing: border-box;
-    block-size: 100vh;
+    overflow: hidden;
     place-items: center;
     color: var(--color-text);
     /* stylelint-disable-next-line property-no-vendor-prefix */
@@ -214,18 +252,33 @@
     user-select: none;
   }
 
+  /* Past the last full row the next one peeks in under a fade, and the top
+     fades too once rows have scrolled away above. */
   .cards {
-    display: flex;
+    display: grid;
     box-sizing: border-box;
+    grid-template-columns: repeat(var(--across), 204px);
+    align-content: start;
     max-inline-size: 100%;
-    block-size: 180px;
-    align-items: center;
-    overflow-x: auto;
+    max-block-size: 100%;
+    overflow: hidden auto;
     gap: 4px;
     padding: 12px;
     outline: none;
-    scroll-padding-inline: 12px;
+    overscroll-behavior: contain;
     scrollbar-width: none;
+  }
+
+  .cards[data-below] {
+    mask-image: var(--mask-fade-below);
+  }
+
+  .cards[data-above] {
+    mask-image: var(--mask-fade-above);
+  }
+
+  .cards[data-above][data-below] {
+    mask-image: var(--mask-fade-ends);
   }
 
   .cards::-webkit-scrollbar {
@@ -241,7 +294,7 @@
   [data-layout="fused"] .cards {
     inline-size: 100%;
     block-size: 100%;
-    justify-content: safe center;
+    place-content: safe center;
     background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
     box-shadow: inset 0 0 0 1px var(--color-border-strong);
   }
@@ -256,7 +309,6 @@
   /* Fixed, whatever the title: a long one ellipses inside its card. */
   .slot {
     position: relative;
-    flex: 0 0 204px;
     min-inline-size: 0;
     inline-size: 204px;
   }
@@ -336,10 +388,40 @@
     object-position: top center;
   }
 
+  /* A tab not seen since it slept has no picture: its mark on a raised
+     badge and the site it is on stand in for one. */
   .blank {
-    display: grid;
+    display: flex;
     block-size: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding-inline: 12px;
+    background: linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-text) 4%, transparent),
+      transparent
+    );
+  }
+
+  .badge {
+    display: grid;
     place-items: center;
+    inline-size: 44px;
+    block-size: 44px;
+    border-radius: var(--radius-row);
+    background: var(--color-float);
+    box-shadow: var(--shadow-raised);
+  }
+
+  .host {
+    max-inline-size: 100%;
+    overflow: hidden;
+    color: var(--color-faint);
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .caption {

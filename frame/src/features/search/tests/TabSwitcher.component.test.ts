@@ -142,3 +142,21 @@ test("every card keeps its width, however long its title", async () => {
   );
   expect(new Set(widths)).toEqual(new Set([204]));
 });
+
+test("cards stand four across, and up and down move a whole row", async () => {
+  const screen = await render(TabSwitcher, { snapshot: state });
+  const tops = [...screen.container.querySelectorAll<HTMLElement>(".card")].map(
+    (card) => card.getBoundingClientRect().top,
+  );
+  expect(new Set(tops.slice(0, 4)).size).toBe(1);
+  expect(tops[4]).toBeGreaterThan(tops[0]!);
+  await userEvent.keyboard("{ArrowDown}");
+  await vi.waitFor(() =>
+    expect(native.action.mock.calls).toEqual([["7", { type: "select", index: 5 }]]),
+  );
+  await screen.rerender({ snapshot: { ...state, selected: 0 } });
+  await userEvent.keyboard("{ArrowUp}");
+  await vi.waitFor(() =>
+    expect(native.action.mock.calls.at(-1)).toEqual(["7", { type: "step", reverse: true }]),
+  );
+});

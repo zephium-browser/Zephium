@@ -61,7 +61,7 @@ struct State {
     placement: Option<geometry::Placement>,
     /// What the window was last placed for: the launcher, or the switcher
     /// with this many cards across.
-    placed_for: Option<Option<usize>>,
+    placed_for: Option<Option<(usize, usize, bool)>>,
     pending_document: Option<tauri::Url>,
     focus_revision: u64,
     focus_timer: bool,
@@ -296,7 +296,7 @@ impl Overlay {
                 let mut state = this.state();
                 state.pending = None;
                 state.model.show_switcher(snapshot);
-                state.content_height = geometry::MAX_HEIGHT;
+                state.content_height = f64::INFINITY;
             }
             if opening {
                 this.cancel_search(old);
@@ -524,7 +524,7 @@ impl Overlay {
         let placing = snapshot
             .switcher
             .as_ref()
-            .map(|s| s.entries.len().clamp(1, geometry::SWITCHER_VISIBLE));
+            .map(|s| geometry::switcher_grid(s.entries.len()));
         if !visible(&self.window) || self.state().placed_for != Some(placing) {
             self.place();
             self.state().placed_for = Some(placing);
@@ -532,7 +532,8 @@ impl Overlay {
         // The switcher stands on one plate of its own; the launcher's shapes
         // come back when it lays itself out again.
         #[cfg(target_os = "macos")]
-        crate::panel::hold(placing.map(|cards| {
+        crate::panel::hold(snapshot.switcher.as_ref().map(|s| {
+            let (width, height) = geometry::switcher_size(s.entries.len());
             let inset = if animated_shapes() {
                 geometry::SHAPE_INSET
             } else {
@@ -541,8 +542,8 @@ impl Overlay {
             zephium_ipc::PanelRect {
                 x: inset,
                 y: inset,
-                width: geometry::switcher_width(cards),
-                height: geometry::SWITCHER_HEIGHT,
+                width,
+                height,
             }
         }));
         if arriving {
@@ -767,7 +768,7 @@ impl Overlay {
                 position: PhysicalPosition::new(0.0, 0.0).into(),
                 size: PhysicalSize::new(
                     placement.width * scale,
-                    placement.height(geometry::MAX_HEIGHT) * scale,
+                    placement.height(f64::INFINITY) * scale,
                 )
                 .into(),
             });

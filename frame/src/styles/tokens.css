@@ -619,6 +619,17 @@
   /* A page that runs on past its sheet fades out at its foot. */
   --mask-fade-bottom: linear-gradient(to bottom, #000 78%, transparent);
 
+  /* A grid that scrolls fades at whichever edge has more of it. */
+  --mask-fade-below: linear-gradient(to bottom, #000 calc(100% - 40px), transparent);
+  --mask-fade-above: linear-gradient(to top, #000 calc(100% - 40px), transparent);
+  --mask-fade-ends: linear-gradient(
+    to bottom,
+    transparent,
+    #000 40px,
+    #000 calc(100% - 40px),
+    transparent
+  );
+
   /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
      stop competing with each other and with the surface. */
   --favicon-plate: color-mix(in srgb, var(--color-text) 88%, transparent);
