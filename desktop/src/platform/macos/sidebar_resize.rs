@@ -1,4 +1,6 @@
-//! Native pointer feedback for the Svelte sidebar. Only release changes layout.
+//! Native pointer capture for the Svelte sidebar. An expanded column follows
+//! the pointer and stops at its narrowest; released well past that, it hides.
+//! A column at any other width changes shape, which waits for release.
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ptr::NonNull;
@@ -22,7 +24,17 @@ use objc2_quartz_core::{CABasicAnimation, CAMediaTiming, CATransaction};
 use objc2_web_kit::WKWebView;
 use zephium_core::layout::{MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
 
-type Commit = Rc<dyn Fn(f64, u64)>;
+/// What a drag asks of the column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Release {
+    /// The column follows the pointer. Nothing is settled until release.
+    Follow(f64),
+    /// The drag ended on this width, travelling for a change of shape.
+    Land { width: f64, travel: bool },
+    /// The column hides, and comes back at the width the drag started from.
+    Hide { width: f64 },
+}
+type Commit = Rc<dyn Fn(Release, u64)>;
 static REVISION: AtomicU64 = AtomicU64::new(0);
 pub(super) fn publish_revision(revision: u64) -> bool {
     revision >= REVISION.fetch_max(revision, Ordering::AcqRel)
@@ -30,14 +42,15 @@ pub(super) fn publish_revision(revision: u64) -> bool {
 fn revision_current(revision: u64) -> bool {
     REVISION.load(Ordering::Acquire) == revision
 }
-// The hot zone overlaps the sidebar by only 2pt and otherwise covers the empty
-// gap before the content, so the tab list's edge and overlay scrollbar stay
-// reachable underneath it.
-const HOT_WIDTH: f64 = 8.0;
 /// The chrome draws the window's gutter before the column, so the column's
 /// edge is this far in from the chrome's own.
 const GUTTER: f64 = 8.0;
+// The hot zone overlaps the sidebar by only 2pt, so the tab list's edge and
+// overlay scrollbar stay reachable underneath it, fills the gap, and reaches a
+// little over the page's edge, where the pointer tends to land.
 const HOT_INSET: f64 = 2.0;
+const HOT_OUTSET: f64 = 6.0;
+const HOT_WIDTH: f64 = HOT_INSET + GUTTER + HOT_OUTSET;
 /// The guide's width, a split guide's.
 const GUIDE_WIDTH: f64 = 4.0;
 const SNAP: f64 = 140.0;
@@ -49,6 +62,11 @@ struct Capture {
     original: f64,
     pending: f64,
     revision: u64,
+    /// An expanded column resizes as it is dragged. Any other shape waits for
+    /// release, since leaving it is a change of shape.
+    live: bool,
+    /// The width the column was last given during the drag.
+    applied: f64,
 }
 
 struct Observers {
@@ -159,7 +177,7 @@ define_class!(
             if !self.ivars().enabled.get() || !revision_current(self.ivars().revision.get()) { return; }
             let Some(window) = self.window() else { return };
             let original = self.ivars().width.get();
-            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get() }));
+            self.ivars().capture.set(Some(Capture { start_x: event.locationInWindow().x, original, pending: original, revision: self.ivars().revision.get(), live: original >= MIN_EXPANDED, applied: original }));
             if !self.install_observers(window) { self.cancel(false); return; }
             self.feedback(original, true);
         }
@@ -174,9 +192,18 @@ define_class!(
             let requested = capture.original + event.locationInWindow().x - capture.start_x;
             if !requested.is_finite() { return; }
             capture.pending = requested.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            // A live column stops at its narrowest, while the guide goes on to
+            // preview where release will land, including the hide.
+            let column = resolved_width(capture.pending).max(MIN_EXPANDED);
+            let follows = capture.live && (column - capture.applied).abs() >= 0.5;
+            if follows { capture.applied = column; }
             self.ivars().capture.set(Some(capture));
-            // Preview where release will land, including the rail snap.
             self.feedback(resolved_width(capture.pending), true);
+            if follows {
+                self.ivars().width.set(column);
+                self.place();
+                (self.ivars().commit)(Release::Follow(column), capture.revision);
+            }
         }
         #[unsafe(method(mouseUp:))]
         fn up(&self, event: &NSEvent) {
@@ -190,7 +217,7 @@ define_class!(
             if self.ivars().generation.get() != generation { return; }
             self.cancel(true);
             if self.ivars().generation.get() != generation.wrapping_add(1) || !self.ivars().enabled.get() { return; }
-            if revision_current(capture.revision) { (self.ivars().commit)(width, capture.revision); }
+            if revision_current(capture.revision) { (self.ivars().commit)(release_at(width, &capture), capture.revision); }
         }
     }
 );
@@ -239,7 +266,14 @@ impl Control {
         };
         let frame = chrome.frame();
         let width = self.ivars().width.get();
-        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < GUTTER + width;
+        // A live drag widens the column before the chrome has grown to it.
+        let growing = self
+            .ivars()
+            .capture
+            .get()
+            .is_some_and(|capture| capture.live);
+        let hidden =
+            !self.ivars().enabled.get() || (!growing && frame.size.width + 0.5 < GUTTER + width);
         let target = NSRect::new(
             NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
@@ -348,6 +382,28 @@ impl Control {
             view.removeFromSuperview();
         }
     }
+    /// A drag that does not end in a release gives back the width it started
+    /// from.
+    fn restore(&self) {
+        let Some(capture) = self.ivars().capture.get() else {
+            return;
+        };
+        if !capture.live
+            || (capture.applied - capture.original).abs() < 0.5
+            || !revision_current(capture.revision)
+        {
+            return;
+        }
+        self.ivars().width.set(capture.original);
+        self.place();
+        (self.ivars().commit)(
+            Release::Land {
+                width: capture.original,
+                travel: false,
+            },
+            capture.revision,
+        );
+    }
     fn guide_current(&self, view: &NSView, generation: u64) -> bool {
         self.ivars().generation.get() == generation
             && self.ivars().enabled.get()
@@ -414,6 +470,7 @@ impl Control {
                 let canceled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Some(control) = weak.load() {
                         if control.ivars().generation.get() == generation {
+                            control.restore();
                             control.cancel(false);
                             return true;
                         }
@@ -441,6 +498,7 @@ impl Control {
                 };
                 if let Some(control) = weak.get(mtm).load() {
                     if control.ivars().generation.get() == generation {
+                        control.restore();
                         control.cancel(false);
                     }
                 }
@@ -574,13 +632,27 @@ pub(super) fn configure(
         }
         control
     };
-    if control.ivars().capture.get().is_some() || control.ivars().width.get() != width || !enabled {
+    // A live drag publishes widths as it goes, and the frame echoes each one
+    // back, late; the drag owns the width until release.
+    let dragging = enabled
+        && control
+            .ivars()
+            .capture
+            .get()
+            .is_some_and(|capture| capture.live && capture.revision == revision);
+    if !dragging
+        && (control.ivars().capture.get().is_some()
+            || control.ivars().width.get() != width
+            || !enabled)
+    {
         control.cancel(false);
     }
     if !configuration_current(epoch, generation, revision) || !registered(&control, generation) {
         return false;
     }
-    control.ivars().width.set(width);
+    if !dragging {
+        control.ivars().width.set(width);
+    }
     control.ivars().enabled.set(enabled);
     control.ivars().revision.set(revision);
     control.place();
@@ -701,5 +773,80 @@ fn resolved_width(width: f64) -> f64 {
         MIN_SIDEBAR_WIDTH
     } else {
         width.round().clamp(MIN_EXPANDED, MAX_SIDEBAR_WIDTH)
+    }
+}
+/// What a release on `width`, as `resolved_width` gave it, asks of the column.
+fn release_at(width: f64, capture: &Capture) -> Release {
+    if !capture.live {
+        Release::Land {
+            width,
+            travel: true,
+        }
+    } else if width < MIN_EXPANDED {
+        Release::Hide {
+            width: capture.original,
+        }
+    } else {
+        Release::Land {
+            width,
+            travel: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capture(original: f64) -> Capture {
+        Capture {
+            start_x: 0.0,
+            original,
+            pending: original,
+            revision: 1,
+            live: original >= MIN_EXPANDED,
+            applied: original,
+        }
+    }
+
+    #[test]
+    fn an_expanded_column_settles_where_it_followed_the_pointer_without_travelling() {
+        assert_eq!(
+            release_at(resolved_width(312.4), &capture(240.0)),
+            Release::Land {
+                width: 312.0,
+                travel: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_column_released_short_of_its_narrowest_stops_there() {
+        assert_eq!(
+            release_at(resolved_width(SNAP), &capture(240.0)),
+            Release::Land {
+                width: MIN_EXPANDED,
+                travel: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_column_released_past_the_snap_hides_and_keeps_its_starting_width() {
+        assert_eq!(
+            release_at(resolved_width(SNAP - 1.0), &capture(240.0)),
+            Release::Hide { width: 240.0 }
+        );
+    }
+
+    #[test]
+    fn a_column_at_another_shape_waits_for_release_and_travels() {
+        assert_eq!(
+            release_at(resolved_width(300.0), &capture(MIN_SIDEBAR_WIDTH)),
+            Release::Land {
+                width: 300.0,
+                travel: true
+            }
+        );
     }
 }

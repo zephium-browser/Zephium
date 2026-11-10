@@ -47,6 +47,41 @@ test("completed and keyboard resizes survive a new sidebar session", async () =>
   expect(host.width).toHaveBeenLastCalledWith(350, false, expect.any(Number));
 });
 
+test("a followed drag saves its width only once it settles", async () => {
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  sidebar.followResizeWidth(300);
+  sidebar.followResizeWidth(320);
+  expect(sidebar.expanded()).toBe(320);
+  expect(host.set).not.toHaveBeenCalled();
+  sidebar.adoptResizeWidth(320);
+  expect(host.set).toHaveBeenCalledExactlyOnceWith("sidebar.width", "320");
+});
+
+test("a stale following width is ignored", async () => {
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  sidebar.followResizeWidth(320, sidebar.sidebarResizeRevision() - 1);
+  sidebar.followResizeWidth(Number.NaN);
+  expect(sidebar.expanded()).toBe(240);
+});
+
+test("a native drag that hides brings the column back at its starting width", async () => {
+  host.stored.set("sidebar.width", "300");
+  const sidebar = await import("../sidebar-mode.svelte");
+  await sidebar.init();
+  sidebar.followResizeWidth(180);
+  window.dispatchEvent(
+    new CustomEvent("zephium:sidebar-hide-selected", {
+      detail: { width: 300, revision: sidebar.sidebarResizeRevision() },
+    }),
+  );
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(sidebar.expanded()).toBe(300);
+  expect(host.width).toHaveBeenLastCalledWith(300, true, expect.any(Number));
+  expect(host.set).not.toHaveBeenCalledWith("sidebar.width", expect.anything());
+});
+
 test("hidden mode keeps its expanded width and temporary panels do not replace it", async () => {
   host.stored.set("sidebar.width", "360");
   host.stored.set("sidebar.mode", "hidden");

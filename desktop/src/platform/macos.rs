@@ -713,19 +713,38 @@ pub async fn configure_sidebar_resize(
             else {
                 return false;
             };
-            let commit = std::rc::Rc::new(move |width, revision| {
+            let commit = std::rc::Rc::new(move |release, revision| {
                 if CHROME_GENERATION.load(Ordering::Acquire) != generation
                     || !sidebar_resize::publish_revision(revision)
                 {
                     return;
                 }
-                // A guide release is a snap to a new shape: the content
-                // travels there, which also covers the chrome's repaint.
-                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, true)) {
+                // A change of shape travels, which also covers the chrome's
+                // repaint; a column following the pointer moves with it.
+                let (width, travel, event) = match release {
+                    sidebar_resize::Release::Follow(width) => {
+                        (width, false, "zephium:sidebar-width-following")
+                    }
+                    sidebar_resize::Release::Land { width, travel } => {
+                        (width, travel, "zephium:sidebar-width-selected")
+                    }
+                    // Hiding is the frame's to own: it saves the choice and
+                    // publishes the width and the hidden layout together.
+                    sidebar_resize::Release::Hide { width } => {
+                        crate::emit_to_privileged(
+                            sender.app_handle(),
+                            crate::MAIN_LABEL,
+                            "zephium:sidebar-hide-selected",
+                            &serde_json::json!({"width": width, "revision": revision}),
+                        );
+                        return;
+                    }
+                };
+                if shell.dispatch(zephium_app::Command::SetSidebarWidth(width, travel)) {
                     crate::emit_to_privileged(
                         sender.app_handle(),
                         crate::MAIN_LABEL,
-                        "zephium:sidebar-width-selected",
+                        event,
                         &serde_json::json!({"width": width, "revision": revision}),
                     );
                 }
