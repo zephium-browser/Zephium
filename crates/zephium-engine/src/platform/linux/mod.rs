@@ -5,10 +5,6 @@ mod content_filter;
 mod find;
 mod stage;
 
-pub(crate) fn external_app_name(_url: &str) -> Option<String> {
-    None
-}
-
 pub(crate) fn open_external_app(_url: &str) -> bool {
     false
 }
@@ -1441,7 +1437,7 @@ mod tests {
         assert!(enforce_runtime_version((2, 52, 6), reviewed_at).is_err());
         assert!(enforce_runtime_version((2, 53, 92), reviewed_at).is_err());
         assert_eq!(
-            enforce_runtime_version((2, 54, 1), reviewed_at),
+            enforce_runtime_version((2, 54, 2), reviewed_at),
             Ok(zephium_core::runtime_security::RuntimeSecurityAdvisories::new())
         );
         assert!(enforce_runtime_version((2, 55, 0), reviewed_at).is_err());
@@ -1492,11 +1488,15 @@ mod tests {
             || None,
         )
         .is_ok());
+        let review_grace_end =
+            zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS
+                + zephium_core::runtime_security::RUNTIME_REVIEW_GRACE_SECONDS;
         assert_eq!(
-            enforce_runtime_version(
-                (2, 54, 1),
-                zephium_core::webkitgtk::SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS,
-            ),
+            enforce_runtime_version((2, 54, 2), review_grace_end - 1),
+            Ok(zephium_core::runtime_security::RuntimeSecurityAdvisories::new()),
+        );
+        assert_eq!(
+            enforce_runtime_version((2, 54, 2), review_grace_end),
             Ok(
                 zephium_core::runtime_security::RuntimeSecurityAdvisories::from_advisory(
                     zephium_core::runtime_security::RuntimeSecurityAdvisory::review_overdue(),

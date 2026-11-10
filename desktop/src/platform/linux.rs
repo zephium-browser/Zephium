@@ -203,7 +203,17 @@ fn install_composition(
 
     let sized_chrome = chrome.clone();
     fixed.connect_size_allocate(move |_, allocation| {
-        sized_chrome.set_size_request(allocation.width(), allocation.height());
+        let (width, height) = (allocation.width(), allocation.height());
+        if sized_chrome.size_request() != (width, height) {
+            sized_chrome.set_size_request(width, height);
+        }
+        // GTK drops resize requests queued during allocation.
+        sized_chrome.size_allocate(&gtk::Allocation::new(
+            allocation.x(),
+            allocation.y(),
+            width,
+            height,
+        ));
     });
     fixed.show_all();
 
@@ -443,6 +453,12 @@ mod native_composition_tests {
         assert_eq!(fixed.parent().as_ref(), Some(&expected_window));
         assert!(!window.is_visible());
         assert!(!window.is_mapped());
+        fixed.size_allocate(&gtk::Allocation::new(0, 0, 800, 600));
+        assert_eq!(chrome.allocated_width(), 800);
+        assert_eq!(chrome.allocated_height(), 600);
+        fixed.size_allocate(&gtk::Allocation::new(0, 0, 640, 480));
+        assert_eq!(chrome.allocated_width(), 640);
+        assert_eq!(chrome.allocated_height(), 480);
 
         let (rollback_window, rollback_vbox, rollback_chrome, _rollback_context) =
             tauri_tree(&application);
@@ -646,11 +662,18 @@ fn shortcut_modifiers(shortcut: &Shortcut) -> gtk::gdk::ModifierType {
 }
 
 fn observed_shortcut_modifiers(state: gtk::gdk::ModifierType) -> gtk::gdk::ModifierType {
+    observed_shortcut_modifiers_with_mask(state, gtk::accelerator_get_default_mod_mask())
+}
+
+fn observed_shortcut_modifiers_with_mask(
+    state: gtk::gdk::ModifierType,
+    accelerator_mask: gtk::gdk::ModifierType,
+) -> gtk::gdk::ModifierType {
     // GTK's default accelerator mask deliberately excludes lock modifiers.
     // Keep the virtual modifiers explicit as a defense against a process-wide
     // mask override: the shared Linux parser rejects Meta/Super/Hyper, so the
     // focused fallback must never accept them as an invisible extra chord.
-    let relevant = gtk::accelerator_get_default_mod_mask()
+    let relevant = accelerator_mask
         | gtk::gdk::ModifierType::SUPER_MASK
         | gtk::gdk::ModifierType::HYPER_MASK
         | gtk::gdk::ModifierType::META_MASK;
@@ -673,6 +696,14 @@ mod shortcut_tests {
 
     #[test]
     fn focused_shortcut_requires_exact_non_lock_modifiers() {
+        let observed_shortcut_modifiers = |state| {
+            observed_shortcut_modifiers_with_mask(
+                state,
+                gtk::gdk::ModifierType::CONTROL_MASK
+                    | gtk::gdk::ModifierType::SHIFT_MASK
+                    | gtk::gdk::ModifierType::MOD1_MASK,
+            )
+        };
         let expected = shortcut_modifiers(&launcher_shortcut());
         assert_eq!(
             observed_shortcut_modifiers(
@@ -681,6 +712,7 @@ mod shortcut_tests {
             expected
         );
         for unexpected in [
+            gtk::gdk::ModifierType::MOD1_MASK,
             gtk::gdk::ModifierType::SUPER_MASK,
             gtk::gdk::ModifierType::HYPER_MASK,
             gtk::gdk::ModifierType::META_MASK,

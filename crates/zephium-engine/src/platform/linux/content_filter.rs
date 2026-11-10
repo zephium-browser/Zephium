@@ -808,7 +808,7 @@ mod tests {
             "/src/platform/linux/content_filter.rs"
         ));
         let production = source
-            .split_once("#[cfg(test)]")
+            .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("content-filter test boundary disappeared")
             .0;
         let context = production
@@ -872,7 +872,7 @@ mod tests {
             "/src/platform/linux/content_filter.rs"
         ));
         let production = source
-            .split_once("#[cfg(test)]")
+            .split_once("\n#[cfg(test)]\nmod tests {")
             .expect("content-filter test boundary disappeared")
             .0;
         let compiler = production
@@ -890,7 +890,7 @@ mod tests {
         assert!(compiler.contains("_cancellable: cancellation,"));
         assert_eq!(
             compiler
-                .matches("let cancellable = context._cancellable.to_glib_none().0;")
+                .matches("context._cancellable.to_glib_none().0")
                 .count(),
             2,
             "load and save must derive their native handle from the retained cancellable"
@@ -907,7 +907,9 @@ mod tests {
         }
         assert_eq!(
             compiler
-                .matches("validated_policy(filter, &context.identifier")
+                .split_whitespace()
+                .collect::<String>()
+                .matches("validated_policy(filter,&context.identifier")
                 .count(),
             2,
             "cache hits and saved filters must both validate native identity"
@@ -916,7 +918,7 @@ mod tests {
             .find("let cache_miss = is_cache_miss(error);")
             .expect("exact cache-miss classification disappeared");
         let save_after_miss = compiler
-            .find("save_after_cache_miss(context);")
+            .find("LoadedAction::Save => save_after_cache_miss(context),")
             .expect("cache-miss save transition disappeared");
         assert!(
             miss < save_after_miss,

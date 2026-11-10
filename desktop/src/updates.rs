@@ -37,6 +37,7 @@ pub(crate) enum UpdateStatus {
 
 struct Parked {
     update: tauri_plugin_updater::Update,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     artifact: Artifact,
 }
 
@@ -326,7 +327,13 @@ async fn check_and_download(
     };
     let version = update.version.clone();
     remember_highlights(&version, update.body.as_deref());
-    *lock(&updates.parked) = Some(Parked { update, artifact });
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    drop(artifact);
+    *lock(&updates.parked) = Some(Parked {
+        update,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        artifact,
+    });
     Ok(UpdateStatus::Ready {
         version,
         retry_reason,

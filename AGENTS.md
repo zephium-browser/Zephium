@@ -1,8 +1,10 @@
 # Engineering instructions
 
 Zephium is a native Rust browser with a Tauri + Svelte interface. Treat Windows
-and macOS as equally supported. Linux is not supported. This is the only
-contributor-agent instruction file; do not create tool-specific copies.
+and macOS as equally supported. Linux source builds are experimental, with a
+foundation build/test job; Linux is not yet a supported browser release target.
+This is the only contributor-agent instruction file; do not create tool-specific
+copies.
 
 ## Find the owner first
 

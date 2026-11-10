@@ -190,6 +190,7 @@ mod groups {
         /// cannot start after the terminal process boundary or evade its drain.
         /// The caller must own every reap through poll_single_process; this is
         /// not suitable for independently reaped Tokio or multi-process children.
+        #[cfg(target_os = "macos")]
         pub fn launch<T, E>(
             spawn: impl FnOnce() -> Result<(T, u32), E>,
             stopped: E,
@@ -228,6 +229,7 @@ mod groups {
         /// Reap only a qualified single-process group while shutdown is excluded.
         /// Removing its registry entry before releasing the lock prevents a
         /// completed numeric PID from being signaled after it can be reused.
+        #[cfg(target_os = "macos")]
         pub fn poll_single_process<T>(
             &mut self,
             poll: impl FnOnce() -> std::io::Result<Option<T>>,

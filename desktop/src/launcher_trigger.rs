@@ -200,6 +200,7 @@ fn unregister(app: &AppHandle, shortcut: &Shortcut) {
     let _ = app.global_shortcut().unregister(*shortcut);
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn setting(key: &str) -> Option<String> {
     crate::APP_STORE
         .get()
@@ -215,6 +216,7 @@ fn persist(key: &str, value: &str) {
 
 /// Registers what was chosen last time, or the default. The keymap override
 /// is honoured for a profile that set one before there was a recorder.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn install(app: &AppHandle, keymap_override: Option<String>) {
     let shortcut = setting(SHORTCUT_KEY)
         .or(keymap_override)

@@ -1172,6 +1172,7 @@ impl WorkAttemptProbe {
         self.no_usage_charge
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) async fn wait_image_cancelled(&self) {
         let mut receiver = self.lifetime.state().cancellation.subscribe();
         loop {
