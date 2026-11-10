@@ -84,7 +84,7 @@
     document.body.style.cursor = previousCursor;
   }
   function handlePointerDown(event: PointerEvent) {
-    if (disabled || nativeCapture || event.button !== 0) return;
+    if (disabled || (nativeCapture && !isHidden()) || event.button !== 0) return;
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) return;
     event.preventDefault();
@@ -199,8 +199,10 @@
     // On the hidden card it stays over the card's own padding, which is all
     // the card there is to hold: past its edge is the page.
     isHidden() ? "right-0" : "-right-1.5",
-    // The native control owns the pointer; the tab list's edge stays usable.
-    nativeCapture && "pointer-events-none",
+    // The native control owns the pointer beside the column, so the tab
+    // list's edge stays usable. The card's padding stays held here as well:
+    // a press that native missed must never fall through to dragging the window.
+    nativeCapture && !isHidden() && "pointer-events-none",
   ]}
   onpointerdown={handlePointerDown}
   onpointermove={handlePointerMove}
@@ -213,7 +215,7 @@
       aria-hidden="true"
       class={[
         "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
-        !nativeCapture && "group-hover:bg-text-muted",
+        (!nativeCapture || isHidden()) && "group-hover:bg-text-muted",
       ]}
     ></span>{/if}
 </div>
