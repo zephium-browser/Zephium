@@ -10,6 +10,8 @@ use crate::{DirectoryIdentity, FileIdentity, PrivateComponent, PrivateFsError};
 
 pub(crate) struct NamespaceLease {
     _lock: File,
+    #[cfg(unix)]
+    lock_owner: u32,
     lock_identity: FileIdentity,
     reserved_lock: PrivateComponent,
     reserved_lock_staging: PrivateComponent,
@@ -48,6 +50,18 @@ pub(crate) struct NamespaceLease {
         any(target_os = "macos", target_os = "linux", target_os = "windows")
     ))]
     tree_removal_preexecution_identity_fault: AtomicBool,
+}
+
+#[cfg(unix)]
+impl Drop for NamespaceLease {
+    fn drop(&mut self) {
+        // The last capability releases ownership, even if an unrelated spawn
+        // has inherited the descriptor and has not reached CLOEXEC yet. A
+        // forked copy must never unlock the original process's lease.
+        if self.lock_owner == std::process::id() {
+            platform::unlock_exclusive(&self._lock);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +157,8 @@ impl NamespaceLease {
     ) -> Self {
         Self {
             _lock: lock,
+            #[cfg(unix)]
+            lock_owner: std::process::id(),
             lock_identity,
             reserved_lock,
             reserved_lock_staging,
@@ -472,5 +488,44 @@ impl NamespaceLease {
     pub(crate) fn take_tree_removal_preexecution_identity_fault(&self) -> bool {
         self.tree_removal_preexecution_identity_fault
             .swap(false, Ordering::AcqRel)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod release_tests {
+    use super::*;
+
+    #[test]
+    fn inherited_lease_drop_does_not_unlock_the_owning_process() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("lock");
+        let lock = File::create(&lock_path).unwrap();
+        platform::lock_exclusive(&lock).unwrap();
+        // This duplicate represents the original process's open description.
+        // Simulate the child's PID without running Rust destructors after fork.
+        let owning_descriptor = lock.try_clone().unwrap();
+        let lock_identity = FileIdentity(platform::raw_identity(&lock.metadata().unwrap()));
+        let root_handle = File::open(root.path()).unwrap();
+        let root_identity =
+            DirectoryIdentity(platform::raw_identity(&root_handle.metadata().unwrap()));
+        let mut inherited = NamespaceLease::new(
+            lock,
+            lock_identity,
+            PrivateComponent::new("lock").unwrap(),
+            PrivateComponent::new("staging").unwrap(),
+            root.path().to_owned(),
+            root_handle,
+            root_identity,
+        );
+        inherited.lock_owner = std::process::id().wrapping_add(1);
+        drop(inherited);
+
+        let contender = File::open(lock_path).unwrap();
+        assert_eq!(
+            platform::lock_exclusive(&contender),
+            Err(PrivateFsError::LockUnavailable)
+        );
+        platform::unlock_exclusive(&owning_descriptor);
+        platform::lock_exclusive(&contender).unwrap();
     }
 }

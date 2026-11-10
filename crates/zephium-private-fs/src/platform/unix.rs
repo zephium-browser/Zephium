@@ -580,6 +580,17 @@ pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
     Err(PrivateFsError::Io)
 }
 
+pub(crate) fn unlock_exclusive(file: &File) {
+    // Drop cannot report an error. Keep interruption handling bounded; closing
+    // the owned descriptor remains the fail-closed fallback if unlock fails.
+    for _ in 0..4 {
+        match rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock) {
+            Err(rustix::io::Errno::INTR) => continue,
+            _ => break,
+        }
+    }
+}
+
 pub(crate) fn atomic_replace(
     directory: &File,
     _directory_path: &Path,
