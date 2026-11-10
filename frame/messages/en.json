@@ -908,6 +908,7 @@
   "site_info_blocking_enable": "Turn on blocking",
   "site_info_blocking_enable_failed": "Couldn't turn on blocking. Try again.",
   "site_info_blocking_retry": "Retry site controls",
+  "tray_blocking_everywhere": "Block ads and trackers",
   "site_info_hide_elements": "Hide elements…",
   "site_info_hide_failed": "Elements can't be hidden on this page.",
   "site_info_hidden": "Hidden on this site",
