@@ -119,12 +119,37 @@ test("middle-click opens a tab only on the empty list background", async () => {
 
   // A press on a row may end on the scroller; that is not a background click.
   row.element().dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
   background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
   expect(native.open).toHaveBeenCalledOnce();
 
   const press = new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true });
   background.dispatchEvent(press);
   expect(press.defaultPrevented).toBe(true);
+});
+
+test("releasing over a row does not open a tab even when auxclick targets the background", async () => {
+  const screen = await mount();
+  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const row = screen.getByRole("button", { name: "Alpha", exact: true }).element();
+
+  background.dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
+  row.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+  expect(native.open).not.toHaveBeenCalled();
+  expect(native.close).not.toHaveBeenCalled();
+});
+
+test("middle-clicking the padding beneath the last tab opens a tab", async () => {
+  const screen = await mount();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
+  const list = screen.container.querySelector<HTMLElement>(".tab-list:not([hidden])")!;
+
+  await userEvent.click(list, {
+    button: "middle",
+    position: { x: 24, y: list.clientHeight - 1 },
+  });
+  expect(native.open).toHaveBeenCalledOnce();
 });
 
 test("the switcher lists every space, checks the one shown and moves to another", async () => {

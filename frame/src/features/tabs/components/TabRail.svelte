@@ -143,7 +143,14 @@
       data-glide-scroller
       {...backgroundClick}
     >
-      <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
+      <ul
+        bind:this={list}
+        class="rail-list"
+        data-tabs-drop
+        data-tab-list-background
+        role="list"
+        aria-label={m.open_tabs()}
+      >
         {#each entries as tab, index (tab.id)}
           {@const active = tab.id === tabs.activeId()}
           <li
