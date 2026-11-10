@@ -611,8 +611,8 @@
   }
 
   /* Hidden, the column is a card that waits beside the window and slides
-     over the page: a sheet of the window's own colour, so bringing it out
-     costs one transform and nothing is decoded for it. */
+     over the page: a solid sheet of the window's own colour with its own
+     edge, so bringing it out costs one transform. */
   .browser-sidebar[data-hidden] {
     position: absolute;
     inset-block: 8px;
@@ -625,7 +625,7 @@
     padding-inline: 8px;
     padding-block-end: 8px;
     border-radius: var(--content-radius);
-    background: var(--sidebar-card-sky, none), var(--sidebar-card);
+    background: var(--sidebar-card);
     box-shadow: var(--shadow-overlay);
     translate: calc(-100% - 24px) 0;
   }
@@ -669,7 +669,7 @@
     inset: 0;
     z-index: -1;
     border-radius: var(--content-radius);
-    background: var(--sidebar-card-sky, none), var(--sidebar-card);
+    background: var(--sidebar-card);
     pointer-events: none;
     transition: opacity var(--motion-page) var(--ease-out);
   }

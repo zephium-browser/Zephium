@@ -26,9 +26,6 @@
     --color-canvas: var(--seed-bg);
     --color-page: var(--seed-bg);
     --color-chrome: color-mix(in oklab, var(--seed-fg) calc(2.9% * var(--seed-k)), var(--seed-bg));
-
-    /* A chosen theme brings its own colour; the default sky's would fight it. */
-    --sidebar-card-sky: none;
     --color-surface: color-mix(in oklab, var(--seed-fg) calc(6.8% * var(--seed-k)), var(--seed-bg));
     --color-raised: color-mix(in oklab, var(--seed-fg) calc(10.1% * var(--seed-k)), var(--seed-bg));
     --color-float: color-mix(in oklab, var(--seed-fg) calc(19.2% * var(--seed-k)), var(--seed-bg));
