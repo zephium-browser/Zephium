@@ -1,21 +1,34 @@
-import { afterEach, expect, test, vi } from "vitest";
-import { render } from "vitest-browser-svelte";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { cleanup, render } from "vitest-browser-svelte";
 import { userEvent } from "vitest/browser";
-import { tick } from "svelte";
+import { flushSync, tick } from "svelte";
 import * as sidebar from "$session/sidebar-mode.svelte";
 import * as attention from "$session/attention.svelte";
 import * as tools from "$session/tools.svelte";
+import { commands } from "$shared/ipc/bindings";
+import { IS_WINDOWS } from "$shared/platform";
 import SidebarHost from "./SidebarHost.svelte";
 
+// Browser-mode module exports snapshot getters. Select the platform before
+// importing Sidebar; run Windows coverage with VITE_SIDEBAR_WINDOWS=true.
+vi.mock("$shared/platform", () => {
+  const windows = import.meta.env.VITE_SIDEBAR_WINDOWS === "true";
+  return { IS_WINDOWS: windows, IS_MAC: !windows };
+});
 const native = vi.hoisted(() => ({
   set: vi.fn(async () => ({ accepted: true, operation_id: null })),
+}));
+vi.mock("$shared/lib/motion", async (original) => ({
+  ...(await original<typeof import("$shared/lib/motion")>()),
+  duration: () => 300,
+  reducedMotion: () => false,
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
-    settingSet: native.set,
     settingGet: async (key) => (key === "sidebar.mode" ? "hidden" : null),
+    settingSet: native.set,
     sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarSetHidden: async () => {},
@@ -23,7 +36,9 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await cleanup();
+  sidebar.holdShown(false);
   tools.close();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -53,12 +68,6 @@ test("a live Essential without a panel does not hold the card open", async () =>
   expect(aside.dataset.peek).toBeUndefined();
 });
 
-test.each(["ui-disclosure-panel", "capture"])("an open %s holds the card", async (panel) => {
-  const aside = await peek(panel);
-  await leave(aside);
-  expect(aside.dataset.peek).toBe("true");
-});
-
 test("the card stays while native has the pointer over it, and goes when it leaves", async () => {
   const aside = await peek();
   window.dispatchEvent(
@@ -85,6 +94,12 @@ test("a tool on the card stays while the pointer is on it and leaves with it", a
   await leave(aside);
   expect(aside.dataset.peek).toBeUndefined();
   expect(tools.activeTool()).toBe("notes");
+});
+
+test.each(["ui-disclosure-panel", "capture"])("an open %s holds the card", async (panel) => {
+  const aside = await peek(panel);
+  await leave(aside);
+  expect(aside.dataset.peek).toBe("true");
 });
 
 test("attention still holds the card until released", async () => {
@@ -173,4 +188,53 @@ test("Escape closes an open tool, after first leaving a field typed in", async (
   await userEvent.keyboard("{Escape}");
   expect(tools.activeTool()).toBeNull();
   await expect.element(screen.getByRole("textbox", { name: "Sidebar field" })).toBeVisible();
+});
+
+describe(IS_WINDOWS ? "Windows" : "macOS", () => {
+  const windows = IS_WINDOWS;
+  for (const interruption of ["pin", "visible", "unmount", "reload"] as const) {
+    test(`${interruption} ends a peek exactly once`, async () => {
+      const native = vi.spyOn(commands, "sidebarPeek");
+      const aside = await peek();
+      await expect.poll(() => native.mock.calls.some(([raised]) => raised)).toBe(true);
+      if (["pin", "visible"].includes(interruption)) {
+        window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: false } }));
+        aside.dispatchEvent(new PointerEvent("pointerleave"));
+        await vi.advanceTimersByTimeAsync(520);
+        // The card is closing, but macOS has not lowered its native chrome yet.
+        if (!windows) {
+          expect(aside.dataset.peek).toBeUndefined();
+          expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(0);
+        }
+        if (interruption === "pin") flushSync(() => sidebar.setMode("default"));
+        if (interruption === "visible") flushSync(() => sidebar.holdShown(true));
+      } else if (interruption === "unmount") {
+        await cleanup();
+      } else {
+        window.dispatchEvent(new Event("pagehide"));
+      }
+      await vi.advanceTimersByTimeAsync(1000);
+      await cleanup();
+      expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(1);
+    });
+  }
+
+  test("unmount cancels a queued peek animation", async () => {
+    await sidebar.init();
+    await render(SidebarHost);
+    const native = vi.spyOn(commands, "sidebarPeek");
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
+    await Promise.resolve();
+    await cleanup();
+    const raisesBeforeFrames = native.mock.calls.filter(([raised]) => raised).length;
+    expect(raisesBeforeFrames).toBe(windows ? 0 : 1);
+    for (const callback of frames) callback(performance.now());
+    expect(native.mock.calls.filter(([raised]) => raised)).toHaveLength(raisesBeforeFrames);
+    expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(windows ? 0 : 1);
+  });
 });

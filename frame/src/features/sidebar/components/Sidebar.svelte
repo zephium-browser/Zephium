@@ -240,6 +240,9 @@
   });
   let aside = $state<HTMLElement>();
   let peeking = $state(false);
+  // An outstanding native raise outlives the card's closing animation.
+  let chromeRaised = false;
+  let peekGeneration = 0;
   let atEdge = false;
   /** Native follows the pointer over the card too, which the card's own
    *  events miss while another app has the keyboard. */
@@ -261,12 +264,27 @@
   let opened = 0;
   let linger: ReturnType<typeof setTimeout> | undefined;
   let lowered: ReturnType<typeof setTimeout> | undefined;
+  function lowerChrome(slide = false) {
+    if (!chromeRaised) return;
+    chromeRaised = false;
+    void commands.sidebarPeek(false, false, slide);
+  }
+  function endPeek() {
+    peekGeneration++;
+    clearTimeout(linger);
+    clearTimeout(lowered);
+    lowered = undefined;
+    lowerChrome();
+    peeking = false;
+  }
   function peek() {
+    const generation = ++peekGeneration;
     clearTimeout(linger);
     clearTimeout(lowered);
     lowered = undefined;
     if (!peeking) opened = performance.now();
     if (peeking) {
+      chromeRaised = true;
       void commands.sidebarPeek(true, true, slides());
       return;
     }
@@ -275,16 +293,20 @@
       peeking = true;
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
-          if (away && peeking) void commands.sidebarPeek(true, true, slides());
+          if (generation === peekGeneration && away && peeking) {
+            chromeRaised = true;
+            void commands.sidebarPeek(true, true, slides());
+          }
         }),
       );
       return;
     }
     // Native stacks the chrome over the page before the card slides in, so
     // the slide is seen from its first frame.
+    chromeRaised = true;
     void commands.sidebarPeek(true, true, false).then(() =>
       requestAnimationFrame(() => {
-        if (away) peeking = true;
+        if (generation === peekGeneration && away) peeking = true;
       }),
     );
   }
@@ -311,7 +333,7 @@
         if (pointerIn || atEdge || overCard || needed()) return;
         if (CUT_TO_CARD) {
           // The cut sets off first, so the card never runs past it.
-          void commands.sidebarPeek(false, false, slides());
+          lowerChrome(slides());
           lowered = setTimeout(() => {
             peeking = false;
             lowered = setTimeout(() => (lowered = undefined), duration("page"));
@@ -324,7 +346,7 @@
         void commands.sidebarPeek(true, false, false);
         lowered = setTimeout(() => {
           lowered = undefined;
-          void commands.sidebarPeek(false, false, false);
+          lowerChrome();
         }, duration("page"));
       },
       Math.max(LINGER_MS, settling),
@@ -372,16 +394,14 @@
   });
   $effect(() => {
     if (away) return;
-    clearTimeout(linger);
-    clearTimeout(lowered);
-    untrack(() => {
-      if (peeking) void commands.sidebarPeek(false, false, false);
-      peeking = false;
-    });
+    untrack(endPeek);
   });
-  $effect(() => () => {
-    clearTimeout(linger);
-    clearTimeout(lowered);
+  $effect(() => {
+    window.addEventListener("pagehide", endPeek);
+    return () => {
+      window.removeEventListener("pagehide", endPeek);
+      endPeek();
+    };
   });
 
   // A change of shape is one continuous change: every mark travels from the

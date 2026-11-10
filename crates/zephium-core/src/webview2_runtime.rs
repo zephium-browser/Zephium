@@ -797,13 +797,25 @@ impl RuntimeGeneration {
     ) -> io::Result<Self> {
         fs::create_dir_all(configured_root)?;
         let generations = direct_directory(configured_root)?;
-        let lease = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .share_mode(0)
-            .open(generations.join(LEASE_FILE))?;
+        let operation = match kind {
+            RuntimeGenerationKind::RawPrivate => "private runtime lifecycle lock",
+            RuntimeGenerationKind::Privileged => "privileged runtime lifecycle lock",
+        };
+        let started = std::time::Instant::now();
+        let lease = super::acquire_lifecycle_lock(
+            operation,
+            || {
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .share_mode(0)
+                    .open(generations.join(LEASE_FILE))
+            },
+            || started.elapsed(),
+            std::thread::sleep,
+        )?;
         let boot = open_boot_registry(kind)?;
         // Boot markers are shared across app identities and runtime roots.
         // Absence from this root does not prove another root's generation dead.

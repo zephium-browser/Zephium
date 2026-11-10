@@ -7143,12 +7143,18 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }
-                    // A replaced document has no dialog open yet; it reports
-                    // its own when it opens one.
+                    // A replaced document owns neither a sidebar peek nor an
+                    // open dialog; reset both even if its cleanup never ran.
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                         && window.label() == MAIN_LABEL
                     {
+                        #[cfg(target_os = "macos")]
+                        platform::imp::sidebar_card_lights(&window, false);
                         if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                            shell.dispatch(Command::PeekSidebar {
+                                peek: false,
+                                slide: false,
+                            });
                             shell.dispatch(Command::SetChromeModal(false));
                         }
                     }
@@ -8370,6 +8376,46 @@ mod tests {
         assert!(
             run.find("updates::finish_after_exit(clean)").unwrap()
                 < run.find("terminate_windows_process").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_lowers_sidebar_before_resetting_modal() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains("shell.dispatch(Command::PeekSidebar {\n                                peek: false,\n                                slide: false,"));
+        assert!(
+            reset.find("Command::PeekSidebar").unwrap()
+                < reset.find("Command::SetChromeModal").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_resets_macos_sidebar_controls() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains(
+            "#[cfg(target_os = \"macos\")]\n                        platform::imp::sidebar_card_lights(&window, false);"
+        ));
+        assert!(
+            reset.find("sidebar_card_lights(&window, false)").unwrap()
+                < reset.find("try_state::<Handle>()").unwrap()
         );
     }
 
