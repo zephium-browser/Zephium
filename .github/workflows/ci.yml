@@ -234,6 +234,12 @@ jobs:
           scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
           linux_x11_shortcut::tests::native_registration_is_live_collision_checked_and_releasable
           -- --exact --ignored --test-threads=1
+      - name: Native GTK launcher ownership
+        run: >-
+          scripts/ci/linux-test.sh env WAYLAND_DISPLAY=unavailable-wayland
+          cargo test -p zephium-desktop --locked --lib
+          overlay::linux::tests::launcher_parent_tracks_owner_without_blocking_independent_mapping
+          -- --exact --ignored --test-threads=1
 
   macos:
     name: Rust (macOS)
