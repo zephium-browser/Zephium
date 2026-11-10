@@ -144,7 +144,7 @@ test("keyboard focus between sidebar controls keeps the card visible", async () 
   expect(aside.dataset.peek).toBeUndefined();
 });
 
-test("the hidden card resizes once on release from a guide, without a window drag or a snap", async () => {
+test.skipIf(!IS_WINDOWS)("Windows hidden card resizes once from its guide", async () => {
   const aside = await peek();
   const guide = native.guide;
   const handle = aside.querySelector<HTMLElement>('[aria-label="Resize sidebar"]')!;
@@ -178,6 +178,36 @@ test("the hidden card resizes once on release from a guide, without a window dra
   expect(aside.style.width).toBe("180px");
   expect(sidebar.sidebarResizeActive()).toBe(false);
   expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");
+});
+
+test.skipIf(IS_WINDOWS)("macOS hidden card resizes live without a native guide", async () => {
+  native.guide.mockClear().mockResolvedValue(false);
+  const aside = await peek();
+  const handle = aside.querySelector<HTMLElement>('[aria-label="Resize sidebar"]')!;
+  vi.spyOn(handle, "setPointerCapture").mockImplementation(() => {});
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 240, pointerId: 1 }),
+  );
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 340, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("340px");
+  expect(sidebar.sidebarResizeActive()).toBe(true);
+  await leave(aside);
+  expect(aside.dataset.peek).toBe("true");
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { bubbles: true, clientX: 56, pointerId: 1 }),
+  );
+  await tick();
+  expect(aside.style.width).toBe("180px");
+  handle.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 56, pointerId: 1 }));
+  await tick();
+  expect(aside.style.width).toBe("180px");
+  expect(sidebar.sidebarResizeActive()).toBe(false);
+  expect(sidebar.sidebarMode()).toBe("hidden");
+  expect(native.guide).not.toHaveBeenCalled();
   expect(native.set).toHaveBeenCalledWith("sidebar.width", "180");
 });
 

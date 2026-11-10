@@ -14,6 +14,7 @@
     MIN_EXPANDED_WIDTH,
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
+  import { IS_MAC } from "$shared/platform";
   import { onDestroy } from "svelte";
 
   let { width, disabled = false }: { width: number; disabled?: boolean } = $props();
@@ -102,9 +103,13 @@
   }
   function updateGuide(value: number) {
     if (isHidden()) {
-      // The card keeps its width while the guide moves; release resizes it
-      // once, as the column does, and never snaps it to the rail.
       pending = Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      if (IS_MAC) {
+        applyDragWidth(pending);
+        return;
+      }
+      // On Windows the card keeps its width while the guide moves; release
+      // resizes it once, as the column does, and never snaps it to the rail.
     } else {
       pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
       // Preview where release lands, including the snap to the rail.
