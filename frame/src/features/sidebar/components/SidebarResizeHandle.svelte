@@ -102,7 +102,7 @@
     pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
     // Preview where release lands, including the snap to the rail.
     const landing = resolveDragWidth(pending);
-    pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
+    pending = landing.mode === "hidden" ? COMPACT_WIDTH : landing.expanded;
     guide = pending;
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
