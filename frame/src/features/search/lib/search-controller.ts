@@ -1,4 +1,6 @@
 import type { SearchContext, SearchResults, SearchResult } from "$shared/ipc/bindings";
+import { shortcutPrefix } from "$shared/lib/search-shortcuts";
+import type { SearchShortcut } from "$shared/ipc/bindings";
 import { sameSearch } from "./search-model";
 
 export type SearchSnapshot = {
@@ -32,6 +34,7 @@ const RETRY_MS = 150;
 const PARTIAL_HOLD_MS = 160;
 
 export function createSearchController(options: {
+  shortcuts?: () => readonly SearchShortcut[];
   owner: Omit<SearchContext, "request_id"> | null;
   send: (query: string, id: string) => Promise<boolean>;
   update: (snapshot: SearchSnapshot) => void;
@@ -185,6 +188,7 @@ export function createSearchController(options: {
     context: () => settledContext,
     request: () => active,
     query: () => query,
+    activeShortcut: () => shortcutPrefix(query, options.shortcuts?.() ?? [])?.shortcut ?? null,
     receive(result: SearchResults) {
       if (disposed || !sameSearch(active, result.context) || result.query !== query) return;
       if (!result.pending) clearTimeout(deadline);

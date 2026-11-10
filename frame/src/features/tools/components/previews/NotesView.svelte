@@ -7,15 +7,8 @@
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import LazyView from "$shared/ui/LazyView";
   import Icon from "$shared/ui/Icon";
-  import Menu, { type MenuEntry } from "$shared/ui/Menu";
-  import {
-    ArrowUpRight01Icon,
-    Cancel01Icon,
-    Delete02Icon,
-    Globe02Icon,
-    MoreHorizontalIcon,
-    PinIcon,
-  } from "@hugeicons/core-free-icons";
+  import type { MenuEntry } from "$shared/ui/Menu";
+  import { Delete02Icon, Globe02Icon, PinIcon } from "@hugeicons/core-free-icons";
   import ArrowLeft01Icon from "@hugeicons/core-free-icons/ArrowLeft01Icon";
   import Copy01Icon from "@hugeicons/core-free-icons/Copy01Icon";
   import DeletePutBackIcon from "@hugeicons/core-free-icons/DeletePutBackIcon";
@@ -65,7 +58,6 @@
     ...(capturable && !session?.trash
       ? [{ kind: "item" as const, id: "capture", label: m.note_from_page(), icon: Globe02Icon }]
       : []),
-    { kind: "item", id: "page", label: m.note_open_page(), icon: ArrowUpRight01Icon },
     {
       kind: "item",
       id: "trash",
@@ -73,8 +65,6 @@
       icon: session?.trash ? ArrowLeft01Icon : Delete02Icon,
     },
     { kind: "item", id: "folder", label: m.note_reveal_folder(), icon: FolderOpenIcon },
-    { kind: "separator" },
-    { kind: "item", id: "close", label: m.note_close(), icon: Cancel01Icon },
   ]);
 
   let noteEntries: MenuEntry[] = $derived(
@@ -85,12 +75,6 @@
           ...(note?.id
             ? [
                 { kind: "item" as const, id: "reveal", label: reveal, icon: FolderOpenIcon },
-                {
-                  kind: "item" as const,
-                  id: "page",
-                  label: m.note_open_page(),
-                  icon: ArrowUpRight01Icon,
-                },
                 { kind: "separator" as const },
                 {
                   kind: "item" as const,
@@ -124,10 +108,8 @@
       // Page titles are text, not Markdown.
       const escaped = title.replace(/[\\`*_[\]<>~]/gu, (c) => `\\${c}`);
       await current.create(`# ${escaped}\n\n[${escaped}](<${capturable.url}>)\n\n`);
-    } else if (action === "page") await expand();
-    else if (action === "trash") await current.showTrash(!current.trash);
+    } else if (action === "trash") await current.showTrash(!current.trash);
     else if (action === "folder") await current.reveal(null);
-    else if (action === "close") props.onclose();
     else if (action === "copy") await navigator.clipboard.writeText(current.markdown);
     else if (action === "reveal" && id) await current.reveal(id);
     else if (action === "delete" && id) await current.moveToTrash(id);
@@ -140,7 +122,10 @@
     {...props}
     caption={false}
     scrolls={false}
-    closable={false}
+    onexpand={() => void expand()}
+    more={note ? noteEntries : listEntries}
+    moreLabel={note ? m.note_more() : m.note_list_more()}
+    onmore={(action) => void act(action)}
     searchLabel={m.note_search()}
     searchOpen={!note}
     searchFocus={false}
@@ -172,16 +157,6 @@
           ><Icon icon={note.summary?.pinned ? PinOffIcon : PinIcon} size={15} /></button
         >
       {/if}
-      <Menu
-        label={note ? m.note_more() : m.note_list_more()}
-        entries={note ? noteEntries : listEntries}
-        side="bottom"
-        align="end"
-        triggerClass="notes-action"
-        onselect={(action) => void act(action)}
-      >
-        {#snippet trigger()}<Icon icon={MoreHorizontalIcon} size={16} />{/snippet}
-      </Menu>
     {/snippet}
     <LazyView
       loader={loadNotes}

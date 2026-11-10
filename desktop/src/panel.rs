@@ -115,6 +115,13 @@ pub fn layout(layout: &zephium_ipc::PanelLayout, animate: bool) {
     }
 }
 
+/// Stands the switcher on a single plate, or lets the launcher's shapes back.
+pub fn hold(plate: Option<zephium_ipc::PanelRect>) {
+    if MainThreadMarker::new().is_some() {
+        shapes::hold(plate);
+    }
+}
+
 /// Activation on macOS 14 and later is cooperative: `activate` asks, and the
 /// system grants it when the user's own action (the launcher's shortcut) led
 /// here. `activateIgnoringOtherApps` is only a deprecated hint there.

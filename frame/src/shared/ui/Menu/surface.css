@@ -123,7 +123,8 @@
    stops reading as the row lighting up and starts reading as a chip sitting on
    top of it. The sidebar's rows keep their rim because nothing else bounds
    them — here the menu does. */
-.ui-menu-item[data-highlighted] {
+.ui-menu-item[data-highlighted],
+.ui-menu-item[data-state="open"] {
   background: var(--row-active);
 }
 

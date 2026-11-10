@@ -128,6 +128,8 @@ mod startup_alert;
 mod startup_styles;
 mod swipe;
 mod system_time;
+mod tab_previews;
+mod tab_switcher;
 #[cfg(all(target_os = "windows", feature = "work-product"))]
 mod taskbar_badge;
 mod updates;
@@ -1935,6 +1937,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             run_command,
             panel_hide,
             panel_ready,
+            tab_switcher::tab_switcher_open,
+            tab_switcher::tab_switcher_action,
             panel_intent,
             panel_layout,
             launcher_edit,
@@ -1944,6 +1948,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_set_double_tap,
             launcher_open_accessibility,
             setting_get,
+            search_shortcut_defaults,
             setting_set,
             windows_privacy::windows_diagnostics_settings,
             windows_privacy::windows_reputation_managed,
@@ -2411,18 +2416,21 @@ const LAUNCHER_THEME_KEYS: &[&str] = &[
     "ui.font-size=",
 ];
 
-fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
-    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
-    // The launcher follows appearance, motion and language only; anything else would
-    // wake its hidden WebView for a command it ignores.
-    if id.starts_with("theme.")
+fn launcher_follows_ui_command(id: &str) -> bool {
+    id.starts_with("theme.")
+        || id.starts_with("preference.search.shortcuts=")
         || id.starts_with("preference.ui.reduce-motion=")
         || id.starts_with("preference.ui.language=")
         || LAUNCHER_THEME_KEYS.iter().any(|key| {
             id.strip_prefix("preference.")
                 .is_some_and(|rest| rest.starts_with(key))
         })
-    {
+}
+
+fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
+    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
+    // Only consumed settings wake the hidden launcher WebView.
+    if launcher_follows_ui_command(id) {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
 }
@@ -3946,6 +3954,16 @@ fn execute_command_or(
         return rejected_operation();
     }
     let id = zephium_core::commands::runs_as(id);
+    if id == "tab.close" && tab_switcher::close_selected(app) {
+        return accepted_ui_operation();
+    }
+    if matches!(id, "tab.recent.next" | "tab.recent.previous") {
+        return if tab_switcher::step(app, id == "tab.recent.previous", true) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     // A feature switched off has no way in, from any menu, key or launcher.
     if !app
         .try_state::<keymap::Keymap>()
@@ -5167,6 +5185,17 @@ fn focus_control(
 
 #[tauri::command]
 #[specta::specta]
+fn search_shortcut_defaults(caller: WebviewWindow) -> Vec<zephium_core::search::SearchShortcut> {
+    if !authorize(&caller, CallerPolicy::Both, "search_shortcut_defaults") {
+        return Vec::new();
+    }
+    zephium_core::search::ShortcutRegistry::default()
+        .entries()
+        .to_vec()
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
@@ -5181,7 +5210,15 @@ async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     // A synchronous command runs on the main thread, and the store may be
     // busy for seconds (an import, a deletion); the read waits off it.
     tauri::async_runtime::spawn_blocking(move || {
-        APP_STORE.get().and_then(|store| store.app_setting(&key))
+        let stored = APP_STORE.get().and_then(|store| store.app_setting(&key));
+        if key == "search.shortcuts"
+            && stored.as_deref().is_some_and(|value| {
+                zephium_core::search::ShortcutRegistry::from_setting(value).is_none()
+            })
+        {
+            return Some(String::new());
+        }
+        stored
     })
     .await
     .ok()
@@ -5731,7 +5768,7 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
@@ -6797,6 +6834,8 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .manage(tab_switcher::Switcher::default())
+        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -7377,6 +7416,7 @@ pub fn run() {
                     "zephium:work-changed",
                     &change,
                 ),
+                Projection::TabSwitcher { session, state } => tab_switcher::project(&emit_handle, session, state),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     #[cfg(feature = "adblock-qa")]
@@ -8425,6 +8465,23 @@ mod tests {
         assert!(source.contains("help::url(id)"));
         assert!(source.contains("id == help::MENU"));
         assert!(source.contains("id == help::DIAGNOSTICS"));
+    }
+
+    #[test]
+    fn launcher_follows_shortcut_changes_without_unrelated_preferences() {
+        assert!(super::launcher_follows_ui_command(
+            "preference.search.shortcuts=[]"
+        ));
+        assert!(super::launcher_follows_ui_command("theme.dark"));
+        assert!(super::launcher_follows_ui_command(
+            "preference.ui.font=system"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.history=false"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.shortcuts-extra=[]"
+        ));
     }
 
     #[test]
@@ -10117,7 +10174,7 @@ mod tests {
         assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
         assert_eq!(
             directive("img-src"),
-            "'self' data: zephium-media: http://zephium-media.localhost"
+            "'self' data: zephium-media: http://zephium-media.localhost zephium-preview: http://zephium-preview.localhost"
         );
         assert_eq!(directive("font-src"), "'self' data:");
         // Same-origin workers only: the diagram layout engine runs off the page thread.

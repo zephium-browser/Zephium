@@ -1,17 +1,44 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import Menu, { type MenuEntry } from "$shared/ui/Menu";
 
+  // The host's frame: the panel's own entries, then closing, in one More menu.
   let {
     actions,
     footer,
     children,
-  }: { actions?: Snippet; footer?: Snippet; children?: Snippet; [key: string]: unknown } = $props();
+    more = [],
+    moreLabel = "More",
+    onmore,
+    onclose,
+  }: {
+    actions?: Snippet;
+    footer?: Snippet;
+    children?: Snippet;
+    more?: MenuEntry[];
+    moreLabel?: string;
+    onmore?: (id: string) => void;
+    onclose?: () => void;
+    [key: string]: unknown;
+  } = $props();
+  let entries = $derived<MenuEntry[]>([
+    ...more,
+    { kind: "separator" },
+    { kind: "item", id: "frame:close", label: "Close tool" },
+  ]);
 </script>
 
 <section class="frame">
   <header>
     <h2>Zephium AI</h2>
     {#if actions}{@render actions()}{/if}
+    <Menu
+      label={moreLabel}
+      {entries}
+      onselect={(id) => (id === "frame:close" ? onclose?.() : onmore?.(id))}
+    >
+      {#snippet trigger()}⋯{/snippet}
+    </Menu>
   </header>
   <div class="content">
     {#if children}{@render children()}{/if}

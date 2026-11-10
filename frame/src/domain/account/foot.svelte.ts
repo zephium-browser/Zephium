@@ -40,6 +40,11 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
     get email() {
       return account?.email ?? null;
     },
+    /** The first name the account itself carries, never one guessed from the address. */
+    get name() {
+      const first = signedIn ? (account?.name ?? "").trim().split(/\s+/u)[0] : "";
+      return first || null;
+    },
     get initials() {
       return signedIn ? initials(account?.email, account?.name) : "";
     },

@@ -1,0 +1,464 @@
+[
+  {
+    "id": "google",
+    "name": "Google",
+    "keywords": [
+      "g",
+      "google"
+    ],
+    "search_url": "https://www.google.com/search?q={query}",
+    "home_url": "https://www.google.com/",
+    "domain": "www.google.com",
+    "suggestions": "google",
+    "enabled": true
+  },
+  {
+    "id": "duckduckgo",
+    "name": "DuckDuckGo",
+    "keywords": [
+      "d",
+      "ddg",
+      "duckduckgo"
+    ],
+    "search_url": "https://duckduckgo.com/?q={query}",
+    "home_url": "https://duckduckgo.com/",
+    "domain": "duckduckgo.com",
+    "suggestions": "duckduckgo",
+    "enabled": true
+  },
+  {
+    "id": "bing",
+    "name": "Bing",
+    "keywords": [
+      "b",
+      "bing"
+    ],
+    "search_url": "https://www.bing.com/search?q={query}",
+    "home_url": "https://www.bing.com/",
+    "domain": "www.bing.com",
+    "suggestions": "bing",
+    "enabled": true
+  },
+  {
+    "id": "brave",
+    "name": "Brave",
+    "keywords": [
+      "br",
+      "brave"
+    ],
+    "search_url": "https://search.brave.com/search?q={query}",
+    "home_url": "https://search.brave.com/",
+    "domain": "search.brave.com",
+    "suggestions": "brave",
+    "enabled": true
+  },
+  {
+    "id": "kagi",
+    "name": "Kagi",
+    "keywords": [
+      "k",
+      "kagi"
+    ],
+    "search_url": "https://kagi.com/search?q={query}",
+    "home_url": "https://kagi.com/",
+    "domain": "kagi.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "perplexity",
+    "name": "Perplexity",
+    "keywords": [
+      "pplx",
+      "perplexity"
+    ],
+    "search_url": "https://www.perplexity.ai/search?q={query}",
+    "home_url": "https://www.perplexity.ai/",
+    "domain": "www.perplexity.ai",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "chatgpt",
+    "name": "ChatGPT",
+    "keywords": [
+      "gpt",
+      "chatgpt"
+    ],
+    "search_url": "https://chatgpt.com/?q={query}",
+    "home_url": "https://chatgpt.com/",
+    "domain": "chatgpt.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "claude",
+    "name": "Claude",
+    "keywords": [
+      "cl",
+      "claude"
+    ],
+    "search_url": "https://claude.ai/new?q={query}",
+    "home_url": "https://claude.ai/",
+    "domain": "claude.ai",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "wikipedia",
+    "name": "Wikipedia",
+    "keywords": [
+      "w",
+      "wiki",
+      "wikipedia"
+    ],
+    "search_url": "https://en.wikipedia.org/w/index.php?search={query}",
+    "home_url": "https://en.wikipedia.org/",
+    "domain": "en.wikipedia.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "youtube",
+    "name": "YouTube",
+    "keywords": [
+      "yt",
+      "youtube"
+    ],
+    "search_url": "https://www.youtube.com/results?search_query={query}",
+    "home_url": "https://www.youtube.com/",
+    "domain": "www.youtube.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "google-images",
+    "name": "Google Images",
+    "keywords": [
+      "gi",
+      "images"
+    ],
+    "search_url": "https://www.google.com/search?tbm=isch&q={query}",
+    "home_url": "https://images.google.com/",
+    "domain": "images.google.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "google-maps",
+    "name": "Google Maps",
+    "keywords": [
+      "gm",
+      "maps"
+    ],
+    "search_url": "https://www.google.com/maps/search/{query}",
+    "home_url": "https://maps.google.com/",
+    "domain": "maps.google.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "keywords": [
+      "gh",
+      "github"
+    ],
+    "search_url": "https://github.com/search?q={query}",
+    "home_url": "https://github.com/",
+    "domain": "github.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "reddit",
+    "name": "Reddit",
+    "keywords": [
+      "r",
+      "reddit"
+    ],
+    "search_url": "https://www.reddit.com/search/?q={query}",
+    "home_url": "https://www.reddit.com/",
+    "domain": "www.reddit.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "x",
+    "name": "X",
+    "keywords": [
+      "x",
+      "twitter"
+    ],
+    "search_url": "https://x.com/search?q={query}",
+    "home_url": "https://x.com/",
+    "domain": "x.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "amazon",
+    "name": "Amazon",
+    "keywords": [
+      "a",
+      "amazon"
+    ],
+    "search_url": "https://www.amazon.com/s?k={query}",
+    "home_url": "https://www.amazon.com/",
+    "domain": "www.amazon.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "mdn",
+    "name": "MDN",
+    "keywords": [
+      "mdn"
+    ],
+    "search_url": "https://developer.mozilla.org/en-US/search?q={query}",
+    "home_url": "https://developer.mozilla.org/",
+    "domain": "developer.mozilla.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "npm",
+    "name": "npm",
+    "keywords": [
+      "npm"
+    ],
+    "search_url": "https://www.npmjs.com/search?q={query}",
+    "home_url": "https://www.npmjs.com/",
+    "domain": "www.npmjs.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "crates",
+    "name": "crates.io",
+    "keywords": [
+      "crates",
+      "crate"
+    ],
+    "search_url": "https://crates.io/search?q={query}",
+    "home_url": "https://crates.io/",
+    "domain": "crates.io",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "stackoverflow",
+    "name": "Stack Overflow",
+    "keywords": [
+      "so",
+      "stackoverflow"
+    ],
+    "search_url": "https://stackoverflow.com/search?q={query}",
+    "home_url": "https://stackoverflow.com/",
+    "domain": "stackoverflow.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "hackernews",
+    "name": "Hacker News",
+    "keywords": [
+      "hn",
+      "hackernews"
+    ],
+    "search_url": "https://hn.algolia.com/?q={query}",
+    "home_url": "https://news.ycombinator.com/",
+    "domain": "news.ycombinator.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "translate",
+    "name": "Translate",
+    "keywords": [
+      "tr",
+      "translate"
+    ],
+    "search_url": "https://translate.google.com/?sl=auto&tl=en&text={query}",
+    "home_url": "https://translate.google.com/",
+    "domain": "translate.google.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "ebay",
+    "name": "eBay",
+    "keywords": [
+      "e",
+      "ebay"
+    ],
+    "search_url": "https://www.ebay.com/sch/i.html?_nkw={query}",
+    "home_url": "https://www.ebay.com/",
+    "domain": "www.ebay.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "imdb",
+    "name": "IMDb",
+    "keywords": [
+      "imdb"
+    ],
+    "search_url": "https://www.imdb.com/find/?q={query}",
+    "home_url": "https://www.imdb.com/",
+    "domain": "www.imdb.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "goodreads",
+    "name": "Goodreads",
+    "keywords": [
+      "gr",
+      "goodreads"
+    ],
+    "search_url": "https://www.goodreads.com/search?q={query}",
+    "home_url": "https://www.goodreads.com/",
+    "domain": "www.goodreads.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "wolframalpha",
+    "name": "Wolfram Alpha",
+    "keywords": [
+      "wa",
+      "wolfram"
+    ],
+    "search_url": "https://www.wolframalpha.com/input?i={query}",
+    "home_url": "https://www.wolframalpha.com/",
+    "domain": "www.wolframalpha.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "openstreetmap",
+    "name": "OpenStreetMap",
+    "keywords": [
+      "osm"
+    ],
+    "search_url": "https://www.openstreetmap.org/search?query={query}",
+    "home_url": "https://www.openstreetmap.org/",
+    "domain": "www.openstreetmap.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "archwiki",
+    "name": "ArchWiki",
+    "keywords": [
+      "aw",
+      "archwiki"
+    ],
+    "search_url": "https://wiki.archlinux.org/index.php?search={query}",
+    "home_url": "https://wiki.archlinux.org/",
+    "domain": "wiki.archlinux.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "rust-docs",
+    "name": "Rust docs",
+    "keywords": [
+      "rust"
+    ],
+    "search_url": "https://doc.rust-lang.org/std/?search={query}",
+    "home_url": "https://doc.rust-lang.org/",
+    "domain": "doc.rust-lang.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "docs-rs",
+    "name": "docs.rs",
+    "keywords": [
+      "docsrs"
+    ],
+    "search_url": "https://docs.rs/releases/search?query={query}",
+    "home_url": "https://docs.rs/",
+    "domain": "docs.rs",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "pypi",
+    "name": "PyPI",
+    "keywords": [
+      "pypi"
+    ],
+    "search_url": "https://pypi.org/search/?q={query}",
+    "home_url": "https://pypi.org/",
+    "domain": "pypi.org",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "gitlab",
+    "name": "GitLab",
+    "keywords": [
+      "gl",
+      "gitlab"
+    ],
+    "search_url": "https://gitlab.com/search?search={query}",
+    "home_url": "https://gitlab.com/",
+    "domain": "gitlab.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "twitch",
+    "name": "Twitch",
+    "keywords": [
+      "tw",
+      "twitch"
+    ],
+    "search_url": "https://www.twitch.tv/search?term={query}",
+    "home_url": "https://www.twitch.tv/",
+    "domain": "www.twitch.tv",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "spotify",
+    "name": "Spotify",
+    "keywords": [
+      "sp",
+      "spotify"
+    ],
+    "search_url": "https://open.spotify.com/search/{query}",
+    "home_url": "https://open.spotify.com/",
+    "domain": "open.spotify.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "startpage",
+    "name": "Startpage",
+    "keywords": [
+      "startpage"
+    ],
+    "search_url": "https://www.startpage.com/sp/search?query={query}",
+    "home_url": "https://www.startpage.com/",
+    "domain": "www.startpage.com",
+    "suggestions": null,
+    "enabled": true
+  },
+  {
+    "id": "internet-archive",
+    "name": "Internet Archive",
+    "keywords": [
+      "ia",
+      "archive"
+    ],
+    "search_url": "https://archive.org/search?query={query}",
+    "home_url": "https://archive.org/",
+    "domain": "archive.org",
+    "suggestions": null,
+    "enabled": true
+  }
+]

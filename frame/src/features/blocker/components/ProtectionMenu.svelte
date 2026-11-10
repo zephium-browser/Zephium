@@ -7,6 +7,7 @@
     ListViewIcon,
     ReloadIcon,
     ShieldBanIcon,
+    ShieldCheckIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { blocker, blockerSites, hiding, shieldPresentation } from "$domain/blocker";
@@ -44,9 +45,13 @@
           ? m.site_info_blocking_attention()
           : "",
   );
+  // With no page in front, such as a new tab, the section is blocking
+  // everywhere: one row and the switch that turns it on or off.
+  let everywhere = $derived(head === undefined && site === null);
   let present = $derived(
     shield.visible &&
       (head !== undefined ||
+        everywhere ||
         standing !== "" ||
         status.desired_enabled !== true ||
         (site !== null && on) ||
@@ -89,6 +94,10 @@
     run(async () => {
       if (!ok(await blocker.setEnabled(true))) failure = m.site_info_blocking_enable_failed();
     });
+  const setEverywhere = (value: boolean) =>
+    run(async () => {
+      if (!ok(await blocker.setEnabled(value))) failure = m.site_info_blocking_failed();
+    });
 
   const showAgain = (ids: string[]) =>
     run(async () => {
@@ -112,7 +121,38 @@
   {/if}
 {/snippet}
 
-{#if present}
+{#if present && everywhere}
+  <section class="protection" data-tray-tools>
+    <div class="everywhere">
+      <span
+        class="everywhere-mark"
+        data-on={status.desired_enabled === true || undefined}
+        aria-hidden="true"
+        ><Icon
+          icon={status.desired_enabled === true ? ShieldCheckIcon : ShieldBanIcon}
+          size={16}
+        /></span
+      >
+      <span class="everywhere-words">
+        <span class="everywhere-name">{m.tray_blocking_everywhere()}</span>
+        {#if standing !== ""}<span
+            class="everywhere-status"
+            class:warning={shield.tone === "warning"}>{standing}</span
+          >{/if}
+      </span>
+      <Switch
+        label={m.tray_blocking_everywhere()}
+        labelHidden
+        checked={status.desired_enabled === true}
+        disabled={busy ||
+          status.preference !== "authoritative" ||
+          (status.desired_enabled !== true && !status.can_enable)}
+        onchange={(value) => void setEverywhere(value)}
+      />
+    </div>
+    {#if failure}<p class="failure" role="status">{failure}</p>{/if}
+  </section>
+{:else if present}
   <section class="protection" data-tray-tools>
     {#if head}{@render head(m.site_info_blocking(), control)}{/if}
 
@@ -219,6 +259,51 @@
     display: flex;
     flex-direction: column;
     min-inline-size: 0;
+  }
+
+  /* The page's own row, as SiteHead draws it, for blocking everywhere. */
+  .everywhere {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-block-size: var(--menu-row);
+    padding: 2px var(--menu-item-inset);
+  }
+
+  .everywhere-mark {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 16px;
+    color: var(--color-muted);
+  }
+
+  .everywhere-mark[data-on] {
+    color: var(--color-success);
+  }
+
+  .everywhere-words {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-inline-size: 0;
+  }
+
+  .everywhere-name {
+    color: var(--color-text);
+    font-size: var(--text-body);
+    font-weight: 450;
+    line-height: 18px;
+  }
+
+  .everywhere-status {
+    color: var(--color-muted);
+    font-size: var(--text-caption);
+    line-height: 14px;
+  }
+
+  .everywhere-status.warning {
+    color: var(--color-warning);
   }
 
   /* Under the page's own row, in its words' column; with no row, where every

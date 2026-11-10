@@ -112,3 +112,37 @@ describe("preference observation lifecycle", () => {
     preferences.dispose();
   });
 });
+
+it("persists shortcut settings and preserves equals signs in live URL templates", async () => {
+  const preferences = await import("../preferences.svelte");
+  await preferences.init();
+  const stored = JSON.stringify([
+    {
+      id: "custom:example",
+      name: "Example",
+      keywords: ["ex"],
+      domain: "example.com",
+      search_url: "https://example.com/?q={query}&mode=all",
+      home_url: "https://example.com/",
+      enabled: true,
+      suggestions: null,
+    },
+  ]);
+  native.get.mockImplementation(async (key: string) =>
+    key === "search.shortcuts" ? stored : null,
+  );
+  await preferences.set("search.shortcuts", stored);
+  expect(preferences.saveFailed()).toBe(false);
+  expect(preferences.searchShortcuts()[0]?.search_url).toBe(
+    "https://example.com/?q={query}&mode=all",
+  );
+  native.listener?.({
+    payload: `preference.search.shortcuts=${stored.replace('"enabled":true', '"enabled":false')}`,
+  });
+  expect(preferences.searchShortcuts()[0]?.enabled).toBe(false);
+  expect(preferences.searchShortcuts()[0]?.search_url).toContain("&mode=all");
+  preferences.dispose();
+  await preferences.init();
+  expect(preferences.searchShortcuts()[0]?.id).toBe("custom:example");
+  preferences.dispose();
+});

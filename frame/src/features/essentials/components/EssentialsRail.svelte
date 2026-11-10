@@ -34,9 +34,9 @@
   const drag = new RowDrag({
     list: () => list,
     reorder: () => ({ essential: true }),
-    drop: ({ id, x, y, over, before }) => {
+    drop: ({ id, x, y, over, before, page }) => {
       if (over?.closest("[data-tabs-drop]")) void tabDrag.move(id, false, before);
-      else tabs.dropTab(id, x, y);
+      else if (page) tabs.dropTab(id, x, y);
     },
   });
   const motion = new ListMotion({ enter: () => "grow" });

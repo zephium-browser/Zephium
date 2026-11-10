@@ -1,4 +1,5 @@
 import { afterEach, expect, test, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, tabFixture } from "$shared/testing/fixtures";
@@ -29,6 +30,18 @@ vi.mock("$domain/blocker", async (original) => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
     tabsBootstrap: async () => {},
     runCommand: async () => ({ accepted: true, operation_id: null }),
     launcherEdit: native.edit,
@@ -314,3 +327,14 @@ async function pageWithout(change: Record<string, unknown>) {
   await expect.poll(() => input.value).toBe("");
   return screen;
 }
+
+test("address shortcut activates on Space and deactivates on empty Backspace", async () => {
+  await preferences.init();
+  const { screen, input } = await field();
+  await userEvent.fill(input, "yt ");
+  await expect.element(screen.getByRole("textbox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.poll(() => input.value).toBe("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
+});

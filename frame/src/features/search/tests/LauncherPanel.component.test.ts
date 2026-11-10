@@ -1,3 +1,4 @@
+import { preferences } from "$domain/preferences";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -24,12 +25,26 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+    settingGet: async () => null,
     launcherSearch: native.search,
     launcherRun: native.run,
     panelLayout: native.layout,
   });
 });
 afterEach(() => {
+  preferences.dispose();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.material;
@@ -56,6 +71,7 @@ function glass(layout: PanelLayout) {
 }
 
 const context: PanelState = {
+  switcher: null,
   ...native.context,
   revision: "0000000000000001",
   visible: true,
@@ -683,4 +699,16 @@ test("the sheet stops where a short display lets the window stop", async () => {
   } finally {
     available.mockRestore();
   }
+});
+
+test("launcher exposes the prefix shortcut and clears it with empty Backspace", async () => {
+  await preferences.init();
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "yt ");
+  await expect.element(screen.getByRole("combobox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.element(field).toHaveValue("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
 });

@@ -352,8 +352,8 @@ impl Shell {
     ) -> OperationDisposition {
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -510,8 +510,8 @@ impl Shell {
     pub(super) fn operation_open_url_background(&mut self, input: String) -> OperationDisposition {
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -660,8 +660,8 @@ impl Shell {
         }
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -921,6 +921,13 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             );
         }
+        if key == "search.shortcuts" {
+            self.search.shortcuts =
+                zephium_core::search::ShortcutRegistry::from_setting(&value).unwrap_or_default();
+            self.search.pending = None;
+            self.search.context = None;
+            self.search.results.clear();
+        }
         if key == "search.custom-url" {
             self.search.custom_url = value.clone();
         }
@@ -1027,6 +1034,8 @@ impl Shell {
                     }
                 }
             }
+            "tab.recent.next" => self.operation_recent_tab(false),
+            "tab.recent.previous" => self.operation_recent_tab(true),
             "tab.next" | "tab.below" => self.operation_cycle_tab(1),
             "tab.previous" | "tab.above" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(

@@ -144,7 +144,7 @@ test("a page with no site of its own, a new tab, has no section while blocking i
   expect(native.stats).not.toHaveBeenCalled();
 });
 
-test("without a row of its own, blocking that is off still says so and offers to turn on", async () => {
+test("with no page, blocking everywhere is one row with a switch that says when it is off", async () => {
   native.status = blocking({
     protection: "disabled",
     applied_enabled: false,
@@ -153,8 +153,19 @@ test("without a row of its own, blocking that is off still says so and offers to
   });
   const screen = await shield({ open: true, headed: false });
   await expect.element(screen.getByText("Turned off in Settings")).toBeVisible();
-  expect(screen.container.querySelector(".standing")!.classList.contains("headed")).toBe(false);
-  await expect.element(screen.getByRole("button", { name: "Turn on blocking" })).toBeVisible();
+  const everywhere = screen.getByRole("switch", { name: "Block ads and trackers" });
+  await expect.element(everywhere).not.toBeChecked();
+  await everywhere.click();
+  expect(native.setEnabled).toHaveBeenCalledExactlyOnceWith(true);
+});
+
+test("with no page, blocking that is on turns off everywhere from its switch", async () => {
+  native.status = blocking({ site: null });
+  const screen = await shield({ open: true, headed: false });
+  const everywhere = screen.getByRole("switch", { name: "Block ads and trackers" });
+  await expect.element(everywhere).toBeChecked();
+  await everywhere.click();
+  expect(native.setEnabled).toHaveBeenCalledExactlyOnceWith(false);
 });
 
 test("Hide elements starts the picker for this page and leaves the panel", async () => {
