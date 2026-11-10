@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { scale } from "svelte/transition";
+  import { scale, slide } from "svelte/transition";
   import { backOut } from "svelte/easing";
   import {
     ArrowDown01Icon,
@@ -73,6 +73,15 @@
   }
   /** The site the query is headed for: one it names, else the engine. */
   let shown = $derived(named ?? (awake || open ? fallback : null));
+
+  // The chevron coming or going moves the field's text, and WebKit leaves
+  // the caret where the text was until the field itself lays out again.
+  function recaret() {
+    const field = host?.closest(".ui-search")?.querySelector("input");
+    if (!field || document.activeElement !== field) return;
+    field.style.textIndent = "0.01px";
+    requestAnimationFrame(() => field.style.removeProperty("text-indent"));
+  }
 
   const markOf = (entry: SearchShortcut | null) =>
     entry ? favicons.forPage(entry.home_url) : null;
@@ -166,11 +175,12 @@
       </span>
     {/key}
   </span>
-  <!-- Its place is kept while it is away, so the field's text and caret
-       never move when it comes and goes. -->
-  <span class="chevron" data-shown={!!shown}
-    ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
-  >
+  {#if shown}<span
+      class="chevron"
+      transition:slide={{ axis: "x", duration: reducedMotion() ? 0 : 180 }}
+      onintroend={recaret}
+      onoutroend={recaret}><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
+    >{/if}
 {/snippet}
 
 <span class="host" bind:this={host}>
@@ -247,17 +257,7 @@
     padding-inline-start: 3px;
     place-items: center;
     color: var(--color-faint);
-    opacity: 0;
-    translate: -3px 0;
-    transition:
-      color var(--motion-instant) var(--ease-smooth),
-      opacity var(--motion-fast) var(--ease-smooth),
-      translate var(--motion-fast) var(--ease-smooth);
-  }
-
-  .chevron[data-shown="true"] {
-    opacity: 1;
-    translate: 0 0;
+    transition: color var(--motion-instant) var(--ease-smooth);
   }
 
   :global(.engine:hover) .chevron,
@@ -270,11 +270,5 @@
     background: color-mix(in srgb, var(--color-float) 98%, transparent);
     backdrop-filter: blur(30px) saturate(1.4);
     max-block-size: min(360px, var(--bits-dropdown-menu-content-available-height, 360px));
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .chevron {
-      transition: none;
-    }
   }
 </style>
