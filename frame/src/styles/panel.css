@@ -69,6 +69,16 @@ button:focus-visible {
   font-size: 12px;
   color: var(--color-danger);
 }
+
+/* Once Linux reports its material, let the launcher and switcher paint their
+   own rounded surfaces on the transparent WebView. */
+@media not (forced-colors: active) {
+  :root[data-platform="linux"][data-material="none"],
+  :root[data-platform="linux"][data-material="none"] :is(body, #root) {
+    background: transparent;
+  }
+}
+
 @media (forced-colors: active) {
   body,
   .panel-root {
