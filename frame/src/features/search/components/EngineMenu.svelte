@@ -210,7 +210,7 @@
     align-items: center;
     min-inline-size: 30px;
     block-size: 30px;
-    margin-inline: -6px -4px;
+    margin-inline: -6px -7px;
     padding-inline: 6px;
     border: 0;
     border-radius: var(--radius-inset);

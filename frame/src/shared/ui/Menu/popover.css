@@ -19,6 +19,12 @@
     ui-menu-in var(--motion-base) var(--ease-out);
 }
 
+/* A list opened beside a row stays a list to scroll, never a column the
+   height of the window. */
+.ui-menu.ui-menu-sub {
+  max-height: min(344px, var(--bits-floating-available-height, 344px));
+}
+
 .ui-menu[data-state="closed"] {
   animation: ui-menu-out var(--motion-instant) var(--ease-exit) forwards;
 }

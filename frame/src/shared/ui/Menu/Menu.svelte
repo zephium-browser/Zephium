@@ -112,7 +112,7 @@
         <DropdownMenu.Portal>
           <DropdownMenu.SubContent
             data-menu-material={material}
-            class={contentClasses}
+            class={`${contentClasses} ui-menu-sub`}
             sideOffset={4}
             collisionPadding={10}
           >
