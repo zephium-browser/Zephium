@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { scale, slide } from "svelte/transition";
+  import { scale } from "svelte/transition";
   import { backOut } from "svelte/easing";
   import {
     ArrowDown01Icon,
@@ -166,11 +166,11 @@
       </span>
     {/key}
   </span>
-  {#if shown}<span
-      class="chevron"
-      transition:slide={{ axis: "x", duration: reducedMotion() ? 0 : 180 }}
-      ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
-    >{/if}
+  <!-- Its place is kept while it is away, so the field's text and caret
+       never move when it comes and goes. -->
+  <span class="chevron" data-shown={!!shown}
+    ><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span
+  >
 {/snippet}
 
 <span class="host" bind:this={host}>
@@ -247,7 +247,17 @@
     padding-inline-start: 3px;
     place-items: center;
     color: var(--color-faint);
-    transition: color var(--motion-instant) var(--ease-smooth);
+    opacity: 0;
+    translate: -3px 0;
+    transition:
+      color var(--motion-instant) var(--ease-smooth),
+      opacity var(--motion-fast) var(--ease-smooth),
+      translate var(--motion-fast) var(--ease-smooth);
+  }
+
+  .chevron[data-shown="true"] {
+    opacity: 1;
+    translate: 0 0;
   }
 
   :global(.engine:hover) .chevron,
@@ -260,5 +270,11 @@
     background: color-mix(in srgb, var(--color-float) 98%, transparent);
     backdrop-filter: blur(30px) saturate(1.4);
     max-block-size: min(360px, var(--bits-dropdown-menu-content-available-height, 360px));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chevron {
+      transition: none;
+    }
   }
 </style>
