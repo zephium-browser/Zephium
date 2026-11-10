@@ -90,6 +90,8 @@ mod intro_sound;
 mod keymap;
 mod launcher_trigger;
 #[cfg(target_os = "linux")]
+mod linux_display;
+#[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
 mod linux_shortcut;

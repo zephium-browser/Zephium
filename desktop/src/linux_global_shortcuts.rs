@@ -1,18 +1,11 @@
-use gtk::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, WebviewWindow};
 
+use crate::linux_display::{display_backend, DisplayBackend};
 use crate::linux_shortcut::LinuxLauncherShortcut;
 use crate::linux_shortcut_portal::{ActivationContext, ActivationTarget, GlobalRegistration};
 use crate::linux_x11_shortcut::X11Shortcut;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DisplayBackend {
-    Wayland,
-    X11,
-    Unsupported,
-}
 
 pub(crate) struct LinuxGlobalShortcuts {
     backend: DisplayBackend,
@@ -133,16 +126,7 @@ fn detect_display_backend(window: &WebviewWindow) -> DisplayBackend {
     let Ok(gtk_window) = window.gtk_window() else {
         return DisplayBackend::Unsupported;
     };
-    let display = gtk_window.display();
-    classify_display_type(display.type_().name())
-}
-
-fn classify_display_type(type_name: &str) -> DisplayBackend {
-    match type_name {
-        "GdkWaylandDisplay" => DisplayBackend::Wayland,
-        "GdkX11Display" => DisplayBackend::X11,
-        _ => DisplayBackend::Unsupported,
-    }
+    display_backend(&gtk_window)
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -154,22 +138,6 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn gdk_backend_detection_is_type_exact() {
-        assert_eq!(
-            classify_display_type("GdkWaylandDisplay"),
-            DisplayBackend::Wayland
-        );
-        assert_eq!(classify_display_type("GdkX11Display"), DisplayBackend::X11);
-        assert_eq!(
-            classify_display_type("wayland-0"),
-            DisplayBackend::Unsupported
-        );
-        assert_eq!(classify_display_type(""), DisplayBackend::Unsupported);
-    }
-
     #[test]
     fn production_adapter_has_no_panicking_diagnostics() {
         let production = include_str!("linux_global_shortcuts.rs")

@@ -3,6 +3,8 @@
 //! loaded, so nothing heavy is ever instantiated a second time here.
 pub(crate) mod geometry;
 mod idle;
+#[cfg(target_os = "linux")]
+mod linux;
 mod model;
 #[cfg(target_os = "windows")]
 mod viewport;
@@ -728,24 +730,43 @@ impl Overlay {
     /// looking, at the same height every time.
     #[cfg(not(target_os = "macos"))]
     fn place(&self) {
-        let monitor = self
+        #[cfg(target_os = "linux")]
+        let owner = self
             .window
             .app_handle()
-            .cursor_position()
-            .ok()
-            .and_then(|cursor| {
-                self.window
-                    .available_monitors()
-                    .ok()?
-                    .into_iter()
-                    .find(|monitor| {
-                        let area = monitor.work_area();
-                        cursor.x >= f64::from(area.position.x)
-                            && cursor.y >= f64::from(area.position.y)
-                            && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
-                            && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
-                    })
-            })
+            .get_webview_window(crate::MAIN_LABEL);
+        #[cfg(target_os = "linux")]
+        let supports_position = self.window.gtk_window().is_ok_and(|window| {
+            let owner = owner.as_ref().and_then(|owner| owner.gtk_window().ok());
+            linux::prepare(&window, owner.as_ref())
+        });
+        #[cfg(not(target_os = "linux"))]
+        let supports_position = true;
+        // Tao returns a successful (0, 0) on native Wayland. Only X11 exposes
+        // global coordinates; otherwise size for the browser owner's display.
+        let cursor = supports_position
+            .then(|| self.window.app_handle().cursor_position().ok())
+            .flatten();
+        let monitor = cursor.and_then(|cursor| {
+            self.window
+                .available_monitors()
+                .ok()?
+                .into_iter()
+                .find(|monitor| {
+                    let area = monitor.work_area();
+                    cursor.x >= f64::from(area.position.x)
+                        && cursor.y >= f64::from(area.position.y)
+                        && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
+                        && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
+                })
+        });
+        #[cfg(target_os = "linux")]
+        let monitor = monitor.or_else(|| {
+            owner
+                .as_ref()
+                .and_then(|owner| owner.current_monitor().ok().flatten())
+        });
+        let monitor = monitor
             .or_else(|| self.window.current_monitor().ok().flatten())
             .or_else(|| self.window.primary_monitor().ok().flatten());
         let Some(monitor) = monitor else {
@@ -788,7 +809,7 @@ impl Overlay {
             let _ = self
                 .window
                 .set_size(LogicalSize::new(placement.width, height));
-            if position_supported() {
+            if supports_position {
                 let _ = self.window.set_position(PhysicalPosition::new(
                     f64::from(work.position.x) + placement.x * scale,
                     f64::from(work.position.y) + placement.y * scale,
@@ -921,10 +942,6 @@ pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn position_supported() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_none()
-}
 fn do_hide(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     crate::panel::hide(window);
