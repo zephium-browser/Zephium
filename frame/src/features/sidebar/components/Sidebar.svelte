@@ -127,7 +127,11 @@
       getComputedStyle(document.documentElement).getPropertyValue("--ease-emphasized").trim() ||
       "ease-out",
   });
+  let workBefore = untrack(() => inWork);
   $effect(() => {
+    const work = untrack(() => inWork);
+    const fromWork = hidden && workBefore && !work;
+    workBefore = work;
     if (!hidden && untrack(() => away && peeking && overPage && !reducedMotion())) {
       // Shown from the card, the card is the column at once, its window
       // controls with it, while native slides the page out from beside it;
@@ -161,7 +165,9 @@
       return;
     }
     if (untrack(() => away)) return;
-    if (reducedMotion()) {
+    // Back from Work, the rail it held out goes straight back to being the
+    // card: the column it would open into is never seen.
+    if (reducedMotion() || fromWork) {
       away = true;
       return;
     }
@@ -563,7 +569,8 @@
       compact={headerCompact}
       launcher={tool !== null}
       ontoggle={toggleShape}
-      pageControls={!inWork}
+      pageControls={!railed}
+      search={!railed || inWork}
     />{/if}
   <div
     bind:this={columns}
@@ -611,6 +618,12 @@
     :global([data-under-panel]) {
       transition: none;
     }
+  }
+
+  /* A stack opened from the rail spills over the page beside it, so the
+     column rises over that page for as long as it is open. */
+  .browser-sidebar:not([data-hidden]):has(:global(.ui-disclosure-panel[data-open="true"])) {
+    z-index: 2;
   }
 
   /* Hidden, the column is a card that waits beside the window and slides

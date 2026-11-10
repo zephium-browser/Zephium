@@ -272,6 +272,13 @@
       visibility 0s linear var(--motion-fast);
   }
 
+  /* Named beside a narrow rail, the stack keeps its own width and spills
+     over whatever stands beside the rail. */
+  .shelf[data-compact="true"][data-glyphs="false"] :global(.shelf-stack) {
+    min-width: 232px;
+    max-width: none;
+  }
+
   .shelf :global(.shelf-stack[data-open="true"]) {
     scale: 1;
     transition:

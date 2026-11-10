@@ -28,6 +28,7 @@
     closable = new Set<string>(),
     onSelect,
     switcher,
+    spaces = true,
     roomy = false,
   }: {
     entries: TabView[];
@@ -37,6 +38,8 @@
     /** Beside a tool the rail keeps only the current tab, and this opens the
      *  switcher onto all of them in place of the new tab row. */
     switcher?: () => void;
+    /** Work has no spaces of its own; Browse leads with them. */
+    spaces?: boolean;
     /** With room beside it, the spaces open as a menu that names them. */
     roomy?: boolean;
   } = $props();
@@ -130,7 +133,7 @@
   `title` gives a real OS tooltip, which is the only label that can appear
   outside the chrome WebView's rectangle.
 -->
-{#if space}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
+{#if space && spaces}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
     <RailSpaces active={space} {roomy} />
   </div>{/if}
 <div

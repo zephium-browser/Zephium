@@ -143,12 +143,14 @@
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");
-  // Settings and a tool in full stand beside the rail the way a tool panel does.
+  // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
-    toolHost.activeTool() !== null ||
-      browserPage.currentPage() === "settings" ||
-      browserPage.toolPage(),
+    toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
   );
+  // A tool in full keeps the same rail beside its page, under the window's
+  // own head, as Work does.
+  let toolPage = $derived(browserPage.toolPage());
+  let besideRail = $derived(paneled || toolPage);
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
@@ -365,8 +367,8 @@
   {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
     >{#snippet browserBody(compact)}
-      {#if compact && (inWork || paneled)}
-        {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
+      {#if compact && (inWork || besideRail)}
+        {#if !inWork && !(toolPage && !paneled)}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if paneled && IS_WINDOWS}
           {#if browserPage.currentPage() === "settings"}<ModeTabs compact standalone />{/if}
           <div class="rail-search"><SidebarSearch /></div>
@@ -380,11 +382,12 @@
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
           {#if compact}
             <TabRail
-              entries={paneled && !inWork ? railCurrent : railTabs}
+              entries={besideRail && !inWork ? railCurrent : railTabs}
               closable={railClosable}
               onSelect={selectTab}
-              switcher={paneled && !inWork ? openSwitcher : undefined}
-              roomy={paneled || inWork}
+              switcher={besideRail && !inWork ? openSwitcher : undefined}
+              spaces={!inWork}
+              roomy={besideRail || inWork}
             />
           {:else}
             <!--
@@ -450,7 +453,7 @@
             profile={tabs.profile()?.id ?? ""}
           />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
-          roomy={paneled}
+          roomy={besideRail}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
         >

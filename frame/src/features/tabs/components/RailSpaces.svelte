@@ -117,8 +117,11 @@
     transform-origin: top center;
   }
 
+  /* Named, the stack is wider than the rail and spills past it, over the
+     panel or page beside it. */
   :global(.ui-disclosure-panel.rail-space-stack.rail-space-stack-roomy[data-align]) {
     width: 224px;
+    max-width: none;
   }
 
   :global(.ui-disclosure-panel.rail-space-stack[data-align]:not([data-open="true"])) {
