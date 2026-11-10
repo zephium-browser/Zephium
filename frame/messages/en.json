@@ -1519,7 +1519,7 @@
   "onb_import_bookmarks": "Bookmarks",
   "onb_import_history": "History",
   "onb_import_action": "Import",
-  "import_start_failed": "Couldn't start the import. Try again.",
+  "import_start_failed": "Couldn't start the import from {browser}. Try again.",
   "onb_import_unavailable": "Importing arrives in an update shortly.",
   "onb_import_quit": "Quit {browser} first. It keeps its data locked while open.",
   "onb_import_permission": "Zephium needs Full Disk Access to read {browser}. Turn it on in System Settings, then reopen Zephium.",

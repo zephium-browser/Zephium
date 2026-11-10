@@ -112,7 +112,7 @@ test.each([false, true])(
 
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("Couldn't start the import. Try again.");
+      .toHaveTextContent("Couldn't start the import from Chrome. Try again.");
 
     fake.emit({ ...finished([]), finished: false });
     await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();

@@ -1501,7 +1501,7 @@
   "onb_import_bookmarks": "书签",
   "onb_import_history": "历史记录",
   "onb_import_action": "导入",
-  "import_start_failed": "无法开始导入。请重试。",
+  "import_start_failed": "无法开始从 {browser} 导入。请重试。",
   "onb_import_unavailable": "导入功能将在不久后的更新中推出。",
   "onb_import_quit": "请先退出 {browser}。它运行时会锁定其数据。",
   "onb_import_permission": "Zephium 需要“完全磁盘访问权限”才能读取 {browser}。请在“系统设置”中打开，然后重新打开 Zephium。",

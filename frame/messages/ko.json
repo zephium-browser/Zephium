@@ -1501,7 +1501,7 @@
   "onb_import_bookmarks": "북마크",
   "onb_import_history": "방문 기록",
   "onb_import_action": "가져오기",
-  "import_start_failed": "가져오기를 시작할 수 없습니다. 다시 시도하세요.",
+  "import_start_failed": "{browser}에서 가져오기를 시작할 수 없습니다. 다시 시도하세요.",
   "onb_import_unavailable": "가져오기 기능은 곧 업데이트로 제공돼요.",
   "onb_import_quit": "열려 있는 {browser}에서는 데이터가 잠겨 있어요. 먼저 종료해 주세요.",
   "onb_import_permission": "{browser}의 데이터를 읽으려면 Zephium에 전체 디스크 접근 권한이 필요해요. 시스템 설정에서 켠 다음 Zephium을 다시 열어 주세요.",

@@ -1501,7 +1501,7 @@
   "onb_import_bookmarks": "Закладки",
   "onb_import_history": "Історія",
   "onb_import_action": "Імпортувати",
-  "import_start_failed": "Не вдалося почати імпорт. Спробуйте ще раз.",
+  "import_start_failed": "Не вдалося почати імпорт із {browser}. Спробуйте ще раз.",
   "onb_import_unavailable": "Імпорт з’явиться найближчим часом в одному з оновлень.",
   "onb_import_quit": "Спочатку завершіть {browser}. Поки він відкритий, його дані заблоковані.",
   "onb_import_permission": "Щоб прочитати дані {browser}, Zephium потрібен повний доступ до диска. Увімкніть його в Системних параметрах і знову відкрийте Zephium.",

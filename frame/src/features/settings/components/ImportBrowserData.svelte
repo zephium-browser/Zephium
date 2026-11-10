@@ -194,8 +194,8 @@
     {/if}
   </SettingsRow>
 {/if}
-{#if refused !== null && (job || source?.id === refused)}
-  <p class="start-error" role="alert">{m.import_start_failed()}</p>
+{#if refused && (job || source?.id === refused.id)}
+  <p class="start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
 {/if}
 {#if !job}
   {#if found && found.length > 0}

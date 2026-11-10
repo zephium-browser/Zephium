@@ -1501,7 +1501,7 @@
   "onb_import_bookmarks": "Yer işaretleri",
   "onb_import_history": "Geçmiş",
   "onb_import_action": "İçe aktar",
-  "import_start_failed": "İçe aktarma başlatılamadı. Tekrar deneyin.",
+  "import_start_failed": "{browser} tarayıcısından içe aktarma başlatılamadı. Tekrar deneyin.",
   "onb_import_unavailable": "İçe aktarma kısa süre içinde bir güncellemeyle gelecek.",
   "onb_import_quit": "Önce {browser} tarayıcısından çıkın. Açıkken verilerini kilitli tutar.",
   "onb_import_permission": "Zephium'un {browser} tarayıcısını okuması için Tam Disk Erişimi gerekir. Sistem Ayarları'ndan açın, ardından Zephium'u yeniden başlatın.",

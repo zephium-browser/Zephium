@@ -62,14 +62,19 @@ test("a refused start shows an error and a retry clears it", async () => {
   refuse(false);
   await expect
     .element(screen.getByRole("alert"))
-    .toHaveTextContent("Couldn't start the import. Try again.");
+    .toHaveTextContent("Couldn't start the import from Zen. Try again.");
   await start.click();
   expect(attempts).toBe(2);
   await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
 });
 
-test("a refused start stays visible when an earlier import reports progress", async () => {
+test("a refused start names its source while an import from another browser progresses", async () => {
   const fake = importer();
+  const list = fake.adapter.sources;
+  fake.adapter.sources = async () => {
+    const [zen] = await list();
+    return [zen!, { ...zen!, id: "firefox", browser: "firefox", name: "Firefox" }];
+  };
   let refuse!: (accepted: boolean) => void;
   const second = new Promise<boolean>((resolve) => (refuse = resolve));
   let attempts = 0;
@@ -79,6 +84,7 @@ test("a refused start stays visible when an earlier import reports progress", as
   const start = screen.getByRole("button", { name: "Import", exact: true });
 
   await start.click();
+  await screen.getByRole("radio", { name: "Firefox" }).click();
   await start.click();
   fake.emit(job(false, { kind: "history", state: "running", done: 0, total: null }));
   refuse(false);
@@ -86,7 +92,7 @@ test("a refused start stays visible when an earlier import reports progress", as
   await expect.element(screen.getByText("Importing from Zen")).toBeVisible();
   await expect
     .element(screen.getByRole("alert"))
-    .toHaveTextContent("Couldn't start the import. Try again.");
+    .toHaveTextContent("Couldn't start the import from Firefox. Try again.");
 });
 
 test("an import shows each kind as it goes and what it brought", async () => {

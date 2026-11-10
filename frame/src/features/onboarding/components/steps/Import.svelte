@@ -197,8 +197,8 @@
     <p class="note">{m.onb_import_none()}</p>
   {/if}
   {#if hint}<p class="note">{hint}</p>{/if}
-  {#if refused !== null && (job || source?.id === refused)}
-    <p class="note start-error" role="alert">{m.import_start_failed()}</p>
+  {#if refused && (job || source?.id === refused.id)}
+    <p class="note start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
   {/if}
 
   <div class="search">

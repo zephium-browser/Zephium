@@ -60,7 +60,7 @@ let adapter = $state.raw<ImportAdapter | null>(null);
 let sources = $state.raw<ImportSource[] | null>(null);
 let job = $state.raw<ImportJob | null>(null);
 let starting = $state(false);
-let refusedSource = $state<string | null>(null);
+let refusedSource = $state.raw<{ id: string; name: string } | null>(null);
 let stop: (() => void) | null = null;
 let generation = 0;
 let lifetime = 0;
@@ -97,14 +97,18 @@ export async function start(source: string, profile: string, kinds: ImportKind[]
   if (!port || busy() || kinds.length === 0) return false;
   starting = true;
   refusedSource = null;
+  const attempted = {
+    id: source,
+    name: sources?.find((entry) => entry.id === source)?.name ?? source,
+  };
   const owner = lifetime;
   try {
     const accepted = await port.start(source, profile, kinds);
     if (owner !== lifetime) return false;
-    if (!accepted) refusedSource = source;
+    if (!accepted) refusedSource = attempted;
     return accepted;
   } catch {
-    if (owner === lifetime) refusedSource = source;
+    if (owner === lifetime) refusedSource = attempted;
     return false;
   } finally {
     if (owner === lifetime) starting = false;
