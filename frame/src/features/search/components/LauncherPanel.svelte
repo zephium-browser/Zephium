@@ -3,7 +3,7 @@
 </script>
 
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { Globe02Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import type { PanelState, ToolKind } from "$shared/ipc/bindings";
@@ -193,8 +193,18 @@
         // Editing a page's address opens on that address, selected, so typing
         // replaces it and Return goes back to it.
         surface.begin(next);
-        input?.focus();
-        input?.select();
+        // The seeded value must reach the DOM before selection is applied.
+        void tick().then(() => {
+          if (
+            bound !== next.session_id ||
+            !context?.visible ||
+            context.session_id !== next.session_id ||
+            !input?.isConnected
+          )
+            return;
+          input.focus();
+          input.select();
+        });
       } else if (bound !== null) {
         bound = null;
         menu = false;
