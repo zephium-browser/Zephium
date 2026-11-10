@@ -108,14 +108,17 @@
             ><Icon icon={ArrowRight01Icon} size={12} strokeWidth={2} /></span
           >
         </DropdownMenu.SubTrigger>
-        <DropdownMenu.SubContent
-          data-menu-material={material}
-          class={contentClasses}
-          sideOffset={4}
-          collisionPadding={10}
-        >
-          {@render list(entry.entries)}
-        </DropdownMenu.SubContent>
+        <!-- Out of the parent's scroller, which would clip it to a scrollbar. -->
+        <DropdownMenu.Portal>
+          <DropdownMenu.SubContent
+            data-menu-material={material}
+            class={contentClasses}
+            sideOffset={4}
+            collisionPadding={10}
+          >
+            {@render list(entry.entries)}
+          </DropdownMenu.SubContent>
+        </DropdownMenu.Portal>
       </DropdownMenu.Sub>
     {:else}
       {@const Item = "checked" in entry ? DropdownMenu.CheckboxItem : DropdownMenu.Item}
