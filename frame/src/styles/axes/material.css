@@ -43,7 +43,14 @@
   --wash-window: 28%;
   --material-window-ground: color-mix(in srgb, var(--color-chrome) var(--wash-window), transparent);
   --wash-raised: 56%;
-  --wash-launcher: 82%;
+  /* Light enough that the launcher reads as the acrylic it is, not a slab. */
+  --wash-launcher: 64%;
+}
+
+/* Windows 11's dark acrylic is a light grey haze on its own; the dark theme
+   lays in enough of its colour that the window reads black through it. */
+:root[data-material="acrylic"][data-theme="dark"] {
+  --wash-window: 52%;
 }
 
 /* Mica is near-opaque and already dark-framed, so the wash only lays the
