@@ -211,7 +211,7 @@ impl Shell {
         }
         session.retain(|tab| self.switchable_tab(tab));
         match action {
-            TabSwitcherAction::Commit | TabSwitcherAction::Cancel => {
+            TabSwitcherAction::Commit | TabSwitcherAction::Cancel | TabSwitcherAction::NewTab => {
                 let selected = session.tabs.get(session.selected).copied();
                 if action == TabSwitcherAction::Commit {
                     if let Some(tab) = selected {
@@ -222,6 +222,9 @@ impl Shell {
                     session: id,
                     state: None,
                 });
+                if action == TabSwitcherAction::NewTab {
+                    let _ = self.operation_open();
+                }
                 return;
             }
             TabSwitcherAction::Step { reverse } => session.step(reverse),

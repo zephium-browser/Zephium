@@ -3300,7 +3300,9 @@ export type TabMenuContext = {
 	media_only: boolean,
 };
 
-export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" };
+export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
+/**  Leaves the switcher for a new tab in its window. */
+{ type: "new_tab" };
 
 export type TabSwitcherEntry = {
 	tab_id: string,

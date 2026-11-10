@@ -745,11 +745,17 @@ impl PanelLayout {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TabSwitcherAction {
-    Step { reverse: bool },
-    Select { index: u32 },
+    Step {
+        reverse: bool,
+    },
+    Select {
+        index: u32,
+    },
     Commit,
     Cancel,
     Close,
+    /// Leaves the switcher for a new tab in its window.
+    NewTab,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

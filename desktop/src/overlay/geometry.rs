@@ -29,10 +29,10 @@ pub const SWITCHER_PEEK: f64 = 36.0;
 /// The plate's corner, concentric with a card's 14 at its padding.
 pub const SWITCHER_RADIUS: f64 = 26.0;
 
-/// How many cards across and rows down the plate shows for `count` tabs,
-/// and whether more wait below.
-pub fn switcher_grid(count: usize) -> (usize, usize, bool) {
-    let count = count.max(1);
+/// How many cards across and rows down the plate shows for `tabs` tabs and
+/// the new tab card after them, and whether more wait below.
+pub fn switcher_grid(tabs: usize) -> (usize, usize, bool) {
+    let count = tabs + 1;
     let rows = count.div_ceil(SWITCHER_COLUMNS);
     (
         count.min(SWITCHER_COLUMNS),
@@ -41,8 +41,8 @@ pub fn switcher_grid(count: usize) -> (usize, usize, bool) {
     )
 }
 
-pub fn switcher_size(count: usize) -> (f64, f64) {
-    let (columns, rows, more) = switcher_grid(count);
+pub fn switcher_size(tabs: usize) -> (f64, f64) {
+    let (columns, rows, more) = switcher_grid(tabs);
     let span = |cells: usize, cell: f64| cells as f64 * cell + (cells - 1) as f64 * SWITCHER_GAP;
     (
         2.0 * SWITCHER_PAD + span(columns, SWITCHER_CARD),
@@ -129,21 +129,21 @@ mod tests {
     #[test]
     fn the_switcher_grows_with_its_cards_up_to_a_grid_and_is_centred() {
         assert_eq!(switcher_grid(0), (1, 1, false));
-        assert_eq!(switcher_grid(3), (3, 1, false));
-        assert_eq!(switcher_grid(5), (4, 2, false));
-        assert_eq!(switcher_grid(12), (4, 3, false));
-        assert_eq!(switcher_grid(13), (4, 3, true));
+        assert_eq!(switcher_grid(2), (3, 1, false));
+        assert_eq!(switcher_grid(4), (4, 2, false));
+        assert_eq!(switcher_grid(11), (4, 3, false));
+        assert_eq!(switcher_grid(12), (4, 3, true));
         assert_eq!(
-            switcher_size(1),
+            switcher_size(0),
             (
                 2.0 * SWITCHER_PAD + SWITCHER_CARD,
                 2.0 * SWITCHER_PAD + SWITCHER_CARD_HEIGHT
             )
         );
-        assert_eq!(switcher_size(40).0, switcher_size(4).0);
+        assert_eq!(switcher_size(40).0, switcher_size(3).0);
         assert_eq!(
             switcher_size(40).1,
-            switcher_size(12).1 + SWITCHER_GAP + SWITCHER_PEEK
+            switcher_size(11).1 + SWITCHER_GAP + SWITCHER_PEEK
         );
         let placement = Placement::switcher(1440.0, 875.0, SHAPE_INSET, 6);
         let (width, height) = switcher_size(6);

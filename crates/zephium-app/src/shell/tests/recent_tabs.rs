@@ -111,6 +111,30 @@ fn reverse_close_and_malformed_selection_preserve_the_frozen_order() {
 }
 
 #[test]
+fn new_tab_leaves_the_switcher_for_a_new_tab_in_its_window() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = loaded(&mut shell, &screen, "one");
+    let second = loaded(&mut shell, &screen, "two");
+    shell.handle(Command::BeginTabSwitcher {
+        session: 5,
+        reverse: false,
+        keyboard: false,
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 5,
+        action: TabSwitcherAction::NewTab,
+    });
+    let opened = active_id(&screen);
+    assert!(opened != first && opened != second);
+    shell.handle(Command::TabSwitcher {
+        session: 5,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_eq!(active_id(&screen), opened);
+}
+
+#[test]
 fn changing_space_cancels_selection_and_keeps_each_spaces_history() {
     let (mut shell, _, screen) = setup();
     shell.handle(Command::Bootstrap);

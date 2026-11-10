@@ -160,3 +160,9 @@ test("cards stand four across, and up and down move a whole row", async () => {
     expect(native.action.mock.calls.at(-1)).toEqual(["7", { type: "step", reverse: true }]),
   );
 });
+
+test("the new tab card after the tabs leaves for a new tab", async () => {
+  const screen = await render(TabSwitcher, { snapshot: state });
+  await screen.getByRole("button", { name: "New Tab" }).click();
+  await vi.waitFor(() => expect(native.action.mock.calls).toEqual([["7", { type: "new_tab" }]]));
+});

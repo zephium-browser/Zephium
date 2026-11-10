@@ -6,7 +6,7 @@
   import { favicons } from "$domain/favicons";
   import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
-  import { Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 
   // Mirrors the native plate (desktop/src/overlay/geometry.rs), which is
   // sized to the cards it shows: up to four across and three down, with the
@@ -40,7 +40,8 @@
   // Native draws the plate behind the cards where it has a material of its
   // own; otherwise the window is the plate and the page tints it.
   let detached = $derived(material === "liquid_glass" || material === "vibrancy");
-  let count = $derived(Math.max(1, snapshot.entries.length));
+  // The new tab card stands after the tabs, in the grid with them.
+  let count = $derived(snapshot.entries.length + 1);
   let across = $derived(Math.min(COLUMNS, count));
   let down = $derived(Math.min(ROWS, Math.ceil(count / COLUMNS)));
   let more = $derived(Math.ceil(count / COLUMNS) > ROWS);
@@ -82,7 +83,7 @@
     );
     void tick().then(() => {
       if (live && !disposed)
-        element.querySelectorAll(".card").forEach((card) => observer.observe(card));
+        element.querySelectorAll(".card[data-index]").forEach((card) => observer.observe(card));
     });
     return () => {
       live = false;
@@ -161,6 +162,9 @@
     if (frozen) return;
     if (await send({ type: "select", index })) await send({ type: "commit" });
   }
+  function newTab() {
+    if (!frozen) void send({ type: "new_tab" });
+  }
   async function closeAt(index: number) {
     if (frozen) return;
     if (await send({ type: "select", index })) await send({ type: "close" });
@@ -232,6 +236,12 @@
         >
       </div>
     {/each}
+    <div class="slot">
+      <button type="button" class="card new" tabindex="-1" onclick={newTab}>
+        <span class="page"><span class="plus"><Icon icon={Add01Icon} size={22} /></span></span>
+        <span class="caption"><span class="title">{m.new_tab()}</span></span>
+      </button>
+    </div>
   </div>
   {#if failed && !frozen}<p role="alert">{m.panel_action_failed()}</p>{/if}
 </section>
@@ -378,6 +388,32 @@
     border-radius: var(--radius-inset);
     background: var(--color-tile);
     box-shadow: var(--shadow-raised);
+  }
+
+  /* The new tab card: an empty page with a plus, quieter than the tabs. */
+  .new .page {
+    display: grid;
+    place-items: center;
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+  }
+
+  .plus {
+    display: grid;
+    place-items: center;
+    inline-size: 44px;
+    block-size: 44px;
+    border-radius: var(--radius-capsule);
+    background: color-mix(in srgb, var(--color-text) 7%, transparent);
+    color: var(--color-muted);
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      color var(--motion-instant) var(--ease-smooth);
+  }
+
+  .new:hover .plus {
+    background: color-mix(in srgb, var(--color-text) 12%, transparent);
+    color: var(--color-text);
   }
 
   img {

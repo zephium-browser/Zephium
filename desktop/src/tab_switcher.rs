@@ -232,11 +232,11 @@ pub(crate) fn action(app: &tauri::AppHandle, id: u64, action: TabSwitcherAction)
     if accepted
         && matches!(
             action,
-            TabSwitcherAction::Commit | TabSwitcherAction::Cancel
+            TabSwitcherAction::Commit | TabSwitcherAction::Cancel | TabSwitcherAction::NewTab
         )
     {
         active.settling = true;
-        active.commit = action == TabSwitcherAction::Commit;
+        active.commit = action != TabSwitcherAction::Cancel;
     }
     accepted
 }
