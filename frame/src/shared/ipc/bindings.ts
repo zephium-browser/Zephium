@@ -3302,7 +3302,11 @@ export type TabMenuContext = {
 
 export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
 /**  Leaves the switcher for a new tab in its window. */
-{ type: "new_tab" };
+{ type: "new_tab" } |
+/**  Leaves the switcher for this tab, whatever is selected by then. */
+{ type: "activate"; tab_id: string } |
+/**  Closes this tab, whatever is selected by then, and stays open. */
+{ type: "close_tab"; tab_id: string };
 
 export type TabSwitcherEntry = {
 	tab_id: string,

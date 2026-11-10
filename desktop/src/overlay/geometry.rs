@@ -33,18 +33,32 @@ pub const SWITCHER_RADIUS: f64 = 26.0;
 
 /// How many cards across and rows down the plate shows for `tabs` tabs and
 /// the new tab card after them, and whether more wait below.
-pub fn switcher_grid(tabs: usize) -> (usize, usize, bool) {
+/// How many cards stand across on a work area this wide: four, or as many
+/// as fit inside its margins, so a narrow or highly scaled display never cuts
+/// a column off. The frame derives the same count from the window's width.
+pub fn switcher_columns(work_width: f64, inset: f64) -> usize {
+    let room = work_width - 2.0 * MARGIN - 2.0 * inset - 2.0 * SWITCHER_PAD + SWITCHER_GAP;
+    let fit = (room / (SWITCHER_CARD + SWITCHER_GAP)).floor();
+    if fit.is_finite() && fit >= 1.0 {
+        (fit as usize).min(SWITCHER_COLUMNS)
+    } else {
+        1
+    }
+}
+
+pub fn switcher_grid(tabs: usize, columns: usize) -> (usize, usize, bool) {
+    let columns = columns.clamp(1, SWITCHER_COLUMNS);
     let count = tabs + 1;
-    let rows = count.div_ceil(SWITCHER_COLUMNS);
+    let rows = count.div_ceil(columns);
     (
-        count.min(SWITCHER_COLUMNS),
+        count.min(columns),
         rows.min(SWITCHER_ROWS),
         rows > SWITCHER_ROWS,
     )
 }
 
-pub fn switcher_size(tabs: usize) -> (f64, f64) {
-    let (columns, rows, more) = switcher_grid(tabs);
+pub fn switcher_size(tabs: usize, columns: usize) -> (f64, f64) {
+    let (columns, rows, more) = switcher_grid(tabs, columns);
     let span = |cells: usize, cell: f64| cells as f64 * cell + (cells - 1) as f64 * SWITCHER_GAP;
     (
         2.0 * SWITCHER_PAD + span(columns, SWITCHER_CARD),
@@ -94,7 +108,7 @@ impl Placement {
     /// The switcher's window: its plate and the room around it for a shadow,
     /// centred on the work area.
     pub fn switcher(work_width: f64, work_height: f64, inset: f64, count: usize) -> Self {
-        let (width, height) = switcher_size(count);
+        let (width, height) = switcher_size(count, switcher_columns(work_width, inset));
         let width = (width + 2.0 * inset)
             .min(work_width - 2.0 * MARGIN)
             .max(1.0);
@@ -130,29 +144,46 @@ mod tests {
 
     #[test]
     fn the_switcher_grows_with_its_cards_up_to_a_grid_and_is_centred() {
-        assert_eq!(switcher_grid(0), (1, 1, false));
-        assert_eq!(switcher_grid(2), (3, 1, false));
-        assert_eq!(switcher_grid(4), (4, 2, false));
-        assert_eq!(switcher_grid(11), (4, 3, false));
-        assert_eq!(switcher_grid(12), (4, 3, true));
+        let four = SWITCHER_COLUMNS;
+        assert_eq!(switcher_grid(0, four), (1, 1, false));
+        assert_eq!(switcher_grid(2, four), (3, 1, false));
+        assert_eq!(switcher_grid(4, four), (4, 2, false));
+        assert_eq!(switcher_grid(11, four), (4, 3, false));
+        assert_eq!(switcher_grid(12, four), (4, 3, true));
         assert_eq!(
-            switcher_size(0),
+            switcher_size(0, four),
             (
                 2.0 * SWITCHER_PAD + SWITCHER_CARD,
                 2.0 * SWITCHER_PAD + SWITCHER_CARD_HEIGHT
             )
         );
-        assert_eq!(switcher_size(40).0, switcher_size(3).0);
+        assert_eq!(switcher_size(40, four).0, switcher_size(3, four).0);
         assert_eq!(
-            switcher_size(40).1,
-            switcher_size(11).1 + SWITCHER_GAP + SWITCHER_PEEK
+            switcher_size(40, four).1,
+            switcher_size(11, four).1 + SWITCHER_GAP + SWITCHER_PEEK
         );
         let placement = Placement::switcher(1440.0, 875.0, SHAPE_INSET, 6);
-        let (width, height) = switcher_size(6);
+        let (width, height) = switcher_size(6, four);
         assert_eq!(placement.width, width + 2.0 * SHAPE_INSET);
         assert_eq!(placement.x, (1440.0 - placement.width) / 2.0);
         assert_eq!(placement.height(f64::INFINITY), height + 2.0 * SHAPE_INSET);
         assert_eq!(placement.y, (875.0 - height - 2.0 * SHAPE_INSET) / 2.0);
+    }
+
+    #[test]
+    fn a_narrow_or_highly_scaled_display_stands_fewer_cards_across() {
+        // 1920 px at 250% is 768 points wide.
+        assert_eq!(switcher_columns(1440.0, SHAPE_INSET), 4);
+        assert_eq!(switcher_columns(768.0, 0.0), 3);
+        assert_eq!(switcher_columns(768.0, SHAPE_INSET), 2);
+        assert_eq!(switcher_columns(200.0, 0.0), 1);
+        for (work, inset) in [(768.0, 0.0), (768.0, SHAPE_INSET), (1024.0, 0.0)] {
+            let placement = Placement::switcher(work, 900.0, inset, 30);
+            let (width, _) = switcher_size(30, switcher_columns(work, inset));
+            assert_eq!(placement.width, width + 2.0 * inset);
+            assert!(placement.x >= MARGIN);
+        }
+        assert_eq!(switcher_grid(30, 2), (2, 3, true));
     }
 
     #[test]

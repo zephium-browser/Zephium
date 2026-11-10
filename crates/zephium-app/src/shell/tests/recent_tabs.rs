@@ -288,3 +288,96 @@ fn rapid_switches_keep_one_capture_in_flight_and_refuse_stale_completion() {
         2
     );
 }
+
+#[test]
+fn a_card_acts_on_its_own_tab_whatever_the_selection_has_become() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = loaded(&mut shell, &screen, "one");
+    let second = loaded(&mut shell, &screen, "two");
+    let third = loaded(&mut shell, &screen, "three");
+    shell.handle(Command::BeginTabSwitcher {
+        session: 9,
+        reverse: false,
+        keyboard: false,
+    });
+    for action in [
+        TabSwitcherAction::Select { index: 1 },
+        TabSwitcherAction::Select { index: 2 },
+        TabSwitcherAction::CloseTab {
+            tab_id: second.to_string(),
+        },
+        TabSwitcherAction::CloseTab {
+            tab_id: "not-a-tab".into(),
+        },
+    ] {
+        shell.handle(Command::TabSwitcher { session: 9, action });
+    }
+    assert!(shell.items.tab(second).is_none());
+    assert!(shell.items.tab(first).is_some());
+    assert_eq!(active_id(&screen), third);
+    shell.handle(Command::TabSwitcher {
+        session: 9,
+        action: TabSwitcherAction::Activate {
+            tab_id: first.to_string(),
+        },
+    });
+    assert_eq!(active_id(&screen), first);
+}
+
+#[test]
+fn from_a_blank_tab_the_first_step_is_the_latest_page() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = loaded(&mut shell, &screen, "one");
+    let second = loaded(&mut shell, &screen, "two");
+    shell.handle(Command::Open);
+    let blank = active_id(&screen);
+    assert_eq!(shell.recent_tab_order(), vec![second, first]);
+    shell.handle(Command::BeginTabSwitcher {
+        session: 3,
+        reverse: false,
+        keyboard: true,
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 3,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_eq!(active_id(&screen), second);
+    shell.handle(Command::Activate(blank));
+    shell.handle(Command::BeginTabSwitcher {
+        session: 4,
+        reverse: true,
+        keyboard: true,
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 4,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_eq!(active_id(&screen), first);
+}
+
+#[test]
+fn browser_pages_are_switchable_and_an_empty_switcher_still_offers_a_new_tab() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    shell.handle(Command::Open);
+    assert_eq!(shell.recent_tab_order(), vec![extensions]);
+    shell.handle(Command::Close(extensions));
+    assert!(shell.recent_tab_order().is_empty());
+    shell.handle(Command::BeginTabSwitcher {
+        session: 6,
+        reverse: false,
+        keyboard: false,
+    });
+    let blank = active_id(&screen);
+    shell.handle(Command::TabSwitcher {
+        session: 6,
+        action: TabSwitcherAction::NewTab,
+    });
+    assert_ne!(active_id(&screen), blank);
+}

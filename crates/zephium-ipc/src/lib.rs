@@ -756,6 +756,14 @@ pub enum TabSwitcherAction {
     Close,
     /// Leaves the switcher for a new tab in its window.
     NewTab,
+    /// Leaves the switcher for this tab, whatever is selected by then.
+    Activate {
+        tab_id: String,
+    },
+    /// Closes this tab, whatever is selected by then, and stays open.
+    CloseTab {
+        tab_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

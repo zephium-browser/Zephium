@@ -220,7 +220,10 @@ pub(crate) fn action(app: &tauri::AppHandle, id: u64, action: TabSwitcherAction)
         return false;
     };
     if active.settling {
-        return matches!(action, TabSwitcherAction::Commit) && active.commit
+        return matches!(
+            action,
+            TabSwitcherAction::Commit | TabSwitcherAction::Activate { .. }
+        ) && active.commit
             || matches!(action, TabSwitcherAction::Cancel) && !active.commit;
     }
     let accepted = app.try_state::<Handle>().is_some_and(|shell| {
@@ -232,7 +235,10 @@ pub(crate) fn action(app: &tauri::AppHandle, id: u64, action: TabSwitcherAction)
     if accepted
         && matches!(
             action,
-            TabSwitcherAction::Commit | TabSwitcherAction::Cancel | TabSwitcherAction::NewTab
+            TabSwitcherAction::Commit
+                | TabSwitcherAction::Cancel
+                | TabSwitcherAction::NewTab
+                | TabSwitcherAction::Activate { .. }
         )
     {
         active.settling = true;
@@ -311,8 +317,15 @@ pub(crate) fn tab_switcher_action(
     session_id: String,
     intent: TabSwitcherAction,
 ) -> bool {
+    let tab_id = match &intent {
+        TabSwitcherAction::Activate { tab_id } | TabSwitcherAction::CloseTab { tab_id } => {
+            Some(tab_id.as_str())
+        }
+        _ => None,
+    };
     if !super::authorize(&caller, super::CallerPolicy::Panel, "tab_switcher_action")
         || session_id.len() > 20
+        || tab_id.is_some_and(|id| !super::bounded(id, super::MAX_ITEM_ID_BYTES))
     {
         return false;
     }

@@ -9,8 +9,9 @@
   import { Add01Icon, Cancel01Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 
   // Mirrors the native plate (desktop/src/overlay/geometry.rs), which is
-  // sized to the cards it shows: up to four across and three down, with the
-  // next row peeking in when there are more.
+  // sized to the cards it shows: up to four across, or as many as the display
+  // has room for, and three down, with the next row peeking in when there are
+  // more.
   const COLUMNS = 4;
   const ROWS = 3;
   const CARD = 204;
@@ -42,9 +43,17 @@
   let detached = $derived(material === "liquid_glass" || material === "vibrancy");
   // The new tab card stands after the tabs, in the grid with them.
   let count = $derived(snapshot.entries.length + 1);
-  let across = $derived(Math.min(COLUMNS, count));
-  let down = $derived(Math.min(ROWS, Math.ceil(count / COLUMNS)));
-  let more = $derived(Math.ceil(count / COLUMNS) > ROWS);
+  // Native sized the window for as many columns as fit, so the same count
+  // reads back from its width; the inset native may add stays under a card.
+  let viewport = $state(window.innerWidth);
+  let columns = $derived(
+    viewport > 0
+      ? Math.max(1, Math.min(COLUMNS, Math.floor((viewport - 2 * PAD + GAP) / (CARD + GAP))))
+      : COLUMNS,
+  );
+  let across = $derived(Math.min(columns, count));
+  let down = $derived(Math.min(ROWS, Math.ceil(count / columns)));
+  let more = $derived(Math.ceil(count / columns) > ROWS);
   let plate = $derived({
     width: 2 * PAD + across * CARD + (across - 1) * GAP,
     height: 2 * PAD + down * CARD_HEIGHT + (down - 1) * GAP + (more ? GAP + PEEK : 0),
@@ -158,20 +167,20 @@
   function keyup(event: KeyboardEvent) {
     if (!frozen && event.key === "Control" && snapshot.keyboard) void send({ type: "commit" });
   }
-  async function choose(index: number) {
-    if (frozen) return;
-    if (await send({ type: "select", index })) await send({ type: "commit" });
+  // A card names its tab, never its place: the selection may have moved by
+  // the time the intent arrives.
+  function choose(tab_id: string) {
+    if (!frozen) void send({ type: "activate", tab_id });
   }
   function newTab() {
     if (!frozen) void send({ type: "new_tab" });
   }
-  async function closeAt(index: number) {
-    if (frozen) return;
-    if (await send({ type: "select", index })) await send({ type: "close" });
+  function closeTab(tab_id: string) {
+    if (!frozen) void send({ type: "close_tab", tab_id });
   }
 </script>
 
-<svelte:window onkeydown={keydown} onkeyup={keyup} />
+<svelte:window onkeydown={keydown} onkeyup={keyup} bind:innerWidth={viewport} />
 <section aria-label={m.tab_switcher_title()} data-layout={detached ? "detached" : "fused"}>
   <div
     bind:this={row}
@@ -198,7 +207,7 @@
           tabindex="-1"
           aria-selected={index === snapshot.selected}
           aria-label={`${entry.title || entry.url_host} ${entry.url_host}`}
-          onclick={() => void choose(index)}
+          onclick={() => choose(entry.tab_id)}
         >
           <span class="page">
             {#if entry.preview_url && visible.has(index)}<img
@@ -231,7 +240,7 @@
           type="button"
           tabindex="-1"
           aria-label={m.close_tab()}
-          onclick={() => void closeAt(index)}
+          onclick={() => closeTab(entry.tab_id)}
           ><Icon icon={Cancel01Icon} size={12} strokeWidth={2} /></button
         >
       </div>

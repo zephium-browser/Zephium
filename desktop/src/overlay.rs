@@ -62,6 +62,9 @@ struct State {
     /// What the window was last placed for: the launcher, or the switcher
     /// with this many cards across.
     placed_for: Option<Option<(usize, usize, bool)>>,
+    /// How many cards stand across on the work area the window was last
+    /// placed on.
+    switcher_columns: usize,
     pending_document: Option<tauri::Url>,
     focus_revision: u64,
     focus_timer: bool,
@@ -137,6 +140,7 @@ impl Overlay {
                 layout_revision: 0,
                 placement: None,
                 placed_for: None,
+                switcher_columns: geometry::SWITCHER_COLUMNS,
                 pending_document,
                 focus_revision: 0,
                 focus_timer: false,
@@ -521,10 +525,11 @@ impl Overlay {
         // On macOS the window stays up through its fade-out, so a launcher
         // called back inside it arrives without ever having been ordered out.
         let arriving = !shown(&self.window);
+        let columns = self.state().switcher_columns;
         let placing = snapshot
             .switcher
             .as_ref()
-            .map(|s| geometry::switcher_grid(s.entries.len()));
+            .map(|s| geometry::switcher_grid(s.entries.len(), columns));
         if !visible(&self.window) || self.state().placed_for != Some(placing) {
             self.place();
             self.state().placed_for = Some(placing);
@@ -533,7 +538,8 @@ impl Overlay {
         // come back when it lays itself out again.
         #[cfg(target_os = "macos")]
         crate::panel::hold(snapshot.switcher.as_ref().map(|s| {
-            let (width, height) = geometry::switcher_size(s.entries.len());
+            let (width, height) =
+                geometry::switcher_size(s.entries.len(), self.state().switcher_columns);
             let inset = if animated_shapes() {
                 geometry::SHAPE_INSET
             } else {
@@ -692,6 +698,7 @@ impl Overlay {
             .switcher
             .as_ref()
             .map(|s| s.entries.len());
+        self.state().switcher_columns = geometry::switcher_columns(work_width, inset);
         match cards {
             Some(cards) => geometry::Placement::switcher(work_width, work_height, inset, cards),
             None => geometry::Placement::new(work_width, work_height, inset),
@@ -1157,6 +1164,7 @@ mod action_barrier_tests {
             layout_revision: 0,
             placement: None,
             placed_for: None,
+            switcher_columns: geometry::SWITCHER_COLUMNS,
             pending_document: None,
             focus_revision: 0,
             focus_timer: false,

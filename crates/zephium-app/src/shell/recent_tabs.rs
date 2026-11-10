@@ -96,7 +96,7 @@ impl Shell {
             return;
         }
         session.retain(|id| self.switchable_tab(id));
-        if session.tabs.is_empty() {
+        if session.tabs.is_empty() && !session.visible {
             (self.emit)(Projection::TabSwitcher {
                 session: session.id,
                 state: None,
@@ -108,14 +108,32 @@ impl Shell {
     }
 
     /// Every page of the focused space can be switched to: one asleep wakes
-    /// as it is chosen, as it would from the sidebar. A blank tab has no page
+    /// as it is chosen, as it would from the sidebar, and a browser or
+    /// extension page goes in without a preview. A blank web tab has no page
     /// to go back to.
     fn switchable_tab(&self, id: ItemId) -> bool {
         self.item_in_focused_scope(id)
-            && self
-                .items
-                .tab(id)
-                .is_some_and(|tab| tab.has_view() || tab.url.is_some())
+            && self.items.tab(id).is_some_and(|tab| {
+                tab.has_view()
+                    || tab.url.is_some()
+                    || tab.content != zephium_core::item::TabContent::Web
+            })
+    }
+
+    /// Where a step starts: on the active tab when it heads the order, else
+    /// just before the order, so the first step forward lands on its head.
+    fn first_step(&self, tabs: &[ItemId], reverse: bool) -> Option<usize> {
+        let current = self.windows.focused().and_then(|window| window.active);
+        match (
+            tabs.first().copied() == current && current.is_some(),
+            reverse,
+        ) {
+            (_, _) if tabs.is_empty() => None,
+            (true, _) if tabs.len() < 2 => None,
+            (true, false) => Some(1),
+            (_, true) => Some(tabs.len() - 1),
+            (false, false) => Some(0),
+        }
     }
 
     pub(super) fn recent_tab_order(&self) -> Vec<ItemId> {
@@ -141,10 +159,10 @@ impl Shell {
 
     pub(super) fn operation_recent_tab(&mut self, reverse: bool) -> OperationDisposition {
         let tabs = self.recent_tab_order();
-        if tabs.len() < 2 {
+        let Some(index) = self.first_step(&tabs, reverse) else {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
-        }
-        self.operation_activate(tabs[if reverse { tabs.len() - 1 } else { 1 }])
+        };
+        self.operation_activate(tabs[index])
     }
 
     pub(super) fn begin_tab_switcher(&mut self, id: u64, reverse: bool, keyboard: bool) {
@@ -155,20 +173,24 @@ impl Shell {
             });
             return;
         };
+        let tabs = self.recent_tab_order();
+        let first = self.first_step(&tabs, reverse);
         let mut session = Session {
             id,
             window: window.id,
             profile: window.profile,
             space: window.space,
-            tabs: self.recent_tab_order(),
+            tabs,
             selected: 0,
             keyboard,
             visible: !keyboard,
         };
         if keyboard {
-            session.step(reverse);
+            session.selected = first.unwrap_or(0);
         }
-        if session.tabs.is_empty() {
+        // Opened by hand it shows even with nothing to switch to, for its new
+        // tab; a keyboard gesture with nothing to go to does nothing.
+        if session.tabs.is_empty() && keyboard {
             (self.emit)(Projection::TabSwitcher {
                 session: id,
                 state: None,
@@ -210,13 +232,22 @@ impl Shell {
             return;
         }
         session.retain(|tab| self.switchable_tab(tab));
+        // A tab named by its id is the one meant, whatever the selection has
+        // become while the intent was on its way; one no longer listed is
+        // ignored rather than read as another.
+        let named = |tab_id: &str| ItemId::parse(tab_id).filter(|tab| session.tabs.contains(tab));
         match action {
-            TabSwitcherAction::Commit | TabSwitcherAction::Cancel | TabSwitcherAction::NewTab => {
-                let selected = session.tabs.get(session.selected).copied();
-                if action == TabSwitcherAction::Commit {
-                    if let Some(tab) = selected {
-                        let _ = self.operation_activate(tab);
-                    }
+            TabSwitcherAction::Commit
+            | TabSwitcherAction::Cancel
+            | TabSwitcherAction::NewTab
+            | TabSwitcherAction::Activate { .. } => {
+                let target = match &action {
+                    TabSwitcherAction::Commit => session.tabs.get(session.selected).copied(),
+                    TabSwitcherAction::Activate { tab_id } => named(tab_id),
+                    _ => None,
+                };
+                if let Some(tab) = target {
+                    let _ = self.operation_activate(tab);
                 }
                 (self.emit)(Projection::TabSwitcher {
                     session: id,
@@ -226,6 +257,12 @@ impl Shell {
                     let _ = self.operation_open();
                 }
                 return;
+            }
+            TabSwitcherAction::CloseTab { tab_id } => {
+                if let Some(tab) = named(&tab_id) {
+                    let _ = self.operation_close(tab);
+                }
+                session.retain(|tab| self.switchable_tab(tab));
             }
             TabSwitcherAction::Step { reverse } => session.step(reverse),
             TabSwitcherAction::Select { index } => {
@@ -240,7 +277,7 @@ impl Shell {
                 session.retain(|tab| self.switchable_tab(tab));
             }
         }
-        if session.tabs.is_empty() {
+        if session.tabs.is_empty() && !session.visible {
             (self.emit)(Projection::TabSwitcher {
                 session: id,
                 state: None,
