@@ -54,7 +54,15 @@ impl Shell {
             return;
         };
         if window.active != Some(previous) {
-            self.queue_tab_preview(window.id, previous, false);
+            let (id, active) = (window.id, window.active);
+            if tab_previews::CAPTURES_ONLY_ON_SCREEN {
+                // The tab left is hidden by now; the one switched to is not.
+                if let Some(active) = active {
+                    self.queue_tab_preview(id, active, true);
+                }
+            } else {
+                self.queue_tab_preview(id, previous, false);
+            }
             self.capture_tab_preview();
         }
     }
@@ -210,7 +218,9 @@ impl Shell {
         session.visible = true;
         let window = session.window;
         if let Some(active) = self.windows.get(window).and_then(|window| window.active) {
-            self.queue_tab_preview(window, active, true);
+            // Where only a tab on screen captures, the one in front is the
+            // only one that can be brought up to date.
+            self.queue_tab_preview(window, active, !tab_previews::CAPTURES_ONLY_ON_SCREEN);
         }
         self.project_tab_switcher();
     }
