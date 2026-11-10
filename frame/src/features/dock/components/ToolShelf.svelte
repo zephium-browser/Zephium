@@ -18,7 +18,10 @@
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let { compact = false, roomy = false }: { compact?: boolean; roomy?: boolean } = $props();
+  // Down a rail alone the stack is glyphs; with a tool or Work beside the
+  // rail it has room to name them, as in the full column.
+  const glyphs = $derived(compact && !roomy);
   onMount(() => {
     void profiles.retain();
     return () => profiles.release();
@@ -74,13 +77,13 @@
     role="menuitem"
     class="ui-menu-item shelf-item"
     style:--step={step}
-    title={compact ? named(label, keys) : undefined}
-    aria-label={compact ? label : undefined}
+    title={glyphs ? named(label, keys) : undefined}
+    aria-label={glyphs ? label : undefined}
     aria-current={current || undefined}
     {onclick}
   >
     <span class="ui-menu-icon"><Icon {icon} size={16} /></span>
-    {#if !compact}<span>{label}</span>{#if keys}<span class="shelf-keys">{keys}</span>{/if}{/if}
+    {#if !glyphs}<span>{label}</span>{#if keys}<span class="shelf-keys">{keys}</span>{/if}{/if}
   </button>
 {/snippet}
 
@@ -103,6 +106,7 @@
 <div
   class="shelf"
   data-compact={compact}
+  data-glyphs={glyphs}
   data-morph="profile"
   role="presentation"
   oncontextmenu={nativeMenu}
@@ -126,12 +130,12 @@
         type="button"
         role="menuitem"
         class="ui-menu-item shelf-me"
-        title={compact ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
+        title={glyphs ? `${name} — ${m.browse_profile_settings()}` : m.browse_profile_settings()}
         aria-label={`${name} — ${m.browse_profile_settings()}`}
         onclick={() => run("settings.profiles")}
       >
-        {@render me(compact ? 24 : 22)}
-        {#if !compact}<span class="shelf-me-name">{name}</span>{/if}
+        {@render me(glyphs ? 24 : 22)}
+        {#if !glyphs}<span class="shelf-me-name">{name}</span>{/if}
       </button>
       {#if others.length > 0 || !privately}<div class="shelf-chips" role="presentation">
           {#each others as profile (profile.id)}
@@ -444,45 +448,45 @@
 
   /* Centred on the 40px case: four points either side of it. The rail's marks
      and header lie behind it, so it is near-solid rather than glass. */
-  .shelf[data-compact="true"] :global(.shelf-stack) {
+  .shelf[data-glyphs="true"] :global(.shelf-stack) {
     background: color-mix(in srgb, var(--color-float) 96%, transparent);
     inset-inline-start: -4px;
     min-width: 0;
     width: 48px;
   }
 
-  .shelf[data-compact="true"] .shelf-head,
-  .shelf[data-compact="true"] .shelf-chips {
+  .shelf[data-glyphs="true"] .shelf-head,
+  .shelf[data-glyphs="true"] .shelf-chips {
     flex-direction: column;
     gap: 2px;
     padding: 0;
   }
 
-  .shelf[data-compact="true"] .shelf-me {
+  .shelf[data-glyphs="true"] .shelf-me {
     flex: none;
     justify-content: center;
     width: 100%;
     padding-inline: 0;
   }
 
-  .shelf[data-compact="true"] .shelf-chip {
+  .shelf[data-glyphs="true"] .shelf-chip {
     width: 36px;
     height: 32px;
     border-radius: calc(var(--radius-menu) - var(--menu-pad));
   }
 
-  .shelf[data-compact="true"] .shelf-private[data-after-others] {
+  .shelf[data-glyphs="true"] .shelf-private[data-after-others] {
     margin: 7px 0 0;
   }
 
-  .shelf[data-compact="true"] .shelf-private[data-after-others]::before {
+  .shelf[data-glyphs="true"] .shelf-private[data-after-others]::before {
     width: 14px;
     height: 1px;
     inset-block-start: -4px;
     inset-inline-start: 11px;
   }
 
-  .shelf[data-compact="true"] :global(.shelf-item) {
+  .shelf[data-glyphs="true"] :global(.shelf-item) {
     justify-content: center;
     padding-inline: 0;
   }

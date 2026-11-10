@@ -53,11 +53,13 @@ export function holdShown(value: boolean) {
   if (mode === "hidden") publish(true);
 }
 export const expanded = () => expandedWidth;
+/** The gap between the rail and a tool's panel beside it. */
+export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>
   panelExtent > 0
-    ? Math.max(expandedWidth, panelExtent)
+    ? COMPACT_WIDTH + PANEL_GAP + panelExtent
     : mode === "compact"
       ? COMPACT_WIDTH
       : // Hidden keeps its width: it comes back over the page at that width.
@@ -65,10 +67,10 @@ export const effectiveWidth = () =>
 
 export const hasPanel = () => panelExtent > 0;
 
-/** A tool open in the column widens it to what the tool needs, at least, without
- *  changing the persisted width or mode. */
+/** A tool's panel stands beside the rail, without changing the persisted width
+ *  or mode. */
 export function setPanelExtent(extent: number) {
-  const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH, extent));
+  const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
   panelExtent = next;
   publish(true);

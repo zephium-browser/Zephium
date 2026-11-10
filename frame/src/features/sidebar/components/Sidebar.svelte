@@ -2,7 +2,7 @@
   import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
-  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { IS_WINDOWS } from "$shared/platform";
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
@@ -56,29 +56,24 @@
       settledInWork = work;
     });
   });
-  // A tool becomes the column: the window's row stays above it and the profile
-  // and kept sites below, and only the middle turns from the tabs to the tool.
-  // Settings takes the whole column for its sections.
+  // A tool stands in a panel beside the rail, which keeps the spaces, the
+  // current tab, the way to all the others and the kept sites. Settings takes
+  // the whole column for its sections.
   let tool = $derived(inWork ? null : tools.activeTool());
   let navigating = $derived(settings);
   let paneled = $derived(settings || tool !== null);
-  // The tabs come back from the side the tool leaves to, never on launch.
-  let returning = $state(false);
-  let hadTool = false;
-  $effect.pre(() => {
-    const open = tool !== null;
-    untrack(() => {
-      if (hadTool && !open) returning = true;
-      else if (open) returning = false;
-      hadTool = open;
-    });
-  });
   // Escape leaves a field typed in first, then the tool; whatever is open
   // inside the tool (a menu, a sheet) takes it before either.
   function escape(event: KeyboardEvent) {
     if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || tool === null)
       return;
-    if (!aside || aside.querySelector('[data-open="true"]')) return;
+    if (
+      !aside ||
+      aside.querySelector(
+        '.sidebar-tool-panel [data-open="true"], .ui-disclosure-panel[data-open="true"]',
+      )
+    )
+      return;
     const active = document.activeElement;
     if (
       active instanceof HTMLElement &&
@@ -94,7 +89,7 @@
     event.preventDefault();
     tools.close();
   }
-  let compact = $derived(inWork || isCompact());
+  let compact = $derived(inWork || tool !== null || isCompact());
   // Work's rail and Settings' sections want the column in view; a tool opened
   // while the column is put away comes out on the card instead.
   $effect(() => {
@@ -560,10 +555,10 @@
       disabled={reshaping}
     />{/if}
   <!-- Settings runs the column's full height under the lights' row. A tool
-       keeps the window's row, with the page's own controls beside it. -->
+       keeps the window's row across the rail and its panel. -->
   {#if !settings}<SidebarHeader
       compact={headerCompact}
-      launcher={false}
+      launcher={tool !== null}
       ontoggle={toggleShape}
       pageControls={!inWork}
     />{/if}
@@ -574,23 +569,23 @@
     data-launch={motion.launchState()}
   >
     {#if settings}<div class="sidebar-browser-column">
-        {#if IS_MAC}<div class="sidebar-lights" aria-hidden="true"></div>{/if}
         <div class="sidebar-tool-host sidebar-sheet" data-sheet="settings">
           {@render settingsNavigation()}
         </div>
       </div>
-    {:else}{#key compact}<div class="sidebar-browser-column">
-          {#if tool !== null}{#key tool}<div
-                class="sidebar-tool-host sidebar-sheet"
-                data-sheet={tool}
-              >
-                {@render toolPanel(tool)}
-              </div>{/key}
-          {:else}<div class="sidebar-tabs" data-returning={returning || undefined}>
-              {@render browserBody(compact)}
-            </div>{/if}
+    {:else}{#key compact}<div
+          class="sidebar-browser-column"
+          class:sidebar-tool-rail={tool !== null}
+        >
+          {@render browserBody(compact)}
           {@render dock(compact)}
-        </div>{/key}{/if}
+        </div>{/key}
+      {#if tool !== null}{#key tool}<div
+            class="sidebar-tool-host sidebar-tool-panel"
+            data-sheet={tool}
+          >
+            {@render toolPanel(tool)}
+          </div>{/key}{/if}{/if}
   </div>
 </aside>
 

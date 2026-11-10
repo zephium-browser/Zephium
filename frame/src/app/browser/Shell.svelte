@@ -10,7 +10,7 @@
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
-  import type { TabView } from "$shared/ipc/bindings";
+  import { commands, type TabView } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
   import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
@@ -216,6 +216,9 @@
   let railEssentials = $derived(
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
+  // Beside a tool the rail keeps only the current tab; the switcher holds the rest.
+  let railCurrent = $derived(railTabs.filter((tab) => tab.id === tabs.activeId()));
+  const openSwitcher = () => void commands.tabSwitcherOpen().catch(() => false);
   let railClosable = $derived(
     new Set(tree.today.flatMap((entry) => (entry.kind === "tab" ? [entry.tab.id] : []))),
   );
@@ -374,7 +377,13 @@
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
           {#if compact}
-            <TabRail entries={railTabs} closable={railClosable} onSelect={selectTab} />
+            <TabRail
+              entries={paneled && !inWork ? railCurrent : railTabs}
+              closable={railClosable}
+              onSelect={selectTab}
+              switcher={paneled && !inWork ? openSwitcher : undefined}
+              roomy={paneled || inWork}
+            />
           {:else}
             <!--
             The switch sits above the address field because it governs the
@@ -439,6 +448,7 @@
             profile={tabs.profile()?.id ?? ""}
           />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
+          roomy={paneled}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
         >

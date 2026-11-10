@@ -9,7 +9,6 @@
   import {
     Add01Icon,
     ArrowExpand01Icon,
-    ArrowLeft01Icon,
     Cancel01Icon,
     Search01Icon,
   } from "@hugeicons/core-free-icons";
@@ -77,8 +76,6 @@
 
 <section class="shared-tool" data-tool={tool} aria-label={meta.title()}>
   <header role="group" aria-label={meta.title()} class="shared-tool-header">
-    <!-- The way back to the tabs leads the row, where reading starts. -->
-    <IconButton icon={ArrowLeft01Icon} label={m.tool_back_to_tabs()} onclick={onclose} />
     {#if marked}<span class="shared-tool-icon"><Icon icon={meta.icon} size={16} /></span>{/if}
     {#if heading}{@render heading()}{:else}<h2>{meta.title()}</h2>{/if}
     {#if actions}{@render actions()}{/if}{#if canCompose}<IconButton
@@ -89,7 +86,7 @@
         icon={ArrowExpand01Icon}
         label={m.tool_open_full()}
         onclick={onexpand}
-      />{/if}
+      />{/if}<IconButton icon={Cancel01Icon} label={m.tool_close()} onclick={onclose} />
   </header>
   {#if (searchLabel && searchOpen) || filters}<div
       class="shared-tool-controls"

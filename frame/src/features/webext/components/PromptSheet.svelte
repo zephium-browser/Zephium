@@ -1,7 +1,12 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { onDestroy } from "svelte";
-  import { effectiveWidth, expandBriefly, hasPanel } from "$session/sidebar-mode.svelte";
+  import {
+    COMPACT_WIDTH,
+    effectiveWidth,
+    expandBriefly,
+    hasPanel,
+  } from "$session/sidebar-mode.svelte";
 
   let {
     labelledby,
@@ -13,12 +18,13 @@
 
   // The page is a native view drawn over the window, so a prompt in the
   // middle of it would sit underneath. It belongs to the sidebar instead: at
-  // rail width the full column opens for it and folds away after, and over an
-  // open tool it covers the tool.
-  const restore = hasPanel() ? () => {} : expandBriefly();
+  // rail width the full column opens for it and folds away after, and beside
+  // an open tool it covers the tool's panel.
+  const beside = hasPanel();
+  const restore = beside ? () => {} : expandBriefly();
   onDestroy(restore);
 
-  const left = INSET;
+  const left = beside ? COMPACT_WIDTH + INSET : INSET;
 </script>
 
 <div
