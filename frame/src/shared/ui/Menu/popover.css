@@ -5,6 +5,10 @@
 @import "./surface.css";
 
 .ui-menu {
+  /* The ends of a list that scrolls wear the menu's own wash, so they read
+     as the panel and not a band laid on it. */
+  --color-menu-step: var(--color-menu);
+
   display: flex;
   flex-direction: column;
 
@@ -77,7 +81,7 @@
 
   /* Full bleed, because a divider that stops short of the edge reads as a
      misaligned row rather than as a break in the list. */
-  margin: 5px calc(var(--menu-pad) * -1);
+  margin: 5px calc(var(--menu-pad, 6px) * -1);
   background: var(--color-menu-separator);
 }
 
@@ -112,10 +116,85 @@
 }
 
 /* A menu long enough to need scrolling keeps its own padding in the scroller:
-   Select brings a viewport of its own, a dropdown has no reason to. */
-.ui-menu-scroll {
+   Select brings a viewport of its own, a dropdown has no reason to. Doubled
+   over the surface's own clip, wherever its stylesheet lands in the order. */
+.ui-menu.ui-menu-scroll {
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: 22px;
+}
+
+/* A hairline of a thumb in a gutter just wide enough for it, clear of the
+   rounded corners, brighter under the pointer. */
+.ui-menu-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-track {
+  margin-block: 10px;
+  background: transparent;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-inline-start-width: 2px;
+  border-radius: var(--radius-capsule);
+  background-color: var(--scroll-thumb);
+  background-clip: padding-box;
+}
+
+.ui-menu-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+
+/* The ends of a list that scrolls, laid over its first and last rows: a
+   chevron on the menu's own material that glides the list while the pointer
+   rests on it. */
+.ui-menu-step {
+  position: sticky;
+  z-index: 1;
+  display: grid;
+  flex: none;
+  place-items: center;
+  block-size: 22px;
+  margin-inline: calc(var(--menu-pad, 6px) * -1);
+  color: var(--color-muted);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-smooth),
+    visibility 0s linear var(--motion-fast);
+}
+
+.ui-menu-step[data-dir="up"] {
+  inset-block-start: 0;
+  margin-block-end: -22px;
+  background: linear-gradient(to bottom, var(--color-menu-step) 45%, transparent);
+}
+
+.ui-menu-step[data-dir="down"] {
+  inset-block-end: 0;
+  margin-block-start: -22px;
+  background: linear-gradient(to top, var(--color-menu-step) 45%, transparent);
+}
+
+.ui-menu-step[data-shown] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    opacity var(--motion-fast) var(--ease-smooth),
+    visibility 0s;
+}
+
+.ui-menu-step:hover {
+  color: var(--color-text);
+}
+
+/* An opaque menu's ends are the solid colour it is painted in. */
+.ui-menu[data-menu-material="opaque"] {
+  --color-menu-step: var(--color-float);
 }
 
 /* A row that opens more beside it ends in a chevron, where a hint would. */

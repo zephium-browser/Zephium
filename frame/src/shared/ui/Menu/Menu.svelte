@@ -32,6 +32,7 @@
   import Icon from "../Icon/Icon.svelte";
   import FavIcon from "../FavIcon/FavIcon.svelte";
   import Mark from "./Mark.svelte";
+  import MenuStep from "./MenuStep.svelte";
   import "./popover.css";
   import { menuMaterialFor } from "./material";
   import { layoutAnchor } from "./anchor";
@@ -116,7 +117,9 @@
             sideOffset={4}
             collisionPadding={10}
           >
+            <MenuStep dir="up" />
             {@render list(entry.entries)}
+            <MenuStep dir="down" />
           </DropdownMenu.SubContent>
         </DropdownMenu.Portal>
       </DropdownMenu.Sub>
@@ -162,7 +165,9 @@
         if (returnFocus && !returnFocus()) event.preventDefault();
       }}
     >
+      <MenuStep dir="up" />
       {@render list(entries)}
+      <MenuStep dir="down" />
     </DropdownMenu.Content>
   </DropdownMenu.Portal>
 </DropdownMenu.Root>
