@@ -224,6 +224,11 @@ jobs:
           scripts/ci/linux-test.sh cargo test -p zephium-engine --locked --lib
           platform::linux::guide::tests::guide_paints_above_ephemeral_webkit_and_remains_input_transparent_x11
           -- --exact --ignored --test-threads=1
+      - name: Native GTK modifier tracking
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          platform::linux::modifiers::native_tests::capture_tracks_both_controls_across_panel_focus_and_clears_lifecycle_state
+          -- --exact --ignored --test-threads=1
       - name: Native X11 shortcut lifecycle
         run: >-
           scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib

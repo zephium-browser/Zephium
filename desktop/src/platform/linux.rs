@@ -19,6 +19,13 @@ use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::Shortcut;
 use zephium_engine::MainThreadDispatch;
 
+#[path = "linux_modifiers.rs"]
+mod modifiers;
+
+pub fn control_down() -> bool {
+    modifiers::control_down()
+}
+
 #[path = "linux_sidebar_edge.rs"]
 mod sidebar_edge;
 
@@ -188,6 +195,7 @@ pub fn init(window: &WebviewWindow) -> Result<(), LinuxInitError> {
         .map_err(|error| LinuxInitError::DefaultVBoxUnavailable(error.to_string()))?;
     let chrome = privileged_webview(&vbox)?;
     harden_privileged_webview(&chrome)?;
+    modifiers::install(&gtk_window);
     install_composition(
         &gtk_window,
         &vbox,
@@ -287,7 +295,9 @@ pub fn harden_privileged(window: &WebviewWindow) -> Result<(), LinuxInitError> {
         .default_vbox()
         .map_err(|error| LinuxInitError::DefaultVBoxUnavailable(error.to_string()))?;
     let chrome = privileged_webview(&vbox)?;
-    harden_privileged_webview(&chrome)
+    harden_privileged_webview(&chrome)?;
+    modifiers::install(&gtk_window);
+    Ok(())
 }
 
 fn privileged_webview(vbox: &gtk::Box) -> Result<webkit2gtk::WebView, LinuxInitError> {
