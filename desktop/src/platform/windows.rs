@@ -1,5 +1,6 @@
 #[path = "windows_caption.rs"]
 mod caption;
+pub(crate) use caption::replay as replay_caption;
 #[path = "windows_menus.rs"]
 mod menus;
 #[path = "windows_pointer.rs"]
@@ -562,7 +563,12 @@ pub fn apply_material(window: &WebviewWindow, dark: bool) -> bool {
     // Use the fallible native adapter directly; the Tauri effect dispatcher
     // discards the underlying DWM error and can falsely report acrylic.
     let preference = crate::material::preference();
-    let chosen = crate::material::windows_material(preference, menus::high_contrast(), launcher);
+    let chosen = crate::material::windows_material(
+        preference,
+        menus::high_contrast(),
+        launcher,
+        windows_version::OsVersion::current().build,
+    );
     let clear = || {
         let _ = window_vibrancy::clear_tabbed(window);
         let _ = window_vibrancy::clear_mica(window);

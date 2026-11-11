@@ -222,31 +222,6 @@
     "enabled": true
   },
   {
-    "id": "npm",
-    "name": "npm",
-    "keywords": [
-      "npm"
-    ],
-    "search_url": "https://www.npmjs.com/search?q={query}",
-    "home_url": "https://www.npmjs.com/",
-    "domain": "www.npmjs.com",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
-    "id": "crates",
-    "name": "crates.io",
-    "keywords": [
-      "crates",
-      "crate"
-    ],
-    "search_url": "https://crates.io/search?q={query}",
-    "home_url": "https://crates.io/",
-    "domain": "crates.io",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
     "id": "stackoverflow",
     "name": "Stack Overflow",
     "keywords": [
@@ -299,31 +274,6 @@
     "enabled": true
   },
   {
-    "id": "imdb",
-    "name": "IMDb",
-    "keywords": [
-      "imdb"
-    ],
-    "search_url": "https://www.imdb.com/find/?q={query}",
-    "home_url": "https://www.imdb.com/",
-    "domain": "www.imdb.com",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
-    "id": "goodreads",
-    "name": "Goodreads",
-    "keywords": [
-      "gr",
-      "goodreads"
-    ],
-    "search_url": "https://www.goodreads.com/search?q={query}",
-    "home_url": "https://www.goodreads.com/",
-    "domain": "www.goodreads.com",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
     "id": "wolframalpha",
     "name": "Wolfram Alpha",
     "keywords": [
@@ -333,18 +283,6 @@
     "search_url": "https://www.wolframalpha.com/input?i={query}",
     "home_url": "https://www.wolframalpha.com/",
     "domain": "www.wolframalpha.com",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
-    "id": "openstreetmap",
-    "name": "OpenStreetMap",
-    "keywords": [
-      "osm"
-    ],
-    "search_url": "https://www.openstreetmap.org/search?query={query}",
-    "home_url": "https://www.openstreetmap.org/",
-    "domain": "www.openstreetmap.org",
     "suggestions": null,
     "enabled": true
   },
@@ -362,18 +300,6 @@
     "enabled": true
   },
   {
-    "id": "rust-docs",
-    "name": "Rust docs",
-    "keywords": [
-      "rust"
-    ],
-    "search_url": "https://doc.rust-lang.org/std/?search={query}",
-    "home_url": "https://doc.rust-lang.org/",
-    "domain": "doc.rust-lang.org",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
     "id": "docs-rs",
     "name": "docs.rs",
     "keywords": [
@@ -382,31 +308,6 @@
     "search_url": "https://docs.rs/releases/search?query={query}",
     "home_url": "https://docs.rs/",
     "domain": "docs.rs",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
-    "id": "pypi",
-    "name": "PyPI",
-    "keywords": [
-      "pypi"
-    ],
-    "search_url": "https://pypi.org/search/?q={query}",
-    "home_url": "https://pypi.org/",
-    "domain": "pypi.org",
-    "suggestions": null,
-    "enabled": true
-  },
-  {
-    "id": "gitlab",
-    "name": "GitLab",
-    "keywords": [
-      "gl",
-      "gitlab"
-    ],
-    "search_url": "https://gitlab.com/search?search={query}",
-    "home_url": "https://gitlab.com/",
-    "domain": "gitlab.com",
     "suggestions": null,
     "enabled": true
   },

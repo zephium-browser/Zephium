@@ -6,6 +6,10 @@ const ENTRIES: usize = 16;
 const CACHE_BYTES: usize = 1024 * 1024 - 4096;
 const ENTRY_BYTES: usize = 80 * 1024;
 const FRESH: Duration = Duration::from_secs(30);
+/// WebView2 captures only a view on screen, and a switch hides the tab it
+/// leaves before its capture runs. There a tab is captured in front: when it
+/// finishes loading, once it is switched to, and when the switcher opens.
+pub(super) const CAPTURES_ONLY_ON_SCREEN: bool = cfg!(target_os = "windows");
 
 struct Preview {
     tab: ItemId,
@@ -136,6 +140,23 @@ impl Shell {
                 let _ = queue.try_push(Command::CaptureTabPreview);
             }
         }
+    }
+
+    /// A tab that finished loading in front of the focused window is on
+    /// screen, the one moment a view that only captures there can be taken.
+    pub(super) fn capture_loaded_tab_preview(&mut self, tab: ItemId) {
+        if !CAPTURES_ONLY_ON_SCREEN {
+            return;
+        }
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.active == Some(tab))
+            .map(|window| window.id)
+        else {
+            return;
+        };
+        self.queue_tab_preview(window, tab, false);
     }
 
     pub(super) fn capture_tab_preview(&mut self) {
