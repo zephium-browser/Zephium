@@ -1,6 +1,12 @@
 //! One host-initiated asynchronous evaluation. No exposed message handler,
-//! host object, timer, or page-callable native capability.
+//! host object, page timer, or page-callable native capability. Linux favicon
+//! calls have a native deadline; generic pulls wait for document changes.
 const MAX_RESULT_BYTES: usize = 256 * 1024;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{cancel, evaluate, evaluate_until_navigation};
 
 #[cfg(target_os = "macos")]
 pub(crate) fn evaluate(

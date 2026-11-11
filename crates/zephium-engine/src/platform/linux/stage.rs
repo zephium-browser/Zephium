@@ -276,6 +276,12 @@ impl Stage {
             .is_ok_and(|state| state.views.contains_key(&id))
     }
 
+    pub fn wants_visible(&self, id: ItemId) -> bool {
+        self.state
+            .try_borrow()
+            .map_or(true, |state| !state.hidden && state.visible.contains(&id))
+    }
+
     /// A coalesced layout may run before a later-queued WebKit construction.
     /// Retaining the desired tree lets creation catch the native widget up to
     /// the latest geometry and visibility immediately.
@@ -1773,6 +1779,8 @@ mod tests {
             gtk::main_iteration_do(false);
         }
         let parked: i32 = fixed.child_property(&content, "x");
+        assert!(stage.wants_visible(id));
+        assert!(stage.wants_visible(sibling_id));
         let sibling_parked: i32 = fixed.child_property(&sibling, "x");
         assert_eq!(parked, -721);
         assert_eq!(sibling_parked, parked);
@@ -2112,6 +2120,8 @@ mod tests {
             .expect("native stage guide");
         assert!(guide.is_child_visible());
         assert!(stage.apply(None, None, &[]));
+        assert!(!stage.wants_visible(id));
+        assert!(!stage.wants_visible(sibling_id));
         assert!(!guide.is_child_visible());
         window.show_all();
         while gtk::events_pending() {

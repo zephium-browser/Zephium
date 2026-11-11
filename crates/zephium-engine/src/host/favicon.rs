@@ -16,7 +16,7 @@
 /// A page that never loads is answered after thirty seconds, or cancelled by
 /// its navigation. Observers, listeners and the timer are removed before every
 /// answer, and a newer watch of the same document cancels this one.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) const FAVICON_WATCH_JS: &str = r#"(function(last){
   'use strict';
   var STOP = '__zephium_favicon_stop__';
@@ -134,7 +134,7 @@ pub(super) const FAVICON_WATCH_JS: &str = r#"(function(last){
 /// base64, or null. Same-origin addresses carry the page's cookies, as an
 /// image tag would; any other asks as an anonymous cross-origin image, which
 /// the canvas can read only when the server allows it.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) const FAVICON_RASTER_JS: &str = r#"(function(source){
   'use strict';
   return new Promise(function(resolve) {
@@ -185,12 +185,12 @@ pub(super) const FAVICON_RASTER_JS: &str = r#"(function(source){
 
 /// A token the page produced, echoed back so a watch resumes from it. Only
 /// short hex is ever placed in a script.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) fn valid_token(token: &str) -> bool {
     !token.is_empty() && token.len() <= 16 && token.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) fn watch_expression(last: Option<&str>) -> String {
     let last = last
         .filter(|token| valid_token(token))
@@ -198,7 +198,7 @@ pub(super) fn watch_expression(last: Option<&str>) -> String {
     FAVICON_WATCH_JS.replace("__LAST__", &last)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) fn raster_expression(url: &str) -> Option<String> {
     if url.len() > zephium_core::icon::MAX_CANDIDATE_URL_BYTES {
         return None;
@@ -208,7 +208,7 @@ pub(super) fn raster_expression(url: &str) -> Option<String> {
 }
 
 /// What the page's decoded answer means for a watch of `page_url`.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) fn same_address(reported: &str, page_url: &str) -> bool {
     let (Ok(mut reported), Ok(mut page)) = (url::Url::parse(reported), url::Url::parse(page_url))
     else {
@@ -222,10 +222,10 @@ pub(super) fn same_address(reported: &str, page_url: &str) -> bool {
 /// Reports one watch may make for a document: the head's first icons, a few
 /// changes, and the last. A page rewriting its icon links forever cannot keep
 /// the watch, or the host, busy.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) const MAX_WATCH_RUNS: u8 = 6;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod supported {
     use super::*;
     use crate::host::EngineHost;
@@ -417,7 +417,7 @@ mod supported {
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 pub(super) use supported::{rasterize, watch};
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl super::EngineHost {
     pub(crate) fn discover_favicon(&mut self, _id: zephium_core::ids::ItemId) {}
     pub(crate) fn rasterize_favicon(&mut self, _id: zephium_core::ids::ItemId, _url: String) {}
@@ -478,3 +478,7 @@ mod tests {
         assert!(!same_address("garbage", "https://a.example/"));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "favicon_linux_tests.rs"]
+mod linux_tests;

@@ -207,7 +207,7 @@ struct ObservedView {
     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
     // Which icon watch of this view's document is current; an older watch's
     // reports are ignored.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     favicon_watch: Cell<u64>,
     // The document an AutoFill warning was shown for; an approval fills only
     // that document.
@@ -396,6 +396,8 @@ impl Drop for ObservedView {
         // rejected even if the shell reuses the same logical ItemId.
         self.event_permit.revoke();
         self.navigation.revoke();
+        #[cfg(target_os = "linux")]
+        crate::platform::cosmetic_pull::cancel(&self.view);
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
         #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -774,6 +774,10 @@ fn rule_identifier(digest: [u8; 32]) -> String {
 }
 
 #[cfg(test)]
+#[path = "content_filter_native_tests.rs"]
+mod native_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -1069,7 +1073,7 @@ mod tests {
         Arc::from(String::from_utf8(bytes).expect("verified WebKit blocker artifact is UTF-8"))
     }
 
-    fn wait_for_native_compilation(
+    pub(super) fn wait_for_native_compilation(
         context: &glib::MainContext,
         cache: &Path,
         rules: Arc<ContentRules>,
