@@ -14,7 +14,8 @@
       <li class="essential" data-open="true"><button type="button">Live Essential</button></li>
     </ul>
     <input aria-label="Sidebar field" />
-    <button type="button">Sidebar control</button>
+    <!-- An explicit tab stop keeps the fixture independent of host keyboard navigation settings. -->
+    <button type="button" tabindex="0">Sidebar control</button>
     {#if panel}<div class={panel} data-open="true"></div>{/if}
   {/snippet}
 </Sidebar>
