@@ -6,6 +6,17 @@ use url::Url;
 
 pub const MAX_SHORTCUTS: usize = 64;
 pub const MAX_SHORTCUT_SETTINGS_BYTES: usize = 32 * 1024;
+/// Defaults that were once offered and no longer are.
+const RETIRED: &[&str] = &[
+    "rust-docs",
+    "npm",
+    "pypi",
+    "gitlab",
+    "crates",
+    "imdb",
+    "goodreads",
+    "openstreetmap",
+];
 
 const PREFIX_STOPLIST: &[&str] = &[
     "a",
@@ -124,10 +135,13 @@ impl ShortcutRegistry {
         if value.len() > MAX_SHORTCUT_SETTINGS_BYTES {
             return None;
         }
-        let entries: Vec<SearchShortcut> = serde_json::from_str(value).ok()?;
+        let mut entries: Vec<SearchShortcut> = serde_json::from_str(value).ok()?;
         if entries.len() > MAX_SHORTCUTS {
             return None;
         }
+        // A list saved before a default was taken out still names it; it is
+        // left behind rather than the whole list refused.
+        entries.retain(|entry| !RETIRED.contains(&entry.id.as_str()));
         let defaults = Self::default();
         let mut ids = std::collections::HashSet::new();
         let mut keywords = std::collections::HashSet::new();
@@ -338,7 +352,7 @@ mod tests {
     #[test]
     fn defaults_and_settings_are_bounded_and_round_trip() {
         let registry = ShortcutRegistry::default();
-        assert_eq!(registry.entries().len(), 36);
+        assert_eq!(registry.entries().len(), 28);
         let stored = serde_json::to_string(registry.entries()).unwrap();
         assert!(stored.len() < MAX_SHORTCUT_SETTINGS_BYTES);
         assert_eq!(
@@ -356,8 +370,30 @@ mod tests {
         assert_eq!(loaded.parse("ex cats").shortcut, Some("custom:example"));
         assert_eq!(
             ShortcutRegistry::from_setting("").unwrap().entries().len(),
-            36
+            28
         );
+    }
+
+    #[test]
+    fn a_list_saved_with_a_retired_default_loads_without_it() {
+        let mut entries = ShortcutRegistry::default().0;
+        entries[1].enabled = false;
+        entries.push(SearchShortcut {
+            id: "npm".into(),
+            name: "npm".into(),
+            keywords: vec!["npm".into()],
+            search_url: "https://www.npmjs.com/search?q={query}".into(),
+            home_url: "https://www.npmjs.com/".into(),
+            domain: "www.npmjs.com".into(),
+            suggestions: None,
+            enabled: true,
+        });
+        let loaded =
+            ShortcutRegistry::from_setting(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(loaded.entries().len(), 28);
+        assert!(loaded.entries().iter().all(|entry| entry.id != "npm"));
+        assert!(!loaded.entries()[1].enabled);
+        assert_eq!(loaded.parse("npm cats").shortcut, None);
     }
 
     #[test]
