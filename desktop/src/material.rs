@@ -43,12 +43,18 @@ impl Preference {
 }
 
 #[cfg(any(target_os = "windows", test))]
-pub fn windows_material(preference: Preference, high_contrast: bool, launcher: bool) -> Material {
+pub fn windows_material(
+    preference: Preference,
+    high_contrast: bool,
+    launcher: bool,
+    build: u32,
+) -> Material {
     if high_contrast || preference == Preference::None {
         Material::None
+    } else if !launcher && preference == Preference::Auto && build == 22000 {
+        // Acrylic uses the slow legacy composition API on Windows 11 21H2.
+        Material::Mica
     } else if launcher || matches!(preference, Preference::Auto | Preference::Acrylic) {
-        // Automatic is Acrylic: the window shows what is behind it, where
-        // Mica only takes the wallpaper's hue and reads as a solid sheet.
         Material::Acrylic
     } else if preference == Preference::MicaAlt {
         Material::MicaAlt
@@ -451,6 +457,36 @@ mod tests {
     }
 
     #[test]
+    fn windows_22000_auto_keeps_mica() {
+        for build in [19045, 22000, 22621, 26100] {
+            assert_eq!(
+                windows_material(Preference::Auto, false, false, build),
+                if build == 22000 {
+                    Material::Mica
+                } else {
+                    Material::Acrylic
+                }
+            );
+            assert_eq!(
+                windows_material(Preference::Acrylic, false, false, build),
+                Material::Acrylic
+            );
+            assert_eq!(
+                windows_material(Preference::Auto, false, true, build),
+                Material::Acrylic
+            );
+            assert_eq!(
+                windows_material(Preference::Auto, true, false, build),
+                Material::None
+            );
+            assert_eq!(
+                windows_material(Preference::None, false, false, build),
+                Material::None
+            );
+        }
+    }
+
+    #[test]
     fn windows_choices_select_the_requested_backdrop() {
         for (preference, expected) in [
             (Preference::Auto, Material::Acrylic),
@@ -461,11 +497,17 @@ mod tests {
             (Preference::Vibrancy, Material::Mica),
             (Preference::LiquidGlass, Material::Mica),
         ] {
-            assert_eq!(windows_material(preference, false, false), expected);
-            assert_eq!(windows_material(preference, true, false), Material::None);
-            assert_eq!(windows_material(preference, true, true), Material::None);
+            assert_eq!(windows_material(preference, false, false, 22621), expected);
             assert_eq!(
-                windows_material(preference, false, true),
+                windows_material(preference, true, false, 22621),
+                Material::None
+            );
+            assert_eq!(
+                windows_material(preference, true, true, 22621),
+                Material::None
+            );
+            assert_eq!(
+                windows_material(preference, false, true, 22621),
                 if preference == Preference::None {
                     Material::None
                 } else {
