@@ -804,7 +804,20 @@ impl Overlay {
                 .window
                 .set_size(PhysicalSize::new(placement.width * scale, height * scale));
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        if let Ok(window) = self.window.gtk_window() {
+            linux::place(
+                &window,
+                LogicalSize::new(placement.width, height),
+                supports_position.then(|| {
+                    PhysicalPosition::new(
+                        f64::from(work.position.x) + placement.x * scale,
+                        f64::from(work.position.y) + placement.y * scale,
+                    )
+                }),
+            );
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = self
                 .window

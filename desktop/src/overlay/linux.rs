@@ -2,6 +2,24 @@ use gtk::prelude::*;
 
 use crate::linux_display::{display_backend, DisplayBackend};
 
+/// Issue geometry on GTK's thread before presentation can map the window.
+pub(super) fn place(
+    window: &gtk::ApplicationWindow,
+    size: tauri::LogicalSize<f64>,
+    position: Option<tauri::PhysicalPosition<f64>>,
+) {
+    // Tao queues these setters on another GLib source. Calling them through
+    // Tauri and then presenting GTK directly can map the previous grid size.
+    let size = size.cast::<i32>();
+    window.resize(size.width.max(1), size.height.max(1));
+    if let (DisplayBackend::X11, Some(position)) = (display_backend(window), position) {
+        // Match Tao's physical-to-GTK conversion using this window's
+        // current scale, rather than the destination monitor's scale.
+        let position = position.to_logical::<i32>(f64::from(window.scale_factor()));
+        window.move_(position.x, position.y);
+    }
+}
+
 /// Refresh the owner before mapping, returning whether global coordinates exist.
 pub(super) fn prepare(
     window: &gtk::ApplicationWindow,
@@ -119,6 +137,58 @@ mod tests {
         assert_eq!(panel.transient_for().as_ref(), Some(owner.upcast_ref()));
         panel.show();
         wait_for(|| panel.is_mapped());
+
+        if expected == DisplayBackend::X11 {
+            panel.hide();
+            wait_for(|| !panel.is_mapped());
+            panel.set_decorated(false);
+            panel.set_resizable(false);
+            // Match Tao's minimal default size and provide a nonzero child
+            // requisition instead of GTK's empty-window 200px fallback.
+            panel.set_default_size(1, 1);
+            let content = gtk::DrawingArea::new();
+            content.set_size_request(1, 1);
+            panel.add(&content);
+            content.show();
+            let work = panel.display().monitor(0).unwrap().workarea();
+            let scale = f64::from(panel.scale_factor());
+            // A reused one-card window must receive the four-card geometry
+            // before its next map; otherwise the WM may place the small grid
+            // and the later resize can extend it beyond the work area.
+            for cards in [0, 3, 0, 3] {
+                panel.hide();
+                wait_for(|| !panel.is_mapped());
+                let placement = super::super::geometry::Placement::switcher(
+                    f64::from(work.width()),
+                    f64::from(work.height()),
+                    0.0,
+                    cards,
+                );
+                let size =
+                    tauri::LogicalSize::new(placement.width, placement.height(f64::INFINITY));
+                let x = f64::from(work.x()) + placement.x;
+                let y = f64::from(work.y()) + placement.y;
+                place(
+                    &panel,
+                    size,
+                    Some(tauri::PhysicalPosition::new(x * scale, y * scale)),
+                );
+                let requested = size.cast::<i32>();
+                // Observe GTK's pending size while still hidden, without
+                // pumping the main context to consume deferred requests.
+                assert_eq!(panel.size(), (requested.width, requested.height));
+                assert!(!panel.is_mapped());
+                assert!(x >= f64::from(work.x()) && y >= f64::from(work.y()));
+                assert!(x + size.width <= f64::from(work.x() + work.width()));
+                assert!(y + size.height <= f64::from(work.y() + work.height()));
+                panel.present();
+                // Native configure acknowledgement is asynchronous, and the
+                // window manager remains authoritative over final position.
+                wait_for(|| {
+                    panel.is_mapped() && panel.size() == (requested.width, requested.height)
+                });
+            }
+        }
 
         // SAFETY: test-owned windows are no longer used after destruction.
         unsafe {
