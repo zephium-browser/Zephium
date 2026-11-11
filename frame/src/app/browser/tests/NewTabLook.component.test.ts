@@ -94,6 +94,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
 });
 afterEach(() => {
+  themed("zephium");
   vi.useRealTimers();
   preferences.dispose();
   delete document.documentElement.dataset.theme;
@@ -252,18 +253,14 @@ test.each(["zephium", "paper", "nord", "dracula", "catppuccin"])(
   async (id) => {
     const screen = await setup({ "ui.newtab-clock-format": "12h" });
     await skied(screen);
-    try {
-      themed(id);
-      for (const theme of ["dark", "light"]) {
-        document.documentElement.dataset.theme = theme;
-        screen.container.style.background = "var(--color-canvas)";
-        await skied(screen);
-        await page
-          .elementLocator(screen.container)
-          .screenshot({ path: `../../../../../target/look/themes/${id}-${theme}-newtab-page.png` });
-      }
-    } finally {
-      themed("zephium");
+    themed(id);
+    for (const theme of ["dark", "light"]) {
+      document.documentElement.dataset.theme = theme;
+      screen.container.style.background = "var(--color-canvas)";
+      await skied(screen);
+      await page
+        .elementLocator(screen.container)
+        .screenshot({ path: `../../../../../target/look/themes/${id}-${theme}-newtab-page.png` });
     }
   },
 );
