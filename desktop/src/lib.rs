@@ -5204,6 +5204,20 @@ fn search_shortcut_defaults(caller: WebviewWindow) -> Vec<zephium_core::search::
         .to_vec()
 }
 
+fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> {
+    if key == "search.shortcuts" {
+        return stored.map(|value| {
+            if value.is_empty() {
+                return value;
+            }
+            zephium_core::search::ShortcutRegistry::from_setting(&value)
+                .and_then(|registry| serde_json::to_string(registry.entries()).ok())
+                .unwrap_or_default()
+        });
+    }
+    stored
+}
+
 #[tauri::command]
 #[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
@@ -5221,14 +5235,7 @@ async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     // busy for seconds (an import, a deletion); the read waits off it.
     tauri::async_runtime::spawn_blocking(move || {
         let stored = APP_STORE.get().and_then(|store| store.app_setting(&key));
-        if key == "search.shortcuts"
-            && stored.as_deref().is_some_and(|value| {
-                zephium_core::search::ShortcutRegistry::from_setting(value).is_none()
-            })
-        {
-            return Some(String::new());
-        }
-        stored
+        setting_value_for_frame(&key, stored)
     })
     .await
     .ok()
@@ -8235,6 +8242,36 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shortcut_ipc_reads_omit_retired_entries() {
+        use zephium_core::search::ShortcutRegistry;
+        let mut entries = ShortcutRegistry::default().entries().to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", Some(raw)),
+            Some(expected)
+        );
+        for value in ["", "not json", "null"] {
+            assert_eq!(
+                super::setting_value_for_frame("search.shortcuts", Some(value.into())),
+                Some(String::new())
+            );
+        }
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", None),
+            None
+        );
+        assert_eq!(
+            super::setting_value_for_frame("search.engine", Some("google".into())),
+            Some("google".into())
+        );
+    }
 
     #[test]
     fn only_an_app_link_grant_names_a_scheme() {

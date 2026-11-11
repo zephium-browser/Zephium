@@ -131,6 +131,15 @@ pub const CODE_FONTS: &[&str] = &[
 /// carried, so a second run finds nothing to do.
 pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
     let mut writes = Vec::new();
+    if let Some(value) = stored("search.shortcuts").filter(|value| !value.is_empty()) {
+        if let Some(registry) = crate::search::ShortcutRegistry::from_setting(&value) {
+            if let Ok(filtered) = serde_json::to_string(registry.entries()) {
+                if filtered != value {
+                    writes.push(("search.shortcuts", filtered));
+                }
+            }
+        }
+    }
     match stored("ui.text-size").as_deref() {
         Some("large") => {
             if stored("ui.font-size").is_none() {
@@ -629,6 +638,24 @@ mod tests {
             );
         }
         writes
+    }
+
+    #[test]
+    fn saved_shortcuts_migrate_without_retired_entries_once() {
+        let mut entries = crate::search::ShortcutRegistry::default()
+            .entries()
+            .to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        assert_eq!(writes, vec![("search.shortcuts", expected.clone())]);
+        for value in [expected.as_str(), "", "not json", "null"] {
+            assert!(migrations(|key| (key == "search.shortcuts").then(|| value.into())).is_empty());
+        }
     }
 
     #[test]

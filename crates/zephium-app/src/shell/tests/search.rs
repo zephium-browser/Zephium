@@ -718,6 +718,41 @@ fn recorded_searches_cannot_crowd_visited_pages_out_of_the_list() {
 }
 
 #[test]
+fn shortcut_writes_and_projections_omit_retired_entries() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    shell.emit = Box::new(move |projection| {
+        if let Projection::UiCommand(command) = projection {
+            sink.lock().unwrap().push(command);
+        }
+    });
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries[0].enabled = false;
+    let expected = serde_json::to_string(&entries).unwrap();
+    let mut retired = entries[0].clone();
+    retired.id = "npm".into();
+    entries.push(retired);
+    let raw = serde_json::to_string(&entries).unwrap();
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    assert_eq!(
+        store.app_setting("search.shortcuts"),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![format!("preference.search.shortcuts={expected}")]
+    );
+    assert!(shell.search.shortcuts.get("npm").is_none());
+    assert!(!shell.search.shortcuts.entries()[0].enabled);
+    shell.operation_set_app_setting("search.shortcuts".into(), "not json".into());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(expected));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn shortcuts_drive_typed_navigation_and_search_answers_after_settings_reload() {
     use zephium_core::search::ShortcutRegistry;
     let store = Arc::new(FakeStore::default());
