@@ -604,6 +604,7 @@ fn canonical_admission_refuses_busy_staging_then_recovers_after_release() {
         PrivateFsError::LockUnavailable
     );
     assert_eq!(fs::read(&staging).unwrap(), LOCK_MARKER);
+    rustix::fs::flock(&staging_owner, rustix::fs::FlockOperation::Unlock).unwrap();
     drop(staging_owner);
 
     let namespace = LockedPrivateNamespace::open_or_create(&root).unwrap();
