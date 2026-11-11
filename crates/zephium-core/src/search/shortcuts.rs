@@ -95,6 +95,7 @@ pub struct SearchShortcut {
     pub search_url: String,
     pub home_url: String,
     pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestions: Option<SearchEngine>,
     pub enabled: bool,
 }
@@ -178,6 +179,13 @@ impl ShortcutRegistry {
             }
         }
         Some(Self(entries))
+    }
+
+    /// Serialize only settings that can be read back within the storage limit.
+    pub fn to_setting(&self) -> Option<String> {
+        let value = serde_json::to_string(self.entries()).ok()?;
+        Self::from_setting(&value)?;
+        Some(value)
     }
 
     pub fn get(&self, id: &str) -> Option<&SearchShortcut> {
@@ -372,6 +380,30 @@ mod tests {
             ShortcutRegistry::from_setting("").unwrap().entries().len(),
             28
         );
+    }
+
+    #[test]
+    fn serialized_settings_omit_absent_suggestions_and_refuse_unreadable_registries() {
+        let registry = ShortcutRegistry(vec![custom()]);
+        let saved = registry.to_setting().unwrap();
+        assert!(!saved.contains("suggestions"));
+        let explicit_null =
+            saved.replace("\"enabled\":true", "\"suggestions\":null,\"enabled\":true");
+        for value in [&saved, &explicit_null] {
+            assert_eq!(
+                ShortcutRegistry::from_setting(value).unwrap().entries(),
+                registry.entries()
+            );
+        }
+        let mut invalid = custom();
+        invalid.home_url = "https://other.example/".into();
+        assert!(ShortcutRegistry(vec![invalid]).to_setting().is_none());
+        assert!(ShortcutRegistry(vec![custom(); MAX_SHORTCUTS])
+            .to_setting()
+            .is_none());
+        let mut oversized = custom();
+        oversized.search_url = "x".repeat(MAX_SHORTCUT_SETTINGS_BYTES);
+        assert!(ShortcutRegistry(vec![oversized]).to_setting().is_none());
     }
 
     #[test]

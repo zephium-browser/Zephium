@@ -5210,9 +5210,11 @@ fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> 
             if value.is_empty() {
                 return value;
             }
-            zephium_core::search::ShortcutRegistry::from_setting(&value)
-                .and_then(|registry| serde_json::to_string(registry.entries()).ok())
-                .unwrap_or_default()
+            let Some(registry) = zephium_core::search::ShortcutRegistry::from_setting(&value)
+            else {
+                return String::new();
+            };
+            registry.to_setting().unwrap_or(value)
         });
     }
     stored
@@ -8270,6 +8272,42 @@ mod tests {
         assert_eq!(
             super::setting_value_for_frame("search.engine", Some("google".into())),
             Some("google".into())
+        );
+    }
+
+    #[test]
+    fn near_limit_shortcut_projection_remains_readable() {
+        use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let projected = super::setting_value_for_frame("search.shortcuts", Some(raw)).unwrap();
+        assert!(projected.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(&projected)
+                .unwrap()
+                .entries(),
+            registry.entries()
         );
     }
 

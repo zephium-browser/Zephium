@@ -917,7 +917,7 @@ impl Shell {
         }
         let value = if key == "search.shortcuts" && !value.is_empty() {
             let Some(filtered) = zephium_core::search::ShortcutRegistry::from_setting(&value)
-                .and_then(|registry| serde_json::to_string(registry.entries()).ok())
+                .and_then(|registry| registry.to_setting())
             else {
                 return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
             };

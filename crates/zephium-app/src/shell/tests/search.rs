@@ -753,6 +753,43 @@ fn shortcut_writes_and_projections_omit_retired_entries() {
 }
 
 #[test]
+fn near_limit_shortcut_write_remains_readable() {
+    use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+    let mut entries: Vec<_> = (0..8)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("custom:near-limit-{index}"),
+                "name": "Near limit",
+                "keywords": [format!("near{index}")],
+                "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                "domain": "example.com",
+                "enabled": false
+            })
+        })
+        .collect();
+    let excess = serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let home = entries.last_mut().unwrap()["home_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+    let raw = serde_json::to_string(&entries).unwrap();
+    assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    let saved = store.app_setting("search.shortcuts").unwrap();
+    assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+    assert_eq!(
+        ShortcutRegistry::from_setting(&saved).unwrap().entries(),
+        registry.entries()
+    );
+    assert_eq!(shell.search.shortcuts.entries(), registry.entries());
+}
+
+#[test]
 fn shortcuts_drive_typed_navigation_and_search_answers_after_settings_reload() {
     use zephium_core::search::ShortcutRegistry;
     let store = Arc::new(FakeStore::default());

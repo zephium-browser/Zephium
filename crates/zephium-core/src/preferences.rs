@@ -133,7 +133,7 @@ pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str,
     let mut writes = Vec::new();
     if let Some(value) = stored("search.shortcuts").filter(|value| !value.is_empty()) {
         if let Some(registry) = crate::search::ShortcutRegistry::from_setting(&value) {
-            if let Ok(filtered) = serde_json::to_string(registry.entries()) {
+            if let Some(filtered) = registry.to_setting() {
                 if filtered != value {
                     writes.push(("search.shortcuts", filtered));
                 }
@@ -656,6 +656,41 @@ mod tests {
         for value in [expected.as_str(), "", "not json", "null"] {
             assert!(migrations(|key| (key == "search.shortcuts").then(|| value.into())).is_empty());
         }
+    }
+
+    #[test]
+    fn near_limit_shortcut_migration_remains_readable() {
+        use crate::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        let saved = writes.first().map_or(raw.as_str(), |(_, value)| value);
+        assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(saved).unwrap().entries(),
+            registry.entries()
+        );
     }
 
     #[test]

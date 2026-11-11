@@ -519,7 +519,7 @@ export const commands = {
 } | null>("launcher_set_double_tap", { mode }),
 	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
-	searchShortcutDefaults: () => __TAURI_INVOKE<SearchShortcut[]>("search_shortcut_defaults"),
+	searchShortcutDefaults: () => __TAURI_INVOKE<SearchShortcut_Serialize[]>("search_shortcut_defaults"),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	windowsDiagnosticsSettings: () => __TAURI_INVOKE<boolean>("windows_diagnostics_settings"),
 	/**  None identifies a local launch-read fallback to ON, separate from Windows policy. */
@@ -3044,7 +3044,9 @@ export type SearchResults = {
 	results: SearchResult[],
 };
 
-export type SearchShortcut = {
+export type SearchShortcut = SearchShortcut_Serialize | SearchShortcut_Deserialize;
+
+export type SearchShortcut_Deserialize = {
 	id: string,
 	name: string,
 	keywords: string[],
@@ -3052,6 +3054,17 @@ export type SearchShortcut = {
 	home_url: string,
 	domain: string,
 	suggestions: SearchEngine | null,
+	enabled: boolean,
+};
+
+export type SearchShortcut_Serialize = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions?: SearchEngine | null,
 	enabled: boolean,
 };
 
