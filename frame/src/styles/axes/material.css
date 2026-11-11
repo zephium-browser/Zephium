@@ -43,6 +43,7 @@
   --wash-window: 28%;
   --material-window-ground: color-mix(in srgb, var(--color-chrome) var(--wash-window), transparent);
   --wash-raised: 56%;
+
   /* Light enough that the launcher reads as the acrylic it is, not a slab. */
   --wash-launcher: 64%;
 }
