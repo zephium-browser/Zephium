@@ -26,13 +26,15 @@ const CLOSE_SETTLED: usize = ID + 3;
 const REVEAL: usize = ID + 4;
 // How far down from the window's top the pointer asks for the caption over a
 // page: the gutter and a little of the page, not a page's own top bar.
-const TOP_REACH: f64 = 20.0;
+const TOP_REACH: f64 = 12.0;
 // How long the pointer must stay there: going for a page's own top bar
 // passes through without the caption coming out over it.
-const TOP_DWELL_MS: u32 = 400;
+const TOP_DWELL_MS: u32 = 500;
 // The pointer must rest on the reveal edge this long before the caption
-// slides in, so passing over it on the way elsewhere reveals nothing.
-const REVEAL_DWELL_MS: u32 = 150;
+// slides in, so passing over it on the way elsewhere reveals nothing. The
+// corner the controls stand in waits as long: a page's own menu there is
+// reached for as often as the controls are.
+const REVEAL_DWELL_MS: u32 = 220;
 // How long the caption takes to come out or go away.
 const FADE_MS: u32 = 220;
 // Without a frame pacer, a step of that motion on every system timer tick.
@@ -533,15 +535,19 @@ unsafe fn layout(p: *mut State) {
         let band = CreateRectRgn(left, 0, rect.right.max(1), displacement);
         let _ = CombineRgn(Some(region), Some(region), Some(band), RGN_OR);
         let _ = DeleteObject(band.into());
-        // Where the controls stand is theirs even while they are away.
-        let spot = CreateRectRgn(
-            (rect.right - controls_width).max(0),
-            0,
-            rect.right.max(1),
-            height,
-        );
-        let _ = CombineRgn(Some(region), Some(region), Some(spot), RGN_OR);
-        let _ = DeleteObject(spot.into());
+        // Where the controls stand is theirs while they are out or on their
+        // way. Away, the corner beneath belongs to the page: its own menu or
+        // New Tab's settings is reached and hovered there, not the caption.
+        if displacement > 0 {
+            let spot = CreateRectRgn(
+                (rect.right - controls_width).max(0),
+                0,
+                rect.right.max(1),
+                height,
+            );
+            let _ = CombineRgn(Some(region), Some(region), Some(spot), RGN_OR);
+            let _ = DeleteObject(spot.into());
+        }
         if SetWindowRgn((*p).edge, Some(region), false) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -854,14 +860,15 @@ unsafe fn pointer_moved_on(p: *mut State) -> bool {
     }
     moved
 }
-/// Hovering the reveal edge asks for the caption after a short dwell. With the
-/// caption out, the pointer where the controls stand, or on Maximize (the
-/// shell's Snap flyout opens from it), hovering brings it without waiting.
+/// Hovering the reveal edge asks for the caption after a short dwell, the
+/// corner the controls stand in too. With the caption out or on its way, the
+/// pointer where the controls stand, or on Maximize (the shell's Snap flyout
+/// opens from it), hovering holds it without waiting.
 unsafe fn hover_reveal(p: *mut State, hot: HWND) {
     if (*p).suppressed || (*p).changing_state || (*p).sizing || !pointer_moved_on(p) {
         return;
     }
-    if (*p).expanded || hot == (*p).buttons[1] || at_controls(p) {
+    if (*p).expanded || hot == (*p).buttons[1] || ((*p).opacity > 0 && at_controls(p)) {
         cancel_reveal(p);
         reveal(p);
     } else if !(*p).reveal_armed {
