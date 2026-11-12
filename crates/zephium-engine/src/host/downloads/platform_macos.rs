@@ -323,12 +323,23 @@ impl Downloads {
         let (native, ask) = request;
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
-            || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
+            || permit.active_token().is_none()
+        {
+            unsafe { native.cancel(None) };
+            return None;
+        }
+        let refusal = if self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
-            || permit.active_token().is_none()
-            || (initial.is_none() && !surface_intent.load(Ordering::Acquire))
         {
+            Some(DownloadError::Capacity)
+        } else if initial.is_none() && !surface_intent.load(Ordering::Acquire) {
+            Some(DownloadError::Unavailable)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            self.refused(partition, &navigation, error);
             unsafe { native.cancel(None) };
             return None;
         }
@@ -379,6 +390,7 @@ impl Downloads {
             extension: self.extension_admission.get(),
         };
         if !source.live() {
+            self.refused(partition, &source.navigation, DownloadError::Unavailable);
             unsafe { native.cancel(None) };
             return None;
         }
