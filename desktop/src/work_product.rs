@@ -12,6 +12,10 @@ pub(crate) struct WorkProductState {
 }
 #[cfg(feature = "work-product")]
 impl WorkProductState {
+    pub(crate) fn retire_profile(&self, profile: ProfileId) -> std::io::Result<()> {
+        self.providers.activity.retire_profile(profile)
+    }
+
     pub(crate) fn page_frame(
         &self,
         attempt: zephium_core::work::WorkAttemptId,

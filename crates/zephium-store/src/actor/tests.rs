@@ -3309,9 +3309,20 @@ fn windows_style_local_deletion_keeps_authorization_until_restart_confirms_absen
     );
     drop(hub);
 
-    // A new process generation occurs after filesystem recovery. Only
-    // this observation is allowed to retire the Windows tombstone.
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    // Filesystem absence alone cannot prove external credential/cache erasure.
+    // Restart exposes the exact obligation for the composed cleanup owner.
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let pending = hub.pending_profile_deletions().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].native_erasure_verified);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    // The caller reaches finalization only after external release succeeded.
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()
@@ -3401,7 +3412,15 @@ fn restart_reopens_local_cleanup_if_a_completed_artifact_is_observed() {
         );
     }
 
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    assert_eq!(hub.pending_profile_deletions().unwrap().len(), 1);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()

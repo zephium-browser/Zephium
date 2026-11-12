@@ -450,9 +450,51 @@ fn serve_page_frame(
 /// Scaled copies of pictures at the width the canvas draws them: a picture
 /// decoded at 1600 px costs six megabytes of the interface's memory to show
 /// at 300, so the interface asks for the small one. Made once, kept on disk.
+pub(crate) fn retire_profile_thumbnails(
+    app: &AppHandle,
+    profile: zephium_core::ids::ProfileId,
+) -> std::io::Result<()> {
+    thumb::retire(app, &profile.to_string())
+}
+
 mod thumb {
     use super::{AppHandle, Manager};
     use std::path::PathBuf;
+
+    static LIFECYCLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    pub(super) fn retire(app: &AppHandle, profile: &str) -> std::io::Result<()> {
+        let mut retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        retired.insert(profile.into());
+        let dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(std::io::Error::other)?
+            .join("media-thumbs")
+            .join(profile);
+        let root = dir
+            .parent()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(&dir),
+            Ok(_) => std::fs::remove_file(&dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }?;
+        #[cfg(unix)]
+        std::fs::File::open(root)?.sync_all()?;
+        match std::fs::symlink_metadata(dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(std::io::Error::other("profile thumbnails remain")),
+        }
+    }
 
     /// The widths a copy is made at, so a few variants exist per picture.
     const WIDTHS: [u32; 7] = [160, 240, 360, 540, 800, 1200, 1600];
@@ -481,6 +523,10 @@ mod thumb {
         digest: &str,
         width: u32,
     ) -> Option<(Vec<u8>, &'static str)> {
+        let retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(profile) {
+            return None;
+        }
         let base = path(app, profile, digest, width)?;
         for (extension, mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
             if let Ok(bytes) = std::fs::read(base.with_extension(extension)) {
@@ -498,6 +544,10 @@ mod thumb {
         bytes: &[u8],
         mime: &str,
     ) {
+        let retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(profile) {
+            return;
+        }
         use std::sync::atomic::{AtomicU32, Ordering};
         static WRITES: AtomicU32 = AtomicU32::new(0);
         let Some(base) = path(app, profile, digest, width) else {

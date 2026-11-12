@@ -7666,13 +7666,31 @@ pub fn run() {
                     failure,
                 )
             });
-            let shell = match zephium_app::spawn_suspended(
+            let cleanup_app = app.handle().clone();
+            let profile_cleanup = zephium_app::profile_cleanup::CleanupWorker::start(move |profile| {
+                #[cfg(feature = "work-product")]
+                {
+                    let Some(connections) = zephium_app::work_connections::store::shared() else { return false; };
+                    if connections.retire_profile(&profile.to_string(), &zephium_app::work_connections::client::keychain::SystemVault).is_err() { return false; }
+                    let Some(blobs) = cleanup_app.try_state::<media::MediaBlobs>() else { return false; };
+                    if blobs.0.retire_profile(profile).is_err() { return false; }
+                    let Some(frames) = cleanup_app.try_state::<work_product::WorkFrames>() else { return false; };
+                    if frames.0.retire_profile(profile).is_err() { return false; }
+                    let Some(work) = cleanup_app.try_state::<work_product::WorkProductState>() else { return false; };
+                    if work.retire_profile(profile).is_err() { return false; }
+                    media::retire_profile_thumbnails(&cleanup_app, profile).is_ok()
+                }
+                #[cfg(not(feature = "work-product"))]
+                { let _ = (&cleanup_app, profile); false }
+            })?;
+            let shell = match zephium_app::spawn_suspended_with_profile_cleanup(
                 engine.clone(),
                 store.clone(),
                 blocker.clone(),
                 shell_terminal_failure,
                 chrome,
                 emit,
+                profile_cleanup,
             ) {
                 Ok(shell) => shell,
                 Err(failure) => {
@@ -9665,7 +9683,7 @@ mod tests {
             .find("let shell_terminal_failure: ShellTerminalFailureCallback")
             .expect("terminal Shell failure callback");
         let shell_spawn = setup
-            .find("let shell = match zephium_app::spawn_suspended(")
+            .find("let shell = match zephium_app::spawn_suspended_with_profile_cleanup(")
             .expect("suspended shell actor construction");
         let blocker_transfer = setup
             .find("if !startup_blocker.transfer_to(&blocker)")

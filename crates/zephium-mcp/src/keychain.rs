@@ -24,6 +24,10 @@ pub trait SecretVault {
     ) -> Result<(), KeychainError>;
     fn delete(&self, profile: &str, server: &str, account: &str) -> Result<(), KeychainError>;
     fn delete_server(&self, profile: &str, server: &str) -> Result<(), KeychainError>;
+    /// Erases every account in this profile's exact service namespace.
+    fn delete_profile(&self, _: &str) -> Result<(), KeychainError> {
+        Err(KeychainError::Inaccessible)
+    }
 }
 
 pub struct SystemVault;
@@ -46,6 +50,9 @@ impl SecretVault for SystemVault {
     fn delete_server(&self, profile: &str, server: &str) -> Result<(), KeychainError> {
         delete_server(profile, server)
     }
+    fn delete_profile(&self, profile: &str) -> Result<(), KeychainError> {
+        delete_profile(profile)
+    }
 }
 
 fn service(profile: &str, server: &str) -> String {
@@ -61,18 +68,6 @@ fn service(profile: &str, server: &str) -> String {
     }
     #[cfg(not(target_os = "windows"))]
     format!("app.zephium.connection.{profile}.{server}")
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod windows_targets {
-    use super::service;
-
-    #[test]
-    fn profile_server_identity_is_unambiguous_and_case_preserving() {
-        assert_ne!(service("a.b", "c"), service("a", "b.c"));
-        assert_ne!(service("Profile", "server"), service("profile", "server"));
-        assert_ne!(service("profile", "Server"), service("profile", "server"));
-    }
 }
 
 /// Reads one secret. Blocking.
@@ -95,6 +90,52 @@ pub fn delete(profile: &str, server: &str, account: &str) -> Result<(), Keychain
 /// Removes every secret for a server, including accounts from earlier configurations.
 pub fn delete_server(profile: &str, server: &str) -> Result<(), KeychainError> {
     platform::delete_server(&service(profile, server))
+}
+
+const MAX_PROFILE_VAULT_ITEMS: usize = 8192;
+
+fn erase_namespace(
+    prefix: &str,
+    mut inventory: impl FnMut() -> Result<Vec<String>, KeychainError>,
+    mut erase: impl FnMut(&str) -> Result<(), KeychainError>,
+) -> Result<(), KeychainError> {
+    let names = inventory()?;
+    if names.len() > MAX_PROFILE_VAULT_ITEMS {
+        return Err(KeychainError::Inaccessible);
+    }
+    for name in names.iter().filter(|name| name.starts_with(prefix)) {
+        erase(name)?;
+    }
+    let remaining = inventory()?;
+    if remaining.len() > MAX_PROFILE_VAULT_ITEMS
+        || remaining.iter().any(|name| name.starts_with(prefix))
+    {
+        return Err(KeychainError::Inaccessible);
+    }
+    Ok(())
+}
+
+/// Removes all profile-scoped services, including secrets whose configuration
+/// was already removed. Inventory reads attributes only, never secret values.
+pub fn delete_profile(profile: &str) -> Result<(), KeychainError> {
+    if profile.is_empty()
+        || profile.len() > 64
+        || !profile.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(KeychainError::Inaccessible);
+    }
+    let prefix = service(profile, "");
+    #[cfg(target_os = "windows")]
+    {
+        let _turn = zephium_credentials::turn().map_err(|_| KeychainError::Inaccessible)?;
+        erase_namespace(
+            &prefix,
+            || zephium_credentials::list(&prefix).map_err(|_| KeychainError::Inaccessible),
+            |name| zephium_credentials::delete(name).map_err(|_| KeychainError::Inaccessible),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    platform::delete_profile(&prefix)
 }
 /// Whether a secret exists, from its attributes only. Blocking.
 pub fn present(profile: &str, server: &str, account: &str) -> bool {
@@ -201,6 +242,79 @@ mod platform {
         }
     }
 
+    pub(super) fn delete(service: &str, account: &str) -> Result<(), KeychainError> {
+        let keychain = login()?;
+        match search(service, account, &keychain).delete() {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == errSecItemNotFound => Ok(()),
+            Err(_) => Err(KeychainError::Inaccessible),
+        }
+    }
+
+    pub(super) fn delete_server(service: &str) -> Result<(), KeychainError> {
+        let keychain = login()?;
+        let mut options = ItemSearchOptions::new();
+        options
+            .class(ItemClass::generic_password())
+            .keychains(&[keychain])
+            .service(service);
+        match options.delete() {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == errSecItemNotFound => Ok(()),
+            Err(_) => Err(KeychainError::Inaccessible),
+        }
+    }
+
+    pub(super) fn delete_profile(prefix: &str) -> Result<(), KeychainError> {
+        let keychain = login()?;
+        super::erase_namespace(
+            prefix,
+            || {
+                let mut options = ItemSearchOptions::new();
+                options
+                    .class(ItemClass::generic_password())
+                    .keychains(std::slice::from_ref(&keychain))
+                    .load_attributes(true)
+                    .limit(super::MAX_PROFILE_VAULT_ITEMS as i64 + 1);
+                match options.search() {
+                    Ok(items) if items.len() <= super::MAX_PROFILE_VAULT_ITEMS => items
+                        .into_iter()
+                        .map(|item| {
+                            item.simplify_dict()
+                                .map(|attributes| {
+                                    attributes.get("svce").cloned().unwrap_or_default()
+                                })
+                                .ok_or(KeychainError::Inaccessible)
+                        })
+                        .collect(),
+                    Err(error) if error.code() == errSecItemNotFound => Ok(Vec::new()),
+                    _ => Err(KeychainError::Inaccessible),
+                }
+            },
+            |service| {
+                let mut options = ItemSearchOptions::new();
+                options
+                    .class(ItemClass::generic_password())
+                    .keychains(std::slice::from_ref(&keychain))
+                    .service(service);
+                match options.delete() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.code() == errSecItemNotFound => Ok(()),
+                    Err(_) => Err(KeychainError::Inaccessible),
+                }
+            },
+        )
+    }
+
+    pub(super) fn present(service: &str, account: &str) -> bool {
+        let Ok(keychain) = login() else {
+            return false;
+        };
+        let mut options = search(service, account, &keychain);
+        options.load_attributes(true);
+        options.search().is_ok_and(|items| !items.is_empty())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::replace_with;
@@ -287,38 +401,6 @@ mod platform {
             assert_eq!(updates.get(), 2);
         }
     }
-
-    pub(super) fn delete(service: &str, account: &str) -> Result<(), KeychainError> {
-        let keychain = login()?;
-        match search(service, account, &keychain).delete() {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == errSecItemNotFound => Ok(()),
-            Err(_) => Err(KeychainError::Inaccessible),
-        }
-    }
-
-    pub(super) fn delete_server(service: &str) -> Result<(), KeychainError> {
-        let keychain = login()?;
-        let mut options = ItemSearchOptions::new();
-        options
-            .class(ItemClass::generic_password())
-            .keychains(&[keychain])
-            .service(service);
-        match options.delete() {
-            Ok(()) => Ok(()),
-            Err(error) if error.code() == errSecItemNotFound => Ok(()),
-            Err(_) => Err(KeychainError::Inaccessible),
-        }
-    }
-
-    pub(super) fn present(service: &str, account: &str) -> bool {
-        let Ok(keychain) = login() else {
-            return false;
-        };
-        let mut options = search(service, account, &keychain);
-        options.load_attributes(true);
-        options.search().is_ok_and(|items| !items.is_empty())
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -340,7 +422,76 @@ mod platform {
     pub(super) fn delete_server(_: &str) -> Result<(), KeychainError> {
         Ok(())
     }
+    pub(super) fn delete_profile(_: &str) -> Result<(), KeychainError> {
+        Err(KeychainError::Inaccessible)
+    }
     pub(super) fn present(_: &str, _: &str) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod profile_erasure_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_erases_vault_only_remnants_and_preserves_sibling_profiles() {
+        let names = std::cell::RefCell::new(vec![
+            service("profile", "orphan"),
+            service("profile2", "server"),
+            "other.service".into(),
+        ]);
+        let prefix = service("profile", "");
+        erase_namespace(
+            &prefix,
+            || Ok(names.borrow().clone()),
+            |name| {
+                names.borrow_mut().retain(|item| item != name);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *names.borrow(),
+            [service("profile2", "server"), "other.service".into()]
+        );
+    }
+
+    #[test]
+    fn inventory_and_delete_failures_never_claim_erasure() {
+        let prefix = service("profile", "");
+        let item = service("profile", "orphan");
+        assert_eq!(
+            erase_namespace(
+                &prefix,
+                || Ok(vec![item.clone()]),
+                |_| Err(KeychainError::Inaccessible)
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+        assert_eq!(
+            erase_namespace(&prefix, || Ok(vec![item.clone()]), |_| Ok(())),
+            Err(KeychainError::Inaccessible)
+        );
+        assert_eq!(
+            erase_namespace(
+                &prefix,
+                || Err(KeychainError::Inaccessible),
+                |_| panic!("unknown inventory cannot authorize deletion")
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_targets {
+    use super::service;
+
+    #[test]
+    fn profile_server_identity_is_unambiguous_and_case_preserving() {
+        assert_ne!(service("a.b", "c"), service("a", "b.c"));
+        assert_ne!(service("Profile", "server"), service("profile", "server"));
+        assert_ne!(service("profile", "Server"), service("profile", "server"));
     }
 }

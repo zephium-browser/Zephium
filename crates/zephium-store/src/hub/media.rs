@@ -118,6 +118,7 @@ pub(crate) fn valid_digest(digest: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct MediaStore {
     root: PathBuf,
+    retired: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<ProfileId>>>,
     scans: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ProfileId, OrphanScan>>>,
 }
 
@@ -206,8 +207,34 @@ impl MediaStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            retired: Default::default(),
             scans: Default::default(),
         }
+    }
+    /// Retires late publishers/readers before erasing this profile's blobs.
+    pub fn retire_profile(&self, profile: ProfileId) -> std::io::Result<()> {
+        let mut retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        retired.insert(profile);
+        self.scans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&profile);
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let dir = self.root.join(profile.to_string());
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(dir),
+            Ok(_) => std::fs::remove_file(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }?;
+        #[cfg(unix)]
+        std::fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
     }
 
     /// Reclaims only exact digest files after proving all live and trashed
@@ -289,6 +316,10 @@ impl MediaStore {
     }
     /// Writes atomically; an existing identical blob is left untouched.
     pub fn put(&self, profile: ProfileId, digest: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+        let retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&profile) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         self.put_with_sync(profile, digest, bytes, &mut sync_path)
     }
 
@@ -342,6 +373,10 @@ impl MediaStore {
         Ok(path)
     }
     pub fn read(&self, profile: ProfileId, digest: &str, max: usize) -> Option<Vec<u8>> {
+        let retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&profile) {
+            return None;
+        }
         let path = self.blob_path(profile, digest)?;
         let metadata = std::fs::metadata(&path).ok()?;
         if !metadata.is_file() || metadata.len() > max as u64 {
@@ -623,6 +658,20 @@ mod tests {
         std::fs::remove_file(reserved).unwrap();
     }
 
+    #[test]
+    fn retired_media_owner_revokes_cloned_late_publishers_and_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::new(dir.path().join("media"));
+        let late = store.clone();
+        let profile = ProfileId::from(67);
+        let digest = hex(&Sha256::digest(b"private"));
+        store.put(profile, &digest, b"private").unwrap();
+        store.retire_profile(profile).unwrap();
+        assert!(late.put(profile, &digest, b"private").is_err());
+        assert!(late.read(profile, &digest, 100).is_none());
+        assert!(!store.root.join(profile.to_string()).exists());
+        assert!(!store.scans.lock().unwrap().contains_key(&profile));
+    }
 
     #[test]
     fn hub_import_mints_a_media_resource_that_callers_cannot_forge() {

@@ -2322,7 +2322,15 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
     }
 }
 
-pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
+pub(super) struct SuccessfulProfileCleanup;
+impl crate::profile_cleanup::ProfileCleanup for SuccessfulProfileCleanup {
+    fn release(&self, _: ProfileId, done: crate::profile_cleanup::CleanupDone) -> bool {
+        done(true);
+        true
+    }
+}
+
+fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
     engine
         .suspends_hidden
@@ -2346,6 +2354,7 @@ pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Scre
         Arc::new(FakeChrome),
         Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen)
 }
@@ -2416,6 +2425,7 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
             apply_projection(&mut sink.lock().unwrap(), p);
         }),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, icons)
 }
@@ -2440,6 +2450,7 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
         chrome.clone(),
         Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, chrome, screen)
 }
@@ -2483,6 +2494,7 @@ pub(super) fn setup_with_operation_log_and_failure(
             apply_projection(&mut sink.lock().unwrap(), projection);
         }),
     );
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, operations)
 }
