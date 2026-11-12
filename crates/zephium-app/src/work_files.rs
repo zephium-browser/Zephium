@@ -911,9 +911,43 @@ fn has_test_grant_home() -> bool {
 }
 
 #[cfg(test)]
+fn test_tempdir_root(current_dir: &Path, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    if protected_path(current_dir) {
+        let root = fallback();
+        assert!(
+            !protected_path(&root),
+            "test fixture fallback directory is protected"
+        );
+        root
+    } else {
+        current_dir.to_path_buf()
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn test_tempdir() -> tempfile::TempDir {
-    tempfile::tempdir_in(std::env::current_dir().expect("test working directory"))
-        .expect("create test directory")
+    let current_dir = std::env::current_dir().expect("test working directory");
+    let root = test_tempdir_root(&current_dir, || {
+        #[cfg(windows)]
+        let path = std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .filter(|path| !protected_path(path))
+            .expect("a safe PUBLIC directory is required for test fixtures");
+
+        #[cfg(not(windows))]
+        let path = {
+            let path = std::env::temp_dir();
+            assert!(
+                !protected_path(&path),
+                "system temporary directory is protected for test fixtures"
+            );
+            path
+        };
+
+        path
+    });
+
+    tempfile::tempdir_in(root).expect("create test directory")
 }
 
 /// Current-thread fixture home; never mutates HOME or changes production policy.
@@ -1715,6 +1749,26 @@ mod tests {
         ]);
         assert_eq!(refused.len(), 4);
         (home, home_scope, grant, project)
+    }
+
+    #[test]
+    fn test_tempdir_avoids_protected_working_directory_components() {
+        let fallback = PathBuf::from("safe-public-root");
+        for current_dir in [
+            Path::new("workspace/.config/project"),
+            Path::new("workspace/AppData/Local/project"),
+        ] {
+            assert_eq!(
+                test_tempdir_root(current_dir, || fallback.clone()),
+                fallback
+            );
+        }
+        assert_eq!(
+            test_tempdir_root(Path::new("workspace/project"), || {
+                panic!("safe working directory should not use the fallback")
+            }),
+            PathBuf::from("workspace/project")
+        );
     }
 
     #[test]
