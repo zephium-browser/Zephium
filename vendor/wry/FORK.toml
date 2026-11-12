@@ -126,3 +126,7 @@ paths = ["src/lib.rs", "src/native_bounds.rs", "src/wkwebview/mod.rs", "src/wkwe
 [[patch_sets]]
 name = "opt-in macOS media return to inline callback"
 paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
+
+[[patch_sets]]
+name = "retained WebKit navigation identity and policy-refused registration retirement"
+paths = ["src/wkwebview/navigation.rs"]

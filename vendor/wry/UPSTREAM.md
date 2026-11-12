@@ -336,3 +336,11 @@ it takes the video back, so without a handler that brings the page on screen
 the button does nothing for a background tab. A missing handler keeps
 upstream's no-op; a panic is contained. Like the other private selectors it
 must be reviewed during upstream rebases.
+
+- Programmatic WebKit navigation records retain their `WKNavigation` objects
+  until terminal settlement or proven policy refusal is superseded. A refused
+  attempt that never starts releases its registry slot before a later owned
+  load. Unstarted attempts without a policy refusal keep their attribution so
+  overlapping and reentrant loads cannot exchange URLs. Action callbacks have
+  no navigation identity: URL correlation is used only when unambiguous; nested
+  or same-address ambiguity remains conservatively retained.
