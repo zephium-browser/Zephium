@@ -127,10 +127,13 @@ impl TokenStore for OAuthItem {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use security_framework::item::{ItemClass, ItemSearchOptions};
+    use core_foundation::data::CFData;
+    use security_framework::item::{
+        update_item, ItemClass, ItemSearchOptions, ItemUpdateOptions, ItemUpdateValue,
+    };
     use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::os::macos::passwords::find_generic_password;
-    use security_framework_sys::base::errSecItemNotFound;
+    use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound};
 
     use super::KeychainError;
 
@@ -165,11 +168,124 @@ mod platform {
 
     pub(super) fn write(service: &str, account: &str, secret: &str) -> Result<(), KeychainError> {
         let keychain = login()?;
-        // Delete then add: updating in place reads the old secret first.
-        let _ = search(service, account, &keychain).delete();
-        keychain
-            .add_generic_password(service, account, secret.as_bytes())
-            .map_err(|_| KeychainError::Inaccessible)
+        // An attribute-only update preserves the existing item on failure and
+        // does not read its secret before writing the replacement.
+        let mut replacement = ItemUpdateOptions::new();
+        replacement.set_value(ItemUpdateValue::Data(CFData::from_buffer(
+            secret.as_bytes(),
+        )));
+        replace_with(
+            || {
+                update_item(&search(service, account, &keychain), &replacement)
+                    .map_err(|error| error.code())
+            },
+            || {
+                keychain
+                    .add_generic_password(service, account, secret.as_bytes())
+                    .map_err(|error| error.code())
+            },
+        )
+        .map_err(|_| KeychainError::Inaccessible)
+    }
+
+    fn replace_with(
+        mut update: impl FnMut() -> Result<(), i32>,
+        mut add: impl FnMut() -> Result<(), i32>,
+    ) -> Result<(), i32> {
+        match update() {
+            Err(code) if code == errSecItemNotFound => match add() {
+                Err(code) if code == errSecDuplicateItem => update(),
+                result => result,
+            },
+            result => result,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::replace_with;
+
+        struct MockItem {
+            value: std::cell::RefCell<Option<Vec<u8>>>,
+            fail_update: std::cell::Cell<bool>,
+            updates: std::cell::Cell<usize>,
+            additions: std::cell::Cell<usize>,
+        }
+        impl MockItem {
+            fn update(&self, replacement: &[u8]) -> Result<(), i32> {
+                self.updates.set(self.updates.get() + 1);
+                if self.value.borrow().is_none() {
+                    return Err(super::errSecItemNotFound);
+                }
+                if self.fail_update.get() {
+                    return Err(-1);
+                }
+                self.value.replace(Some(replacement.to_vec()));
+                Ok(())
+            }
+            fn add(&self, replacement: &[u8]) -> Result<(), i32> {
+                self.additions.set(self.additions.get() + 1);
+                if self.value.borrow().is_some() {
+                    return Err(super::errSecDuplicateItem);
+                }
+                self.value.replace(Some(replacement.to_vec()));
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn failed_replacement_preserves_the_previous_secret_without_retrying_add() {
+            let item = MockItem {
+                value: std::cell::RefCell::new(Some(b"original".to_vec())),
+                fail_update: std::cell::Cell::new(true),
+                updates: std::cell::Cell::new(0),
+                additions: std::cell::Cell::new(0),
+            };
+            assert_eq!(
+                replace_with(|| item.update(b"replacement"), || item.add(b"replacement")),
+                Err(-1)
+            );
+            assert_eq!(item.updates.get(), 1);
+            assert_eq!(item.additions.get(), 0);
+            assert_eq!(item.value.borrow().as_deref(), Some(b"original".as_slice()));
+            item.fail_update.set(false);
+            assert_eq!(
+                replace_with(|| item.update(b"replacement"), || item.add(b"replacement")),
+                Ok(())
+            );
+            assert_eq!(
+                item.value.borrow().as_deref(),
+                Some(b"replacement".as_slice())
+            );
+            assert_eq!(item.updates.get(), 2);
+            assert_eq!(item.additions.get(), 0);
+        }
+
+        #[test]
+        fn missing_items_are_added_and_creation_races_retry_an_atomic_update() {
+            use super::{errSecDuplicateItem, errSecItemNotFound};
+            let updates = std::cell::Cell::new(0);
+            assert_eq!(replace_with(|| Err(errSecItemNotFound), || Ok(())), Ok(()));
+            assert_eq!(
+                replace_with(|| Err(errSecItemNotFound), || Err(-1)),
+                Err(-1)
+            );
+            assert_eq!(
+                replace_with(
+                    || {
+                        updates.set(updates.get() + 1);
+                        if updates.get() == 1 {
+                            Err(errSecItemNotFound)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || Err(errSecDuplicateItem)
+                ),
+                Ok(())
+            );
+            assert_eq!(updates.get(), 2);
+        }
     }
 
     pub(super) fn delete(service: &str, account: &str) -> Result<(), KeychainError> {

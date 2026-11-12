@@ -7738,6 +7738,7 @@ name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "core-foundation 0.10.1",
  "http",
  "libc",
  "reqwest",
