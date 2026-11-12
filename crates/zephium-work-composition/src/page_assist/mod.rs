@@ -1052,8 +1052,10 @@ impl PageAssist {
         }
     }
 
-    /// The panel closed for `space`: its marks and picks leave the pages.
+    /// The panel closed for `space`: its reply stops and its marks and picks
+    /// leave the pages.
     pub fn close(&self, space: &str) {
+        self.stop(space);
         let current = self.state().current.get(space).cloned();
         if let Some(conversation) = current {
             self.release_marks(&conversation);

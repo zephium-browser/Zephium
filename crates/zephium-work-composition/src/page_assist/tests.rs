@@ -1595,6 +1595,23 @@ async fn stop_drops_the_call_and_cancels_the_reply() {
 }
 
 #[tokio::test]
+async fn closing_the_panel_drops_its_running_call() {
+    let h = harness(vec![Turn {
+        deltas: vec!["Thinking".into()],
+        hang: true,
+        ..Turn::default()
+    }]);
+    h.ask("Long one", true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    h.service.close(SPACE);
+    h.settle().await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Cancelled);
+    h.ask("Again", false).await.unwrap();
+    h.settle().await;
+}
+
+#[tokio::test]
 async fn model_faults_end_the_reply_with_their_reason() {
     let h = harness(vec![Turn {
         error: Some(WorkModelError::RateLimited {
