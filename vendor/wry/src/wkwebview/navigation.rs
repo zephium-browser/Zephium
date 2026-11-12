@@ -836,6 +836,10 @@ pub(crate) fn did_commit_navigation(
   webview: &WKWebView,
   navigation: &WKNavigation,
 ) {
+  #[cfg(target_os = "macos")]
+  if this.ivars().navigation_event_handler.is_none() {
+    this.ivars().script_dialogs.document_committed();
+  }
   if this.ivars().navigation_event_handler.is_some() {
     let committed_url = unsafe {
       webview
@@ -847,6 +851,8 @@ pub(crate) fn did_commit_navigation(
       state.committed(navigation_key(navigation), committed_url)
     });
     if update.guard_presentation {
+      #[cfg(target_os = "macos")]
+      this.ivars().script_dialogs.document_committed();
       // WKNavigationDelegate's didCommit boundary precedes presentation of
       // the newly committed main-frame document. Hide once per exact native
       // identity before calling the embedder; duplicate callbacks cannot

@@ -344,3 +344,10 @@ must be reviewed during upstream rebases.
   overlapping and reentrant loads cannot exchange URLs. Action callbacks have
   no navigation identity: URL correlation is used only when unambiguous; nested
   or same-address ambiguity remains conservatively retained.
+
+- macOS script-dialog suppression is scoped to a committed main-frame
+  document generation. Same-document history/hash changes do not reopen
+  dialogs. A later document clears suppression; an old sheet's completion
+  cannot silence its replacement. The fork explicitly enables AppKit NSCell
+  and block2 APIs used by the suppression checkbox and sheet completion,
+  including in its independent dependency graph.

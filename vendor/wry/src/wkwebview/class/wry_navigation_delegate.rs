@@ -71,6 +71,8 @@ impl Drop for BlockedLoadCounter {
 }
 
 pub struct WryNavigationDelegateIvars {
+  #[cfg(target_os = "macos")]
+  pub script_dialogs: std::rc::Rc<super::super::script_dialog::ScriptDialogs>,
   pub blocked_loads: std::cell::RefCell<Option<BlockedLoadCounter>>,
   pub pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   pub has_download_handler: bool,
@@ -374,6 +376,9 @@ impl WryNavigationDelegate {
     >,
     navigation_presentation_guard: Option<Box<dyn Fn()>>,
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
+    #[cfg(target_os = "macos")] script_dialogs: std::rc::Rc<
+      super::super::script_dialog::ScriptDialogs,
+    >,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
     let navigation_policy_function =
@@ -409,6 +414,8 @@ impl WryNavigationDelegate {
     let delegate = mtm
       .alloc::<WryNavigationDelegate>()
       .set_ivars(WryNavigationDelegateIvars {
+        #[cfg(target_os = "macos")]
+        script_dialogs,
         blocked_loads: Default::default(),
         pending_scripts,
         navigation_policy_function,

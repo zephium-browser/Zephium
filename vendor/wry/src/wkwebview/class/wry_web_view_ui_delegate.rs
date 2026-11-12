@@ -151,6 +151,25 @@ impl WryNSWindowDelegate {
   }
 }
 
+pub(crate) struct WryWebViewUIDelegateOptions {
+  #[cfg(target_os = "macos")]
+  pub page_close_handler: Option<Box<dyn Fn()>>,
+  pub new_window_req_handler:
+    Option<std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
+  pub permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
+  #[cfg(target_os = "macos")]
+  pub permission_request_handler:
+    Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
+  #[cfg(target_os = "macos")]
+  pub file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
+  #[cfg(target_os = "macos")]
+  pub autofill_button_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub media_return_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
+}
+
 pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   page_close_handler: Option<Box<dyn Fn()>>,
@@ -172,7 +191,7 @@ pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   media_return_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
-  script_dialogs: super::super::script_dialog::ScriptDialogs,
+  script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
 }
 
 #[cfg(target_os = "macos")]
@@ -707,47 +726,32 @@ impl WryWebViewUIDelegate {
     true
   }
 
-  pub fn new(
-    mtm: MainThreadMarker,
-    #[cfg(target_os = "macos")] page_close_handler: Option<Box<dyn Fn()>>,
-    new_window_req_handler: Option<
-      std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>,
-    >,
-    permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
-    #[cfg(target_os = "macos")] permission_request_handler: Option<
-      Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>,
-    >,
-    #[cfg(target_os = "macos")] file_upload_handler: Option<
-      Box<crate::file_upload::FileUploadHandler>,
-    >,
-    #[cfg(target_os = "macos")] autofill_button_handler: Option<Box<dyn Fn()>>,
-    #[cfg(target_os = "macos")] media_return_handler: Option<Box<dyn Fn()>>,
-  ) -> Retained<Self> {
+  pub fn new(mtm: MainThreadMarker, options: WryWebViewUIDelegateOptions) -> Retained<Self> {
     #[cfg(target_os = "ios")]
-    let _new_window_req_handler = new_window_req_handler;
+    let _new_window_req_handler = options.new_window_req_handler;
 
     let delegate = mtm
       .alloc::<WryWebViewUIDelegate>()
       .set_ivars(WryWebViewUIDelegateIvars {
         #[cfg(target_os = "macos")]
-        page_close_handler,
+        page_close_handler: options.page_close_handler,
         #[cfg(target_os = "macos")]
-        new_window_req_handler,
+        new_window_req_handler: options.new_window_req_handler,
         #[cfg(target_os = "macos")]
         new_windows: Rc::new(RefCell::new(vec![])),
-        permission_handler,
+        permission_handler: options.permission_handler,
         #[cfg(target_os = "macos")]
-        permission_request_handler,
+        permission_request_handler: options.permission_request_handler,
         #[cfg(target_os = "macos")]
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
         #[cfg(target_os = "macos")]
-        file_upload_handler,
+        file_upload_handler: options.file_upload_handler,
         #[cfg(target_os = "macos")]
-        autofill_button_handler,
+        autofill_button_handler: options.autofill_button_handler,
         #[cfg(target_os = "macos")]
-        media_return_handler,
+        media_return_handler: options.media_return_handler,
         #[cfg(target_os = "macos")]
-        script_dialogs: Default::default(),
+        script_dialogs: options.script_dialogs,
       });
     unsafe { msg_send![super(delegate), init] }
   }
