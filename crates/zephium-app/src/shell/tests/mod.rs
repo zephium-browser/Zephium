@@ -370,6 +370,7 @@ pub(crate) struct FakeEngine {
     fullscreen_exits: Mutex<Vec<ItemId>>,
     layout_regions: Mutex<Vec<Option<Rect>>>,
     tab_preview_completions: Mutex<Vec<HeldTabPreview>>,
+    site_permission_reply: Mutex<Option<Option<Vec<zephium_core::permissions::SitePermission>>>>,
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
@@ -517,6 +518,26 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn site_permissions(
+        &self,
+        _profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        done(
+            self.site_permission_reply
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Some(Vec::new())),
+        );
+    }
+    fn site_permission_snapshot(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.site_permissions(profile, done);
+    }
     fn capture_tab_preview(&self, id: ItemId, _url: String, done: HeldTabPreview) {
         self.log(format!("capture-preview {id}"));
         self.tab_preview_completions.lock().unwrap().push(done);

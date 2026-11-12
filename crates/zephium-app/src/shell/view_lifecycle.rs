@@ -17,9 +17,8 @@ pub(super) const LIVE_VIEW_ABSOLUTE_LIMIT: usize = 64;
 const _: () = assert!(LIVE_VIEW_ABSOLUTE_LIMIT >= LIVE_VIEW_PRESSURE_LIMIT + MAX_VISIBLE_PANES);
 pub(super) const MAX_CONCURRENT_DISCARD_PROBES: usize = 4;
 pub(super) const DISCARD_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-// Suspension keeps page state and resumes in an instant, so a hidden page
-// stops running soon after the person leaves it.
-const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+// Throttle hidden pages for five minutes before requesting suspension.
+const DORMANT_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 // A system memory warning can last for hours on small machines; a short
 // grace keeps tabs the user is actively switching between from reloading.
 const WARNING_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(2 * 60);
@@ -61,8 +60,127 @@ pub(super) enum PendingDiscardProbe {
     },
 }
 
+const NOTIFICATION_REFRESH: std::time::Duration = std::time::Duration::from_secs(60);
+type NotificationOrigins = std::collections::HashSet<zephium_core::permissions::PageOrigin>;
+type NotificationReplies = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<ProfileId, (u64, Option<NotificationOrigins>)>>,
+>;
+
+struct NotificationObservation {
+    request: u64,
+    pending: bool,
+    valid: bool,
+    checked: Option<std::time::Instant>,
+    allowed: Option<NotificationOrigins>,
+}
+
+#[derive(Default)]
+struct NotificationSleepState {
+    native: bool,
+    next: u64,
+    profiles: std::collections::HashMap<ProfileId, NotificationObservation>,
+    replies: NotificationReplies,
+}
+impl NotificationSleepState {
+    fn invalidate(&mut self, profile: ProfileId) {
+        if let Some(observation) = self.profiles.get_mut(&profile) {
+            observation.valid = false;
+            observation.allowed = None;
+            observation.checked = None;
+        }
+    }
+    fn invalidate_all(&mut self) {
+        for observation in self.profiles.values_mut() {
+            observation.valid = false;
+            observation.allowed = None;
+            observation.checked = None;
+        }
+    }
+    fn reconcile(&mut self, live: &std::collections::HashSet<ProfileId>, now: std::time::Instant) {
+        let replies = std::mem::take(
+            &mut *self
+                .replies
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for (profile, (request, allowed)) in replies {
+            if let Some(observation) = self
+                .profiles
+                .get_mut(&profile)
+                .filter(|observation| observation.request == request && observation.pending)
+            {
+                observation.pending = false;
+                if observation.valid && live.contains(&profile) {
+                    observation.allowed = allowed;
+                    observation.checked = Some(now);
+                }
+            }
+        }
+        // Unresolved native reads still own reservations, even after profile
+        // retirement. They cannot be replaced around an unknown callback.
+        self.profiles
+            .retain(|profile, observation| live.contains(profile) || observation.pending);
+    }
+    fn begin(&mut self, profile: ProfileId, now: std::time::Instant) -> Option<u64> {
+        if !self.native {
+            return None;
+        }
+        if let Some(observation) = self.profiles.get(&profile) {
+            if observation.pending
+                || observation.checked.is_some_and(|checked| {
+                    now.saturating_duration_since(checked) < NOTIFICATION_REFRESH
+                })
+            {
+                return None;
+            }
+        } else if self.profiles.len() >= zephium_core::session::MAX_SESSION_PROFILES {
+            return None;
+        }
+        let Some(request) = self.next.checked_add(1) else {
+            self.invalidate(profile);
+            return None;
+        };
+        self.next = request;
+        let (checked, allowed) = self
+            .profiles
+            .remove(&profile)
+            .filter(|observation| observation.valid)
+            .map_or((None, None), |observation| {
+                (observation.checked, observation.allowed)
+            });
+        self.profiles.insert(
+            profile,
+            NotificationObservation {
+                request,
+                pending: true,
+                valid: true,
+                checked,
+                allowed,
+            },
+        );
+        Some(request)
+    }
+    fn keeps_awake(
+        &self,
+        profile: ProfileId,
+        origin: Option<&zephium_core::permissions::PageOrigin>,
+        established: bool,
+    ) -> bool {
+        self.native
+            && self.profiles.get(&profile).is_none_or(|observation| {
+                (observation.pending && !established)
+                    || !observation.valid
+                    || observation
+                        .allowed
+                        .as_ref()
+                        .is_none_or(|allowed| origin.is_none_or(|origin| allowed.contains(origin)))
+            })
+    }
+}
+
 pub(super) struct ResidencyState {
     sleeping: bool,
+    notifications: NotificationSleepState,
     exceptions: Vec<String>,
     memory_pressure: MemoryPressure,
     preferred_limits: (usize, usize),
@@ -102,6 +220,12 @@ impl Default for ResidencyState {
     fn default() -> Self {
         Self {
             sleeping: true,
+            // macOS never admits Notifications and has no native grant catalog.
+            // Windows must observe WebView2's durable native decisions.
+            notifications: NotificationSleepState {
+                native: cfg!(target_os = "windows"),
+                ..Default::default()
+            },
             exceptions: Vec::new(),
             memory_pressure: MemoryPressure::Normal,
             preferred_limits: (WARM_VIEW_LIMIT, LIVE_VIEW_PRESSURE_LIMIT),
@@ -159,7 +283,7 @@ impl ResidencyState {
             "performance.after" => {
                 let minutes = value.parse::<u64>().unwrap_or(30);
                 self.discard_idle_min = std::time::Duration::from_secs(minutes * 60);
-                self.dormant_min = self.discard_idle_min.min(DORMANT_GRACE);
+                self.dormant_min = DORMANT_GRACE;
             }
             "performance.memory" => {
                 self.preferred_limits = match value {
@@ -293,17 +417,110 @@ impl Shell {
         }
     }
 
-    fn site_kept_awake(&self, id: ItemId) -> bool {
-        self.items
+    pub(super) fn invalidate_notification_sleep(&mut self, profile: Option<ProfileId>) {
+        if let Some(profile) = profile {
+            self.residency.notifications.invalidate(profile);
+        } else {
+            self.residency.notifications.invalidate_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn enable_native_notification_source_for_test(&mut self) {
+        self.residency.notifications.native = true;
+    }
+
+    fn refresh_notification_sleep(&mut self) {
+        if !self.residency.notifications.native {
+            return;
+        }
+        let live: std::collections::HashSet<ProfileId> = self
+            .items
+            .view_ids()
+            .into_iter()
+            .filter_map(|id| self.profile_of_item(id))
+            .filter(|profile| {
+                self.profiles.get(*profile).is_some()
+                    && !self.profile_deletion_quarantines(*profile)
+            })
+            .collect();
+        let now = std::time::Instant::now();
+        self.residency.notifications.reconcile(&live, now);
+        for profile in &live {
+            let Some(request) = self.residency.notifications.begin(*profile, now) else {
+                continue;
+            };
+            let profile = *profile;
+            let replies = self.residency.notifications.replies.clone();
+            let wake = self.self_queue.as_ref().map(|queue| CallbackHandle {
+                queue: Arc::downgrade(&queue.inner),
+            });
+            self.engine.site_permission_snapshot(
+                profile,
+                Box::new(move |permissions| {
+                    use zephium_core::permissions::{RememberedPagePermission, SitePermissionKind};
+                    let allowed = permissions
+                        .filter(|permissions| {
+                            permissions.len() <= zephium_core::permissions::MAX_SITE_PERMISSIONS
+                        })
+                        .map(|permissions| {
+                            permissions
+                                .into_iter()
+                                .filter(|permission| {
+                                    permission.kind == SitePermissionKind::Notifications
+                                        && permission.decision == RememberedPagePermission::Allow
+                                })
+                                .map(|permission| permission.origin)
+                                .collect()
+                        });
+                    let mut held = replies
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if held
+                        .get(&profile)
+                        .is_none_or(|(prior, _)| request >= *prior)
+                        && (held.contains_key(&profile)
+                            || held.len() < zephium_core::session::MAX_SESSION_PROFILES)
+                    {
+                        held.insert(profile, (request, allowed));
+                    }
+                    drop(held);
+                    if let Some(wake) = wake {
+                        let _ = wake.dispatch(Command::Tick);
+                    }
+                }),
+            );
+        }
+        // A synchronous native/fake answer can be used in this same pass.
+        self.residency.notifications.reconcile(&live, now);
+    }
+
+    fn notification_kept_awake(&self, id: ItemId, established: bool) -> bool {
+        let Some(profile) = self.profile_of_item(id) else {
+            return self.residency.notifications.native;
+        };
+        let origin = self
+            .items
             .tab(id)
             .and_then(|tab| tab.url.as_ref())
-            .and_then(|url| url.host_str())
-            .is_some_and(|host| {
-                self.residency
-                    .exceptions
-                    .iter()
-                    .any(|site| zephium_core::time::site_covers(site, host.trim_end_matches('.')))
-            })
+            .and_then(|url| zephium_core::permissions::PageOrigin::from_url(url).ok());
+        self.residency
+            .notifications
+            .keeps_awake(profile, origin.as_ref(), established)
+    }
+
+    fn site_kept_awake(&self, id: ItemId, established: bool) -> bool {
+        self.notification_kept_awake(id, established)
+            || self
+                .items
+                .tab(id)
+                .and_then(|tab| tab.url.as_ref())
+                .and_then(|url| url.host_str())
+                .is_some_and(|host| {
+                    self.residency.exceptions.iter().any(|site| {
+                        zephium_core::time::site_covers(site, host.trim_end_matches('.'))
+                    })
+                })
     }
 
     /// Suspending or discarding would cut off what the person hears, watches
@@ -574,6 +791,7 @@ impl Shell {
         // split the user expects to reappear atomically.
         let protected = self.discard_protected_leaves();
         self.record_inactive_leaves(&protected, &shown);
+        self.refresh_notification_sleep();
         let live_count = self.items.view_ids().len();
         let warm = self.warm_views(&protected);
         self.sample_hidden_page_memory(&shown);
@@ -660,12 +878,9 @@ impl Shell {
                 .view_ids()
                 .into_iter()
                 .filter(|id| {
-                    self.residency.sleeping
-                        && !shown.contains(id)
+                    self.may_sleep(*id, &shown)
                         && !self.residency.dormant_sent.contains(id)
                         && !self.residency.suspend_refused.contains(id)
-                        && !self.site_kept_awake(*id)
-                        && !self.keeps_running(*id)
                 })
                 .filter_map(|id| {
                     self.last_view_activity(id)
@@ -818,7 +1033,7 @@ impl Shell {
     /// OS killing renderers outright, may still discard. A page that keeps
     /// running is not asked: the probe would refuse it, and over and over.
     fn wants_discard(&self, id: ItemId, live_count: usize, warm: &Warmth) -> bool {
-        if self.site_kept_awake(id) || self.keeps_running(id) {
+        if self.site_kept_awake(id, false) || self.keeps_running(id) {
             return false;
         }
         if self.discard_is_urgent(live_count) {
@@ -1095,12 +1310,31 @@ impl Shell {
             .insert(id, std::time::Instant::now());
     }
 
+    fn minimized_active_page(&self, id: ItemId) -> bool {
+        if self.window_visible {
+            return false;
+        }
+        let Some(window) = self.windows.focused() else {
+            return false;
+        };
+        let active = if self.active_browser_page().is_some() {
+            self.work_pane
+                .as_ref()
+                .filter(|pane| pane.window == window.id)
+                .and_then(|_| self.work_pane_tab())
+        } else {
+            window.active
+        };
+        active == Some(id) && self.item_in_scope(id, window.profile, window.space)
+    }
+
     /// Whether a live page could be asked to sleep, idle time aside.
     fn may_sleep(&self, id: ItemId, shown: &std::collections::HashSet<ItemId>) -> bool {
         self.residency.sleeping
-            && !self.site_kept_awake(id)
+            && !self.site_kept_awake(id, self.residency.dormant_sent.contains(&id))
             && !self.keeps_running(id)
             && !shown.contains(&id)
+            && !self.minimized_active_page(id)
             && !self.residency.discard_probes.contains_key(&id)
             && self
                 .items
@@ -1148,6 +1382,9 @@ impl Shell {
         {
             if self.items.tab(*id).is_some_and(TabState::has_view) {
                 self.residency.inactive_since.insert(*id, now);
+                if let Some(profile) = self.profile_of_item(*id) {
+                    self.residency.notifications.invalidate(profile);
+                }
             }
         }
         self.residency.last_protected = protected.clone();
@@ -1275,5 +1512,145 @@ impl Shell {
         self.residency
             .last_focus
             .insert(id, std::time::Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod notification_sleep_tests {
+    use super::*;
+
+    #[test]
+    fn a_valid_negative_refresh_does_not_wake_established_dormancy_but_invalidation_does() {
+        let now = std::time::Instant::now();
+        let profile = ProfileId::from(1);
+        let live = std::collections::HashSet::from([profile]);
+        let origin =
+            zephium_core::permissions::PageOrigin::parse_exact("https://mail.example").unwrap();
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        let first = state.begin(profile, now).unwrap();
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        let refresh = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        assert!(
+            !state.keeps_awake(profile, Some(&origin), true),
+            "unchanged background refresh does not wake a dormant page"
+        );
+        assert!(
+            state.keeps_awake(profile, Some(&origin), false),
+            "fresh admission waits for the current observation"
+        );
+        state.invalidate(profile);
+        assert!(state.keeps_awake(profile, Some(&origin), true));
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (refresh, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(
+            state.keeps_awake(profile, Some(&origin), true),
+            "an invalidated in-flight result cannot restore authority"
+        );
+        let fresh = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (fresh, Some(Default::default())));
+        state.reconcile(&live, now + NOTIFICATION_REFRESH);
+        state.next = u64::MAX;
+        assert!(state
+            .begin(profile, now + NOTIFICATION_REFRESH * 2)
+            .is_none());
+        assert!(
+            state.keeps_awake(profile, Some(&origin), false),
+            "generation exhaustion cannot reuse an old negative observation"
+        );
+    }
+
+    #[test]
+    fn invalidated_or_retired_native_results_cannot_restore_sleep_authority() {
+        let now = std::time::Instant::now();
+        let profile = ProfileId::from(1);
+        let mut live = std::collections::HashSet::from([profile]);
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        let first = state.begin(profile, now).unwrap();
+        state.invalidate(profile);
+        assert!(
+            state.begin(profile, now).is_none(),
+            "an unresolved native read retains its reservation"
+        );
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(state.keeps_awake(profile, None, false));
+        let second = state.begin(profile, now).unwrap();
+        assert_ne!(first, second);
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (first, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(
+            state.keeps_awake(profile, None, false),
+            "an old generation cannot stand in for a fresh observation"
+        );
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (second, Some(Default::default())));
+        state.reconcile(&live, now);
+        let origin =
+            zephium_core::permissions::PageOrigin::parse_exact("https://mail.example").unwrap();
+        assert!(!state.keeps_awake(profile, Some(&origin), false));
+        let third = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        live.clear();
+        state.reconcile(&live, now);
+        assert!(state.profiles[&profile].pending);
+        state
+            .replies
+            .lock()
+            .unwrap()
+            .insert(profile, (third, Some(Default::default())));
+        state.reconcile(&live, now);
+        assert!(state.profiles.is_empty());
+    }
+
+    #[test]
+    fn pending_notification_reads_stay_bounded_through_invalidation_and_profile_retirement() {
+        let now = std::time::Instant::now();
+        let mut state = NotificationSleepState {
+            native: true,
+            ..Default::default()
+        };
+        for id in 1..=zephium_core::session::MAX_SESSION_PROFILES {
+            assert!(state.begin(ProfileId::from(id as u128), now).is_some());
+        }
+        for _ in 0..100 {
+            state.invalidate_all();
+            state.reconcile(&Default::default(), now);
+            assert!(state.begin(ProfileId::from(999), now).is_none());
+        }
+        assert_eq!(
+            state.profiles.len(),
+            zephium_core::session::MAX_SESSION_PROFILES
+        );
+        state.next = u64::MAX;
+        assert!(state.begin(ProfileId::from(999), now).is_none());
     }
 }

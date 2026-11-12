@@ -2495,6 +2495,17 @@ impl Engine for WebviewEngine {
             move |host, done| host.site_permissions(profile, done),
         );
     }
+    fn site_permission_snapshot(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.answer_on_host(
+            done,
+            |done| done(None),
+            move |host, done| host.site_permission_snapshot(profile, done),
+        );
+    }
     fn set_site_permission(
         &self,
         profile: ProfileId,

@@ -114,6 +114,25 @@ fn listed(
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn permission_read_limit(count: u32, complete: bool) -> Option<u32> {
+    let max = zephium_core::permissions::MAX_SITE_PERMISSIONS as u32;
+    if complete && count > max {
+        None
+    } else {
+        Some(count.min(max + 1))
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn snapshot_entry<T>(complete: bool, known: bool, entry: Option<T>) -> Option<Option<T>> {
+    if complete && known && entry.is_none() {
+        None
+    } else {
+        Some(entry)
+    }
+}
+
 impl EngineHost {
     /// The WebView2 profile holding `profile`'s saved decisions, admitted as
     /// a data call is, and whether a hidden page was opened to reach it.
@@ -158,6 +177,23 @@ impl EngineHost {
     }
 
     pub(crate) fn site_permissions(&mut self, profile: ProfileId, done: SitePermissionsDone) {
+        self.read_site_permissions(profile, false, done);
+    }
+
+    pub(crate) fn site_permission_snapshot(
+        &mut self,
+        profile: ProfileId,
+        done: SitePermissionsDone,
+    ) {
+        self.read_site_permissions(profile, true, done);
+    }
+
+    fn read_site_permissions(
+        &mut self,
+        profile: ProfileId,
+        complete: bool,
+        done: SitePermissionsDone,
+    ) {
         #[cfg(target_os = "windows")]
         {
             use std::cell::Cell;
@@ -175,7 +211,14 @@ impl EngineHost {
                     };
                     let read = || -> windows::core::Result<Vec<SitePermission>> {
                         status?;
-                        let Some(settings) = settings else {
+                        let invalid = || {
+                            windows::core::Error::from_hresult(
+                                windows::Win32::Foundation::E_INVALIDARG,
+                            )
+                        };
+                        let Some(settings) =
+                            snapshot_entry(complete, true, settings).ok_or_else(invalid)?
+                        else {
                             return Ok(Vec::new());
                         };
                         let mut count = 0;
@@ -183,8 +226,7 @@ impl EngineHost {
                         unsafe { settings.Count(&mut count)? };
                         let mut entries = Vec::new();
                         // One past the cap, so the listing knows it is cut short.
-                        let limit =
-                            count.min(zephium_core::permissions::MAX_SITE_PERMISSIONS as u32 + 1);
+                        let limit = permission_read_limit(count, complete).ok_or_else(invalid)?;
                         for index in 0..limit {
                             // SAFETY: index is below the collection's Count.
                             let setting = unsafe { settings.GetValueAtIndex(index)? };
@@ -192,14 +234,25 @@ impl EngineHost {
                             let mut state = COREWEBVIEW2_PERMISSION_STATE::default();
                             let mut origin = windows::core::PWSTR::null();
                             // SAFETY: outputs are initialized and the string
-                            // is freed by take_pwstr.
+                            // is freed by take_pwstr_bounded.
                             unsafe {
                                 setting.PermissionKind(&mut kind)?;
                                 setting.PermissionState(&mut state)?;
-                                setting.PermissionOrigin(&mut origin)?;
                             }
-                            let origin = webview2_com::take_pwstr(origin);
-                            entries.extend(listed(&origin, kind, state));
+                            // SAFETY: native getter initializes its owned output;
+                            // copy/free it even when the getter reports failure.
+                            let received = unsafe { setting.PermissionOrigin(&mut origin) };
+                            let bound = zephium_core::permissions::MAX_PAGE_ORIGIN_BYTES + 1;
+                            let origin =
+                                crate::platform::imp::take_pwstr_bounded(origin, bound, bound);
+                            received?;
+                            let entry = origin
+                                .as_deref()
+                                .and_then(|origin| listed(origin, kind, state));
+                            entries.extend(
+                                snapshot_entry(complete, site_kind(kind).is_some(), entry)
+                                    .ok_or_else(invalid)?,
+                            );
                         }
                         Ok(entries)
                     };
@@ -216,7 +269,7 @@ impl EngineHost {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = profile;
+            let _ = (profile, complete);
             done(None);
         }
     }
@@ -320,5 +373,35 @@ mod tests {
             COREWEBVIEW2_PERMISSION_STATE_DENY
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn filtering_or_truncation_cannot_establish_a_complete_negative_snapshot() {
+        let over = zephium_core::permissions::MAX_SITE_PERMISSIONS as u32 + 1;
+        assert!(
+            permission_read_limit(over, true).is_none(),
+            "native Count is checked before unsupported rows are filtered"
+        );
+        assert_eq!(
+            permission_read_limit(over, false),
+            Some(over),
+            "UI may still list a partial page"
+        );
+        let missing_collection: Option<Vec<()>> = None;
+        assert!(
+            snapshot_entry(true, true, missing_collection).is_none(),
+            "a successful callback without a collection is unavailable"
+        );
+        assert!(
+            snapshot_entry::<()>(true, true, None).is_none(),
+            "missing native collection or malformed known row cannot imply complete negative proof"
+        );
+        assert_eq!(snapshot_entry::<()>(false, true, None), Some(None));
+        assert_eq!(snapshot_entry::<()>(true, false, None), Some(None));
+        assert_eq!(snapshot_entry(true, true, Some(7)), Some(Some(7)));
     }
 }

@@ -429,3 +429,17 @@ fn refused_child_frames_cannot_consume_main_frame_feedback_rate_limit() {
     ));
 }
 
+#[test]
+fn notification_grant_source_exists_only_for_windows_human_views() {
+    assert!(matches!(
+        raw_content_permission_on(wry::PermissionKind::Notifications, false),
+        wry::PermissionResponse::Deny
+    ));
+    assert!(matches!(
+        raw_content_permission_on(wry::PermissionKind::Notifications, true),
+        wry::PermissionResponse::Prompt
+    ));
+    assert!(zephium_core::permissions::SitePermissionKind::Notifications
+        .page()
+        .is_none());
+}
