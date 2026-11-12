@@ -1501,6 +1501,7 @@
   "onb_import_bookmarks": "Segnalibri",
   "onb_import_history": "Cronologia",
   "onb_import_action": "Importa",
+  "import_start_failed": "Impossibile avviare l’importazione da {browser}. Riprova.",
   "onb_import_unavailable": "L'importazione arriverà presto con un aggiornamento.",
   "onb_import_quit": "Chiudi prima {browser}. Mentre è aperto, mantiene i dati bloccati.",
   "onb_import_permission": "Zephium ha bisogno dell'accesso completo al disco per leggere {browser}. Attivalo in Impostazioni di Sistema, poi riapri Zephium.",

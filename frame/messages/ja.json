@@ -1501,6 +1501,7 @@
   "onb_import_bookmarks": "ブックマーク",
   "onb_import_history": "履歴",
   "onb_import_action": "読み込む",
+  "import_start_failed": "{browser} からのインポートを開始できませんでした。もう一度お試しください。",
   "onb_import_unavailable": "読み込み機能は、まもなくアップデートで提供されます。",
   "onb_import_quit": "先に{browser}を終了してください。開いている間は、データがロックされたままです。",
   "onb_import_permission": "{browser}を読み取るには、Zephiumにフルディスクアクセスが必要です。システム設定でオンにしてから、Zephiumを開き直してください。",
