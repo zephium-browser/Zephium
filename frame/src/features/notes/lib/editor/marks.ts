@@ -1,3 +1,4 @@
+import { shortcutHint } from "../platform";
 import type { Editor } from "@tiptap/core";
 import type { IconSvgElement } from "@hugeicons/svelte";
 import CodeIcon from "@hugeicons/core-free-icons/CodeIcon";
@@ -21,28 +22,28 @@ export const MARKS: InlineStyle[] = [
     id: "bold",
     label: m.note_bold,
     icon: TextBoldIcon,
-    hint: "⌘B",
+    hint: shortcutHint("CmdOrCtrl+B"),
     toggle: (editor) => editor.chain().focus().toggleBold().run(),
   },
   {
     id: "italic",
     label: m.note_italic,
     icon: TextItalicIcon,
-    hint: "⌘I",
+    hint: shortcutHint("CmdOrCtrl+I"),
     toggle: (editor) => editor.chain().focus().toggleItalic().run(),
   },
   {
     id: "strike",
     label: m.note_strike,
     icon: TextStrikethroughIcon,
-    hint: "⇧⌘X",
+    hint: shortcutHint("CmdOrCtrl+Shift+X"),
     toggle: (editor) => editor.chain().focus().toggleStrike().run(),
   },
   {
     id: "code",
     label: m.note_code,
     icon: CodeIcon,
-    hint: "⌘E",
+    hint: shortcutHint("CmdOrCtrl+E"),
     toggle: (editor) => editor.chain().focus().toggleCode().run(),
   },
 ];

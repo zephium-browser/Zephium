@@ -3987,5 +3987,11 @@
   "search_shortcut_invalid": "Use a unique keyword and an HTTPS URL containing {query} once.",
   "search_shortcut_enabled": "Enable {name}",
   "tab_switcher_title": "Switch tabs",
-  "tab_switcher_all": "All tabs ({count})"
+  "tab_switcher_all": "All tabs ({count})",
+  "blocker_hiding_title": "Hiding elements",
+  "blocker_hiding_saving": "Saving…",
+  "blocker_hiding_hidden": "{label} hidden",
+  "blocker_hiding_pick": "Click anything on the page",
+  "blocker_hiding_undo": "Undo",
+  "blocker_hiding_done": "Done"
 }
