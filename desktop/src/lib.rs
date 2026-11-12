@@ -261,6 +261,18 @@ const MAX_OPERATION_LEDGER_ENTRIES: usize = 1024;
 const BLOCKER_STATUS_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 const PRE_SHELL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn system_renderer_flush_deadline(
+    now: std::time::Instant,
+    system_deadline: std::time::Instant,
+) -> std::time::Instant {
+    let cleanup_reserve = std::time::Duration::from_secs(6);
+    let flush_budget = std::time::Duration::from_secs(2);
+    system_deadline
+        .min(now + flush_budget)
+        .min(system_deadline.checked_sub(cleanup_reserve).unwrap_or(now))
+}
+
 const PRIVILEGED_PERMISSIONS_POLICY: &str = "accelerometer=(), attribution-reporting=(), autoplay=(), browsing-topics=(), camera=(), clipboard-read=(), clipboard-write=(self), compute-pressure=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), join-ad-interest-group=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), private-state-token-issuance=(), private-state-token-redemption=(), publickey-credentials-get=(), run-ad-auction=(), screen-wake-lock=(), serial=(), speaker-selection=(), storage-access=(), sync-xhr=(), unload=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()";
 const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
 // The chrome and launcher load their own pages, so a warm spare renderer
@@ -986,6 +998,23 @@ impl Default for ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    fn request_system_flush(
+        &self,
+        deadline: std::time::Instant,
+        request_flush: impl FnOnce(std::time::Instant, Box<dyn FnOnce(bool) + Send>),
+        cleanup: impl FnOnce(Self) + Send + 'static,
+    ) {
+        let owner = self.clone();
+        request_flush(deadline, Box::new(move |proven| {
+            if !proven {
+                diagnostic!("shutdown: system renderer draft flush was not proven");
+                owner.terminal_failure.store(true, Ordering::Release);
+            }
+            cleanup(owner);
+        }));
+    }
+
     /// Linearizes every terminal-start publication against the Shell's sole
     /// startup-admission transition. The atomic mirror keeps later setup
     /// gates read-only and lock-free.
@@ -6927,7 +6956,17 @@ pub fn run() {
                     menu_text::shutdown_reason(),
                     move || {
                         if let Some(shell) = termination_app.try_state::<Handle>() {
-                            termination_owner.request(termination_app.clone(), shell.inner().clone());
+                            let now = std::time::Instant::now();
+                            let system_deadline = tao::event_loop::system_termination_deadline()
+                                .unwrap_or(now + PRE_SHELL_CLEANUP_TIMEOUT);
+                            let flush_deadline = system_renderer_flush_deadline(now, system_deadline);
+                            let app = termination_app.clone();
+                            let owner = termination_owner.clone();
+                            let handle = shell.inner().clone();
+                            let flush_app = app.clone();
+                            owner.request_system_flush(flush_deadline,
+                                move |deadline, done| resource_close::request_system(flush_app, deadline, done),
+                                move |owner| owner.request(app, handle));
                         } else {
                             termination_owner.request_terminal_startup_failure(
                                 termination_app.clone(),
@@ -8264,6 +8303,37 @@ mod frame_sources;
 mod tests {
 
     #[test]
+    fn system_shutdown_admits_renderer_writes_before_publishing_native_terminal_state() {
+        for proven in [true, false] {
+            let owner = super::ShutdownCoordinator::default();
+            let admission_owner = owner.clone();
+            let deadline = std::time::Instant::now();
+            let (done, result) = std::sync::mpsc::channel();
+            owner.request_system_flush(deadline, move |observed, complete| {
+                assert_eq!(observed, deadline);
+                assert!(!admission_owner.terminal_started());
+                assert!(!admission_owner.terminal_failure.load(std::sync::atomic::Ordering::Acquire));
+                complete(proven);
+            }, move |owner| {
+                owner.mark_terminal_start();
+                done.send(owner.terminal_failure.load(std::sync::atomic::Ordering::Acquire)).unwrap();
+            });
+            assert_eq!(result.recv().unwrap(), !proven);
+            assert!(owner.terminal_started());
+        }
+    }
+
+    #[test]
+    fn system_renderer_flush_uses_the_external_deadline_and_reserves_native_cleanup() {
+        let now = std::time::Instant::now();
+        let seconds = std::time::Duration::from_secs;
+        assert_eq!(super::system_renderer_flush_deadline(now, now + seconds(8)), now + seconds(2));
+        assert_eq!(super::system_renderer_flush_deadline(now, now + seconds(7)), now + seconds(1));
+        assert!(super::system_renderer_flush_deadline(now, now + seconds(4)) <= now);
+        assert_eq!(super::system_renderer_flush_deadline(now, now), now - seconds(6));
+    }
+
+    #[test]
     fn shortcut_ipc_reads_omit_retired_entries() {
         use zephium_core::search::ShortcutRegistry;
         let mut entries = ShortcutRegistry::default().entries().to_vec();
@@ -8416,7 +8486,12 @@ mod tests {
             .next()
             .unwrap();
         assert!(setup.contains("set_system_termination_handler"));
-        assert!(setup.contains("termination_owner.request("));
+        assert!(setup.contains("owner.request_system_flush("));
+        let flush = setup.find("owner.request_system_flush(").unwrap();
+        assert!(!setup[..flush].contains("mark_terminal_start()"));
+        assert!(!setup[..flush].contains("signal_terminal_start("));
+        assert!(setup[flush..].contains("resource_close::request_system("));
+        assert!(setup[flush..].contains("move |owner| owner.request(app, handle)"));
     }
 
     #[test]
