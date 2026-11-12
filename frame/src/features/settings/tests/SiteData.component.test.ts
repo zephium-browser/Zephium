@@ -3,15 +3,23 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import SiteData from "../components/SiteData.svelte";
 
-const native = vi.hoisted(() => ({ call: vi.fn() }));
+const native = vi.hoisted(() => ({ call: vi.fn(), switchProfile: (_id: string) => {} }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ browsingDataCall: native.call as never });
 });
-vi.mock("$domain/tabs", () => ({ tabs: { profile: () => ({ id: "profile" }) } }));
+vi.mock("$domain/tabs", async () => {
+  const { SvelteMap } = await import("svelte/reactivity");
+  const active = new SvelteMap([["id", "profile"]]);
+  native.switchProfile = (id) => active.set("id", id);
+  return { tabs: { profile: () => ({ id: active.get("id") }) } };
+});
 
-afterEach(() => native.call.mockReset());
+afterEach(() => {
+  native.call.mockReset();
+  native.switchProfile("profile");
+});
 
 const sites = [
   { site: "example.com", cookies: true, storage: true },
@@ -88,6 +96,38 @@ test("a site that could not be removed stays listed and says so", async () => {
     .element(page.getByRole("alert"))
     .toHaveTextContent("Couldn't remove the data of example.com");
   await expect.element(dialog.getByRole("listitem")).toHaveLength(3);
+});
+
+test("reopening waits for the previous removal before listing fresh data", async () => {
+  let finish!: (reply: { kind: "error"; error: "failed" }) => void;
+  listing();
+  native.call.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+  listing();
+  const dialog = await open();
+
+  await dialog.getByRole("button", { name: "Remove data for example.com" }).click();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect.element(dialog).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Manage…" }).click();
+  expect(native.call).toHaveBeenCalledTimes(2);
+
+  finish({ kind: "error", error: "failed" });
+  await expect.element(dialog.getByText("example.com")).toBeVisible();
+  expect(native.call).toHaveBeenNthCalledWith(3, "profile", { kind: "sites" });
+  await expect.element(dialog.getByRole("alert")).not.toBeInTheDocument();
+});
+
+test("switching profiles closes the list and loads the new profile on reopen", async () => {
+  listing();
+  native.call.mockResolvedValueOnce({ kind: "sites", sites: [], partial: false });
+  const dialog = await open();
+  await expect.element(dialog.getByText("example.com")).toBeVisible();
+
+  native.switchProfile("other-profile");
+  await expect.element(dialog).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Manage…" }).click();
+  expect(native.call).toHaveBeenNthCalledWith(2, "other-profile", { kind: "sites" });
+  await expect.element(dialog.getByText("No site data")).toBeVisible();
 });
 
 test("a site only partly removed stays listed and says some of its data is left", async () => {
