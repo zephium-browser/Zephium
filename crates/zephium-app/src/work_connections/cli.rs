@@ -643,14 +643,44 @@ mod tests {
 
     #[tokio::test]
     async fn run_refuses_ambient_cli_while_confinement_is_closed() {
-        assert!(run(
-            Path::new("untrusted-command"),
-            &[],
-            None,
-            None,
-            Duration::from_secs(1)
-        )
-        .await
-        .is_none());
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("executed");
+
+        #[cfg(unix)]
+        let (program, args) = {
+            use std::os::unix::fs::PermissionsExt;
+
+            let fixture = root.path().join("fixture.sh");
+            std::fs::write(&fixture, "#!/bin/sh\nprintf fixture > \"$1\"\n").unwrap();
+            std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+            (fixture, vec![marker.to_string_lossy().into_owned()])
+        };
+
+        #[cfg(windows)]
+        let (program, args) = {
+            let escaped_marker = marker.to_string_lossy().replace('\'', "''");
+            let script = format!("Set-Content -NoNewline -Path '{escaped_marker}' -Value fixture");
+            (
+                PathBuf::from("powershell.exe"),
+                vec!["-NoProfile".into(), "-Command".into(), script],
+            )
+        };
+
+        let independently_runs = std::process::Command::new(&program)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(independently_runs.success());
+        assert!(
+            marker.is_file(),
+            "the executable fixture must create its marker"
+        );
+
+        std::fs::remove_file(&marker).unwrap();
+        let arg_refs: Vec<_> = args.iter().map(String::as_str).collect();
+        assert!(run(&program, &arg_refs, None, None, Duration::from_secs(1))
+            .await
+            .is_none());
+        assert!(!marker.exists(), "run must refuse to execute the fixture");
     }
 }
