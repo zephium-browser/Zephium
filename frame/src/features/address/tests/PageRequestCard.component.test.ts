@@ -261,7 +261,7 @@ test("an unreadable native address is a dismiss-only navigation notice", async (
     .element(page.getByRole("button", { name: "Open", exact: true }))
     .not.toBeInTheDocument();
   await expect.element(page.getByRole("checkbox")).not.toBeInTheDocument();
-  await userEvent.click(page.getByRole("button", { name: "Dismiss", exact: true }));
+  await userEvent.click(page.getByRole("button", { name: "OK", exact: true }));
   expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 9, "dismiss");
 });
 
@@ -277,6 +277,6 @@ test("an embedded refusal identifies child content and offers only dismissal", a
   await expect
     .element(page.getByRole("button", { name: "Open", exact: true }))
     .not.toBeInTheDocument();
-  await userEvent.click(page.getByRole("button", { name: "Dismiss", exact: true }));
+  await userEvent.click(page.getByRole("button", { name: "OK", exact: true }));
   expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 10, "dismiss");
 });
