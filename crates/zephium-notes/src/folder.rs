@@ -314,15 +314,26 @@ impl Folder {
             return Err(not_regular());
         }
         let directory = absolute.parent().unwrap_or(&self.root).to_path_buf();
-        let stem = names::stem_of(path);
-        let temporary = (0..16)
-            .map(|n| directory.join(format!(".{stem}.{}.{n}.zephium-save", std::process::id())))
-            .find(|candidate| fs::symlink_metadata(candidate).is_err())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no temporary name"))?;
         let mut options = open_options();
         options.write(true).create_new(true);
+        // External editors may use the full filesystem component limit for
+        // a note name. Keep our temporary component independent of that name,
+        // and reserve it atomically rather than treating any stat error as free.
+        let mut reserved = None;
+        for n in 0..16 {
+            let temporary = directory.join(format!(".{}.{n}.zephium-save", std::process::id()));
+            match options.open(&temporary) {
+                Ok(file) => {
+                    reserved = Some((temporary, file));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let (temporary, mut file) = reserved
+            .ok_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no temporary name"))?;
         let result = (|| {
-            let mut file = options.open(&temporary)?;
             file.set_permissions(existing.permissions())?;
             file.write_all(bytes)?;
             sync_file(&file)?;
@@ -423,6 +434,16 @@ mod tests {
         folder.create("B.md", b"b", None).unwrap();
         assert!(folder.rename("A.md", "B.md").is_err());
         assert_eq!(folder.read("B.md").unwrap().bytes, b"b");
+    }
+
+    #[test]
+    fn replaces_notes_with_maximum_length_external_names() {
+        let (_base, folder) = folder();
+        let path = format!("{}.md", "x".repeat(252));
+        assert!(names::valid_path(&path));
+        folder.create(&path, b"before", None).unwrap();
+        folder.replace(&path, b"after").unwrap();
+        assert_eq!(folder.read(&path).unwrap().bytes, b"after");
     }
 
     #[test]
