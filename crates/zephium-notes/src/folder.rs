@@ -141,6 +141,24 @@ fn open_options() -> OpenOptions {
     options
 }
 
+fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            source,
+            rustix::fs::CWD,
+            target,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        zephium_private_fs::rename_file_no_replace(source, target)
+    }
+}
+
 impl Folder {
     /// Opens the folder at `base/components…`, creating what is missing
     /// below `base`, which must already exist.
@@ -352,6 +370,15 @@ impl Folder {
     /// names the same file, which is how a case-only rename looks on a
     /// case-insensitive disk.
     pub fn rename(&self, from: &str, to: &str) -> io::Result<FileMeta> {
+        self.rename_with(from, to, || {})
+    }
+
+    fn rename_with(
+        &self,
+        from: &str,
+        to: &str,
+        before_move: impl FnOnce(),
+    ) -> io::Result<FileMeta> {
         let source = self.resolve(from)?;
         let source_meta = fs::symlink_metadata(&source)?;
         if !source_meta.file_type().is_file() {
@@ -359,16 +386,8 @@ impl Folder {
         }
         self.ensure_parent(to)?;
         let target = self.resolve(to)?;
-        if let Ok(target_meta) = fs::symlink_metadata(&target) {
-            let same = file_meta(&target_meta).identity.is_some()
-                && file_meta(&target_meta).identity == file_meta(&source_meta).identity;
-            #[cfg(windows)]
-            let same = same || fs::canonicalize(&source)? == fs::canonicalize(&target)?;
-            if !same {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "name taken"));
-            }
-        }
-        fs::rename(&source, &target)?;
+        before_move();
+        rename_no_replace(&source, &target)?;
         sync_directory(source.parent().unwrap_or(&self.root))?;
         let target_directory = target.parent().unwrap_or(&self.root);
         if Some(target_directory) != source.parent() {
@@ -434,6 +453,34 @@ mod tests {
         folder.create("B.md", b"b", None).unwrap();
         assert!(folder.rename("A.md", "B.md").is_err());
         assert_eq!(folder.read("B.md").unwrap().bytes, b"b");
+    }
+
+    #[test]
+    fn concurrent_destination_creation_is_never_overwritten() {
+        let (_base, folder) = folder();
+        folder.create("Source.md", b"original", None).unwrap();
+        let result = folder.rename_with("Source.md", "Destination.md", || {
+            folder
+                .create("Destination.md", b"external edit", None)
+                .unwrap();
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(folder.read("Source.md").unwrap().bytes, b"original");
+        assert_eq!(
+            folder.read("Destination.md").unwrap().bytes,
+            b"external edit"
+        );
+    }
+
+    #[test]
+    fn case_only_rename_preserves_the_note() {
+        let (_base, folder) = folder();
+        folder.create("Plans.md", b"plans", None).unwrap();
+        folder.rename("Plans.md", "plans.md").unwrap();
+        let (entries, _) = folder.scan().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "plans.md");
+        assert_eq!(folder.read("plans.md").unwrap().bytes, b"plans");
     }
 
     #[test]

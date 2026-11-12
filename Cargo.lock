@@ -7769,6 +7769,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "zephium-core",
+ "zephium-private-fs",
 ]
 
 [[package]]
