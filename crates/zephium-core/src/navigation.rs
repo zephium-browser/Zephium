@@ -292,6 +292,7 @@ const NOT_FOR_APPS: &[&str] = &[
     "ws",
     "wss",
     "x-apple-systempreferences",
+    "x-apple.systempreferences",
     "zephium",
 ];
 
@@ -437,6 +438,16 @@ fn looks_like_host(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn system_settings_links_never_reach_external_app_admission() {
+        for scheme in ["x-apple.systempreferences", "x-apple-systempreferences"] {
+            let target = format!("{scheme}:com.apple.preference.security?Privacy_AllFiles");
+            assert!(external_app_link(&target).is_none());
+            assert!(!app_link_scheme(scheme));
+            assert!(classify(&target).is_none());
+        }
+    }
 
     #[test]
     fn long_web_redirects_keep_a_finite_navigation_bound_without_expanding_search_inputs() {
