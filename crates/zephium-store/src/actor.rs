@@ -67,6 +67,13 @@ const MAX_PENDING_USERSCRIPT_MUTATIONS: usize = 4;
 const MAX_PENDING_USERSCRIPT_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 
+fn history_url_allowed(value: &str) -> bool {
+    value.len() <= hub::MAX_URL_BYTES
+        && url::Url::parse(value).is_ok_and(|url| {
+            url.as_str().len() <= hub::MAX_URL_BYTES && navigation::is_allowed(&url)
+        })
+}
+
 type PendingVisits = HashMap<(ProfileId, String), String>;
 type BlockerConfigUpdateDone = Box<dyn FnOnce(BlockerConfigUpdateOutcome) + Send>;
 type BlockerConfigLoadDone = Box<dyn FnOnce(BlockerConfigLoadOutcome) + Send>;
@@ -1183,7 +1190,7 @@ impl Store for SqliteStore {
     }
 
     fn record_visit(&self, profile: ProfileId, url: String, title: String) {
-        if !navigation::is_allowed_str(&url) {
+        if !history_url_allowed(&url) {
             return;
         }
         let title = sanitize_page_title(&title);
@@ -1339,10 +1346,7 @@ impl Store for SqliteStore {
     }
 
     fn record_search(&self, profile: ProfileId, query: String, url: String) -> bool {
-        if query.trim().is_empty()
-            || query.len() > 512
-            || !zephium_core::navigation::is_allowed_str(&url)
-        {
+        if query.trim().is_empty() || query.len() > 512 || !history_url_allowed(&url) {
             return false;
         }
         self.tx
@@ -1705,7 +1709,7 @@ impl Store for SqliteStore {
     }
 
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
-        if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
+        if !history_url_allowed(&url) || title.len() > hub::MAX_TITLE_BYTES {
             return false;
         }
         self.tx

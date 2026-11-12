@@ -1,7 +1,10 @@
 use url::Url;
 
 const SEARCH_BASE: &str = "https://duckduckgo.com/";
-const MAX_URL_BYTES: usize = 8 * 1024;
+/// Bounded page-navigation budget shared by native adapters. Long identity
+/// redirects and deep links are distinct from small search/chrome inputs.
+pub const MAX_URL_BYTES: usize = 256 * 1024;
+const MAX_SEARCH_URL_BYTES: usize = 8 * 1024;
 const RESERVED_HOSTS: &[&str] = &[
     "asset.localhost",
     "ipc.localhost",
@@ -91,11 +94,14 @@ fn classify_input(s: &str) -> InputKind {
 }
 
 fn search_url(value: &str) -> Option<Url> {
+    if value.len() > MAX_SEARCH_URL_BYTES {
+        return None;
+    }
     let mut url = Url::parse(SEARCH_BASE).ok()?;
     url.query_pairs_mut().append_pair("q", value);
     // Percent-encoding can expand an otherwise bounded input. Apply the
     // native URL ceiling to the final request.
-    is_allowed(&url).then_some(url)
+    (url.as_str().len() <= MAX_SEARCH_URL_BYTES && is_allowed(&url)).then_some(url)
 }
 
 /// A malformed absolute URL can fail `Url::parse` but still be target-shaped.
@@ -431,6 +437,22 @@ fn looks_like_host(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn long_web_redirects_keep_a_finite_navigation_bound_without_expanding_search_inputs() {
+        let long = format!(
+            "https://sso.example.test/callback?state={}",
+            "a".repeat(32 * 1024)
+        );
+        assert!(is_allowed_str(&long));
+        assert_eq!(classify(&long).unwrap().as_str(), long);
+        let prefix = "https://example.test/";
+        let exact = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
+        assert!(is_allowed_str(&exact));
+        assert!(!is_allowed_str(&(exact + "a")));
+        assert!(search_query(&"x".repeat(8 * 1024)).is_none());
+        assert!(search_query(&"word ".repeat(2000)).is_none());
+    }
 
     #[test]
     fn bracketed_ipv6_input_is_a_web_address_not_a_search() {

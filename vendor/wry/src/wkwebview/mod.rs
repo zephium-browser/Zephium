@@ -911,6 +911,7 @@ impl InnerWebView {
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,
         attributes.navigation_failure_handler,
+        attributes.native_url_refused_handler.clone(),
         attributes.navigation_presentation_guard,
         pl_attrs.on_web_content_process_terminate_handler,
         #[cfg(target_os = "macos")]
@@ -938,6 +939,8 @@ impl InnerWebView {
           media_return_handler: pl_attrs.media_return_handler,
           #[cfg(target_os = "macos")]
           script_dialogs,
+          #[cfg(target_os = "macos")]
+          native_url_refused_handler: attributes.native_url_refused_handler,
         },
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);

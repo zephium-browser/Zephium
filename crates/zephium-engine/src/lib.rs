@@ -1178,6 +1178,7 @@ impl RetirementGate {
             | event @ EngineEvent::PresentationReady { id, .. }
             | event @ EngineEvent::NavigationFailed { id, .. }
             | event @ EngineEvent::NavigationFailureReported { id, .. }
+            | event @ EngineEvent::NativeNavigationRefused { id, .. }
             | event @ EngineEvent::ZoomSettled { id, .. }
             | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }

@@ -185,8 +185,8 @@ use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
-const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
-const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
+const PAGE_URL_UTF16_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
+const PAGE_URL_UTF8_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
 const WINDOWS_PATH_UTF16_LIMIT: usize = 32_767;
 const WINDOWS_PATH_UTF8_LIMIT: usize = 4 * WINDOWS_PATH_UTF16_LIMIT;
 const VERSION_UTF16_LIMIT: usize = 256;
@@ -558,6 +558,7 @@ impl SecurityPolicy {
     pub fn judge_frame_navigations(
         &mut self,
         blocks: impl Fn(&str) -> bool + 'static,
+        unreadable: impl Fn() + 'static,
     ) -> windows_core::Result<()> {
         if self.refused_frame_requests.is_none() {
             // Without it a refused frame is still never shown; only its
@@ -579,9 +580,12 @@ impl SecurityPolicy {
             };
             unsafe {
                 let mut uri = PWSTR::null();
-                let uri = args.Uri(&mut uri).ok().and_then(|()| {
-                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                });
+                let received = args.Uri(&mut uri);
+                let uri = take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT);
+                let uri = received.ok().and(uri);
+                if uri.is_none() {
+                    unreadable();
+                }
                 if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
                     if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {

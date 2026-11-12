@@ -2,6 +2,8 @@
 
 use super::*;
 
+const MAX_SESSION_URL_BYTES: usize = zephium_core::navigation::MAX_URL_BYTES;
+
 pub(super) struct PreparedSession {
     state: SessionState,
     snapshot: String,
@@ -145,7 +147,7 @@ where
             BoundedKind::Tab {
                 url, title, zoom, ..
             } => {
-                url.len() <= MAX_URL_BYTES
+                url.len() <= MAX_SESSION_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
@@ -162,7 +164,7 @@ where
     D: serde::Deserializer<'de>,
 {
     bounded_json::deserialize_bounded_vec(deserializer, MAX_RECENTLY_CLOSED_TABS, |entry| {
-        entry.url.len() <= MAX_URL_BYTES
+        entry.url.len() <= MAX_SESSION_URL_BYTES
             && entry.title.len() <= MAX_TITLE_BYTES
             && entry.zoom.is_finite()
             && (0.3..=3.0).contains(&entry.zoom)
@@ -285,7 +287,12 @@ fn decode_authoritative_snapshot(data: &str) -> Option<SessionState> {
 }
 
 fn decode_snapshot(data: &str, version: i64) -> Option<SessionState> {
-    bounded_json::from_str::<BoundedSessionState>(data)
+    if data.len() > MAX_SESSION_SNAPSHOT_BYTES {
+        return None;
+    }
+    bounded_json::preflight_session(data)
+        .ok()?
+        .deserialize::<BoundedSessionState>()
         .ok()?
         .into_state(version)
 }
@@ -546,6 +553,68 @@ mod qa_settings_recovery_tests {
             active_item: Some(ItemId::from(704)),
             splits: None,
             recently_closed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn long_browser_urls_round_trip_in_open_and_closed_tabs_without_quarantining_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = saved_qa_session();
+        let url = format!("https://example.test/#{}", "x".repeat(32 * 1024));
+        let PersistedKind::Tab { url: current, .. } = &mut state.items[0].kind else {
+            panic!("fixture tab");
+        };
+        *current = url.clone();
+        state
+            .recently_closed
+            .push(core_session::PersistedClosedTab {
+                profile: state.profiles[0].id,
+                space: state.spaces[0].id,
+                url,
+                title: "Closed long link".into(),
+                zoom: 1.0,
+                session_id: None,
+                closed_at_ms: None,
+                position: None,
+            });
+        assert!(serde_json::to_vec(&state).unwrap().len() < MAX_SESSION_SNAPSHOT_BYTES);
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        hub.save(&state).unwrap();
+        let PersistedKind::Tab { url, .. } = &state.items[0].kind else {
+            panic!("fixture tab");
+        };
+        hub.record_visit(
+            state.profiles[0].id,
+            url,
+            "long URL remains outside bounded history",
+        );
+        assert!(hub
+            .search_history(state.profiles[0].id, "long URL", 10)
+            .is_empty());
+        assert!(hub
+            .history_page(state.profiles[0].id, "", None, None, 50)
+            .is_empty());
+        drop(hub);
+        let mut reopened = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.load().unwrap(), Some(state.clone()));
+        assert!(reopened.recovery_required.is_none());
+        for closed in [false, true] {
+            let mut oversized = state.clone();
+            let too_long = format!(
+                "https://example.test/#{}",
+                "x".repeat(MAX_SESSION_URL_BYTES)
+            );
+            if closed {
+                oversized.recently_closed[0].url = too_long;
+            } else if let PersistedKind::Tab { url, .. } = &mut oversized.items[0].kind {
+                *url = too_long;
+            }
+            assert!(
+                decode_authoritative_snapshot(&serde_json::to_string(&oversized).unwrap())
+                    .is_none()
+            );
+            assert!(reopened.save(&oversized).is_err());
+            assert_eq!(reopened.load().unwrap(), Some(state.clone()));
         }
     }
 

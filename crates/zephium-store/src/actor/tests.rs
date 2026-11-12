@@ -70,6 +70,48 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
     }
 }
 
+#[test]
+fn non_session_history_admission_keeps_the_eight_kib_queue_bound() {
+    let (send, receive) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(send);
+    let profile = ProfileId::from(1);
+    let prefix = "https://example.test/";
+    let at_limit = format!("{prefix}{}", "x".repeat(hub::MAX_URL_BYTES - prefix.len()));
+    let over_limit = format!("{at_limit}x");
+    assert_eq!(at_limit.len(), 8192);
+    assert!(navigation::is_allowed_str(&over_limit));
+    assert!(over_limit.len() < navigation::MAX_URL_BYTES);
+
+    let expanded = format!("{prefix}{}", "é".repeat(2000));
+    assert!(expanded.len() < hub::MAX_URL_BYTES);
+    assert!(url::Url::parse(&expanded).unwrap().as_str().len() > hub::MAX_URL_BYTES);
+    assert!(navigation::is_allowed_str(&expanded));
+    store.record_visit(profile, expanded.clone(), "expanded visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(!store.record_search(profile, "query".into(), expanded.clone()));
+    assert!(!store.amend_visit_title(profile, expanded, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, over_limit.clone(), "oversized visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(receive.try_recv().is_err());
+    assert!(!store.record_search(profile, "query".into(), over_limit.clone()));
+    assert!(!store.amend_visit_title(profile, over_limit, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, at_limit.clone(), "bounded visit".into());
+    assert_eq!(store.pending_visits.lock().unwrap().len(), 1);
+    assert!(matches!(receive.try_recv(), Ok(Cmd::VisitWake)));
+    assert!(store.record_search(profile, "query".into(), at_limit.clone()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::RecordSearch(owner, _, url)) if owner == profile && url == at_limit)
+    );
+    assert!(store.amend_visit_title(profile, at_limit.clone(), "title".into()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::AmendVisitTitle(owner, url, _)) if owner == profile && url == at_limit)
+    );
+}
+
 #[cfg(feature = "work-execution")]
 #[test]
 fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {

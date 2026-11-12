@@ -36,6 +36,10 @@ pub const MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS: usize = 8;
 /// Maximum server redirects one exact native navigation identity may follow.
 pub const MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 8;
 
+// Trusted agent operands retain their smaller contract independently of the
+// ordinary browser's larger page-navigation allowance.
+const MAX_CONTEXT_NAVIGATION_TARGET_BYTES: usize = 8 * 1024;
+
 /// Fixed logical viewport for a run-owned browser context.
 ///
 /// V1 deliberately exposes no arbitrary constructor: page layout, semantic
@@ -116,13 +120,18 @@ pub struct ContextNavigationTarget(Url);
 impl ContextNavigationTarget {
     /// Parses and validates one exact absolute browser target.
     pub fn parse(value: &str) -> Result<Self, ContextPortContractError> {
+        if value.len() > MAX_CONTEXT_NAVIGATION_TARGET_BYTES {
+            return Err(ContextPortContractError::NavigationTarget);
+        }
         let target = Url::parse(value).map_err(|_| ContextPortContractError::NavigationTarget)?;
         Self::try_new(target)
     }
 
     /// Validates an already-parsed absolute browser target.
     pub fn try_new(target: Url) -> Result<Self, ContextPortContractError> {
-        if !zephium_core::navigation::is_allowed(&target) {
+        if target.as_str().len() > MAX_CONTEXT_NAVIGATION_TARGET_BYTES
+            || !zephium_core::navigation::is_allowed(&target)
+        {
             return Err(ContextPortContractError::NavigationTarget);
         }
         Ok(Self(target))
@@ -1371,6 +1380,37 @@ mod tests {
             .expect("ordinary web target");
         assert_eq!(format!("{target:?}"), "ContextNavigationTarget([redacted])");
         assert!(!format!("{target:?}").contains("secret"));
+    }
+
+    #[test]
+    fn trusted_navigation_target_budget_bounds_raw_and_serialized_urls() {
+        let prefix = "https://example.test/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "x".repeat(MAX_CONTEXT_NAVIGATION_TARGET_BYTES - prefix.len())
+        );
+        assert!(ContextNavigationTarget::parse(&at_bound).is_ok());
+        assert!(ContextNavigationTarget::try_new(Url::parse(&at_bound).unwrap()).is_ok());
+        let oversized = format!("{at_bound}x");
+        assert!(ContextNavigationTarget::parse(&oversized).is_err());
+        assert!(ContextNavigationTarget::try_new(Url::parse(&oversized).unwrap()).is_err());
+
+        // Parsing strips this newline, but raw native-port input is still bounded.
+        let normalized = format!("{at_bound}\n");
+        assert_eq!(Url::parse(&normalized).unwrap().as_str(), at_bound);
+        assert!(ContextNavigationTarget::parse(&normalized).is_err());
+
+        // UTF-8 input fits while its percent-encoded serialized target does not.
+        let expanded = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_CONTEXT_NAVIGATION_TARGET_BYTES - prefix.len()) / 2)
+        );
+        assert!(expanded.len() <= MAX_CONTEXT_NAVIGATION_TARGET_BYTES);
+        let parsed = Url::parse(&expanded).unwrap();
+        assert!(parsed.as_str().len() > MAX_CONTEXT_NAVIGATION_TARGET_BYTES);
+        assert!(zephium_core::navigation::is_allowed(&parsed));
+        assert!(ContextNavigationTarget::parse(&expanded).is_err());
+        assert!(ContextNavigationTarget::try_new(parsed).is_err());
     }
 
     #[test]

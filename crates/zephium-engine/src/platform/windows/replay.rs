@@ -50,7 +50,11 @@ impl RequestWitness {
                 let request = unsafe { args.Request() }.ok()?;
                 let mut uri = PWSTR::null();
                 let received = unsafe { request.Uri(&mut uri) };
-                let uri = super::take_pwstr_bounded(uri, 8192, 8192);
+                let uri = super::take_pwstr_bounded(
+                    uri,
+                    super::PAGE_URL_UTF16_LIMIT,
+                    super::PAGE_URL_UTF8_LIMIT,
+                );
                 received.ok()?;
                 let uri = uri?;
                 let mut method = PWSTR::null();
@@ -91,7 +95,11 @@ impl RequestWitness {
                 unsafe { args.NavigationId(&mut id) }.ok()?;
                 let mut uri = PWSTR::null();
                 let received = unsafe { args.Uri(&mut uri) };
-                let uri = super::take_pwstr_bounded(uri, 8192, 8192);
+                let uri = super::take_pwstr_bounded(
+                    uri,
+                    super::PAGE_URL_UTF16_LIMIT,
+                    super::PAGE_URL_UTF8_LIMIT,
+                );
                 received.ok()?;
                 let uri = uri?;
                 let mut navigation = observed.navigation.lock().ok()?;

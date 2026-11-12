@@ -95,6 +95,7 @@ pub struct WryNavigationDelegateIvars {
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
   pub navigation_failure_handler:
     Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
+  pub native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
   pub navigation_presentation_guard: Option<Box<dyn Fn()>>,
   // `AppleNavigationEventState` intentionally uses a non-wrapping `u128`
   // record token, which gives it 16-byte alignment on Apple 64-bit targets.
@@ -374,6 +375,7 @@ impl WryNavigationDelegate {
     navigation_failure_handler: Option<
       Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>,
     >,
+    native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
     navigation_presentation_guard: Option<Box<dyn Fn()>>,
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
     #[cfg(target_os = "macos")] script_dialogs: std::rc::Rc<
@@ -436,6 +438,7 @@ impl WryNavigationDelegate {
         on_page_load_handler,
         navigation_event_handler,
         navigation_failure_handler,
+        native_url_refused_handler,
         navigation_presentation_guard,
         navigation_event_state: Box::new(Mutex::new(AppleNavigationEventState::default())),
         on_web_content_process_terminate_handler,

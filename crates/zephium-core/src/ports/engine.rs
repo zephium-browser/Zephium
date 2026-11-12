@@ -1711,6 +1711,13 @@ pub enum EngineEvent {
         id: ItemId,
         request: NavigationRequestId,
     },
+    /// A main-frame URL failed the bounded native copy boundary. This is a
+    /// policy refusal, independent of transport failure or HTTPS fallback.
+    NativeNavigationRefused {
+        id: ItemId,
+        /// Child content refusal does not affect the top-level navigation.
+        embedded: bool,
+    },
     /// Why the view's current main-frame navigation failed, reported before
     /// its failure settles.
     NavigationFailureReported {

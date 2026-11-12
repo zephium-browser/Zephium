@@ -129,6 +129,8 @@ pub enum PageRequestView {
         host: Option<String>,
         site: Option<String>,
     },
+    /// The native address was unreadable or too long. Dismissal only.
+    NavigationRefused { embedded: bool },
     /// The site, or its proxy, asks to sign in. Never carries the server's
     /// own text.
     HttpAuth {
@@ -886,6 +888,7 @@ impl HistoryRange {
 pub const MAX_HISTORY_PAGE_LIMIT: u16 = 200;
 pub const MAX_HISTORY_QUERY_BYTES: usize = 512;
 pub const MAX_HISTORY_FORGET_URLS: usize = 100;
+const MAX_HISTORY_URL_BYTES: usize = 8 * 1024;
 
 impl HistoryCall {
     pub fn validate(&self) -> bool {
@@ -906,9 +909,13 @@ impl HistoryCall {
             Self::Forget { urls } => {
                 !urls.is_empty()
                     && urls.len() <= MAX_HISTORY_FORGET_URLS
-                    && urls
-                        .iter()
-                        .all(|url| zephium_core::navigation::is_allowed_str(url))
+                    && urls.iter().all(|url| {
+                        url.len() <= MAX_HISTORY_URL_BYTES
+                            && url::Url::parse(url).is_ok_and(|target| {
+                                target.as_str().len() <= MAX_HISTORY_URL_BYTES
+                                    && zephium_core::navigation::is_allowed(&target)
+                            })
+                    })
             }
             Self::Clear { .. } | Self::ClosedTabs => true,
             Self::ClearSince { since } => *since > 0,
@@ -2010,5 +2017,38 @@ mod bookmark_tests {
             },
         ];
         assert!(!invalid.iter().any(BookmarkCall::validate));
+    }
+}
+
+#[cfg(test)]
+mod history_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn history_forget_retains_its_per_address_and_row_budgets() {
+        let prefix = "https://example.test/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "x".repeat(MAX_HISTORY_URL_BYTES - prefix.len())
+        );
+        let forget = |url| HistoryCall::Forget { urls: vec![url] };
+        assert!(forget(at_bound.clone()).validate());
+        assert!(HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS]
+        }
+        .validate());
+        assert!(!HistoryCall::Forget {
+            urls: vec![at_bound.clone(); MAX_HISTORY_FORGET_URLS + 1]
+        }
+        .validate());
+        assert!(!forget(format!("{at_bound}x")).validate());
+        assert!(!forget(format!("{at_bound}\n")).validate());
+        let expanded = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_HISTORY_URL_BYTES - prefix.len()) / 2)
+        );
+        assert!(expanded.len() <= MAX_HISTORY_URL_BYTES);
+        assert!(zephium_core::navigation::is_allowed_str(&expanded));
+        assert!(!forget(expanded).validate());
     }
 }

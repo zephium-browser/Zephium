@@ -141,13 +141,17 @@ fn operation_uri(operation: &ICoreWebView2DownloadOperation) -> Option<String> {
         drop(TaskMemory(text));
         return Some("data:".into());
     }
-    take_string(text, 8192)
+    take_string(text, zephium_core::navigation::MAX_URL_BYTES)
 }
 fn current_origin(controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
     let core = unsafe { controller.CoreWebView2() }.ok()?;
     let mut value = PWSTR::null();
     unsafe { core.Source(&mut value) }.ok()?;
-    let url = url::Url::parse(&take_string(value, 8192)?).ok()?;
+    let url = url::Url::parse(&take_string(
+        value,
+        zephium_core::navigation::MAX_URL_BYTES,
+    )?)
+    .ok()?;
     PageOrigin::from_url(&url).ok()
 }
 fn source_origin(uri: &str, controller: &ICoreWebView2Controller) -> Option<PageOrigin> {

@@ -1366,6 +1366,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::NavigationFailureReported { .. }
+                    | EngineEvent::NativeNavigationRefused { .. }
                     | EngineEvent::ZoomSettled { .. }
                     | EngineEvent::NativeActionFailed { .. }
                     | EngineEvent::ViewCreationFailed { .. }

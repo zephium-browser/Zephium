@@ -168,6 +168,8 @@ pub(crate) struct WryWebViewUIDelegateOptions {
   pub media_return_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
   pub script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
+  #[cfg(target_os = "macos")]
+  pub native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
 }
 
 pub struct WryWebViewUIDelegateIvars {
@@ -192,6 +194,8 @@ pub struct WryWebViewUIDelegateIvars {
   media_return_handler: Option<Box<dyn Fn()>>,
   #[cfg(target_os = "macos")]
   script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
+  #[cfg(target_os = "macos")]
+  native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
 }
 
 #[cfg(target_os = "macos")]
@@ -428,10 +432,13 @@ define_class!(
       (|| -> Option<Retained<objc2_web_kit::WKWebView>> {
         if let Some(new_window_req_handler) = &self.ivars().new_window_req_handler {
           let request = action.request();
-          let url = request
+          let Some(url) = request
             .URL()
             .and_then(|url| url.absoluteString())
-            .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))?;
+            .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT)) else {
+              crate::report_native_url_refused(self.ivars().native_url_refused_handler.as_ref(), crate::NativeUrlTarget::NewWindow);
+              return None;
+            };
 
           let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             new_window_req_handler(
@@ -752,6 +759,8 @@ impl WryWebViewUIDelegate {
         media_return_handler: options.media_return_handler,
         #[cfg(target_os = "macos")]
         script_dialogs: options.script_dialogs,
+        #[cfg(target_os = "macos")]
+        native_url_refused_handler: options.native_url_refused_handler,
       });
     unsafe { msg_send![super(delegate), init] }
   }

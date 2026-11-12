@@ -935,6 +935,12 @@ pub(crate) fn navigation_policy(
         .and_then(|url| url.absoluteString())
         .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
       else {
+        let target = match action.targetFrame().map(|frame| frame.isMainFrame()) {
+          Some(true) => crate::NativeUrlTarget::MainFrame,
+          Some(false) => crate::NativeUrlTarget::Subframe,
+          None => crate::NativeUrlTarget::NewWindow,
+        };
+        crate::report_native_url_refused(this.ivars().native_url_refused_handler.as_ref(), target);
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };

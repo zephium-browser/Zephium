@@ -352,7 +352,7 @@ impl Downloads {
             request_url
                 .as_ref()
                 .and_then(|url| url.absoluteString())
-                .and_then(|url| bounded(&url, 8192))
+                .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                 .filter(|url| zephium_core::navigation::is_allowed_str(url))
                 .and_then(|url| url::Url::parse(&url).ok())
         } else {
@@ -428,7 +428,7 @@ impl Downloads {
                     .view
                     .URL()
                     .and_then(|url| url.absoluteString())
-                    .and_then(|url| bounded(&url, 8192))
+                    .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                     .and_then(|url| url::Url::parse(&url).ok())
                     .and_then(|url| PageOrigin::from_url(&url).ok())
             }
@@ -625,7 +625,7 @@ impl Downloads {
                 response
                     .URL()
                     .and_then(|url| url.absoluteString())
-                    .and_then(|url| bounded(&url, 8192))
+                    .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                     .as_deref(),
             );
             let completion = completion.copy();
@@ -1161,7 +1161,7 @@ define_class!(
             let allowed = request
                 .URL()
                 .and_then(|url| url.absoluteString())
-                .and_then(|url| bounded(&url, 8192))
+                .and_then(|url| bounded(&url, zephium_core::navigation::MAX_URL_BYTES))
                 .is_some_and(|url| zephium_core::navigation::is_allowed_str(&url));
             completion.call((if allowed {
                 WKDownloadRedirectPolicy::Allow

@@ -351,3 +351,10 @@ must be reviewed during upstream rebases.
   cannot silence its replacement. The fork explicitly enables AppKit NSCell
   and block2 APIs used by the suppression checkbox and sheet completion,
   including in its independent dependency graph.
+
+- Native page navigation URLs use a 256 KiB allocation ceiling in both UTF-16
+  units and UTF-8 bytes, synchronized with Zephium's domain navigation bound.
+  Unreadable/oversized native main-frame and new-window addresses report a
+  metadata-free refusal instead of silently disappearing. WebKit identifies
+  child-frame refusals separately; these never manufacture a whole-tab
+  navigation failure or a partial URL/native identity.

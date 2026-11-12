@@ -397,3 +397,35 @@ fn a_new_browser_keeps_its_bootstrap_until_the_first_controller_is_proven() {
         }
     }
 }
+
+#[test]
+fn refused_child_frames_cannot_consume_main_frame_feedback_rate_limit() {
+    let clocks = [Cell::new(None), Cell::new(None)];
+    let now = std::time::Instant::now();
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::Subframe,
+        &clocks,
+        now
+    ));
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::MainFrame,
+        &clocks,
+        now
+    ));
+    assert!(!admit_native_url_refusal(
+        wry::NativeUrlTarget::Subframe,
+        &clocks,
+        now
+    ));
+    assert!(!admit_native_url_refusal(
+        wry::NativeUrlTarget::NewWindow,
+        &clocks,
+        now
+    ));
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::NewWindow,
+        &clocks,
+        now + std::time::Duration::from_secs(1)
+    ));
+}
+

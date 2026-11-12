@@ -8,6 +8,7 @@ license.workspace = true
 zephium-core = { workspace = true, features = ["ipc-types"] }
 serde.workspace = true
 specta.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

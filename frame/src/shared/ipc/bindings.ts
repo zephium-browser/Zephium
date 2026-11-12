@@ -2503,6 +2503,8 @@ export type PageRequestView =
  *  allow that site's pop-ups.
  */
 { kind: "popup"; host: string | null; site: string | null } |
+/**  The native address was unreadable or too long. Dismissal only. */
+{ kind: "navigation_refused"; embedded: boolean } |
 /**
  *  The site, or its proxy, asks to sign in. Never carries the server's
  *  own text.
