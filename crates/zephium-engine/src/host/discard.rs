@@ -734,7 +734,10 @@ impl EngineHost {
         else {
             return false;
         };
-        if self.erasure_tombstones.contains(&profile) || self.picker.is_some() {
+        if self.erasure_tombstones.contains(&profile)
+            || self.picker.is_some()
+            || view.navigation.has_assistant_edit()
+        {
             return false;
         }
         #[cfg(target_os = "macos")]

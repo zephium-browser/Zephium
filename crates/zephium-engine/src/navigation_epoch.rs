@@ -27,6 +27,7 @@ struct NavigationEpochState {
     // even if the same committed epoch becomes visible again.
     activity: Option<NavigationActivity>,
     revoked: bool,
+    assistant_edit: Option<NavigationEpoch>,
     // Provider redirects may advance epochs. Explicit browser actions and
     // native main-frame link/history/reload navigation relinquish cleanup.
     auth_cleanup_owned: bool,
@@ -101,6 +102,7 @@ impl NavigationEpochTracker {
                 current: None,
                 activity: None,
                 revoked: false,
+                assistant_edit: None,
                 auth_cleanup_owned: true,
                 auth_cleanup_fence: None,
             })),
@@ -548,6 +550,49 @@ impl NavigationEpochTracker {
         }
     }
 
+    /// Record possible assistant-created draft state before dispatch. Synthetic
+    /// DOM input is deliberately not trusted by the page discard monitor.
+    #[cfg(feature = "agentic-browser")]
+    pub(crate) fn protect_assistant_edit(&self, presentation: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return false;
+        }
+        let Some(current) = state.current.as_ref() else {
+            return false;
+        };
+        if current.phase != TrackedNavigationPhase::Committed || current.epoch.0 != presentation {
+            return false;
+        }
+        state.assistant_edit = Some(current.epoch);
+        true
+    }
+
+    pub(crate) fn has_assistant_edit(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked {
+            return true;
+        }
+        let Some(current) = state.current.as_ref() else {
+            return false;
+        };
+        let resident = if current.phase == TrackedNavigationPhase::Committed {
+            Some(current.epoch)
+        } else {
+            current
+                .previous_committed
+                .as_ref()
+                .map(|previous| previous.epoch)
+        };
+        state.assistant_edit.is_some() && state.assistant_edit == resident
+    }
+
     pub(crate) fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
         let state = self
             .state
@@ -722,6 +767,46 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "agentic-browser")]
+    #[test]
+    fn assistant_drafts_stay_protected_through_failed_navigation_only() {
+        let tracker = NavigationEpochTracker::new();
+        let original = tracker.begin("https://draft.example/").unwrap();
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Started,
+            "https://draft.example/",
+        ));
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Committed,
+            "https://draft.example/",
+        ));
+        assert!(!tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(original.0 + 1));
+        assert!(tracker.protect_assistant_edit(original.0));
+        assert!(tracker.has_assistant_edit());
+        let failed = tracker.begin("https://failed.example/").unwrap();
+        assert!(tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(failed.0));
+        assert!(tracker.fail_synchronous(failed));
+        assert!(tracker.has_assistant_edit());
+        tracker.begin("https://new.example/").unwrap();
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Started,
+            "https://new.example/",
+        ));
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Committed,
+            "https://new.example/",
+        ));
+        assert!(!tracker.has_assistant_edit());
+        assert!(!tracker.protect_assistant_edit(original.0));
+        assert!(!tracker.has_assistant_edit());
+    }
 
     #[test]
     fn a_failed_navigation_names_its_request_only_while_it_is_the_one_in_flight() {
