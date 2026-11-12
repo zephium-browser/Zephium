@@ -482,6 +482,7 @@ impl Shell {
     // discard. Positive renderer results are only advisory until this actor
     // rechecks URL, loading, visibility, idle age, and the current budget.
     pub(super) fn maintain_views(&mut self) -> bool {
+        self.expire_tab_preview(std::time::Instant::now());
         self.crash
             .crashes
             .retain(|id, _| self.items.tab(*id).is_some());
@@ -1122,6 +1123,7 @@ impl Shell {
     }
 
     pub(super) fn record_view_retirement(&mut self, id: ItemId) {
+        self.tab_previews.invalidate_capture(id);
         self.residency.resident_since.remove(&id);
         self.residency.inactive_since.remove(&id);
         self.residency.suspend_refused.remove(&id);
