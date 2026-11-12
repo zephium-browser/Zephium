@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+#[cfg(any(target_os = "macos", test))]
+mod background_groups;
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{
     last_action_timeout_stage, AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES,
