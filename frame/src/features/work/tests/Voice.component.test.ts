@@ -8,7 +8,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 import VoiceStage from "./VoiceStage.svelte";
 
 const native = vi.hoisted(() => ({
-  start: vi.fn<() => Promise<VoiceStartV1>>(),
+  start: vi.fn<(request: string) => Promise<VoiceStartV1>>(),
   stop: vi.fn(async (_take: number) => true),
   cancel: vi.fn(async () => true),
   run: vi.fn(async (_id: string) => ({ kind: "accepted" })),
@@ -28,8 +28,11 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 afterEach(() => vi.clearAllMocks());
 
+const request = () => native.start.mock.calls.at(-1)?.[0] ?? "";
+
 const change = (take: number, rest: Partial<VoiceChanged>): VoiceChanged => ({
   take,
+  request: request(),
   phase: "listening",
   engine: "on_device",
   partial: null,
@@ -55,7 +58,7 @@ test("the mic opens a live take, and stopping lands the words in the field", asy
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage);
   await listening();
-  emitNativeEvent("voiceLevels", { take: 7, levels: [30, 60, 80] });
+  emitNativeEvent("voiceLevels", { take: 7, request: request(), levels: [30, 60, 80] });
   emitNativeEvent("voiceChanged", change(7, { partial: "Book a table" }));
   await expect.element(page.getByText("Book a table", { exact: true })).toBeVisible();
   await expect.element(page.getByRole("button", { name: "Stop and insert" })).toHaveFocus();
@@ -72,6 +75,10 @@ test("dictated words join what was already typed, and other takes' changes are i
   await page.viewport(1000, 600);
   const screen = await render(VoiceStage, { value: "Find flights " });
   await listening("on_device", 7, true);
+  emitNativeEvent(
+    "voiceChanged",
+    change(7, { request: "00000000-0000-0000-0000-000000000001", phase: "done", text: "Ignored" }),
+  );
   emitNativeEvent("voiceChanged", change(3, { phase: "done", text: "Ignored" }));
   emitNativeEvent("voiceChanged", change(7, { phase: "done", text: "to Lisbon" }));
   await expect.poll(() => field().value).toBe("Find flights to Lisbon");

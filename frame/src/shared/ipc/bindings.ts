@@ -103,11 +103,11 @@ export const commands = {
 	 *  Opens the microphone and starts a take. On first use this waits while
 	 *  the system asks for permission.
 	 */
-	voiceStart: () => __TAURI_INVOKE<VoiceStartV1>("voice_start"),
+	voiceStart: (request: string) => __TAURI_INVOKE<VoiceStartV1>("voice_start", { request }),
 	/**  Stops listening; the words arrive as a `done` change. */
 	voiceStop: (take: number) => __TAURI_INVOKE<boolean>("voice_stop", { take }),
-	/**  Discards the current take, whatever its phase. */
-	voiceCancel: () => __TAURI_INVOKE<boolean>("voice_cancel"),
+	/**  Discards only this start request's take, whatever its phase. */
+	voiceCancel: (request: string, take: number | null) => __TAURI_INVOKE<boolean>("voice_cancel", { request, take }),
 	/**
 	 *  Opens the system's privacy settings for the microphone or speech
 	 *  recognition, after the person declined one.
@@ -3535,6 +3535,7 @@ export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {
 	take: number,
+	request: string,
 	phase: VoicePhaseV1,
 	engine: VoiceEngineV1 | null,
 	/**  The words so far, while listening, when the engine streams them. */
@@ -3577,6 +3578,7 @@ export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_micr
  */
 export type VoiceLevels = {
 	take: number,
+	request: string,
 	levels: number[],
 };
 
