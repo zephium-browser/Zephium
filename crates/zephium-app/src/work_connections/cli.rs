@@ -641,54 +641,46 @@ mod tests {
         assert!(!executable(&folder));
     }
 
-    #[cfg(windows)]
     #[tokio::test]
-    async fn run_accepts_windows_command_shims() {
+    async fn run_refuses_ambient_cli_while_confinement_is_closed() {
         let root = tempfile::tempdir().unwrap();
-        let shim = root.path().join("tool.cmd");
-        std::fs::write(&shim, "@echo off\r\necho %~1\r\n").unwrap();
-        let (ok, out, _) = run(&shim, &["two words"], None, None, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert!(ok);
-        assert_eq!(out.trim(), "two words");
-    }
+        let marker = root.path().join("executed");
 
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn run_is_bounded_and_feeds_stdin() {
-        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-        let (ok, out, _) = run(
-            &shell,
-            &[
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[Console]::Out.Write([Console]::In.ReadToEnd())",
-            ],
-            None,
-            Some("hello"),
-            Duration::from_secs(10),
-        )
-        .await
-        .unwrap();
-        assert!(ok);
-        assert_eq!(out, "hello");
-        assert!(run(
-            &shell,
-            &[
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 5"
-            ],
-            None,
-            None,
-            Duration::from_millis(200)
-        )
-        .await
-        .is_none());
+        #[cfg(unix)]
+        let (program, args) = {
+            use std::os::unix::fs::PermissionsExt;
+
+            let fixture = root.path().join("fixture.sh");
+            std::fs::write(&fixture, "#!/bin/sh\nprintf fixture > \"$1\"\n").unwrap();
+            std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+            (fixture, vec![marker.to_string_lossy().into_owned()])
+        };
+
+        #[cfg(windows)]
+        let (program, args) = {
+            let escaped_marker = marker.to_string_lossy().replace('\'', "''");
+            let script = format!("Set-Content -NoNewline -Path '{escaped_marker}' -Value fixture");
+            (
+                PathBuf::from("powershell.exe"),
+                vec!["-NoProfile".into(), "-Command".into(), script],
+            )
+        };
+
+        let independently_runs = std::process::Command::new(&program)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(independently_runs.success());
+        assert!(
+            marker.is_file(),
+            "the executable fixture must create its marker"
+        );
+
+        std::fs::remove_file(&marker).unwrap();
+        let arg_refs: Vec<_> = args.iter().map(String::as_str).collect();
+        assert!(run(&program, &arg_refs, None, None, Duration::from_secs(1))
+            .await
+            .is_none());
+        assert!(!marker.exists(), "run must refuse to execute the fixture");
     }
 }
