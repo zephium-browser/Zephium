@@ -401,8 +401,9 @@ impl Hub {
             ));
         }
         use std::collections::hash_map::Entry;
-        match self.profiles.entry(id) {
-            Entry::Occupied(slot) => Ok(slot.into_mut()),
+        let media = self.media.clone();
+        let conn = match self.profiles.entry(id) {
+            Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {
                 let mut conn = match &self.dir {
                     Some(dir) => open_database(&dir.join(format!("profile-{id}.sqlite")))?,
@@ -412,9 +413,15 @@ impl Hub {
                 migrations::apply(&mut conn, migrations::PROFILE)?;
                 history::enforce_history_budget(&conn)?;
                 resources::prune_receipts(&conn)?;
-                Ok(slot.insert(conn))
+                slot.insert(conn)
+            }
+        };
+        if let Some(media) = media {
+            if media.reconcile_orphans(id, conn).is_err() {
+                eprintln!("store: media orphan reconciliation deferred");
             }
         }
+        Ok(conn)
     }
 
     pub fn knows(&self, profile: ProfileId) -> bool {

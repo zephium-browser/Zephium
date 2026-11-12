@@ -118,7 +118,33 @@ pub(crate) fn valid_digest(digest: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct MediaStore {
     root: PathBuf,
+    scans: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<ProfileId, OrphanScan>>>,
 }
+
+#[derive(Debug, Default)]
+struct OrphanScan {
+    entries: Option<std::fs::ReadDir>,
+    complete: bool,
+    retry: bool,
+}
+
+fn referenced_digests(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    let mut statement = conn.prepare(
+        "SELECT json_extract(body,'$.content.asset.digest') FROM user_resources WHERE kind='media'",
+    )?;
+    let references = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .take(MAX_RESOURCES + 1)
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if references.len() > MAX_RESOURCES || references.iter().any(|digest| !valid_digest(digest)) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(references
+        .into_iter()
+        .map(|digest| digest.to_ascii_lowercase())
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SyncPoint {
     File,
@@ -178,7 +204,85 @@ fn publish_file(temporary: &std::path::Path, path: &std::path::Path) -> std::io:
 }
 impl MediaStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            scans: Default::default(),
+        }
+    }
+
+    /// Reclaims only exact digest files after proving all live and trashed
+    /// references. A cursor bounds each store turn and continues on later use.
+    pub(super) fn reconcile_orphans(
+        &self,
+        profile: ProfileId,
+        conn: &Connection,
+    ) -> rusqlite::Result<()> {
+        self.reconcile_orphans_with_remove(profile, conn, |path| std::fs::remove_file(path))
+    }
+
+    fn reconcile_orphans_with_remove(
+        &self,
+        profile: ProfileId,
+        conn: &Connection,
+        mut remove: impl FnMut(&std::path::Path) -> std::io::Result<()>,
+    ) -> rusqlite::Result<()> {
+        const SCAN_PER_TURN: usize = 256;
+        let mut scans = self.scans.lock().unwrap_or_else(|p| p.into_inner());
+        let scan = scans.entry(profile).or_default();
+        if scan.complete {
+            return Ok(());
+        }
+        let io_error =
+            |error: std::io::Error| rusqlite::Error::ToSqlConversionFailure(Box::new(error));
+        let references = referenced_digests(conn)?;
+        if scan.entries.is_none() {
+            let dir = self.root.join(profile.to_string());
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.file_type().is_dir() => {}
+                Ok(_) => return Err(rusqlite::Error::InvalidPath(dir)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    scan.complete = true;
+                    return Ok(());
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+            scan.entries = Some(std::fs::read_dir(dir).map_err(io_error)?);
+        }
+        for _ in 0..SCAN_PER_TURN {
+            let Some(entry) = scan.entries.as_mut().and_then(Iterator::next) else {
+                scan.entries = None;
+                scan.complete = !scan.retry;
+                scan.retry = false;
+                break;
+            };
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Unknown files and save temporaries remain recovery evidence.
+            // Symlinks and other special nodes are never followed or removed.
+            if !valid_digest(name)
+                || name.bytes().any(|byte| byte.is_ascii_uppercase())
+                || references.contains(name)
+                || !entry.file_type().map_err(io_error)?.is_file()
+            {
+                continue;
+            }
+            if let Err(error) = remove(&entry.path()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    scan.retry = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn retry_orphan_scan(&self, profile: ProfileId) {
+        self.scans
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile)
+            .or_default()
+            .complete = false;
     }
     pub fn blob_path(&self, profile: ProfileId, digest: &str) -> Option<PathBuf> {
         valid_digest(digest).then(|| self.root.join(profile.to_string()).join(digest))
@@ -295,11 +399,7 @@ impl Hub {
                 record,
             };
         }
-        if media.put(profile, &asset.digest, &import.bytes).is_err() {
-            return ResourceResponse::Error {
-                error: ResourceError::Unavailable,
-            };
-        }
+        let digest = asset.digest.clone();
         let title = asset.name.clone();
         let command = ResourceCommand {
             version: 1,
@@ -313,9 +413,37 @@ impl Hub {
                 },
             },
         };
-        super::resources::mutate(conn, profile, command).unwrap_or(ResourceResponse::Error {
-            error: ResourceError::OutcomeUnknown,
-        })
+        let mut publication_failed = false;
+        let result = super::resources::mutate_before_commit(conn, profile, command, || {
+            media
+                .put(profile, &digest, &import.bytes)
+                .map(|_| ())
+                .map_err(|error| {
+                    publication_failed = true;
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                })
+        });
+        let response = result.unwrap_or(ResourceResponse::Error {
+            error: if publication_failed {
+                ResourceError::Unavailable
+            } else {
+                ResourceError::OutcomeUnknown
+            },
+        });
+        if !matches!(response, ResourceResponse::Applied { .. }) {
+            media.retry_orphan_scan(profile);
+            // A publication may precede a failed SQLite commit. The Store
+            // actor is serialized: reclaim only after proving that no live or
+            // trashed record references this digest, including an older import.
+            let referenced = referenced_digests(conn);
+            if matches!(referenced, Ok(references) if !references.contains(&digest.to_ascii_lowercase()))
+            {
+                if let Some(path) = media.blob_path(profile, &digest) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        response
     }
     #[cfg(test)]
     pub(crate) fn media_store(&self) -> Option<&MediaStore> {
@@ -495,6 +623,7 @@ mod tests {
         std::fs::remove_file(reserved).unwrap();
     }
 
+
     #[test]
     fn hub_import_mints_a_media_resource_that_callers_cannot_forge() {
         let dir = tempfile::tempdir().unwrap();
@@ -636,5 +765,258 @@ mod tests {
         assert!(
             matches!(imported_again, ResourceResponse::Applied { record: again, .. } if again.id != record.id)
         );
+    }
+
+    #[test]
+    fn rejected_media_imports_never_accumulate_unreferenced_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        let profile = ProfileId::from(61);
+        hub.meta
+            .execute(
+                "INSERT INTO profiles(id,name,kind,position) VALUES(?1,'Fixture','named',0)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.load_registry().unwrap();
+        let import = |request: &str, bytes: &[u8]| MediaImport {
+            request_id: request.into(),
+            name: "file.bin".into(),
+            origin: MediaOrigin::Imported,
+            bytes: std::sync::Arc::new(bytes.to_vec()),
+        };
+        assert!(matches!(
+            hub.import_media(profile, import("media-request-original-001", b"retained")),
+            ResourceResponse::Applied { .. }
+        ));
+        let conflict = hub.import_media(
+            profile,
+            import("media-request-original-001", b"conflicting"),
+        );
+        assert!(matches!(
+            conflict,
+            ResourceResponse::Error {
+                error: ResourceError::Conflict
+            }
+        ));
+        let conflict_digest = hex(&Sha256::digest(b"conflicting"));
+        assert!(!hub
+            .media_store()
+            .unwrap()
+            .blob_path(profile, &conflict_digest)
+            .unwrap()
+            .exists());
+        hub.profile_conn(profile).unwrap().execute_batch("WITH RECURSIVE fill(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM fill WHERE n<9999) INSERT INTO user_resources(id,kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text) SELECT printf('%026d',n),kind,revision,title,pinned,trashed,created_at,updated_at,body,search_text FROM fill CROSS JOIN (SELECT * FROM user_resources LIMIT 1);").unwrap();
+        for index in 0..3 {
+            let bytes = format!("rejected capacity {index}");
+            let response = hub.import_media(
+                profile,
+                import(
+                    &format!("media-request-capacity-{index:03}"),
+                    bytes.as_bytes(),
+                ),
+            );
+            assert!(matches!(
+                response,
+                ResourceResponse::Error {
+                    error: ResourceError::Capacity
+                }
+            ));
+            let digest = hex(&Sha256::digest(bytes.as_bytes()));
+            assert!(!hub
+                .media_store()
+                .unwrap()
+                .blob_path(profile, &digest)
+                .unwrap()
+                .exists());
+        }
+    }
+
+    #[test]
+    fn failed_media_commit_reclaims_only_unreferenced_publications() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        let profile = ProfileId::from(62);
+        hub.meta
+            .execute(
+                "INSERT INTO profiles(id,name,kind,position) VALUES(?1,'Fixture','named',0)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.load_registry().unwrap();
+        let import = |request: &str, bytes: &[u8]| MediaImport {
+            request_id: request.into(),
+            name: "file.bin".into(),
+            origin: MediaOrigin::Imported,
+            bytes: std::sync::Arc::new(bytes.to_vec()),
+        };
+        assert!(matches!(
+            hub.import_media(profile, import("media-request-retained-001", b"retained")),
+            ResourceResponse::Applied { .. }
+        ));
+        let conn = hub.profile_conn(profile).unwrap();
+        conn.execute_batch("UPDATE user_resources SET body=json_set(body,'$.content.asset.digest',upper(json_extract(body,'$.content.asset.digest')));").unwrap();
+        conn.execute_batch("CREATE TRIGGER deferred_media_commit_failure AFTER INSERT ON user_resources BEGIN INSERT INTO user_resource_receipts(request_id,digest,resource_id,revision,retained) VALUES('injected-deferred',zeroblob(32),'00000000000000000000000000',1,0); END;").unwrap();
+        for (request, bytes, retained) in [
+            ("media-request-failure-001", b"new blob".as_slice(), false),
+            ("media-request-failure-002", b"retained".as_slice(), true),
+        ] {
+            hub.profile_conn(profile)
+                .unwrap()
+                .execute_batch("PRAGMA defer_foreign_keys=ON;")
+                .unwrap();
+            assert!(matches!(
+                hub.import_media(profile, import(request, bytes)),
+                ResourceResponse::Error {
+                    error: ResourceError::OutcomeUnknown
+                }
+            ));
+            let digest = hex(&Sha256::digest(bytes));
+            assert_eq!(
+                hub.media_store()
+                    .unwrap()
+                    .blob_path(profile, &digest)
+                    .unwrap()
+                    .is_file(),
+                retained
+            );
+        }
+    }
+
+    #[test]
+    fn crash_orphans_are_reclaimed_after_reopen_while_shared_and_trashed_blobs_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(63);
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO profiles(id,name,kind,position) VALUES(?1,'Fixture','named',0)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.load_registry().unwrap();
+        for (index, bytes) in [
+            b"shared".as_slice(),
+            b"shared".as_slice(),
+            b"trashed".as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                hub.import_media(
+                    profile,
+                    MediaImport {
+                        request_id: format!("media-crash-retained-{index:04}"),
+                        name: "file".into(),
+                        origin: MediaOrigin::Imported,
+                        bytes: std::sync::Arc::new(bytes.to_vec())
+                    }
+                ),
+                ResourceResponse::Applied { .. }
+            ));
+        }
+        let trashed = hex(&Sha256::digest(b"trashed"));
+        hub.profile_conn(profile).unwrap().execute("UPDATE user_resources SET trashed=1 WHERE json_extract(body,'$.content.asset.digest')=?1", [&trashed]).unwrap();
+        let orphan = hex(&Sha256::digest(b"crashed before commit"));
+        let store = hub.media_store().unwrap().clone();
+        let orphan_path = store
+            .put(profile, &orphan, b"crashed before commit")
+            .unwrap();
+        let folder = orphan_path.parent().unwrap();
+        std::fs::write(folder.join("unknown-recovery-file"), b"keep").unwrap();
+        #[cfg(unix)]
+        {
+            let outside = dir.path().join("outside");
+            std::fs::write(&outside, b"keep outside").unwrap();
+            std::os::unix::fs::symlink(&outside, folder.join("f".repeat(64))).unwrap();
+        }
+        drop(hub);
+        let mut reopened = Hub::open(dir.path().to_path_buf()).unwrap();
+        reopened.profile_conn(profile).unwrap();
+        assert!(!orphan_path.exists());
+        assert!(store
+            .blob_path(profile, &hex(&Sha256::digest(b"shared")))
+            .unwrap()
+            .is_file());
+        assert!(store.blob_path(profile, &trashed).unwrap().is_file());
+        assert!(folder.join("unknown-recovery-file").is_file());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::read(dir.path().join("outside")).unwrap(),
+            b"keep outside"
+        );
+    }
+
+    #[test]
+    fn orphan_reconciliation_refuses_unknown_reference_inventory_and_preserves_case_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::new(dir.path().join("media"));
+        let profile = ProfileId::from(64);
+        let digest = hex(&Sha256::digest(b"referenced"));
+        let path = store.put(profile, &digest, b"referenced").unwrap();
+        let variant = path.with_file_name(digest.to_ascii_uppercase());
+        std::fs::rename(&path, &variant).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE user_resources(kind TEXT,body TEXT);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO user_resources VALUES('media',?1)",
+            [serde_json::json!({"content":{"asset":{"digest":digest}}}).to_string()],
+        )
+        .unwrap();
+        store.reconcile_orphans(profile, &conn).unwrap();
+        assert!(variant.is_file());
+        conn.execute_batch("UPDATE user_resources SET body=json_set(body,'$.content.asset.digest',upper(json_extract(body,'$.content.asset.digest')));").unwrap();
+        let lowercase_profile = ProfileId::from(68);
+        let lowercase = store
+            .put(lowercase_profile, &digest, b"referenced")
+            .unwrap();
+        store.reconcile_orphans(lowercase_profile, &conn).unwrap();
+        assert!(
+            lowercase.is_file(),
+            "uppercase record digests must retain lowercase file aliases"
+        );
+
+        let other = ProfileId::from(65);
+        let path = store.put(other, &digest, b"referenced").unwrap();
+        conn.execute_batch(
+            "DELETE FROM user_resources; INSERT INTO user_resources VALUES('media','not JSON');",
+        )
+        .unwrap();
+        assert!(store.reconcile_orphans(other, &conn).is_err());
+        assert!(path.is_file());
+        conn.execute_batch("DELETE FROM user_resources; WITH RECURSIVE fill(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM fill WHERE n<10001) INSERT INTO user_resources SELECT 'media','{\"content\":{\"asset\":{\"digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}}' FROM fill;").unwrap();
+        assert!(store.reconcile_orphans(other, &conn).is_err());
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn orphan_reconciliation_is_bounded_and_failed_unlinks_retry_on_later_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::new(dir.path().join("media"));
+        let profile = ProfileId::from(66);
+        let folder = store.root.join(profile.to_string());
+        std::fs::create_dir_all(&folder).unwrap();
+        for index in 0..300 {
+            std::fs::write(
+                folder.join(hex(&Sha256::digest(index.to_string().as_bytes()))),
+                b"orphan",
+            )
+            .unwrap();
+        }
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE user_resources(kind TEXT,body TEXT);")
+            .unwrap();
+        store.reconcile_orphans(profile, &conn).unwrap();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 44);
+        store
+            .reconcile_orphans_with_remove(profile, &conn, |_| {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            })
+            .unwrap();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 44);
+        store.reconcile_orphans(profile, &conn).unwrap();
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(), 0);
     }
 }
