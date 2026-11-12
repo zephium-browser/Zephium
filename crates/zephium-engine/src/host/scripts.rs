@@ -39,8 +39,8 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var MAX_DRAWN_CANVASES = 16;
   var drawnCanvases = [];
   var beforeUnload = [];
-  var audioContexts = new Set();
-  var captureTracks = new Set();
+  var audioContexts = [];
+  var captureTracks = [];
   var MAX_TRACKED = 4096;
   // Ordinary article and app pages exceed a few thousand elements. One bounded
   // walk per probe of a hidden page costs milliseconds.
@@ -280,12 +280,35 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     eventTarget.removeEventListener = wrappedRemove;
   } catch (_) { uncertain = true; }
 
+  // Tracking never owns an application's contexts/tracks. Prune closed,
+  // ended and collected entries before checking the active-object ceiling.
+  function pruneTracked(list, terminal, visit) {
+    var retained = 0;
+    for (var i = 0; i < list.length; i++) {
+      var value = apply(weakDeref, list[i], []);
+      if (!value || terminal(value)) continue;
+      list[retained++] = list[i];
+      if (visit) visit(value);
+    }
+    list.length = retained;
+  }
+  function rememberTracked(list, value, terminal) {
+    if (!WeakReference || !weakDeref) { uncertain = true; return; }
+    pruneTracked(list, terminal);
+    if (terminal(value)) return;
+    for (var i = 0; i < list.length; i++) {
+      if (apply(weakDeref, list[i], []) === value) return;
+    }
+    if (list.length >= MAX_TRACKED) { uncertain = true; return; }
+    apply(arrayPush, list, [new WeakReference(value)]);
+  }
+  function endedTrack(track) { return !liveTrack(track); }
+  function closedContext(context) { return callGetter(contextState, context) === 'closed'; }
   function observeStream(stream) {
     try {
       var tracks = apply(getTracks, stream, []);
       for (var i = 0; i < tracks.length; i++) {
-        if (captureTracks.size < MAX_TRACKED) captureTracks.add(tracks[i]);
-        else uncertain = true;
+        rememberTracked(captureTracks, tracks[i], endedTrack);
       }
     } catch (_) { uncertain = true; }
     return stream;
@@ -316,8 +339,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       var wrapped = new Proxy(original, {
         construct: function(target, args, newTarget) {
           var value = construct(target, args, newTarget === wrapped ? target : newTarget);
-          if (audioContexts.size < MAX_TRACKED) audioContexts.add(value);
-          else uncertain = true;
+          rememberTracked(audioContexts, value, closedContext);
           return value;
         }
       });
@@ -455,10 +477,10 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
           for (var t = 0; t < tracks.length; t++) if (liveTrack(tracks[t])) capture = true;
         }
       }
-      audioContexts.forEach(function(context) {
+      pruneTracked(audioContexts, closedContext, function(context) {
         if (callGetter(contextState, context) === 'running') audioContext = true;
       });
-      captureTracks.forEach(function(track) { if (liveTrack(track)) capture = true; });
+      pruneTracked(captureTracks, endedTrack, function() { capture = true; });
       // Native playback state cannot tell muted from audible. A complete scan
       // of a frameless document whose playing media is all muted explains it.
       mutedOnly = playing && !media && complete && elements.length <= MAX_TRACKED &&
