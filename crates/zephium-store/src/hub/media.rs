@@ -119,6 +119,63 @@ pub(crate) fn valid_digest(digest: &str) -> bool {
 pub struct MediaStore {
     root: PathBuf,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncPoint {
+    File,
+    Directory,
+}
+
+fn sync_path(point: SyncPoint, path: &std::path::Path) -> std::io::Result<()> {
+    match point {
+        SyncPoint::File => flushable_file(path)?.sync_all(),
+        SyncPoint::Directory => {
+            #[cfg(unix)]
+            std::fs::File::open(path)?.sync_all()?;
+            #[cfg(not(unix))]
+            let _ = path;
+            Ok(())
+        }
+    }
+}
+
+fn flushable_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    // Windows FlushFileBuffers requires a writable handle, including when a
+    // previously published blob is reused after an interrupted import.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+fn reserve_blob_temporary(
+    dir: &std::path::Path,
+    digest: &str,
+    mut next: impl FnMut() -> u64,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    for _ in 0..16 {
+        let temp = dir.join(format!(".{digest}.{}.{}.tmp", std::process::id(), next()));
+        match options.open(&temp) {
+            Ok(file) => return Ok((temp, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+}
+
+fn publish_file(temporary: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    return crate::windows_file_identity::publish_file(temporary, path);
+    #[cfg(not(target_os = "windows"))]
+    std::fs::rename(temporary, path)
+}
 impl MediaStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -128,12 +185,19 @@ impl MediaStore {
     }
     /// Writes atomically; an existing identical blob is left untouched.
     pub fn put(&self, profile: ProfileId, digest: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+        self.put_with_sync(profile, digest, bytes, &mut sync_path)
+    }
+
+    fn put_with_sync(
+        &self,
+        profile: ProfileId,
+        digest: &str,
+        bytes: &[u8],
+        sync: &mut impl FnMut(SyncPoint, &std::path::Path) -> std::io::Result<()>,
+    ) -> std::io::Result<PathBuf> {
         let path = self
             .blob_path(profile, digest)
             .ok_or_else(|| std::io::Error::other("invalid digest"))?;
-        if path.is_file() {
-            return Ok(path);
-        }
         let dir = path
             .parent()
             .ok_or_else(|| std::io::Error::other("no parent"))?;
@@ -144,19 +208,34 @@ impl MediaStore {
             std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700)).ok();
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }
-        let temp = dir.join(format!(".{digest}.{}.tmp", std::process::id()));
-        std::fs::write(&temp, bytes)?;
-        match std::fs::rename(&temp, &path) {
-            Ok(()) => Ok(path),
-            Err(error) => {
+        if path.is_file() {
+            sync(SyncPoint::File, &path)?;
+        } else {
+            use std::io::Write;
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let (temp, mut file) =
+                reserve_blob_temporary(dir, digest, || NEXT.fetch_add(1, Ordering::Relaxed))?;
+            let result = (|| {
+                file.write_all(bytes)?;
+                sync(SyncPoint::File, &temp)?;
+                drop(file);
+                publish_file(&temp, &path)
+            })();
+            if let Err(error) = result {
                 let _ = std::fs::remove_file(&temp);
-                if path.is_file() {
-                    Ok(path)
-                } else {
-                    Err(error)
-                }
+                return Err(error);
             }
         }
+        // Persist every newly created directory entry, from the blob outward,
+        // before SQLite may commit a reference to these bytes. Windows uses a
+        // write-through move because directory FlushFileBuffers is unsupported.
+        sync(SyncPoint::Directory, dir)?;
+        sync(SyncPoint::Directory, &self.root)?;
+        if let Some(parent) = self.root.parent() {
+            sync(SyncPoint::Directory, parent)?;
+        }
+        Ok(path)
     }
     pub fn read(&self, profile: ProfileId, digest: &str, max: usize) -> Option<Vec<u8>> {
         let path = self.blob_path(profile, digest)?;
@@ -315,6 +394,105 @@ mod tests {
         assert!(store
             .read(ProfileId::from(8), &asset.digest, 1 << 20)
             .is_none());
+    }
+
+    #[test]
+    fn blob_publication_flushes_bytes_before_publishing_and_parent_entries_before_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::new(dir.path().join("media"));
+        let profile = ProfileId::from(7);
+        let bytes = b"durable import";
+        let digest = hex(&Sha256::digest(bytes));
+        let published = store.blob_path(profile, &digest).unwrap();
+        let mut durable_bytes = None;
+        let mut durable_name = false;
+        let mut directories = Vec::new();
+        store
+            .put_with_sync(profile, &digest, bytes, &mut |point, path| {
+                match point {
+                    SyncPoint::File => {
+                        assert!(
+                            !published.exists(),
+                            "bytes must reach disk before publication"
+                        );
+                        durable_bytes = Some(std::fs::read(path)?);
+                    }
+                    SyncPoint::Directory => {
+                        assert_eq!(durable_bytes.as_deref(), Some(bytes.as_slice()));
+                        assert!(published.is_file());
+                        durable_name = true;
+                        directories.push(path.to_path_buf());
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            durable_name,
+            "a crash must retain the published namespace entry"
+        );
+        assert_eq!(
+            directories,
+            [
+                published.parent().unwrap(),
+                store.root.as_path(),
+                dir.path()
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_blob_flush_refuses_publication_and_removes_temporary_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MediaStore::new(dir.path().join("media"));
+        let profile = ProfileId::from(8);
+        let digest = hex(&Sha256::digest(b"bytes"));
+        let result = store.put_with_sync(profile, &digest, b"bytes", &mut |_, _| {
+            Err(std::io::Error::other("injected failed flush"))
+        });
+        assert!(result.is_err());
+        assert!(!store.blob_path(profile, &digest).unwrap().exists());
+        assert_eq!(
+            std::fs::read_dir(store.root.join(profile.to_string()))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn blob_flush_handles_have_write_access_without_truncating_bytes() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        std::fs::write(&path, b"retained").unwrap();
+        let mut file = flushable_file(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 8);
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"!").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"retained!");
+    }
+
+    #[test]
+    fn blob_temporary_collisions_preserve_preexisting_recovery_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = hex(&Sha256::digest(b"bytes"));
+        let collision = dir
+            .path()
+            .join(format!(".{digest}.{}.0.tmp", std::process::id()));
+        std::fs::write(&collision, b"prior interrupted save").unwrap();
+        let mut next = 0;
+        let (reserved, file) = reserve_blob_temporary(dir.path(), &digest, || {
+            let value = next;
+            next += 1;
+            value
+        })
+        .unwrap();
+        assert_ne!(reserved, collision);
+        assert_eq!(std::fs::read(collision).unwrap(), b"prior interrupted save");
+        drop(file);
+        std::fs::remove_file(reserved).unwrap();
     }
 
     #[test]
