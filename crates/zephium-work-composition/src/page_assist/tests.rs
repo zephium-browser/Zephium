@@ -1735,6 +1735,89 @@ async fn model_faults_end_the_reply_with_their_reason() {
     );
 }
 
+async fn model_call_with_timeouts(
+    turn: Turn,
+    idle: Duration,
+    overall: Duration,
+) -> Option<PageAssistFaultV1> {
+    let h = harness(vec![say("Warmup"), turn]);
+    h.ask("Warmup", false).await.unwrap();
+    h.settle().await;
+    let request = h.requests()[0].clone();
+    h.client.dropped.store(false, Ordering::Release);
+    let conversation = h.conversation().await;
+    let reply = agent::Reply {
+        service: h.service.clone(),
+        conversation,
+        space: SPACE.into(),
+        profile: profile(),
+        reply: 2,
+        words: String::new(),
+        suggestion: None,
+        attachments: Vec::new(),
+        cancel: Arc::new(Cancel::default()),
+        leased: Arc::new(AtomicBool::new(false)),
+        took_over: Arc::new(AtomicBool::new(false)),
+        glowing: Mutex::new(Vec::new()),
+    };
+    let model = ResolvedModel {
+        entry: entry(true),
+        effort: None,
+        client: h.client.clone(),
+    };
+    let fault = reply.call_for_test(&model, request, idle, overall).await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    fault
+}
+
+#[tokio::test]
+async fn model_stream_progress_resets_the_idle_timeout() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 30],
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_silent_model_times_out_without_claiming_provider_failure() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                hang: true,
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
+    );
+}
+
+#[tokio::test]
+async fn continuous_model_progress_still_has_an_overall_cap() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 100],
+                ..Turn::default()
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(40)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
+    );
+}
+
 #[tokio::test]
 async fn refusals_hold_before_any_request() {
     let h = harness(vec![say("x")]);

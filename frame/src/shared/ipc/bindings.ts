@@ -2239,6 +2239,8 @@ export type PageAssistFaultV1 = { reason: "ai_off" } | { reason: "private" } | {
 { reason: "step_failed" } |
 /**  The reply reached its limit of steps or time. */
 { reason: "too_long" } |
+/**  The model stopped making progress or exceeded the call's overall cap. */
+{ reason: "timed_out" } |
 /**
  *  The model call failed. `retry_after_ms` is set for `rate_limited`
  *  (and hosted limits) when the provider or server said when to retry.
