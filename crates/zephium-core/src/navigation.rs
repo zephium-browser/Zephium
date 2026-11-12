@@ -44,10 +44,11 @@ pub fn search_query(input: &str) -> Option<Url> {
     }
     if has_leading_scheme_separator(value) || Url::parse(value).is_ok() {
         let parsed = Url::parse(value).ok()?;
-        if !is_allowed(&parsed) {
+        if !is_allowed(&parsed) && !opaque_search_phrase(value, &parsed) {
             return None;
         }
-    } else if !embedded_web_targets_allowed(value) {
+    }
+    if !embedded_web_targets_allowed(value) {
         return None;
     }
     search_url(value)
@@ -67,30 +68,98 @@ fn classify_input(s: &str) -> InputKind {
     if looks_like_local_path(s) {
         return InputKind::Rejected;
     }
-    if looks_like_host(s) {
+    if looks_like_host(s) || bare_host_with_port(s) {
         return Url::parse(&format!("https://{s}"))
             .ok()
             .filter(is_allowed)
             .map_or(InputKind::Rejected, InputKind::Direct);
     }
 
-    // A syntactically absolute input expresses an intent to navigate, not to
-    // search. This includes schemes without `//` such as file:, data: and
-    // javascript:. Reject every disallowed absolute URL without exfiltrating
-    // its original text to SEARCH_BASE. A malformed leading `scheme://` is
-    // treated the same way because it may still contain credentials or a local
-    // path; a safe web URL embedded later in prose remains ordinary search text.
-    if has_leading_scheme_separator(s) || Url::parse(s).is_ok() {
+    // Absolute targets remain navigation intent, including file:, data: and
+    // javascript:. Only explicit prose/search prefixes such as TypeError or
+    // site are reconsidered as search when followed by a phrase. Arbitrary
+    // custom protocols retain refusal instead of exposing their payloads.
+    // A malformed leading scheme:// also remains an explicit target.
+    if has_leading_scheme_separator(s) {
         return Url::parse(s)
             .ok()
             .filter(is_browser_target)
             .map_or(InputKind::Rejected, InputKind::Direct);
+    }
+    if let Ok(parsed) = Url::parse(s) {
+        if is_browser_target(&parsed) {
+            return InputKind::Direct(parsed);
+        }
+        if !opaque_search_phrase(s, &parsed) {
+            return InputKind::Rejected;
+        }
     }
     if !embedded_web_targets_allowed(s) {
         return InputKind::Rejected;
     }
 
     search_url(s).map_or(InputKind::Rejected, InputKind::Search)
+}
+
+// These application names avoid ambiguity with a numeric host:port. Opaque
+// phrases search only the explicit prose prefixes below, never arbitrary
+// registered or unknown application protocols.
+const EXPLICIT_APP_SCHEMES: &[&str] = &[
+    "mailto",
+    "tel",
+    "sms",
+    "facetime",
+    "facetime-audio",
+    "slack",
+    "msteams",
+    "zoommtg",
+    "steam",
+    "ssh",
+    "git",
+    "vscode",
+];
+
+fn explicit_non_search_scheme(scheme: &str) -> bool {
+    NOT_FOR_APPS.contains(&scheme)
+        || EXPLICIT_APP_SCHEMES.contains(&scheme)
+        || scheme.starts_with("zephium")
+}
+
+const PROSE_SEARCH_PREFIXES: &[&str] = &[
+    "typeerror",
+    "referenceerror",
+    "syntaxerror",
+    "rangeerror",
+    "urierror",
+    "evalerror",
+    "aggregateerror",
+    "error",
+    "site",
+    "define",
+    "re",
+];
+
+fn opaque_search_phrase(value: &str, parsed: &Url) -> bool {
+    value.contains(char::is_whitespace)
+        && parsed.cannot_be_a_base()
+        && PROSE_SEARCH_PREFIXES.contains(&parsed.scheme())
+}
+
+fn bare_host_with_port(value: &str) -> bool {
+    if value.contains(char::is_whitespace) {
+        return false;
+    }
+    let authority = value.split(['/', '?', '#']).next().unwrap_or(value);
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && !host.contains([':', '@'])
+        && !explicit_non_search_scheme(&host.to_ascii_lowercase())
+        && !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+        && url::Host::parse(host).is_ok()
 }
 
 fn search_url(value: &str) -> Option<Url> {
@@ -438,6 +507,46 @@ fn looks_like_host(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn opaque_prose_with_colons_searches_while_explicit_protocols_stay_refused() {
+        for input in [
+            "TypeError: Cannot read properties of undefined",
+            "ERROR: relation users does not exist",
+            "site:reddit.com laptops",
+            "define: serendipity",
+            "Re: meeting notes",
+        ] {
+            assert!(is_query(input), "{input}");
+            assert_eq!(
+                classify(input)
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(key, _)| key == "q")
+                    .unwrap()
+                    .1,
+                input
+            );
+            assert!(search_query(input).is_some());
+        }
+        assert_eq!(
+            classify("myrouter:8080").unwrap().as_str(),
+            "https://myrouter:8080/"
+        );
+        for input in [
+            "javascript: alert(1)",
+            "file: /private/document",
+            "data: text/plain,secret",
+            "mailto: private@example.test",
+            "slack: secret channel",
+            "custom:payload",
+            "custom: payload with spaces",
+            "steam://run/123 text",
+        ] {
+            assert!(classify(input).is_none(), "{input}");
+            assert!(search_query(input).is_none(), "{input}");
+        }
+    }
 
     #[test]
     fn system_settings_links_never_reach_external_app_admission() {
