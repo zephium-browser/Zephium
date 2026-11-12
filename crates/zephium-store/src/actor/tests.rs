@@ -2,6 +2,7 @@ use super::*;
 mod activity_writes;
 mod chats;
 mod composers;
+mod startup_recovery;
 mod zoom;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};

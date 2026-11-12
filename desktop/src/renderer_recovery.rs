@@ -31,6 +31,19 @@ pub(crate) enum Action {
 }
 
 impl Recovery {
+    fn failure(&mut self, browser_exited: bool, invalidate_health: impl FnOnce()) -> Action {
+        invalidate_health();
+        if browser_exited {
+            if self.stop() {
+                Action::Stop
+            } else {
+                Action::Ignore
+            }
+        } else {
+            self.crashed()
+        }
+    }
+
     #[cfg(all(test, target_os = "windows"))]
     pub(crate) fn settled_attempts(&self) -> u8 {
         if self.pending.is_none() && !self.terminal {
@@ -145,15 +158,13 @@ pub(crate) fn failed(app: &AppHandle, label: &str, browser_exited: bool) {
     };
     let action = {
         let mut recovery = surface.lock().unwrap_or_else(|e| e.into_inner());
-        if browser_exited {
-            if recovery.stop() {
-                Action::Stop
-            } else {
-                Action::Ignore
+        recovery.failure(browser_exited, || {
+            if label == crate::MAIN_LABEL {
+                if let Some(gate) = app.try_state::<crate::UiStartupGate>() {
+                    gate.mark_document_started();
+                }
             }
-        } else {
-            recovery.crashed()
-        }
+        })
     };
     let attempt = match action {
         Action::Ignore => return,
@@ -252,6 +263,43 @@ fn explain_failure(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_crash_action_invalidates_startup_health_before_any_reload_event() {
+        use std::sync::atomic::Ordering;
+        for (mut recovery, browser_exited, expected) in [
+            (Recovery::default(), false, Action::Reload(1)),
+            (
+                Recovery {
+                    terminal: true,
+                    ..Default::default()
+                },
+                false,
+                Action::Ignore,
+            ),
+            (Recovery::default(), true, Action::Stop),
+            (
+                Recovery {
+                    pending: Some(1),
+                    ..Default::default()
+                },
+                false,
+                Action::Ignore,
+            ),
+        ] {
+            let gate = crate::UiStartupGate::new(tauri::Url::parse("tauri://localhost/").unwrap());
+            gate.document_loaded.store(true, Ordering::Release);
+            gate.frontend_ready.store(true, Ordering::Release);
+            assert!(gate.healthy_generation(0));
+            assert_eq!(
+                recovery.failure(browser_exited, || gate.mark_document_started()),
+                expected
+            );
+            assert!(!gate.healthy_generation(0));
+            // No navigation or PageLoadStarted signal has been delivered.
+            assert!(!gate.document_loaded.load(Ordering::Acquire));
+        }
+    }
 
     #[test]
     fn repeated_events_do_not_overlap_reloads_or_reset_the_rapid_crash_budget() {

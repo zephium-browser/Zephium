@@ -316,6 +316,7 @@ enum Cmd {
     Load(Sender<SessionLoad>),
     /// Sets an unrestorable session aside and loads the restarted one.
     SetAsideSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
+    SetAsideStartupSession(Sender<Option<(SessionLoad, Option<std::path::PathBuf>)>>),
     UpdateProfileBlockerConfig(
         ProfileId,
         BlockerConfigRevision,
@@ -517,6 +518,23 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// After an explicit startup recovery choice, preserves the current
+    /// bounded session bytes and restarts without tabs, retaining draft scopes.
+    pub fn set_aside_startup_session(&self) -> Option<(SessionLoad, Option<std::path::PathBuf>)> {
+        let lifecycle = match self.lifecycle.try_read() {
+            Ok(lifecycle) => lifecycle,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return None;
+        }
+        let (send, receive) = mpsc::channel();
+        self.tx.try_send(Cmd::SetAsideStartupSession(send)).ok()?;
+        drop(lifecycle);
+        receive.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
+    }
+
     fn admits_writes(&self) -> bool {
         let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
         !lifecycle.terminal_admitted && !self.shutdown_clean.load(Ordering::Acquire)
@@ -1964,6 +1982,20 @@ fn actor(
                         eprintln!("store: setting the unrestorable session aside failed: {error}");
                         None
                     }
+                };
+                let _ = reply.send(restarted);
+            }
+            Some(Cmd::SetAsideStartupSession(reply)) => {
+                let restarted = if flush(&mut hub, &mut pending) {
+                    match hub.set_aside_startup_session() {
+                        Ok(file) => Some((session_load(&mut hub), file)),
+                        Err(error) => {
+                            eprintln!("store: startup session recovery failed: {error}");
+                            None
+                        }
+                    }
+                } else {
+                    None
                 };
                 let _ = reply.send(restarted);
             }

@@ -124,6 +124,7 @@ mod resource_close;
 mod search_providers;
 mod spaces;
 mod startup_alert;
+mod startup_recovery;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
 mod swipe;
@@ -440,6 +441,8 @@ struct UiStartupGate {
     visible: Arc<AtomicBool>,
     handed_over: Arc<AtomicBool>,
     browser_revealed: Arc<AtomicBool>,
+    health_generation: Arc<std::sync::atomic::AtomicU64>,
+    health_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 // WebView2 cold starts compete with runtime servicing and antivirus scanning.
@@ -465,6 +468,8 @@ impl UiStartupGate {
             visible: Arc::new(AtomicBool::new(false)),
             handed_over: Arc::new(AtomicBool::new(false)),
             browser_revealed: Arc::new(AtomicBool::new(false)),
+            health_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            health_task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -496,6 +501,88 @@ impl UiStartupGate {
         self.show_if_ready(window);
     }
 
+    fn mark_document_started(&self) {
+        self.document_loaded.store(false, Ordering::Release);
+        self.frontend_ready.store(false, Ordering::Release);
+        let _ = self.health_generation.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |generation| generation.checked_add(1),
+        );
+        if let Some(task) = self
+            .health_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+    }
+
+    fn schedule_healthy(&self, window: &WebviewWindow) {
+        let app = window.app_handle().clone();
+        let Some(health) = app.try_state::<StartupHealth>() else {
+            return;
+        };
+        if !health.admitted.load(Ordering::Acquire) {
+            return;
+        }
+        let attempt = health.attempt.clone();
+        let generation = self.health_generation.load(Ordering::Acquire);
+        if generation == u64::MAX {
+            return;
+        }
+        let mut pending = self
+            .health_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending.is_some() {
+            return;
+        }
+        let gate = self.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                if !gate.healthy_generation(generation)
+                    || shutdown_started(&app)
+                    || resource_close::is_closing()
+                {
+                    return;
+                }
+                let Some(shell) = app.try_state::<Handle>() else {
+                    return;
+                };
+                // This actor-ordered projection is absent until Bootstrap has
+                // completed, including on the onboarding document.
+                if !matches!(
+                    shell
+                        .profiles()
+                        .recv_timeout(std::time::Duration::from_millis(250)),
+                    Ok(Some(_))
+                ) {
+                    return;
+                }
+                if gate.healthy_generation(generation)
+                    && !shutdown_started(&app)
+                    && !resource_close::is_closing()
+                {
+                    if let Err(error) = attempt.mark_healthy() {
+                        diagnostic!("startup: healthy marker could not settle: {error}");
+                    }
+                }
+            })
+            .await
+            .ok();
+        });
+        *pending = Some(task.inner().abort_handle());
+    }
+
+    fn healthy_generation(&self, generation: u64) -> bool {
+        generation == self.health_generation.load(Ordering::Acquire)
+            && self.document_loaded.load(Ordering::Acquire)
+            && self.frontend_ready.load(Ordering::Acquire)
+    }
+
     fn mark_frontend_ready(&self, window: &WebviewWindow) -> bool {
         let Ok(current_url) = window.url() else {
             return false;
@@ -521,6 +608,7 @@ impl UiStartupGate {
             request_startup_failure(window.app_handle(), "could not reveal recovered chrome");
             return;
         }
+        self.schedule_healthy(window);
         if self.handed_over.load(Ordering::Acquire) {
             self.reveal_browser(window);
             return;
@@ -681,8 +769,7 @@ impl UiStartupGate {
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn prepare_recovery(&self, window: &WebviewWindow) -> Option<tauri::Url> {
-        self.document_loaded.store(false, Ordering::Release);
-        self.frontend_ready.store(false, Ordering::Release);
+        self.mark_document_started();
         platform::imp::set_chrome_hidden(window, true).then(|| self.expected())
     }
 }
@@ -1006,13 +1093,16 @@ impl ShutdownCoordinator {
         cleanup: impl FnOnce(Self) + Send + 'static,
     ) {
         let owner = self.clone();
-        request_flush(deadline, Box::new(move |proven| {
-            if !proven {
-                diagnostic!("shutdown: system renderer draft flush was not proven");
-                owner.terminal_failure.store(true, Ordering::Release);
-            }
-            cleanup(owner);
-        }));
+        request_flush(
+            deadline,
+            Box::new(move |proven| {
+                if !proven {
+                    diagnostic!("shutdown: system renderer draft flush was not proven");
+                    owner.terminal_failure.store(true, Ordering::Release);
+                }
+                cleanup(owner);
+            }),
+        );
     }
 
     /// Linearizes every terminal-start publication against the Shell's sole
@@ -1134,6 +1224,15 @@ impl ShutdownCoordinator {
         // shell/store teardown cannot turn failed initialization successful.
         let exit_code =
             coordinated_exit_code(outcome, self.terminal_failure.load(Ordering::Acquire));
+        if exit_code == 0 {
+            if let Some(health) = app.try_state::<StartupHealth>() {
+                if health.admitted.load(Ordering::Acquire) {
+                    if let Err(error) = health.attempt.mark_clean() {
+                        diagnostic!("startup: clean-close marker could not settle: {error}");
+                    }
+                }
+            }
+        }
         self.schedule_authorized_exit(app, exit_code);
     }
 
@@ -1315,6 +1414,107 @@ fn shutdown_receive_outcome(
 }
 
 type SetupResult = Result<(), Box<dyn std::error::Error>>;
+
+struct StartupHealth {
+    attempt: startup_recovery::StartupAttempt,
+    admitted: AtomicBool,
+}
+
+impl StartupHealth {
+    fn new(attempt: startup_recovery::StartupAttempt) -> Self {
+        Self {
+            attempt,
+            admitted: AtomicBool::new(false),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StartupContinuation {
+    shutdown: ShutdownCoordinator,
+    consumed: Arc<AtomicBool>,
+}
+
+impl StartupContinuation {
+    fn new(shutdown: ShutdownCoordinator) -> Self {
+        Self {
+            shutdown,
+            consumed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    fn available(&self) -> bool {
+        !self.shutdown.terminal_started() && !self.consumed.load(Ordering::Acquire)
+    }
+    fn admit(&self) -> bool {
+        self.shutdown
+            .try_startup_admission(|| !self.consumed.swap(true, Ordering::AcqRel))
+    }
+    fn answer(&self, accepted: bool, recover: impl FnOnce(), close: impl FnOnce()) {
+        if !self.available() {
+            return;
+        }
+        if accepted {
+            recover();
+        } else {
+            close();
+        }
+    }
+}
+
+fn offer_startup_recovery(
+    app: tauri::AppHandle,
+    store: Arc<SqliteStore>,
+    data_dir: std::path::PathBuf,
+    attempt: Option<startup_recovery::StartupAttempt>,
+    continuation: StartupContinuation,
+    advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    #[cfg(target_os = "windows")] environments: Arc<AtomicU8>,
+) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    app.dialog().message("Zephium did not finish starting on recent attempts. You can open it without restoring tabs. Your saved session will be preserved in a recovery file, and unsent Work drafts will remain available.")
+        .title("Recover Zephium startup")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Open without restored tabs".into(), "Close".into()))
+        .show(move |accepted| {
+            let answer = continuation.clone();
+            let close_app = app.clone();
+            answer.answer(accepted, move || {
+            tauri::async_runtime::spawn(async move {
+                let worker_guard = continuation.clone();
+                let recovered = tauri::async_runtime::spawn_blocking(move || -> Result<_, std::io::Error> {
+                    if !worker_guard.available() { return Ok(None); }
+                    let Some((load, _artifact)) = store.set_aside_startup_session() else {
+                        return Err(std::io::Error::other("startup session could not be preserved"));
+                    };
+                    if matches!(load, zephium_core::ports::store::SessionLoad::RecoveryRequired { .. } | zephium_core::ports::store::SessionLoad::Failed) {
+                        return Err(std::io::Error::other("startup session recovery remained unavailable"));
+                    }
+                    let attempt = match attempt { Some(attempt) => attempt, None => startup_recovery::recover_marker_after_choice(&data_dir)? };
+                    Ok(Some((store, data_dir, attempt)))
+                }).await;
+                if !continuation.available() { return; }
+                let dispatch = app.clone();
+                if app.run_on_main_thread(move || {
+                    if !continuation.admit() { return; }
+                    let result = match recovered {
+                        Ok(Ok(Some((store, data_dir, attempt)))) => {
+                            dispatch.manage(StartupHealth::new(attempt));
+                            finish_browser_setup(&dispatch, store, data_dir, advisories,
+                                #[cfg(target_os = "windows")] environments,
+                            )
+                        }
+                        Ok(Ok(None)) => return,
+                        Ok(Err(error)) => Err(error.into()),
+                        Err(_) => Err(std::io::Error::other("startup recovery worker did not complete").into()),
+                    };
+                    if let Err(error) = result { request_setup_failure(&dispatch, error); }
+                }).is_err() {
+                    request_orderly_terminal_failure(&app);
+                }
+            });
+            }, move || request_orderly_terminal_failure(&close_app));
+        });
+}
 
 /// Tauri 2.11 turns a setup-hook `Err` into a panic from its runtime Ready
 /// callback. On macOS that callback is entered from Objective-C, so release
@@ -2108,7 +2308,7 @@ fn ui_navigation_allowed(url: &tauri::Url) -> bool {
 }
 
 fn privileged_app_url(
-    app: &tauri::App,
+    app: &tauri::AppHandle,
     configured: &tauri::WebviewUrl,
 ) -> tauri::Result<tauri::Url> {
     use tauri::utils::config::FrontendDist;
@@ -5649,7 +5849,7 @@ const ONBOARDING_PAGE: &str = "onboarding.html";
 
 /// Where a first run's onboarding loads. A bundled Windows build serves it
 /// from a host of its own; see `onboarding_host`.
-fn onboarding_url(app: &tauri::App) -> tauri::Result<tauri::Url> {
+fn onboarding_url(app: &tauri::AppHandle) -> tauri::Result<tauri::Url> {
     #[cfg(target_os = "windows")]
     if !tauri::is_dev() {
         return tauri::Url::parse(onboarding_host::URL).map_err(tauri::Error::InvalidUrl);
@@ -6809,346 +7009,100 @@ fn install_async_runtime() {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    if cfg!(all(unix, not(target_os = "macos"))) {
-        diagnostic!(
-            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
-        );
-        std::process::exit(1);
+fn finish_browser_setup(
+    app: &tauri::AppHandle,
+    store: Arc<SqliteStore>,
+    data_dir: std::path::PathBuf,
+    runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    #[cfg(target_os = "windows")] setup_privileged_environments: Arc<AtomicU8>,
+) -> SetupResult {
+    let shutdown = app
+        .try_state::<ShutdownCoordinator>()
+        .ok_or_else(|| std::io::Error::other("shutdown coordinator state is unavailable"))?;
+    let startup_store = app
+        .try_state::<StartupStore>()
+        .ok_or_else(|| std::io::Error::other("startup storage cleanup owner is unavailable"))?;
+    if shutdown.terminal_started() {
+        return Ok(());
     }
+    for (key, value) in zephium_core::preferences::migrations(|key| store.app_setting(key)) {
+        let _ = store.set_app_setting(key.into(), value);
+    }
+    #[cfg(target_os = "windows")]
+    windows_privacy::initialize(app, store.clone());
+    menu_text::set_language(store.app_setting("ui.language").as_deref());
+    updates::schedule_native_checks(app);
+    work_models::install(app);
+    // The benchmark must not reach the person's keychain or the
+    // account server: the keychain asks for their password.
     #[cfg(feature = "adblock-qa")]
-    blocker_bench::refuse_bad_arguments();
-    install_async_runtime();
-    APP_STARTED.get_or_init(std::time::Instant::now);
-    let context = tauri::generate_context!();
-    focus_alerts::claim_identity(&context.config().identifier);
+    if !blocker_bench::enabled() {
+        account::install(app);
+    }
+    #[cfg(not(feature = "adblock-qa"))]
+    account::install(app);
+
     #[cfg(target_os = "windows")]
-    default_browser::windows::claim(
-        context
-            .config()
-            .product_name
-            .as_deref()
-            .unwrap_or("Zephium"),
+    let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
+    #[cfg(target_os = "windows")]
+    let runtime_security_advisories =
+        runtime_security_advisories.with_optional(privileged_runtime_windows::cleanup_advisory());
+
+    let mut main_config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
+    // Decided before either page loads: a first run opens onboarding
+    // in this window, and the browser replaces it there once it is
+    // finished. The browser bundle carries none of it.
+    let onboarding = onboarding_first(store.as_ref());
+    let browser_url = privileged_app_url(app, &main_config.url)?;
+    let app_url = if onboarding {
+        onboarding_url(app)?
+    } else {
+        browser_url.clone()
+    };
+    main_config.url = tauri::WebviewUrl::External(
+        tauri::Url::parse(PRIVILEGED_BOOTSTRAP_URL)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
     );
-    // A launch that stops before setup has nowhere else to say why.
-    #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
-    platform::imp::open_startup_log(&context.config().identifier);
     #[cfg(target_os = "macos")]
-    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
-        Ok(advisory) => advisory,
-        Err(error) => {
-            // WebKit is dynamically supplied by macOS. Only an unsupported
-            // or unparseable runtime stops here, before Builder creates even
-            // the privileged blank bootstrap WKWebView; an outdated one
-            // starts with an update advisory.
-            diagnostic!("security: {error}");
-            startup_alert::show_blocking(startup_alert::StartupProblem::UnsupportedSystem, &error);
-            std::process::exit(78);
-        }
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let runtime_security_advisories = match zephium_engine::enforce_runtime_security_floor() {
-        Ok(advisory) => advisory,
-        Err(error) => {
-            // WebKitGTK is dynamically supplied by the OS. Reject known
-            // obsolete/development runtimes and security overrides before
-            // Builder constructs even the privileged blank bootstrap WebView.
-            diagnostic!("security: {error}");
-            std::process::exit(78);
-        }
-    };
-
+    if let Some(position) = main_config.traffic_light_position.as_mut() {
+        position.y += platform::imp::window_controls_lift();
+    }
+    let main_builder = tauri::WebviewWindowBuilder::from_config(app, &main_config)?
+        // Do not expose an interactive privileged renderer until the
+        // platform deny handlers below have replaced WebKit/WebView2
+        // defaults. This also closes the small post-build attachment
+        // window while we remain on Tauri's public construction API.
+        .visible(false)
+        // Privileged chrome is a projection of Rust-owned state. It
+        // must not persist cookies, cache, service workers, or web
+        // storage across launches.
+        .incognito(true)
+        .devtools(cfg!(debug_assertions))
+        .general_autofill_enabled(false)
+        .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
+    #[cfg(feature = "work-development-traces")]
+    let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
     #[cfg(target_os = "windows")]
-    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
-        Ok(advisory) => advisory,
-        Err(failure) => {
-            // This runs before Builder creates either privileged chrome
-            // or raw content. Preview, overridden, or unparseable runtimes
-            // remain hard failures; an outdated one is an advisory.
-            diagnostic!("security: {failure}");
-            startup_alert::show_blocking(failure.problem(), failure.detail());
-            terminate_windows_process(78);
-        }
-    };
-
-    let specta = specta_builder();
-    #[cfg(target_os = "windows")]
-    let attempted_privileged_environments = Arc::new(AtomicU8::new(0));
-    #[cfg(target_os = "windows")]
-    let setup_privileged_environments = attempted_privileged_environments.clone();
-    let builder = tauri::Builder::default()
-        // Every Tauri-managed webview is zone 2. It may load only the bundled
-        // application origin (or the exact Vite origin in debug builds).
-        .plugin(navigation_lock())
-        .manage(tab_switcher::Switcher::default())
-        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
-        .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        // Must register first: a second launch (file association, dock, a
-        // stale instance holding the global hotkey and the profile dbs)
-        // focuses the running window and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
-        }));
-    // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
-    // native Wayland session can report success while receiving no keys (or
-    // fail startup when Xwayland is absent). Linux selects an actual GDK
-    // backend below and uses either direct X11 grabs or the desktop portal.
-    #[cfg(not(target_os = "linux"))]
-    let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
-    #[cfg(target_os = "windows")]
-    let builder = builder
-        .register_asynchronous_uri_scheme_protocol(onboarding_host::SCHEME, onboarding_host::serve);
-    // Windows hears the same from WebView2 ProcessFailed. Any other WebView
-    // keeps Tauri's own plain reload, which this hook replaces for all.
-    #[cfg(target_os = "macos")]
-    let builder = builder.on_web_content_process_terminate(|webview| {
-        let label = webview.label().to_owned();
-        if !renderer_recovery::owns(&label) {
-            let _ = webview.reload();
-            return;
-        }
-        let app = webview.app_handle().clone();
-        let target = app.clone();
-        let _ = app.run_on_main_thread(move || renderer_recovery::failed(&target, &label, false));
-    });
-    let app = builder
-        .invoke_handler(specta.invoke_handler())
-        // This state must predate the setup hook: every environmental failure
-        // is contained inside that native Ready callback and converted into a
-        // correlated event-loop exit instead of escaping as Tauri's panic.
-        .manage(ShutdownCoordinator::default())
-        .manage(updates::Updates::default())
-        // Storage is admitted first inside setup, but its temporary cleanup
-        // owner must already exist so installation and later Shell transfer are
-        // one exact, failure-observable transaction.
-        .manage(StartupStore::default())
-        // Own a successfully installed native host until shell ownership is
-        // published. Setup failures in that narrow interval can therefore
-        // execute the same explicit bounded engine teardown.
-        .manage(StartupEngine::default())
-        // The managed blocker starts its own compiler/updater workers. Keep
-        // their exact Arc reachable from the instant construction succeeds
-        // until the app-managed shell publishes authoritative ownership.
-        .manage(StartupBlocker::default())
-        .setup(move |app| {
-            let setup_result: SetupResult = (|| {
-                let shutdown = app
-                    .try_state::<ShutdownCoordinator>()
-                    .ok_or_else(|| {
-                        std::io::Error::other("shutdown coordinator state is unavailable")
-                    })?;
-                // Allocate the independent deadline thread before any native
-                // callback or persistent actor exists. Later callbacks only
-                // signal it and can never fail while spawning a watchdog.
-                shutdown.prepare_hard_exit_watchdog()?;
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
-                let termination_app = app.handle().clone();
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
-                let termination_owner = shutdown.inner().clone();
-                #[cfg(any(target_os = "windows", target_os = "macos"))]
-                tao::event_loop::set_system_termination_handler(
-                    PRE_SHELL_CLEANUP_TIMEOUT,
-                    menu_text::shutdown_reason(),
-                    move || {
-                        if let Some(shell) = termination_app.try_state::<Handle>() {
-                            let now = std::time::Instant::now();
-                            let system_deadline = tao::event_loop::system_termination_deadline()
-                                .unwrap_or(now + PRE_SHELL_CLEANUP_TIMEOUT);
-                            let flush_deadline = system_renderer_flush_deadline(now, system_deadline);
-                            let app = termination_app.clone();
-                            let owner = termination_owner.clone();
-                            let handle = shell.inner().clone();
-                            let flush_app = app.clone();
-                            owner.request_system_flush(flush_deadline,
-                                move |deadline, done| resource_close::request_system(flush_app, deadline, done),
-                                move |owner| owner.request(app, handle));
-                        } else {
-                            termination_owner.request_terminal_startup_failure(
-                                termination_app.clone(),
-                                TerminalStartupResources {
-                                    engine_owner: termination_app.try_state::<StartupEngine>().map(|owner| owner.inner().clone()),
-                                    blocker_owner: termination_app.try_state::<StartupBlocker>().map(|owner| owner.inner().clone()),
-                                    store_owner: termination_app.try_state::<StartupStore>().map(|owner| owner.inner().clone()),
-                                    ..TerminalStartupResources::default()
-                                },
-                            );
-                        }
-                    },
-                );
-                specta.mount_events(app);
-                let data_dir = app.path().app_data_dir()?;
-                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
-                let qa_session = webext_qa::session_label("--webext-qa-session=")?;
-                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
-                let data_dir = webext_qa::data_dir(data_dir, qa_session.as_deref())?;
-                #[cfg(feature = "adblock-qa")]
-                let data_dir = webext_qa::data_dir(data_dir, blocker_bench::session()?.as_deref())?;
-                #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
-                foreground_rendering_probe::validate_data_root(&data_dir)?;
-                #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
-                navigation_probe::validate_data_root(&data_dir)?;
-                std::fs::create_dir_all(&data_dir)?;
-                #[cfg(target_os = "windows")]
-                updates::restore(app.handle(), &data_dir);
-                #[cfg(feature = "work-product")]
-                zephium_app::work_lead::skills::install_root(data_dir.clone());
-                #[cfg(feature = "work-product")]
-                zephium_app::work_files::trash::install_root(data_dir.clone());
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
-                }
-                #[cfg(all(feature = "macos-work-profile-enrollment", target_os = "macos"))]
-                navigation_probe::mark_profile_enrollment(&data_dir)?;
-                #[cfg(target_os = "windows")]
-                {
-                    // Release builds have no console. Establish the bounded,
-                    // private diagnostic sink before storage admission so a
-                    // schema/corruption failure is still actionable without
-                    // constructing WebView2 state merely to initialize logs.
-                    platform::imp::redirect_stderr(&data_dir);
-                    diagnostics::install(data_dir.clone());
-                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    // Finder-launched apps write stderr nowhere; keep it in
-                    // a private, bounded log the person can choose to share.
-                    let logs = app.path().app_log_dir()?;
-                    platform::imp::redirect_stderr(&logs);
-                    diagnostics::install(logs);
-                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
-                }
-
-                // Storage is the first fallible subsystem admitted after the
-                // private data root is secured. A corrupt/newer database must
-                // fail before either privileged chrome or raw content creates
-                // native renderer state.
-                #[cfg(all(target_os = "windows", feature = "work-product"))]
-                let store = {
-                    #[cfg(feature = "webext-qa")]
-                    let session = qa_session.as_deref();
-                    #[cfg(not(feature = "webext-qa"))]
-                    let session = None;
-                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
-                        &app.config().identifier,
-                        session,
-                    )?;
-                    Arc::new(SqliteStore::open_with_windows_work_storage(&data_dir, work_storage)?)
-                };
-                #[cfg(not(all(target_os = "windows", feature = "work-product")))]
-                let store = Arc::new(SqliteStore::open(&data_dir)?);
-                app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
-                    data_dir.join("media"),
-                )));
-                #[cfg(feature = "work-product")]
-                zephium_app::work_connections::store::install(&data_dir);
-                #[cfg(feature = "work-product")]
-                app.manage(work_product::WorkFrames(Arc::new(
-                    zephium_store::WorkFrameStore::new(data_dir.join("work-frames")),
-                )));
-                let startup_store = app.try_state::<StartupStore>().ok_or_else(|| {
-                    std::io::Error::other("startup storage cleanup owner is unavailable")
-                })?;
-                if !startup_store.install(store.clone()) {
-                    let error =
-                        std::io::Error::other("startup storage cleanup owner is already armed");
-                    request_pre_shell_startup_failure_with_store(
-                        app.handle(),
-                        &error,
-                        store.clone(),
-                    );
-                    return Err(error.into());
-                }
-                APP_STORE.set(store.clone()).map_err(|_| {
-                    std::io::Error::other("process-global application store is already installed")
-                })?;
-                for (key, value) in
-                    zephium_core::preferences::migrations(|key| store.app_setting(key))
-                {
-                    let _ = store.set_app_setting(key.into(), value);
-                }
-                #[cfg(target_os = "windows")]
-                windows_privacy::initialize(app.handle(), store.clone());
-                menu_text::set_language(store.app_setting("ui.language").as_deref());
-                updates::schedule_native_checks(app.handle());
-                work_models::install(app.handle());
-                // The benchmark must not reach the person's keychain or the
-                // account server: the keychain asks for their password.
-                #[cfg(feature = "adblock-qa")]
-                if !blocker_bench::enabled() {
-                    account::install(app.handle());
-                }
-                #[cfg(not(feature = "adblock-qa"))]
-                account::install(app.handle());
-
-                #[cfg(target_os = "windows")]
-                let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
-                #[cfg(target_os = "windows")]
-                let runtime_security_advisories = runtime_security_advisories
-                    .with_optional(privileged_runtime_windows::cleanup_advisory());
-
-                let mut main_config = app
-                .config()
-                .app
-                .windows
-                .first()
-                .cloned()
-                .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
-                // Decided before either page loads: a first run opens onboarding
-                // in this window, and the browser replaces it there once it is
-                // finished. The browser bundle carries none of it.
-                let onboarding = onboarding_first(store.as_ref());
-                let browser_url = privileged_app_url(app, &main_config.url)?;
-                let app_url = if onboarding {
-                    onboarding_url(app)?
-                } else {
-                    browser_url.clone()
-                };
-                main_config.url = tauri::WebviewUrl::External(
-                tauri::Url::parse(PRIVILEGED_BOOTSTRAP_URL)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?,
-            );
-                #[cfg(target_os = "macos")]
-                if let Some(position) = main_config.traffic_light_position.as_mut() {
-                    position.y += platform::imp::window_controls_lift();
-                }
-                let main_builder = tauri::WebviewWindowBuilder::from_config(app, &main_config)?
-                // Do not expose an interactive privileged renderer until the
-                // platform deny handlers below have replaced WebKit/WebView2
-                // defaults. This also closes the small post-build attachment
-                // window while we remain on Tauri's public construction API.
-                .visible(false)
-                // Privileged chrome is a projection of Rust-owned state. It
-                // must not persist cookies, cache, service workers, or web
-                // storage across launches.
-                .incognito(true)
-                .devtools(cfg!(debug_assertions))
-                .general_autofill_enabled(false)
-                .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
-            #[cfg(feature = "work-development-traces")]
-            let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
-            #[cfg(target_os = "windows")]
-            let main_builder = main_builder
-                .decorations(false)
-                // Seed the native parent's first erase, not just WebView2's
-                // transparent renderer. Otherwise a hidden decorated window
-                // can reveal an unpainted white client surface until redraw.
-                .background_color(tauri::utils::config::Color(0, 0, 0, 0))
-                .data_directory(privileged_runtime.main.clone())
-                // Supplying any explicit value replaces Wry's default, which
-                // also disables msSmartScreenProtection. Keep only the
-                // feature suppressions privileged chrome needs.
-                .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
-            let main_builder = main_builder.on_download(|_, _| false);
-            #[cfg(feature = "file-workflows-qa")]
+    let main_builder = main_builder
+        .decorations(false)
+        // Seed the native parent's first erase, not just WebView2's
+        // transparent renderer. Otherwise a hidden decorated window
+        // can reveal an unpainted white client surface until redraw.
+        .background_color(tauri::utils::config::Color(0, 0, 0, 0))
+        .data_directory(privileged_runtime.main.clone())
+        // Supplying any explicit value replaces Wry's default, which
+        // also disables msSmartScreenProtection. Keep only the
+        // feature suppressions privileged chrome needs.
+        .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let main_builder = main_builder.on_download(|_, _| false);
+    #[cfg(feature = "file-workflows-qa")]
             let main_builder = main_builder.initialization_script(r#"
               (() => {
                 const report = value => {
@@ -7161,72 +7115,72 @@ pub fn run() {
                 window.addEventListener('DOMContentLoaded', () => report(`document ready; root children=${document.getElementById('root')?.childElementCount}`));
               })();
             "#);
-            let ui_startup_gate = if onboarding {
-                UiStartupGate::onboarding_first(app_url.clone(), browser_url)
-            } else {
-                UiStartupGate::new(app_url.clone())
-            };
-            app.manage(ui_startup_gate.clone());
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            app.manage(renderer_recovery::Renderers::default());
-            let page_gate = ui_startup_gate.clone();
-            #[cfg(target_os = "windows")]
-            setup_privileged_environments
-                .fetch_or(PRIVILEGED_MAIN_ENVIRONMENT, Ordering::Release);
-            let window = main_builder
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-                .on_web_resource_request(|request, response| {
-                    #[cfg(feature = "work-development-traces")]
-                    startup_styles::stylesheet_response(&request, response);
-                    harden_privileged_headers(response.headers_mut());
-                    // Onboarding is left for good: never kept in the
-                    // back-forward cache behind the browser that replaced it.
-                    if request.uri().path().strip_prefix('/') == Some(ONBOARDING_PAGE) {
-                        response.headers_mut().insert(
-                            tauri::http::header::CACHE_CONTROL,
-                            tauri::http::HeaderValue::from_static("no-store"),
-                        );
-                    }
-                })
-                .on_page_load(move |window, payload| {
-                    // The native window is transparent and its privileged
-                    // WebView is deliberately constructed at about:blank so
-                    // deny handlers can be installed before app code runs.
-                    // Never expose that engine-default backing surface. A
-                    // native Finished event proves only document loading; the
-                    // trusted frontend separately acknowledges deterministic
-                    // theme/DOM initialization. The opaque bootstrap surface
-                    // remains in place until then; the gate requires both
-                    // facts and is idempotent in either order.
-                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
-                        page_gate.mark_document_loaded(&window, payload.url());
-                    }
-                    // A replaced document owns neither a sidebar peek nor an
-                    // open dialog; reset both even if its cleanup never ran.
-                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
-                        && window.label() == MAIN_LABEL
-                    {
-                        #[cfg(target_os = "macos")]
-                        platform::imp::sidebar_card_lights(&window, false);
-                        if let Some(shell) = window.app_handle().try_state::<Handle>() {
-                            shell.dispatch(Command::PeekSidebar {
-                                peek: false,
-                                slide: false,
-                            });
-                            shell.dispatch(Command::SetChromeModal(false));
-                        }
-                    }
-                })
-                .build()?;
-            // Onboarding composes for one size; the browser takes the window
-            // back resizable once it has replaced onboarding.
-            if onboarding {
-                window.set_resizable(false)?;
-                window.set_maximizable(false)?;
+    let ui_startup_gate = if onboarding {
+        UiStartupGate::onboarding_first(app_url.clone(), browser_url)
+    } else {
+        UiStartupGate::new(app_url.clone())
+    };
+    app.manage(ui_startup_gate.clone());
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    app.manage(renderer_recovery::Renderers::default());
+    let page_gate = ui_startup_gate.clone();
+    #[cfg(target_os = "windows")]
+    setup_privileged_environments.fetch_or(PRIVILEGED_MAIN_ENVIRONMENT, Ordering::Release);
+    let window = main_builder
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .on_web_resource_request(|request, response| {
+            #[cfg(feature = "work-development-traces")]
+            startup_styles::stylesheet_response(&request, response);
+            harden_privileged_headers(response.headers_mut());
+            // Onboarding is left for good: never kept in the
+            // back-forward cache behind the browser that replaced it.
+            if request.uri().path().strip_prefix('/') == Some(ONBOARDING_PAGE) {
+                response.headers_mut().insert(
+                    tauri::http::header::CACHE_CONTROL,
+                    tauri::http::HeaderValue::from_static("no-store"),
+                );
             }
-            let startup_watchdog_gate = ui_startup_gate.clone();
-            let startup_watchdog_app = app.handle().clone();
-            std::thread::Builder::new()
+        })
+        .on_page_load(move |window, payload| {
+            // The native window is transparent and its privileged
+            // WebView is deliberately constructed at about:blank so
+            // deny handlers can be installed before app code runs.
+            // Never expose that engine-default backing surface. A
+            // native Finished event proves only document loading; the
+            // trusted frontend separately acknowledges deterministic
+            // theme/DOM initialization. The opaque bootstrap surface
+            // remains in place until then; the gate requires both
+            // facts and is idempotent in either order.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                page_gate.mark_document_loaded(&window, payload.url());
+            }
+            // A replaced document owns neither a sidebar peek nor an
+            // open dialog; reset both even if its cleanup never ran.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+                && window.label() == MAIN_LABEL
+            {
+                page_gate.mark_document_started();
+                #[cfg(target_os = "macos")]
+                platform::imp::sidebar_card_lights(&window, false);
+                if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                    shell.dispatch(Command::PeekSidebar {
+                        peek: false,
+                        slide: false,
+                    });
+                    shell.dispatch(Command::SetChromeModal(false));
+                }
+            }
+        })
+        .build()?;
+    // Onboarding composes for one size; the browser takes the window
+    // back resizable once it has replaced onboarding.
+    if onboarding {
+        window.set_resizable(false)?;
+        window.set_maximizable(false)?;
+    }
+    let startup_watchdog_gate = ui_startup_gate.clone();
+    let startup_watchdog_app = app.clone();
+    std::thread::Builder::new()
                 .name("zephium-ui-startup-watchdog".into())
                 .spawn(move || {
                     std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
@@ -7249,615 +7203,686 @@ pub fn run() {
                         "could not start UI startup watchdog: {error}"
                     ))
                 })?;
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            let parent = window.window_handle()?.as_raw();
-            let handle = app.handle().clone();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let parent = window.window_handle()?.as_raw();
+    let handle = app.clone();
 
-            // Privileged WebView2 environments exist before the shell and raw
-            // engine do. Keep an early callback target plus a sticky bit; once
-            // the engine exists, every privileged notification enters its
-            // process-global dedupe gate and the shell can reconcile the bit
-            // even if its command queue was not installed yet.
-            let slot: Arc<OnceLock<zephium_app::CallbackHandle>> = Arc::new(OnceLock::new());
-            #[cfg(target_os = "windows")]
-            let runtime_engine_slot: Arc<OnceLock<Arc<zephium_engine::WebviewEngine>>> =
-                Arc::new(OnceLock::new());
-            #[cfg(target_os = "windows")]
-            let pending_runtime_update = Arc::new(AtomicBool::new(false));
-            #[cfg(target_os = "windows")]
-            let runtime_update_notifier: platform::imp::RuntimeUpdateCallback = {
-                let engine_slot = runtime_engine_slot.clone();
-                let pending = pending_runtime_update.clone();
-                Arc::new(move || {
-                    if let Some(engine) = engine_slot.get() {
-                        engine.notify_runtime_restart_required();
-                    } else {
-                        pending.store(true, Ordering::Release);
-                    }
-                })
-            };
-
-            let dispatch_handle = handle.clone();
-            let dispatch: MainThreadDispatch = Arc::new(move |task: Box<dyn FnOnce() + Send>| {
-                dispatch_handle.run_on_main_thread(task).is_ok()
-            });
-
-            #[cfg(target_os = "windows")]
-            platform::imp::init(
-                &window,
-                &privileged_runtime.main,
-                runtime_update_notifier.clone(),
-            )?;
-            #[cfg(target_os = "macos")]
-            if !platform::imp::init(&window) {
-                return Err(std::io::Error::other(
-                    "the browser window couldn't be set up with its required protections",
-                )
-                .into());
+    // Privileged WebView2 environments exist before the shell and raw
+    // engine do. Keep an early callback target plus a sticky bit; once
+    // the engine exists, every privileged notification enters its
+    // process-global dedupe gate and the shell can reconcile the bit
+    // even if its command queue was not installed yet.
+    let slot: Arc<OnceLock<zephium_app::CallbackHandle>> = Arc::new(OnceLock::new());
+    #[cfg(target_os = "windows")]
+    let runtime_engine_slot: Arc<OnceLock<Arc<zephium_engine::WebviewEngine>>> =
+        Arc::new(OnceLock::new());
+    #[cfg(target_os = "windows")]
+    let pending_runtime_update = Arc::new(AtomicBool::new(false));
+    #[cfg(target_os = "windows")]
+    let runtime_update_notifier: platform::imp::RuntimeUpdateCallback = {
+        let engine_slot = runtime_engine_slot.clone();
+        let pending = pending_runtime_update.clone();
+        Arc::new(move || {
+            if let Some(engine) = engine_slot.get() {
+                engine.notify_runtime_restart_required();
+            } else {
+                pending.store(true, Ordering::Release);
             }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            platform::imp::init(&window).map_err(|error| {
-                std::io::Error::other(format!(
-                    "required privileged WebKitGTK hardening or GTK composition failed: {error}"
-                ))
-            })?;
-            // The engine is owned by the shell. Retaining a strong Handle in
-            // its callback would form Shell -> Engine -> Handle -> queue and
-            // keep the actor/ticker alive after every application owner drops.
-            let sink_slot = slot.clone();
-            let sink_app = handle.clone();
-            let terminal_failure_app = handle.clone();
-            let engine = Arc::new(zephium_engine::install(
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                parent,
-                dispatch.clone(),
-                data_dir.join("web-content"),
-                runtime_security_advisories,
-                InitialUserContent::new(
-                    UserContentGeneration::new(1)
-                        .expect("initial user-content generation is nonzero"),
-                    UserContent {
-                        scripts: Vec::new(),
-                        #[cfg(target_os = "macos")]
-                        styles: Vec::new(),
-                        #[cfg(not(target_os = "macos"))]
-                        styles: vec![UserStyle {
-                            id: ScriptId::from(4),
-                            owner: ScriptOwner::Builtin,
-                            css: SCROLLBAR_CSS.into(),
-                            matches: MatchSet::all_urls(),
-                            all_frames: true,
-                        }],
-                    },
-                ),
-                move |event| {
-                    #[cfg(feature = "adblock-qa")]
-                    blocker_bench::engine_event(&event);
-                    #[cfg(all(feature = "macos-work-retained-controller-probe", target_os = "macos"))]
-                    if zephium_work_composition::retained_qualification::retained_controller_policy_event(&event) { return; }
-                    #[cfg(all(feature = "macos-work-resource-probe", target_os = "macos"))]
-                    if zephium_engine::work_resource_policy_event(&event) { return; }
-                    #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
-                    if zephium_engine::foreground_rendering_policy_event(&event) { return; }
-                    if let zephium_core::ports::engine::EngineEvent::ShortcutPressed {
-                        command,
-                        ..
-                    } = &event
-                    {
-                        let _ = execute_command(&sink_app, command);
-                        return;
-                    }
-                    if let Some(shell) = sink_slot.get() {
-                        shell.dispatch(Command::Engine(event));
-                    }
-                },
-                move |reason| {
-                    // A refused native close/erasure transition can leave a
-                    // renderer executing after Rust has retired authority.
-                    // Skip engine-driven teardown, but preserve Tauri/App and
-                    // Windows privileged-environment finalization.
-                    request_unrecoverable_native_failure(&terminal_failure_app, reason);
-                },
-            )?);
-            let downloads_app = handle.clone();
-            if !engine.initialize_downloads(store.clone(), move |profile| {
-                let event = DownloadsChanged { profile: profile.to_string() };
-                emit_to_privileged(&downloads_app, MAIN_LABEL, "zephium:downloads-changed", &event);
-            }) { return Err(std::io::Error::other("download service initialization was not admitted").into()); }
-            let startup_engine = app.try_state::<StartupEngine>().ok_or_else(|| {
-                std::io::Error::other("startup engine cleanup owner is unavailable")
-            })?;
-            if !startup_engine.install(engine.clone()) {
-                return Err(
-                    std::io::Error::other("startup engine cleanup owner is already armed").into(),
-                );
-            }
-            #[cfg(target_os = "windows")]
-            runtime_engine_slot
-                .set(engine.clone())
-                .map_err(|_| std::io::Error::other("runtime engine callback slot already set"))?;
-            let operation_ledger = OperationLedger::default();
-            app.manage(operation_ledger.clone());
-            app.manage(TabMenuTarget::default());
-            app.manage(history_menu::HistoryMenuTarget::default());
+        })
+    };
 
-            app.manage(keymap::Keymap::load());
-            app.manage(browser_import::ImportJobs::default());
-            let keymap = keymap_overrides(&handle);
-            // Windows and Linux get the same menu as a popup from the sidebar
-            // "more" button instead of a persistent bar.
-            #[cfg(target_os = "macos")]
-            install_menu_bar(&handle, &keymap, false)?;
-            app.on_menu_event(|app, event| {
-                let _ = execute_command(app, event.id().0.as_str());
-            });
-            let keys_engine = engine.clone();
-            app.state::<keymap::Keymap>()
-                .attach_engine(Box::new(move |table| keys_engine.set_shortcuts(table)));
-            #[cfg(target_os = "macos")]
-            let _ = std::thread::Builder::new()
-                .name("webkit-private-api".into())
-                .spawn(|| {
-                    let missing = zephium_engine::missing_private_webkit_api();
-                    if missing.is_empty() {
-                        write_diagnostic(format_args!("webkit: private api present"));
-                    } else {
-                        write_diagnostic(format_args!(
-                            "webkit: missing private api {}",
-                            missing.join(", ")
-                        ));
-                    }
-                });
-            #[cfg(target_os = "macos")]
-            {
-                let shortcut_app = handle.clone();
-                platform::imp::install_key_monitor(
-                    &window,
-                    app.state::<keymap::Keymap>().key_table(),
-                    move |id| {
-                        let _ = execute_command(&shortcut_app, id);
-                    },
-                );
-            }
-            #[cfg(target_os = "linux")]
-            let global_registration = linux_shortcut_portal::GlobalRegistration::default();
-            #[cfg(target_os = "linux")]
-            let focused_shortcut_presses = platform::imp::FocusedShortcutPresses::default();
-            #[cfg(target_os = "linux")]
-            let linux_launcher_shortcut = {
-                let accelerator = zephium_core::commands::resolve(&keymap)
-                    .iter()
-                    .find(|command| command.id == linux_shortcut::LAUNCHER_COMMAND_ID)
-                    .and_then(|command| command.accelerator.clone());
-                let shortcut = accelerator
-                    .as_deref()
-                    .and_then(linux_shortcut::LinuxLauncherShortcut::parse);
-                if accelerator.is_some() && shortcut.is_none() {
-                    write_diagnostic(format_args!(
-                        "global shortcut: launcher accelerator is not representable consistently on Linux; focused and global registration are disabled"
-                    ));
-                }
-                shortcut
-            };
-            #[cfg(target_os = "linux")]
-            let window_shortcuts =
-                app.state::<keymap::Keymap>().window_table(linux_launcher_shortcut);
-            #[cfg(target_os = "linux")]
-            {
-                let focused_registration = global_registration.clone();
-                let shortcut_app = handle.clone();
-                platform::imp::install_shortcuts(
-                    &window,
-                    window_shortcuts.clone(),
-                    focused_shortcut_presses.clone(),
-                    move |id| {
-                        if id == linux_shortcut::LAUNCHER_COMMAND_ID
-                            && focused_registration.is_live()
-                        {
-                            return;
-                        }
-                        let _ = execute_command(&shortcut_app, id);
-                    },
-                );
-            }
+    let dispatch_handle = handle.clone();
+    let dispatch: MainThreadDispatch = Arc::new(move |task: Box<dyn FnOnce() + Send>| {
+        dispatch_handle.run_on_main_thread(task).is_ok()
+    });
 
-            app.manage(overlay::ContextCache::default());
-            let emit_handle = handle.clone();
-            let disposition_ledger = operation_ledger.clone();
-            let emit: EmitFn = Box::new(move |projection| match projection {
-                Projection::WorkEnvironmentChanged(change) => emit_to_privileged(
-                    &emit_handle, MAIN_LABEL, "zephium:work-environment-changed", &change,
-                ),
-                Projection::WorkChanged(change) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    "zephium:work-changed",
-                    &change,
-                ),
-                Projection::TabSwitcher { session, state } => tab_switcher::project(&emit_handle, session, state),
-                Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
-                Projection::Items(state) => {
-                    #[cfg(feature = "adblock-qa")]
-                    blocker_bench::items(&state);
-                    spaces::follow(&emit_handle, &state);
-                    page_assist::observe_items(&state);
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
-                }
-                Projection::Tab(tab) => {
-                    #[cfg(feature = "adblock-qa")]
-                    blocker_bench::tab(&tab);
-                    page_assist::observe_tab(&tab);
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
-                }
-                Projection::Favicons(favicons) => emit_to_privileged(
-                    &emit_handle,
-                    match favicons.surface {
-                        zephium_ipc::IconSurface::Chrome => MAIN_LABEL,
-                        zephium_ipc::IconSurface::Panel => overlay::PANEL_LABEL,
-                    },
-                    EVENT_FAVICONS,
-                    &favicons,
-                ),
-                Projection::ExtensionActions(actions) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_ACTIONS,
-                    &actions,
-                ),
-                Projection::ExtensionActionFailed(failure) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_ACTION_FAILED,
-                    &failure,
-                ),
-                Projection::WebExtensionAccessRemoved(removal) => {
-                    webext::access_removed(&emit_handle, removal)
-                }
-                Projection::WebExtensionAccessRequest(request) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_WEB_EXTENSION_ACCESS,
-                    &request,
-                ),
-                Projection::WebExtensionStoreClick(click) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_WEB_EXTENSION_STORE_CLICK,
-                    &click,
-                ),
-                Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_EXTENSION_ACTION_SHORTCUT,
-                    &shortcut,
-                ),
-                Projection::PagePermissionPrompt(prompt) => emit_to_privileged(
-                    &emit_handle,
-                    MAIN_LABEL,
-                    EVENT_PAGE_PERMISSION_PROMPT,
-                    &prompt,
-                ),
-                Projection::FindResult(result) => {
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FIND, &result)
-                }
-                Projection::UiCommand(id) => {
-                    if id.starts_with("preference.search.") { search_providers::cancel_all(); }
-                    #[cfg(target_os = "macos")]
-                    if let Some(value) = id.strip_prefix("preference.ui.reduce-motion=") {
-                        panel::set_reduce_motion(value == "true");
-                    }
-                    if let Some(alert) = id.strip_prefix("focus.alert=") {
-                        focus_alerts::phase_ended(&emit_handle, alert);
-                    }
-                    if let Some(mode) = id.strip_prefix("theme.") {
-                        if matches!(mode, "system" | "light" | "dark") {
-                            apply_native_theme(&emit_handle, mode);
-                        }
-                    }
-                    if let Some(value) = id.strip_prefix("preference.ui.material=") {
-                        apply_native_material(&emit_handle, value);
-                    }
-                    if let Some((key, value)) = id.strip_prefix("preference.").and_then(|rest| rest.split_once('=')) {
-                        page_assist::preference_changed(key, value);
-                        if material::theme_changed(key, value) {
-                            reinstall_native_materials(&emit_handle);
-                        }
-                        if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
-                            let language = key == "ui.language" && menu_text::set_language(Some(value));
-                            if keymap.follow_preference(key, value) || language {
-                                keymap.rebuild_menu_bar(&emit_handle);
-                            }
-                        }
-                    }
-                    emit_ui_command(&emit_handle, &id);
-                }
-                Projection::OpenNote { profile, id } => emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:note-open-requested", &NoteOpenRequested { profile, id }),
-                Projection::Search(results) => {
-                    emit_to_privileged(&emit_handle, if results.context.as_ref().is_some_and(|context| context.session_id.starts_with("newtab:")) { MAIN_LABEL } else { overlay::PANEL_LABEL }, EVENT_SEARCH, &results)
-                }
-                Projection::Layout(layout) => {
-                    if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
-                        keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
-                    }
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
-                }
-                Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
-                Projection::RaiseWindow => {
-                    let app = emit_handle.clone();
-                    let _ = emit_handle.run_on_main_thread(move || {
-                        let Some(main) = app.get_webview_window(MAIN_LABEL) else {
-                            return;
-                        };
-                        #[cfg(target_os = "macos")]
-                        panel::raise(&main);
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            let _ = main.unminimize();
-                            let _ = main.show();
-                            let _ = main.set_focus();
-                        }
-                    });
-                }
-                Projection::RuntimeStatus(status) => {
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
-                }
-                Projection::BlockerStatus(status) => {
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
-                }
-                Projection::Focus(status) => {
-                    if status.session.is_some() {
-                        focus_alerts::session_started();
-                    }
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
-                }
-                Projection::OperationProcessed(disposition) => {
-                    #[cfg(feature = "adblock-qa")]
-                    blocker_bench::operation_processed(&disposition);
-                    let panel_result=disposition.clone();
-                    if record_and_deliver_operation(&disposition_ledger,disposition,|disposition| {
-                        work_product::preference_processed(&emit_handle, disposition);
-                        try_emit_to_privileged(&emit_handle,MAIN_LABEL,EVENT_OPERATION_PROCESSED,disposition)
-                    }) {
-                        if let Some(panel)=emit_handle.try_state::<overlay::Overlay>() {panel.operation(panel_result);}
-                    } else {
-                        diagnostic!("operation: rejected duplicate or unreserved actor disposition");
-                    }
-                }
-                Projection::Profiles(view) => {
-                    #[cfg(feature = "adblock-qa")]
-                    blocker_bench::profiles(&view);
-                    private_window::follow(&emit_handle, &view);
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:profiles", &view)
-                }
-                Projection::RecentlyClosed(tabs) => recently_closed::follow(&emit_handle, &tabs),
-                Projection::MediaPlayer(player) => {
-                    emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
-                }
-
-            });
-
-            let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
-            // Official source candidates must pass the same native compiler
-            // as profile policies before becoming the durable current lists.
-            let native_validation:zephium_blocker_service::NativeRuleValidator={
-                let engine=engine.clone();
-                Arc::new(move |rules,done|zephium_core::ports::engine::Engine::validate_content_rules(engine.as_ref(),rules,done))
-            };
-            engine.retain_content_rule_cache_digests(blocker_service::cached_webkit_digests(&data_dir));
-            let blocker = blocker_service::start_with_updates(&data_dir,native_validation).map_err(|error| {
-                std::io::Error::other(format!(
-                    "failed to start managed content-policy service: {error}"
-                ))
-            })?;
-            let startup_blocker = app.try_state::<StartupBlocker>().ok_or_else(|| {
-                std::io::Error::other("startup blocker cleanup owner is unavailable")
-            })?;
-            if !startup_blocker.install(blocker.clone()) {
-                // A second setup transaction is an invariant violation, but
-                // the newly-created workers are still ours to reap because
-                // they were never published into the temporary owner.
-                let error = std::io::Error::other(
-                    "startup blocker cleanup owner is already armed",
-                );
-                request_pre_shell_startup_failure_with_blocker(
-                    app.handle(),
-                    &error,
-                    blocker,
-                );
-                return Err(error.into());
-            }
-
-            let terminal_failure_app = app.handle().clone();
-            let terminal_failure_shutdown = shutdown.inner().clone();
-            let shell_terminal_failure: ShellTerminalFailureCallback = Box::new(move |failure| {
-                // An unopenable session would otherwise leave an empty window
-                // that does nothing. Say so, then quit in order; the store
-                // has kept the saved data as it was.
-                if matches!(
-                    failure,
-                    zephium_app::ShellTerminalFailure::SessionUnavailable
-                        | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
-                ) {
-                    let app = terminal_failure_app.clone();
-                    let shutdown = terminal_failure_shutdown.clone();
-                    let explained = terminal_failure_app.run_on_main_thread(move || {
-                        #[cfg(not(target_os = "linux"))]
-                        startup_alert::show_blocking(
-                            if matches!(
-                                failure,
-                                zephium_app::ShellTerminalFailure::SessionFromNewerVersion
-                            ) {
-                                startup_alert::StartupProblem::NewerProfile
-                            } else {
-                                startup_alert::StartupProblem::DamagedProfile
-                            },
-                            "the saved tabs and settings could not be opened",
-                        );
-                        request_shell_terminal_failure(&app, &shutdown, failure);
-                    });
-                    if explained.is_ok() {
-                        return;
-                    }
-                }
-                request_shell_terminal_failure(
-                    &terminal_failure_app,
-                    &terminal_failure_shutdown,
-                    failure,
-                )
-            });
-            let cleanup_app = app.handle().clone();
-            let profile_cleanup = zephium_app::profile_cleanup::CleanupWorker::start(move |profile| {
-                #[cfg(feature = "work-product")]
-                {
-                    let Some(connections) = zephium_app::work_connections::store::shared() else { return false; };
-                    if connections.retire_profile(&profile.to_string(), &zephium_app::work_connections::client::keychain::SystemVault).is_err() { return false; }
-                    let Some(blobs) = cleanup_app.try_state::<media::MediaBlobs>() else { return false; };
-                    if blobs.0.retire_profile(profile).is_err() { return false; }
-                    let Some(frames) = cleanup_app.try_state::<work_product::WorkFrames>() else { return false; };
-                    if frames.0.retire_profile(profile).is_err() { return false; }
-                    let Some(work) = cleanup_app.try_state::<work_product::WorkProductState>() else { return false; };
-                    if work.retire_profile(profile).is_err() { return false; }
-                    media::retire_profile_thumbnails(&cleanup_app, profile).is_ok()
-                }
-                #[cfg(not(feature = "work-product"))]
-                { let _ = (&cleanup_app, profile); false }
-            })?;
-            let shell = match zephium_app::spawn_suspended_with_profile_cleanup(
-                engine.clone(),
-                store.clone(),
-                blocker.clone(),
-                shell_terminal_failure,
-                chrome,
-                emit,
-                profile_cleanup,
+    #[cfg(target_os = "windows")]
+    platform::imp::init(
+        &window,
+        &privileged_runtime.main,
+        runtime_update_notifier.clone(),
+    )?;
+    #[cfg(target_os = "macos")]
+    if !platform::imp::init(&window) {
+        return Err(std::io::Error::other(
+            "the browser window couldn't be set up with its required protections",
+        )
+        .into());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    platform::imp::init(&window).map_err(|error| {
+        std::io::Error::other(format!(
+            "required privileged WebKitGTK hardening or GTK composition failed: {error}"
+        ))
+    })?;
+    // The engine is owned by the shell. Retaining a strong Handle in
+    // its callback would form Shell -> Engine -> Handle -> queue and
+    // keep the actor/ticker alive after every application owner drops.
+    let sink_slot = slot.clone();
+    let sink_app = handle.clone();
+    let terminal_failure_app = handle.clone();
+    let engine = Arc::new(zephium_engine::install(
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        parent,
+        dispatch.clone(),
+        data_dir.join("web-content"),
+        runtime_security_advisories,
+        InitialUserContent::new(
+            UserContentGeneration::new(1).expect("initial user-content generation is nonzero"),
+            UserContent {
+                scripts: Vec::new(),
+                #[cfg(target_os = "macos")]
+                styles: Vec::new(),
+                #[cfg(not(target_os = "macos"))]
+                styles: vec![UserStyle {
+                    id: ScriptId::from(4),
+                    owner: ScriptOwner::Builtin,
+                    css: SCROLLBAR_CSS.into(),
+                    matches: MatchSet::all_urls(),
+                    all_frames: true,
+                }],
+            },
+        ),
+        move |event| {
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::engine_event(&event);
+            #[cfg(all(feature = "macos-work-retained-controller-probe", target_os = "macos"))]
+            if zephium_work_composition::retained_qualification::retained_controller_policy_event(
+                &event,
             ) {
-                Ok(shell) => shell,
-                Err(failure) => {
-                    if !failure.worker_cleanup_proven() {
-                        write_diagnostic(format_args!(
-                            "startup: application helper-worker cleanup was not proven after Shell construction failed"
-                        ));
-                    }
-                    return Err(failure.into());
-                }
-            };
-            if !app.manage(shell.clone()) {
-                let error = std::io::Error::other("shell cleanup state is already installed");
-                // The local actor owns the Store, engine, and blocker even
-                // though Tauri refused to publish its Handle. Route that
-                // exact owner through the coordinator before the outer setup
-                // error callback can observe unrelated managed state.
-                shutdown.request_terminal_startup_failure(
-                    app.handle().clone(),
-                    TerminalStartupResources {
-                        shell: Some(shell),
-                        ..TerminalStartupResources::default()
-                    },
-                );
-                return Err(error.into());
+                return;
             }
-            #[cfg(feature = "work-product")]
-            if !work_product::install(
-                app.handle(),
-                engine.clone(),
-                store.clone(),
-                app.try_state::<work_product::WorkFrames>().map(|frames| frames.0.clone()),
-            ) {
-                let error = std::io::Error::other("Work product owner is already installed");
-                shutdown.request_terminal_startup_failure(
-                    app.handle().clone(),
-                    TerminalStartupResources { shell: Some(shell), ..TerminalStartupResources::default() },
-                );
-                return Err(error.into());
-            }
-            #[cfg(feature = "work-product")]
-            page_assist::install(app.handle(), engine.clone(), store.clone());
-            notes::install(app.handle(), &data_dir, store.clone(), &shell);
-            external_links::adopt(app.handle());
-            #[cfg(feature = "work-product")]
-            favicon_probe::install(&shell);
-            let web_extensions = webext::WebExtensions::new(&data_dir);
-            web_extensions.restore(&shell);
-            app.manage(web_extensions);
-            #[cfg(feature = "macos-work")]
-            if !work::install(app.handle(), engine.clone(), store.clone()) {
-                let error = std::io::Error::other("Work composition owner is already installed");
-                shutdown.request_terminal_startup_failure(
-                    app.handle().clone(),
-                    TerminalStartupResources { shell: Some(shell), ..TerminalStartupResources::default() },
-                );
-                return Err(error.into());
+            #[cfg(all(feature = "macos-work-resource-probe", target_os = "macos"))]
+            if zephium_engine::work_resource_policy_event(&event) {
+                return;
             }
             #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
-            if !foreground_rendering_probe::install(app.handle(), engine.clone(), store.clone()) {
-                return Err(std::io::Error::other("rendering probe owner already installed").into());
+            if zephium_engine::foreground_rendering_policy_event(&event) {
+                return;
             }
-            #[cfg(all(
-                feature = "macos-work-navigation-probe",
-                not(feature = "macos-work-profile-enrollment"),
-                target_os = "macos"
-            ))]
-            navigation_probe::install(app.handle())?;
-            #[cfg(feature = "macos-work-public-inspection")]
-            work_development::install(app.handle())?;
-            // Before admission: the shell's one profile projection can come
-            // right after it, and the driver waits on that projection.
+            if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { command, .. } =
+                &event
+            {
+                let _ = execute_command(&sink_app, command);
+                return;
+            }
+            if let Some(shell) = sink_slot.get() {
+                shell.dispatch(Command::Engine(event));
+            }
+        },
+        move |reason| {
+            // A refused native close/erasure transition can leave a
+            // renderer executing after Rust has retired authority.
+            // Skip engine-driven teardown, but preserve Tauri/App and
+            // Windows privileged-environment finalization.
+            request_unrecoverable_native_failure(&terminal_failure_app, reason);
+        },
+    )?);
+    let downloads_app = handle.clone();
+    if !engine.initialize_downloads(store.clone(), move |profile| {
+        let event = DownloadsChanged {
+            profile: profile.to_string(),
+        };
+        emit_to_privileged(
+            &downloads_app,
+            MAIN_LABEL,
+            "zephium:downloads-changed",
+            &event,
+        );
+    }) {
+        return Err(
+            std::io::Error::other("download service initialization was not admitted").into(),
+        );
+    }
+    let startup_engine = app
+        .try_state::<StartupEngine>()
+        .ok_or_else(|| std::io::Error::other("startup engine cleanup owner is unavailable"))?;
+    if !startup_engine.install(engine.clone()) {
+        return Err(std::io::Error::other("startup engine cleanup owner is already armed").into());
+    }
+    #[cfg(target_os = "windows")]
+    runtime_engine_slot
+        .set(engine.clone())
+        .map_err(|_| std::io::Error::other("runtime engine callback slot already set"))?;
+    let operation_ledger = OperationLedger::default();
+    app.manage(operation_ledger.clone());
+    app.manage(TabMenuTarget::default());
+    app.manage(history_menu::HistoryMenuTarget::default());
+
+    app.manage(keymap::Keymap::load());
+    app.manage(browser_import::ImportJobs::default());
+    let keymap = keymap_overrides(&handle);
+    // Windows and Linux get the same menu as a popup from the sidebar
+    // "more" button instead of a persistent bar.
+    #[cfg(target_os = "macos")]
+    install_menu_bar(&handle, &keymap, false)?;
+    app.on_menu_event(|app, event| {
+        let _ = execute_command(app, event.id().0.as_str());
+    });
+    let keys_engine = engine.clone();
+    app.state::<keymap::Keymap>()
+        .attach_engine(Box::new(move |table| keys_engine.set_shortcuts(table)));
+    #[cfg(target_os = "macos")]
+    let _ = std::thread::Builder::new()
+        .name("webkit-private-api".into())
+        .spawn(|| {
+            let missing = zephium_engine::missing_private_webkit_api();
+            if missing.is_empty() {
+                write_diagnostic(format_args!("webkit: private api present"));
+            } else {
+                write_diagnostic(format_args!(
+                    "webkit: missing private api {}",
+                    missing.join(", ")
+                ));
+            }
+        });
+    #[cfg(target_os = "macos")]
+    {
+        let shortcut_app = handle.clone();
+        platform::imp::install_key_monitor(
+            &window,
+            app.state::<keymap::Keymap>().key_table(),
+            move |id| {
+                let _ = execute_command(&shortcut_app, id);
+            },
+        );
+    }
+    #[cfg(target_os = "linux")]
+    let global_registration = linux_shortcut_portal::GlobalRegistration::default();
+    #[cfg(target_os = "linux")]
+    let focused_shortcut_presses = platform::imp::FocusedShortcutPresses::default();
+    #[cfg(target_os = "linux")]
+    let linux_launcher_shortcut = {
+        let accelerator = zephium_core::commands::resolve(&keymap)
+            .iter()
+            .find(|command| command.id == linux_shortcut::LAUNCHER_COMMAND_ID)
+            .and_then(|command| command.accelerator.clone());
+        let shortcut = accelerator
+            .as_deref()
+            .and_then(linux_shortcut::LinuxLauncherShortcut::parse);
+        if accelerator.is_some() && shortcut.is_none() {
+            write_diagnostic(format_args!(
+                        "global shortcut: launcher accelerator is not representable consistently on Linux; focused and global registration are disabled"
+                    ));
+        }
+        shortcut
+    };
+    #[cfg(target_os = "linux")]
+    let window_shortcuts = app
+        .state::<keymap::Keymap>()
+        .window_table(linux_launcher_shortcut);
+    #[cfg(target_os = "linux")]
+    {
+        let focused_registration = global_registration.clone();
+        let shortcut_app = handle.clone();
+        platform::imp::install_shortcuts(
+            &window,
+            window_shortcuts.clone(),
+            focused_shortcut_presses.clone(),
+            move |id| {
+                if id == linux_shortcut::LAUNCHER_COMMAND_ID && focused_registration.is_live() {
+                    return;
+                }
+                let _ = execute_command(&shortcut_app, id);
+            },
+        );
+    }
+
+    app.manage(overlay::ContextCache::default());
+    let emit_handle = handle.clone();
+    let disposition_ledger = operation_ledger.clone();
+    let emit: EmitFn = Box::new(move |projection| match projection {
+        Projection::WorkEnvironmentChanged(change) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            "zephium:work-environment-changed",
+            &change,
+        ),
+        Projection::WorkChanged(change) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:work-changed", &change)
+        }
+        Projection::TabSwitcher { session, state } => {
+            tab_switcher::project(&emit_handle, session, state)
+        }
+        Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
+        Projection::Items(state) => {
             #[cfg(feature = "adblock-qa")]
-            blocker_bench::start(app.handle(), &engine)?;
-            if !startup_engine.transfer_to(&engine) {
-                return Err(std::io::Error::other(
-                    "startup engine ownership did not transfer to the shell",
-                )
-                .into());
+            blocker_bench::items(&state);
+            spaces::follow(&emit_handle, &state);
+            page_assist::observe_items(&state);
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
+        }
+        Projection::Tab(tab) => {
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::tab(&tab);
+            page_assist::observe_tab(&tab);
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_TAB, &tab)
+        }
+        Projection::Favicons(favicons) => emit_to_privileged(
+            &emit_handle,
+            match favicons.surface {
+                zephium_ipc::IconSurface::Chrome => MAIN_LABEL,
+                zephium_ipc::IconSurface::Panel => overlay::PANEL_LABEL,
+            },
+            EVENT_FAVICONS,
+            &favicons,
+        ),
+        Projection::ExtensionActions(actions) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_EXTENSION_ACTIONS, &actions)
+        }
+        Projection::ExtensionActionFailed(failure) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_EXTENSION_ACTION_FAILED,
+            &failure,
+        ),
+        Projection::WebExtensionAccessRemoved(removal) => {
+            webext::access_removed(&emit_handle, removal)
+        }
+        Projection::WebExtensionAccessRequest(request) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_WEB_EXTENSION_ACCESS,
+            &request,
+        ),
+        Projection::WebExtensionStoreClick(click) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_WEB_EXTENSION_STORE_CLICK,
+            &click,
+        ),
+        Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_EXTENSION_ACTION_SHORTCUT,
+            &shortcut,
+        ),
+        Projection::PagePermissionPrompt(prompt) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_PAGE_PERMISSION_PROMPT,
+            &prompt,
+        ),
+        Projection::FindResult(result) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FIND, &result)
+        }
+        Projection::UiCommand(id) => {
+            if id.starts_with("preference.search.") {
+                search_providers::cancel_all();
             }
-            if !startup_blocker.transfer_to(&blocker) {
-                return Err(std::io::Error::other(
-                    "startup blocker ownership did not transfer to the shell",
-                )
-                .into());
+            #[cfg(target_os = "macos")]
+            if let Some(value) = id.strip_prefix("preference.ui.reduce-motion=") {
+                panel::set_reduce_motion(value == "true");
             }
-            if !startup_store.transfer_to(&store) {
-                return Err(std::io::Error::other(
-                    "startup storage ownership did not transfer to the shell",
-                )
-                .into());
+            if let Some(alert) = id.strip_prefix("focus.alert=") {
+                focus_alerts::phase_ended(&emit_handle, alert);
             }
-            // Publish the weak callback ingress before actor admission, then
-            // make the single exact transition only after every temporary
-            // cleanup owner has been cleared. A concurrent terminal request may
-            // cancel admission and is never allowed to be overtaken here.
-            slot.set(shell.callback_handle()).map_err(|_| {
-                std::io::Error::other("native engine callback ingress is already published")
-            })?;
-            if !shutdown.try_admit_shell(&shell) {
-                return Err(std::io::Error::other(
+            if let Some(mode) = id.strip_prefix("theme.") {
+                if matches!(mode, "system" | "light" | "dark") {
+                    apply_native_theme(&emit_handle, mode);
+                }
+            }
+            if let Some(value) = id.strip_prefix("preference.ui.material=") {
+                apply_native_material(&emit_handle, value);
+            }
+            if let Some((key, value)) = id
+                .strip_prefix("preference.")
+                .and_then(|rest| rest.split_once('='))
+            {
+                page_assist::preference_changed(key, value);
+                if material::theme_changed(key, value) {
+                    reinstall_native_materials(&emit_handle);
+                }
+                if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
+                    let language = key == "ui.language" && menu_text::set_language(Some(value));
+                    if keymap.follow_preference(key, value) || language {
+                        keymap.rebuild_menu_bar(&emit_handle);
+                    }
+                }
+            }
+            emit_ui_command(&emit_handle, &id);
+        }
+        Projection::OpenNote { profile, id } => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            "zephium:note-open-requested",
+            &NoteOpenRequested { profile, id },
+        ),
+        Projection::Search(results) => emit_to_privileged(
+            &emit_handle,
+            if results
+                .context
+                .as_ref()
+                .is_some_and(|context| context.session_id.starts_with("newtab:"))
+            {
+                MAIN_LABEL
+            } else {
+                overlay::PANEL_LABEL
+            },
+            EVENT_SEARCH,
+            &results,
+        ),
+        Projection::Layout(layout) => {
+            if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
+                keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
+            }
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
+        }
+        Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
+        Projection::RaiseWindow => {
+            let app = emit_handle.clone();
+            let _ = emit_handle.run_on_main_thread(move || {
+                let Some(main) = app.get_webview_window(MAIN_LABEL) else {
+                    return;
+                };
+                #[cfg(target_os = "macos")]
+                panel::raise(&main);
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = main.unminimize();
+                    let _ = main.show();
+                    let _ = main.set_focus();
+                }
+            });
+        }
+        Projection::RuntimeStatus(status) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_RUNTIME_STATUS, &status)
+        }
+        Projection::BlockerStatus(status) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_BLOCKER_STATUS, &status)
+        }
+        Projection::Focus(status) => {
+            if status.session.is_some() {
+                focus_alerts::session_started();
+            }
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FOCUS, &status)
+        }
+        Projection::OperationProcessed(disposition) => {
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::operation_processed(&disposition);
+            let panel_result = disposition.clone();
+            if record_and_deliver_operation(&disposition_ledger, disposition, |disposition| {
+                work_product::preference_processed(&emit_handle, disposition);
+                try_emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_OPERATION_PROCESSED,
+                    disposition,
+                )
+            }) {
+                if let Some(panel) = emit_handle.try_state::<overlay::Overlay>() {
+                    panel.operation(panel_result);
+                }
+            } else {
+                diagnostic!("operation: rejected duplicate or unreserved actor disposition");
+            }
+        }
+        Projection::Profiles(view) => {
+            #[cfg(feature = "adblock-qa")]
+            blocker_bench::profiles(&view);
+            private_window::follow(&emit_handle, &view);
+            emit_to_privileged(&emit_handle, MAIN_LABEL, "zephium:profiles", &view)
+        }
+        Projection::RecentlyClosed(tabs) => recently_closed::follow(&emit_handle, &tabs),
+        Projection::MediaPlayer(player) => {
+            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
+        }
+    });
+
+    let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
+    // Official source candidates must pass the same native compiler
+    // as profile policies before becoming the durable current lists.
+    let native_validation: zephium_blocker_service::NativeRuleValidator = {
+        let engine = engine.clone();
+        Arc::new(move |rules, done| {
+            zephium_core::ports::engine::Engine::validate_content_rules(
+                engine.as_ref(),
+                rules,
+                done,
+            )
+        })
+    };
+    engine.retain_content_rule_cache_digests(blocker_service::cached_webkit_digests(&data_dir));
+    let blocker =
+        blocker_service::start_with_updates(&data_dir, native_validation).map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to start managed content-policy service: {error}"
+            ))
+        })?;
+    let startup_blocker = app
+        .try_state::<StartupBlocker>()
+        .ok_or_else(|| std::io::Error::other("startup blocker cleanup owner is unavailable"))?;
+    if !startup_blocker.install(blocker.clone()) {
+        // A second setup transaction is an invariant violation, but
+        // the newly-created workers are still ours to reap because
+        // they were never published into the temporary owner.
+        let error = std::io::Error::other("startup blocker cleanup owner is already armed");
+        request_pre_shell_startup_failure_with_blocker(app, &error, blocker);
+        return Err(error.into());
+    }
+
+    let terminal_failure_app = app.clone();
+    let terminal_failure_shutdown = shutdown.inner().clone();
+    let shell_terminal_failure: ShellTerminalFailureCallback = Box::new(move |failure| {
+        // An unopenable session would otherwise leave an empty window
+        // that does nothing. Say so, then quit in order; the store
+        // has kept the saved data as it was.
+        if matches!(
+            failure,
+            zephium_app::ShellTerminalFailure::SessionUnavailable
+                | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+        ) {
+            let app = terminal_failure_app.clone();
+            let shutdown = terminal_failure_shutdown.clone();
+            let explained = terminal_failure_app.run_on_main_thread(move || {
+                #[cfg(not(target_os = "linux"))]
+                startup_alert::show_blocking(
+                    if matches!(
+                        failure,
+                        zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                    ) {
+                        startup_alert::StartupProblem::NewerProfile
+                    } else {
+                        startup_alert::StartupProblem::DamagedProfile
+                    },
+                    "the saved tabs and settings could not be opened",
+                );
+                request_shell_terminal_failure(&app, &shutdown, failure);
+            });
+            if explained.is_ok() {
+                return;
+            }
+        }
+        request_shell_terminal_failure(&terminal_failure_app, &terminal_failure_shutdown, failure)
+    });
+    let cleanup_app = app.clone();
+    let profile_cleanup = zephium_app::profile_cleanup::CleanupWorker::start(move |profile| {
+        #[cfg(feature = "work-product")]
+        {
+            let Some(connections) = zephium_app::work_connections::store::shared() else {
+                return false;
+            };
+            if connections
+                .retire_profile(
+                    &profile.to_string(),
+                    &zephium_app::work_connections::client::keychain::SystemVault,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let Some(blobs) = cleanup_app.try_state::<media::MediaBlobs>() else {
+                return false;
+            };
+            if blobs.0.retire_profile(profile).is_err() {
+                return false;
+            }
+            let Some(frames) = cleanup_app.try_state::<work_product::WorkFrames>() else {
+                return false;
+            };
+            if frames.0.retire_profile(profile).is_err() {
+                return false;
+            }
+            let Some(work) = cleanup_app.try_state::<work_product::WorkProductState>() else {
+                return false;
+            };
+            if work.retire_profile(profile).is_err() {
+                return false;
+            }
+            media::retire_profile_thumbnails(&cleanup_app, profile).is_ok()
+        }
+        #[cfg(not(feature = "work-product"))]
+        {
+            let _ = (&cleanup_app, profile);
+            false
+        }
+    })?;
+    let shell = match zephium_app::spawn_suspended_with_profile_cleanup(
+        engine.clone(),
+        store.clone(),
+        blocker.clone(),
+        shell_terminal_failure,
+        chrome,
+        emit,
+        profile_cleanup,
+    ) {
+        Ok(shell) => shell,
+        Err(failure) => {
+            if !failure.worker_cleanup_proven() {
+                write_diagnostic(format_args!(
+                            "startup: application helper-worker cleanup was not proven after Shell construction failed"
+                        ));
+            }
+            return Err(failure.into());
+        }
+    };
+    if !app.manage(shell.clone()) {
+        let error = std::io::Error::other("shell cleanup state is already installed");
+        // The local actor owns the Store, engine, and blocker even
+        // though Tauri refused to publish its Handle. Route that
+        // exact owner through the coordinator before the outer setup
+        // error callback can observe unrelated managed state.
+        shutdown.request_terminal_startup_failure(
+            app.clone(),
+            TerminalStartupResources {
+                shell: Some(shell),
+                ..TerminalStartupResources::default()
+            },
+        );
+        return Err(error.into());
+    }
+    #[cfg(feature = "work-product")]
+    if !work_product::install(
+        app,
+        engine.clone(),
+        store.clone(),
+        app.try_state::<work_product::WorkFrames>()
+            .map(|frames| frames.0.clone()),
+    ) {
+        let error = std::io::Error::other("Work product owner is already installed");
+        shutdown.request_terminal_startup_failure(
+            app.clone(),
+            TerminalStartupResources {
+                shell: Some(shell),
+                ..TerminalStartupResources::default()
+            },
+        );
+        return Err(error.into());
+    }
+    #[cfg(feature = "work-product")]
+    page_assist::install(app, engine.clone(), store.clone());
+    notes::install(app, &data_dir, store.clone(), &shell);
+    external_links::adopt(app);
+    #[cfg(feature = "work-product")]
+    favicon_probe::install(&shell);
+    let web_extensions = webext::WebExtensions::new(&data_dir);
+    web_extensions.restore(&shell);
+    app.manage(web_extensions);
+    #[cfg(feature = "macos-work")]
+    if !work::install(app, engine.clone(), store.clone()) {
+        let error = std::io::Error::other("Work composition owner is already installed");
+        shutdown.request_terminal_startup_failure(
+            app.clone(),
+            TerminalStartupResources {
+                shell: Some(shell),
+                ..TerminalStartupResources::default()
+            },
+        );
+        return Err(error.into());
+    }
+    #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+    if !foreground_rendering_probe::install(app, engine.clone(), store.clone()) {
+        return Err(std::io::Error::other("rendering probe owner already installed").into());
+    }
+    #[cfg(all(
+        feature = "macos-work-navigation-probe",
+        not(feature = "macos-work-profile-enrollment"),
+        target_os = "macos"
+    ))]
+    navigation_probe::install(app)?;
+    #[cfg(feature = "macos-work-public-inspection")]
+    work_development::install(app)?;
+    // Before admission: the shell's one profile projection can come
+    // right after it, and the driver waits on that projection.
+    #[cfg(feature = "adblock-qa")]
+    blocker_bench::start(app, &engine)?;
+    if !startup_engine.transfer_to(&engine) {
+        return Err(std::io::Error::other(
+            "startup engine ownership did not transfer to the shell",
+        )
+        .into());
+    }
+    if !startup_blocker.transfer_to(&blocker) {
+        return Err(std::io::Error::other(
+            "startup blocker ownership did not transfer to the shell",
+        )
+        .into());
+    }
+    if !startup_store.transfer_to(&store) {
+        return Err(std::io::Error::other(
+            "startup storage ownership did not transfer to the shell",
+        )
+        .into());
+    }
+    // Publish the weak callback ingress before actor admission, then
+    // make the single exact transition only after every temporary
+    // cleanup owner has been cleared. A concurrent terminal request may
+    // cancel admission and is never allowed to be overtaken here.
+    slot.set(shell.callback_handle()).map_err(|_| {
+        std::io::Error::other("native engine callback ingress is already published")
+    })?;
+    if !shutdown.try_admit_shell(&shell) {
+        return Err(std::io::Error::other(
                     "terminal shutdown started before Shell actor admission, or admission was already consumed",
                 )
                 .into());
-            }
-            if shutdown.terminal_started() {
-                return Err(std::io::Error::other(
-                    "terminal shutdown overtook Shell actor admission",
-                )
-                .into());
-            }
-            #[cfg(target_os = "windows")]
-            if pending_runtime_update.swap(false, Ordering::AcqRel) {
-                engine.notify_runtime_restart_required();
-            }
+    }
+    if let Some(health) = app.try_state::<StartupHealth>() {
+        health.admitted.store(true, Ordering::Release);
+    }
+    if shutdown.terminal_started() {
+        return Err(
+            std::io::Error::other("terminal shutdown overtook Shell actor admission").into(),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    if pending_runtime_update.swap(false, Ordering::AcqRel) {
+        engine.notify_runtime_restart_required();
+    }
 
-            let initial =
-                platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
-            shell.dispatch(Command::SetWindowSize(initial));
-            shell.dispatch(Command::SetWindowFocused(window.is_focused().unwrap_or(false)));
+    let initial = platform::imp::content_size(&window).unwrap_or_else(|| inner_logical(&window));
+    shell.dispatch(Command::SetWindowSize(initial));
+    shell.dispatch(Command::SetWindowFocused(
+        window.is_focused().unwrap_or(false),
+    ));
 
-            let resize_shell = shell.clone();
-            let resize_window = window.clone();
-            #[cfg(target_os = "windows")]
-            let focus_engine = engine.clone();
-            let exit_handle = handle.clone();
-            let window_shutdown = shutdown.inner().clone();
-            window.on_window_event(move |event| {
+    let resize_shell = shell.clone();
+    let resize_window = window.clone();
+    #[cfg(target_os = "windows")]
+    let focus_engine = engine.clone();
+    let exit_handle = handle.clone();
+    let window_shutdown = shutdown.inner().clone();
+    window.on_window_event(move |event| {
                 match event {
                     tauri::WindowEvent::Resized(size)
                         if !window_shutdown.terminal_started() =>
@@ -7994,130 +8019,140 @@ pub fn run() {
                 }
             });
 
-            let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
-            let panel_handle = handle.clone();
-            #[cfg(target_os = "linux")]
-            let panel_registration = global_registration.clone();
-            let create_panel = move || -> SetupResult {
-                let app = &panel_handle;
-                #[cfg(target_os = "linux")]
-                let handle = app.clone();
-                let window = app.get_webview_window(MAIN_LABEL).ok_or_else(|| std::io::Error::other("launcher owner is unavailable"))?;
-                let shutdown = app.state::<ShutdownCoordinator>();
-                #[cfg(target_os = "linux")]
-                let global_registration = panel_registration;
-            if shutdown.terminal_started() {
+    let panel_url = privileged_app_url(app, &tauri::WebviewUrl::App("panel.html".into()))?;
+    let panel_handle = handle.clone();
+    #[cfg(target_os = "linux")]
+    let panel_registration = global_registration.clone();
+    let create_panel = move || -> SetupResult {
+        let app = &panel_handle;
+        #[cfg(target_os = "linux")]
+        let handle = app.clone();
+        let window = app
+            .get_webview_window(MAIN_LABEL)
+            .ok_or_else(|| std::io::Error::other("launcher owner is unavailable"))?;
+        let shutdown = app.state::<ShutdownCoordinator>();
+        #[cfg(target_os = "linux")]
+        let global_registration = panel_registration;
+        if shutdown.terminal_started() {
+            return Err(std::io::Error::other(
+                "terminal shutdown started before privileged panel construction",
+            )
+            .into());
+        }
+        let panel_builder = tauri::WebviewWindowBuilder::new(
+            app,
+            overlay::PANEL_LABEL,
+            tauri::WebviewUrl::External(
+                tauri::Url::parse(PRIVILEGED_BOOTSTRAP_URL)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            ),
+        )
+        .title("Zephium")
+        .incognito(true)
+        .devtools(cfg!(debug_assertions))
+        .general_autofill_enabled(false)
+        .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
+        #[cfg(target_os = "windows")]
+        let panel_builder = panel_builder
+            .data_directory(privileged_runtime.panel.clone())
+            .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let panel_builder = panel_builder.on_download(|_, _| false);
+        #[cfg(target_os = "windows")]
+        setup_privileged_environments.fetch_or(PRIVILEGED_PANEL_ENVIRONMENT, Ordering::Release);
+        let panel_window = panel_builder
+            .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Suspend)
+            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+            .on_web_resource_request(|_, response| {
+                harden_privileged_headers(response.headers_mut())
+            })
+            .inner_size(overlay::PANEL_SIZE.0, overlay::PANEL_SIZE.1)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .maximizable(false)
+            .fullscreen(false)
+            .shadow(true)
+            .visible(false)
+            .build()?;
+
+        #[cfg(target_os = "macos")]
+        {
+            if !platform::imp::harden_privileged(&panel_window) {
                 return Err(std::io::Error::other(
-                    "terminal shutdown started before privileged panel construction",
+                    "the launcher panel couldn't be set up with its required protections",
                 )
                 .into());
             }
-            let panel_builder = tauri::WebviewWindowBuilder::new(
-                app,
-                overlay::PANEL_LABEL,
-                tauri::WebviewUrl::External(
-                    tauri::Url::parse(PRIVILEGED_BOOTSTRAP_URL)
-                        .map_err(|error| std::io::Error::other(error.to_string()))?,
-                ),
-            )
-            .title("Zephium")
-            .incognito(true)
-            .devtools(cfg!(debug_assertions))
-            .general_autofill_enabled(false)
-            .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
-            #[cfg(target_os = "windows")]
-            let panel_builder = panel_builder
-                .data_directory(privileged_runtime.panel.clone())
-                .additional_browser_args(PRIVILEGED_WEBVIEW2_BROWSER_ARGS);
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
-            let panel_builder = panel_builder.on_download(|_, _| false);
-            #[cfg(target_os = "windows")]
-            setup_privileged_environments
-                .fetch_or(PRIVILEGED_PANEL_ENVIRONMENT, Ordering::Release);
-            let panel_window = panel_builder
-                .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Suspend)
-                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-                .on_web_resource_request(|_, response| {
-                    harden_privileged_headers(response.headers_mut())
-                })
-                .inner_size(overlay::PANEL_SIZE.0, overlay::PANEL_SIZE.1)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .maximizable(false)
-                .fullscreen(false)
-                .shadow(true)
-                .visible(false)
-                .build()?;
+            material::install(&panel_window, true);
+            overlay::fit_to_shapes(&panel_window);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            platform::imp::round_corners(&panel_window);
+            platform::imp::harden_privileged(
+                &panel_window,
+                &privileged_runtime.panel,
+                runtime_update_notifier.clone(),
+            )?;
+            platform::imp::apply_material(&panel_window, true);
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        platform::imp::harden_privileged(&panel_window).map_err(|error| {
+            std::io::Error::other(format!(
+                "required privileged panel WebKitGTK hardening failed: {error}"
+            ))
+        })?;
 
-            #[cfg(target_os = "macos")]
-            {
-                if !platform::imp::harden_privileged(&panel_window) {
-                    return Err(std::io::Error::other(
-                        "the launcher panel couldn't be set up with its required protections",
-                    )
-                    .into());
-                }
-                material::install(&panel_window, true);
-                overlay::fit_to_shapes(&panel_window);
-            }
-            #[cfg(target_os = "windows")]
-            {
-                platform::imp::round_corners(&panel_window);
-                platform::imp::harden_privileged(
-                    &panel_window,
-                    &privileged_runtime.panel,
-                    runtime_update_notifier.clone(),
-                )?;
-                platform::imp::apply_material(&panel_window, true);
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            platform::imp::harden_privileged(&panel_window).map_err(|error| {
-                std::io::Error::other(format!(
-                    "required privileged panel WebKitGTK hardening failed: {error}"
-                ))
-            })?;
-
-            #[cfg(target_os = "linux")]
-            {
-                // When portal/direct-X11 registration is unavailable the
-                // focused fallback must also close a launcher whose panel,
-                // rather than the main window, owns keyboard focus.
-                let focused_registration = global_registration.clone();
-                let shortcut_app = handle.clone();
-                platform::imp::install_shortcuts(
-                    &panel_window,
-                    window_shortcuts,
-                    focused_shortcut_presses,
-                    move |id| {
-                        if id == linux_shortcut::LAUNCHER_COMMAND_ID
-                            && focused_registration.is_live()
-                        {
-                            return;
-                        }
-                        let _ = execute_command(&shortcut_app, id);
-                    },
-                );
-            }
-
-            let overlay = overlay::Overlay::new(
-                panel_window.clone(),
-                cfg!(not(target_os = "linux")).then(|| panel_url.clone()),
+        #[cfg(target_os = "linux")]
+        {
+            // When portal/direct-X11 registration is unavailable the
+            // focused fallback must also close a launcher whose panel,
+            // rather than the main window, owns keyboard focus.
+            let focused_registration = global_registration.clone();
+            let shortcut_app = handle.clone();
+            platform::imp::install_shortcuts(
+                &panel_window,
+                window_shortcuts,
+                focused_shortcut_presses,
+                move |id| {
+                    if id == linux_shortcut::LAUNCHER_COMMAND_ID && focused_registration.is_live() {
+                        return;
+                    }
+                    let _ = execute_command(&shortcut_app, id);
+                },
             );
-            let main_focus_overlay = overlay.clone();
-            window.on_window_event(move |event| { if matches!(event, tauri::WindowEvent::Focused(_)) { main_focus_overlay.focus_changed(); } });
-            let blur_overlay = overlay.clone();
-            panel_window.on_window_event(move |event| {
-                if matches!(event,tauri::WindowEvent::Destroyed){blur_overlay.destroyed();}
-                match event {
+        }
+
+        let overlay = overlay::Overlay::new(
+            panel_window.clone(),
+            cfg!(not(target_os = "linux")).then(|| panel_url.clone()),
+        );
+        let main_focus_overlay = overlay.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Focused(_)) {
+                main_focus_overlay.focus_changed();
+            }
+        });
+        let blur_overlay = overlay.clone();
+        panel_window.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                blur_overlay.destroyed();
+            }
+            match event {
                 tauri::WindowEvent::Focused(_) => {
                     blur_overlay.focus_changed();
                     presence::report_app_active(blur_overlay.window_app());
                 }
                 tauri::WindowEvent::ScaleFactorChanged { .. } => blur_overlay.display_changed(),
-                tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(blur_overlay.window_app()) => { api.prevent_close(); blur_overlay.hide(); },
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if !shutdown_started(blur_overlay.window_app()) =>
+                {
+                    api.prevent_close();
+                    blur_overlay.hide();
+                }
                 #[cfg(target_os = "windows")]
                 tauri::WindowEvent::Destroyed
                     if !platform::imp::remove_privileged_version_observer(overlay::PANEL_LABEL) =>
@@ -8125,101 +8160,421 @@ pub fn run() {
                     diagnostic!("runtime: panel WebView2 update observer removal was reentrant");
                 }
                 _ => {}
-            }});
-            app.manage(overlay);
-            #[cfg(all(debug_assertions, target_os = "macos"))]
-            log_webview_processes(&window, &panel_window);
-
-
-                apply_native_theme(app, &APP_STORE.get().and_then(|store| store.app_setting("appearance")).unwrap_or_else(|| "system".into()));
-                if shutdown.terminal_started() {
-                    return Err(std::io::Error::other("terminal shutdown started before trusted panel navigation").into());
-                }
-                #[cfg(target_os = "linux")]
-                panel_window.navigate(panel_url)?;
-                Ok(())
-            };
-            #[cfg(not(target_os = "linux"))]
-            app.manage(overlay::Factory::new(create_panel));
-            #[cfg(target_os = "linux")]
-            create_panel()?;
-
-            #[cfg(not(target_os = "linux"))]
-            {
-                app.manage(launcher_trigger::Trigger::default());
-                // Honoured for a profile that stored one before the launcher
-                // had its own recorder; the keymap no longer rebinds it.
-                let keymap_override = keymap
-                    .get("launcher.toggle")
-                    .filter(|accelerator| {
-                        !accelerator.is_empty() && *accelerator != launcher_trigger::DEFAULT
-                    })
-                    .cloned();
-                launcher_trigger::install(&handle, keymap_override);
             }
-            #[cfg(target_os = "linux")]
-            {
-                let shortcut_app = handle.clone();
-                let global_shortcuts = linux_global_shortcuts::LinuxGlobalShortcuts::install(
-                    &window,
-                    linux_launcher_shortcut,
-                    global_registration,
-                    move |context| {
-                        if shutdown_started(&shortcut_app) {
-                            return;
-                        }
-                        if let Some(overlay) = shortcut_app.try_state::<overlay::Overlay>() {
-                            overlay.toggle_with_activation(
-                                context.activation_token,
-                                context.timestamp,
+        });
+        app.manage(overlay);
+        #[cfg(all(debug_assertions, target_os = "macos"))]
+        log_webview_processes(&window, &panel_window);
+
+        apply_native_theme(
+            app,
+            &APP_STORE
+                .get()
+                .and_then(|store| store.app_setting("appearance"))
+                .unwrap_or_else(|| "system".into()),
+        );
+        if shutdown.terminal_started() {
+            return Err(std::io::Error::other(
+                "terminal shutdown started before trusted panel navigation",
+            )
+            .into());
+        }
+        #[cfg(target_os = "linux")]
+        panel_window.navigate(panel_url)?;
+        Ok(())
+    };
+    #[cfg(not(target_os = "linux"))]
+    app.manage(overlay::Factory::new(create_panel));
+    #[cfg(target_os = "linux")]
+    create_panel()?;
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        app.manage(launcher_trigger::Trigger::default());
+        // Honoured for a profile that stored one before the launcher
+        // had its own recorder; the keymap no longer rebinds it.
+        let keymap_override = keymap
+            .get("launcher.toggle")
+            .filter(|accelerator| {
+                !accelerator.is_empty() && *accelerator != launcher_trigger::DEFAULT
+            })
+            .cloned();
+        launcher_trigger::install(&handle, keymap_override);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let shortcut_app = handle.clone();
+        let global_shortcuts = linux_global_shortcuts::LinuxGlobalShortcuts::install(
+            &window,
+            linux_launcher_shortcut,
+            global_registration,
+            move |context| {
+                if shutdown_started(&shortcut_app) {
+                    return;
+                }
+                if let Some(overlay) = shortcut_app.try_state::<overlay::Overlay>() {
+                    overlay.toggle_with_activation(context.activation_token, context.timestamp);
+                }
+            },
+        );
+        if !app.manage(global_shortcuts) {
+            return Err(std::io::Error::other(
+                "Linux global-shortcut lifecycle state is already installed",
+            )
+            .into());
+        }
+    }
+
+    presence::install(&handle, &window);
+    memory_pressure::install(&handle);
+    presence::report_app_active(&handle);
+
+    let appearance = APP_STORE
+        .get()
+        .and_then(|store| store.app_setting("appearance"))
+        .unwrap_or_else(|| "system".to_owned());
+    apply_native_theme(&handle, &appearance);
+
+    // No bundled application asset or page script runs before every
+    // mandatory native deny handler has installed. Tauri's trusted
+    // IPC/document-start plumbing and app protocols were registered
+    // when the blank WebViews were built, so this navigation activates
+    // the normal application without rebuilding the native views.
+    if shutdown.terminal_started() {
+        return Err(std::io::Error::other(
+            "terminal shutdown started before trusted application navigation",
+        )
+        .into());
+    }
+    if shutdown.terminal_started() {
+        return Err(std::io::Error::other(
+            "terminal shutdown overtook privileged panel navigation",
+        )
+        .into());
+    }
+    window.navigate(app_url)?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if std::env::var("ZEPHIUM_NATIVE_STARTUP_PROBE").as_deref() == Ok("1") {
+        // CI accepts this marker only after both privileged WebViews
+        // exist, their deny-by-default GTK policy/composition has
+        // completed, and both trusted navigations were admitted.
+        diagnostic!("startup-probe: Linux privileged WebViews are hardened and composed");
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        diagnostic!(
+            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
+        );
+        std::process::exit(1);
+    }
+    #[cfg(feature = "adblock-qa")]
+    blocker_bench::refuse_bad_arguments();
+    install_async_runtime();
+    APP_STARTED.get_or_init(std::time::Instant::now);
+    let context = tauri::generate_context!();
+    focus_alerts::claim_identity(&context.config().identifier);
+    #[cfg(target_os = "windows")]
+    default_browser::windows::claim(
+        context
+            .config()
+            .product_name
+            .as_deref()
+            .unwrap_or("Zephium"),
+    );
+    // A launch that stops before setup has nowhere else to say why.
+    #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
+    platform::imp::open_startup_log(&context.config().identifier);
+    #[cfg(target_os = "macos")]
+    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            // WebKit is dynamically supplied by macOS. Only an unsupported
+            // or unparseable runtime stops here, before Builder creates even
+            // the privileged blank bootstrap WKWebView; an outdated one
+            // starts with an update advisory.
+            diagnostic!("security: {error}");
+            startup_alert::show_blocking(startup_alert::StartupProblem::UnsupportedSystem, &error);
+            std::process::exit(78);
+        }
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let runtime_security_advisories = match zephium_engine::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            // WebKitGTK is dynamically supplied by the OS. Reject known
+            // obsolete/development runtimes and security overrides before
+            // Builder constructs even the privileged blank bootstrap WebView.
+            diagnostic!("security: {error}");
+            std::process::exit(78);
+        }
+    };
+
+    #[cfg(target_os = "windows")]
+    let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
+        Ok(advisory) => advisory,
+        Err(failure) => {
+            // This runs before Builder creates either privileged chrome
+            // or raw content. Preview, overridden, or unparseable runtimes
+            // remain hard failures; an outdated one is an advisory.
+            diagnostic!("security: {failure}");
+            startup_alert::show_blocking(failure.problem(), failure.detail());
+            terminate_windows_process(78);
+        }
+    };
+
+    let specta = specta_builder();
+    #[cfg(target_os = "windows")]
+    let attempted_privileged_environments = Arc::new(AtomicU8::new(0));
+    #[cfg(target_os = "windows")]
+    let setup_privileged_environments = attempted_privileged_environments.clone();
+    let builder = tauri::Builder::default()
+        // Every Tauri-managed webview is zone 2. It may load only the bundled
+        // application origin (or the exact Vite origin in debug builds).
+        .plugin(navigation_lock())
+        .manage(tab_switcher::Switcher::default())
+        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
+        .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Must register first: a second launch (file association, dock, a
+        // stale instance holding the global hotkey and the profile dbs)
+        // focuses the running window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            external_links::bring_forward(app);
+            external_links::hand_off(app, argv.into_iter().skip(1), true);
+        }));
+    // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
+    // native Wayland session can report success while receiving no keys (or
+    // fail startup when Xwayland is absent). Linux selects an actual GDK
+    // backend below and uses either direct X11 grabs or the desktop portal.
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .register_asynchronous_uri_scheme_protocol(onboarding_host::SCHEME, onboarding_host::serve);
+    // Windows hears the same from WebView2 ProcessFailed. Any other WebView
+    // keeps Tauri's own plain reload, which this hook replaces for all.
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        let label = webview.label().to_owned();
+        if !renderer_recovery::owns(&label) {
+            let _ = webview.reload();
+            return;
+        }
+        let app = webview.app_handle().clone();
+        let target = app.clone();
+        let _ = app.run_on_main_thread(move || renderer_recovery::failed(&target, &label, false));
+    });
+    let app = builder
+        .invoke_handler(specta.invoke_handler())
+        // This state must predate the setup hook: every environmental failure
+        // is contained inside that native Ready callback and converted into a
+        // correlated event-loop exit instead of escaping as Tauri's panic.
+        .manage(ShutdownCoordinator::default())
+        .manage(updates::Updates::default())
+        // Storage is admitted first inside setup, but its temporary cleanup
+        // owner must already exist so installation and later Shell transfer are
+        // one exact, failure-observable transaction.
+        .manage(StartupStore::default())
+        // Own a successfully installed native host until shell ownership is
+        // published. Setup failures in that narrow interval can therefore
+        // execute the same explicit bounded engine teardown.
+        .manage(StartupEngine::default())
+        // The managed blocker starts its own compiler/updater workers. Keep
+        // their exact Arc reachable from the instant construction succeeds
+        // until the app-managed shell publishes authoritative ownership.
+        .manage(StartupBlocker::default())
+        .setup(move |app| {
+            let setup_result: SetupResult = (|| {
+                let shutdown = app.try_state::<ShutdownCoordinator>().ok_or_else(|| {
+                    std::io::Error::other("shutdown coordinator state is unavailable")
+                })?;
+                // Allocate the independent deadline thread before any native
+                // callback or persistent actor exists. Later callbacks only
+                // signal it and can never fail while spawning a watchdog.
+                shutdown.prepare_hard_exit_watchdog()?;
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_app = app.handle().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_owner = shutdown.inner().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tao::event_loop::set_system_termination_handler(
+                    PRE_SHELL_CLEANUP_TIMEOUT,
+                    menu_text::shutdown_reason(),
+                    move || {
+                        if let Some(shell) = termination_app.try_state::<Handle>() {
+                            let now = std::time::Instant::now();
+                            let system_deadline = tao::event_loop::system_termination_deadline()
+                                .unwrap_or(now + PRE_SHELL_CLEANUP_TIMEOUT);
+                            let flush_deadline =
+                                system_renderer_flush_deadline(now, system_deadline);
+                            let app = termination_app.clone();
+                            let owner = termination_owner.clone();
+                            let handle = shell.inner().clone();
+                            let flush_app = app.clone();
+                            owner.request_system_flush(
+                                flush_deadline,
+                                move |deadline, done| {
+                                    resource_close::request_system(flush_app, deadline, done)
+                                },
+                                move |owner| owner.request(app, handle),
+                            );
+                        } else {
+                            termination_owner.request_terminal_startup_failure(
+                                termination_app.clone(),
+                                TerminalStartupResources {
+                                    engine_owner: termination_app
+                                        .try_state::<StartupEngine>()
+                                        .map(|owner| owner.inner().clone()),
+                                    blocker_owner: termination_app
+                                        .try_state::<StartupBlocker>()
+                                        .map(|owner| owner.inner().clone()),
+                                    store_owner: termination_app
+                                        .try_state::<StartupStore>()
+                                        .map(|owner| owner.inner().clone()),
+                                    ..TerminalStartupResources::default()
+                                },
                             );
                         }
                     },
                 );
-                if !app.manage(global_shortcuts) {
-                    return Err(std::io::Error::other(
-                        "Linux global-shortcut lifecycle state is already installed",
-                    )
-                    .into());
+                specta.mount_events(app);
+                let data_dir = app.path().app_data_dir()?;
+                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
+                let qa_session = webext_qa::session_label("--webext-qa-session=")?;
+                #[cfg(all(target_os = "windows", feature = "webext-qa"))]
+                let data_dir = webext_qa::data_dir(data_dir, qa_session.as_deref())?;
+                #[cfg(feature = "adblock-qa")]
+                let data_dir = webext_qa::data_dir(data_dir, blocker_bench::session()?.as_deref())?;
+                #[cfg(all(feature = "macos-work-rendering-probe", target_os = "macos"))]
+                foreground_rendering_probe::validate_data_root(&data_dir)?;
+                #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
+                navigation_probe::validate_data_root(&data_dir)?;
+                std::fs::create_dir_all(&data_dir)?;
+                #[cfg(target_os = "windows")]
+                updates::restore(app.handle(), &data_dir);
+                #[cfg(feature = "work-product")]
+                zephium_app::work_lead::skills::install_root(data_dir.clone());
+                #[cfg(feature = "work-product")]
+                zephium_app::work_files::trash::install_root(data_dir.clone());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
                 }
-            }
+                #[cfg(all(feature = "macos-work-profile-enrollment", target_os = "macos"))]
+                navigation_probe::mark_profile_enrollment(&data_dir)?;
+                #[cfg(target_os = "windows")]
+                {
+                    // Release builds have no console. Establish the bounded,
+                    // private diagnostic sink before storage admission so a
+                    // schema/corruption failure is still actionable without
+                    // constructing WebView2 state merely to initialize logs.
+                    platform::imp::redirect_stderr(&data_dir);
+                    diagnostics::install(data_dir.clone());
+                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    // Finder-launched apps write stderr nowhere; keep it in
+                    // a private, bounded log the person can choose to share.
+                    let logs = app.path().app_log_dir()?;
+                    platform::imp::redirect_stderr(&logs);
+                    diagnostics::install(logs);
+                    diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
+                }
 
-            presence::install(&handle, &window);
-            memory_pressure::install(&handle);
-            presence::report_app_active(&handle);
-
-            let appearance = APP_STORE
-                .get()
-                .and_then(|store| store.app_setting("appearance"))
-                .unwrap_or_else(|| "system".to_owned());
-            apply_native_theme(&handle, &appearance);
-
-            // No bundled application asset or page script runs before every
-            // mandatory native deny handler has installed. Tauri's trusted
-            // IPC/document-start plumbing and app protocols were registered
-            // when the blank WebViews were built, so this navigation activates
-            // the normal application without rebuilding the native views.
-            if shutdown.terminal_started() {
-                return Err(std::io::Error::other(
-                    "terminal shutdown started before trusted application navigation",
-                )
-                .into());
-            }
-            if shutdown.terminal_started() {
-                return Err(std::io::Error::other(
-                    "terminal shutdown overtook privileged panel navigation",
-                )
-                .into());
-            }
-            window.navigate(app_url)?;
-            #[cfg(all(unix, not(target_os = "macos")))]
-            if std::env::var("ZEPHIUM_NATIVE_STARTUP_PROBE").as_deref() == Ok("1") {
-                // CI accepts this marker only after both privileged WebViews
-                // exist, their deny-by-default GTK policy/composition has
-                // completed, and both trusted navigations were admitted.
-                diagnostic!("startup-probe: Linux privileged WebViews are hardened and composed");
-            }
-            Ok(())
+                // Storage is the first fallible subsystem admitted after the
+                // private data root is secured. A corrupt/newer database must
+                // fail before either privileged chrome or raw content creates
+                // native renderer state.
+                #[cfg(all(target_os = "windows", feature = "work-product"))]
+                let store = {
+                    #[cfg(feature = "webext-qa")]
+                    let session = qa_session.as_deref();
+                    #[cfg(not(feature = "webext-qa"))]
+                    let session = None;
+                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
+                        &app.config().identifier,
+                        session,
+                    )?;
+                    Arc::new(SqliteStore::open_with_windows_work_storage(
+                        &data_dir,
+                        work_storage,
+                    )?)
+                };
+                #[cfg(not(all(target_os = "windows", feature = "work-product")))]
+                let store = Arc::new(SqliteStore::open(&data_dir)?);
+                app.manage(media::MediaBlobs(zephium_store::MediaStore::new(
+                    data_dir.join("media"),
+                )));
+                #[cfg(feature = "work-product")]
+                zephium_app::work_connections::store::install(&data_dir);
+                #[cfg(feature = "work-product")]
+                app.manage(work_product::WorkFrames(Arc::new(
+                    zephium_store::WorkFrameStore::new(data_dir.join("work-frames")),
+                )));
+                let startup_store = app.try_state::<StartupStore>().ok_or_else(|| {
+                    std::io::Error::other("startup storage cleanup owner is unavailable")
+                })?;
+                if !startup_store.install(store.clone()) {
+                    let error =
+                        std::io::Error::other("startup storage cleanup owner is already armed");
+                    request_pre_shell_startup_failure_with_store(
+                        app.handle(),
+                        &error,
+                        store.clone(),
+                    );
+                    return Err(error.into());
+                }
+                APP_STORE.set(store.clone()).map_err(|_| {
+                    std::io::Error::other("process-global application store is already installed")
+                })?;
+                let startup = startup_recovery::begin(&data_dir);
+                let recovery_needed = match &startup {
+                    Ok(attempt) => attempt.requires_recovery(),
+                    Err(error) if startup_recovery::marker_recovery_available(&data_dir, error) => {
+                        true
+                    }
+                    Err(error) => {
+                        return Err(std::io::Error::new(
+                            error.kind(),
+                            "startup recovery marker is unavailable",
+                        )
+                        .into())
+                    }
+                };
+                let continuation = StartupContinuation::new(shutdown.inner().clone());
+                if recovery_needed {
+                    offer_startup_recovery(
+                        app.handle().clone(),
+                        store,
+                        data_dir,
+                        startup.ok(),
+                        continuation,
+                        runtime_security_advisories,
+                        #[cfg(target_os = "windows")]
+                        setup_privileged_environments,
+                    );
+                    return Ok(());
+                }
+                app.manage(StartupHealth::new(startup?));
+                if continuation.admit() {
+                    finish_browser_setup(
+                        app.handle(),
+                        store,
+                        data_dir,
+                        runtime_security_advisories,
+                        #[cfg(target_os = "windows")]
+                        setup_privileged_environments,
+                    )?;
+                }
+                Ok(())
             })();
 
             contain_tauri_setup_failure(setup_result, |error| {
@@ -8301,6 +8656,83 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    fn composed_setup_source(production: &str) -> String {
+        let initial = production
+            .split(".setup(move |app| {")
+            .nth(1)
+            .expect("initial setup")
+            .split(".build(context)")
+            .next()
+            .expect("bounded initial setup");
+        let continuation = production
+            .split("fn finish_browser_setup(")
+            .nth(1)
+            .expect("browser setup continuation")
+            .split("#[cfg_attr(mobile,")
+            .next()
+            .expect("bounded continuation");
+        format!("{initial}\n{continuation}")
+    }
+
+    #[test]
+    fn pending_recovery_exit_rejects_late_acceptance_and_releases_the_store_owner_once() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let shutdown = super::ShutdownCoordinator::default();
+        let continuation = super::StartupContinuation::new(shutdown.clone());
+        let store = super::StartupOwner::<AtomicUsize>::default();
+        let cleanup = Arc::new(AtomicUsize::new(0));
+        assert!(store.install(cleanup.clone()));
+        assert!(continuation.available());
+        shutdown.mark_terminal_start();
+        for _ in 0..2 {
+            if let Some(owner) = store.take() {
+                owner.fetch_add(1, Ordering::AcqRel);
+            }
+            assert!(!continuation.available());
+            assert!(!continuation.admit());
+        }
+        assert_eq!(cleanup.load(Ordering::Acquire), 1);
+        let admissions = AtomicUsize::new(0);
+        continuation.answer(
+            true,
+            || {
+                admissions.fetch_add(1, Ordering::AcqRel);
+            },
+            || panic!("late answer must be inert"),
+        );
+        assert_eq!(admissions.load(Ordering::Acquire), 0);
+        let fresh = super::StartupContinuation::new(super::ShutdownCoordinator::default());
+        let closed = AtomicUsize::new(0);
+        fresh.answer(
+            false,
+            || panic!("decline must not mutate Store or admit a view"),
+            || {
+                closed.fetch_add(1, Ordering::AcqRel);
+            },
+        );
+        assert_eq!(closed.load(Ordering::Acquire), 1);
+        assert!(fresh.admit());
+        assert!(!fresh.admit());
+    }
+
+    #[test]
+    fn startup_health_rejects_a_replaced_or_unready_document_generation() {
+        use std::sync::atomic::Ordering;
+        let gate = super::UiStartupGate::new(tauri::Url::parse("tauri://localhost/").unwrap());
+        gate.document_loaded.store(true, Ordering::Release);
+        gate.frontend_ready.store(true, Ordering::Release);
+        assert!(gate.healthy_generation(0));
+        gate.mark_document_started();
+        assert!(!gate.healthy_generation(0));
+        assert!(!gate.healthy_generation(1));
+        gate.document_loaded.store(true, Ordering::Release);
+        gate.frontend_ready.store(true, Ordering::Release);
+        assert!(gate.healthy_generation(1));
+        assert!(!gate.healthy_generation(0));
+    }
 
     #[test]
     fn system_shutdown_admits_renderer_writes_before_publishing_native_terminal_state() {
@@ -8309,15 +8741,26 @@ mod tests {
             let admission_owner = owner.clone();
             let deadline = std::time::Instant::now();
             let (done, result) = std::sync::mpsc::channel();
-            owner.request_system_flush(deadline, move |observed, complete| {
-                assert_eq!(observed, deadline);
-                assert!(!admission_owner.terminal_started());
-                assert!(!admission_owner.terminal_failure.load(std::sync::atomic::Ordering::Acquire));
-                complete(proven);
-            }, move |owner| {
-                owner.mark_terminal_start();
-                done.send(owner.terminal_failure.load(std::sync::atomic::Ordering::Acquire)).unwrap();
-            });
+            owner.request_system_flush(
+                deadline,
+                move |observed, complete| {
+                    assert_eq!(observed, deadline);
+                    assert!(!admission_owner.terminal_started());
+                    assert!(!admission_owner
+                        .terminal_failure
+                        .load(std::sync::atomic::Ordering::Acquire));
+                    complete(proven);
+                },
+                move |owner| {
+                    owner.mark_terminal_start();
+                    done.send(
+                        owner
+                            .terminal_failure
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    )
+                    .unwrap();
+                },
+            );
             assert_eq!(result.recv().unwrap(), !proven);
             assert!(owner.terminal_started());
         }
@@ -8327,10 +8770,19 @@ mod tests {
     fn system_renderer_flush_uses_the_external_deadline_and_reserves_native_cleanup() {
         let now = std::time::Instant::now();
         let seconds = std::time::Duration::from_secs;
-        assert_eq!(super::system_renderer_flush_deadline(now, now + seconds(8)), now + seconds(2));
-        assert_eq!(super::system_renderer_flush_deadline(now, now + seconds(7)), now + seconds(1));
+        assert_eq!(
+            super::system_renderer_flush_deadline(now, now + seconds(8)),
+            now + seconds(2)
+        );
+        assert_eq!(
+            super::system_renderer_flush_deadline(now, now + seconds(7)),
+            now + seconds(1)
+        );
         assert!(super::system_renderer_flush_deadline(now, now + seconds(4)) <= now);
-        assert_eq!(super::system_renderer_flush_deadline(now, now), now - seconds(6));
+        assert_eq!(
+            super::system_renderer_flush_deadline(now, now),
+            now - seconds(6)
+        );
     }
 
     #[test]
@@ -8569,7 +9021,8 @@ mod tests {
             .unwrap();
         let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
         assert!(reset.contains("window.label() == MAIN_LABEL"));
-        assert!(reset.contains("shell.dispatch(Command::PeekSidebar {\n                                peek: false,\n                                slide: false,"));
+        let compact: String = reset.split_whitespace().collect();
+        assert!(compact.contains("shell.dispatch(Command::PeekSidebar{peek:false,slide:false,"));
         assert!(
             reset.find("Command::PeekSidebar").unwrap()
                 < reset.find("Command::SetChromeModal").unwrap()
@@ -8588,8 +9041,9 @@ mod tests {
             .unwrap();
         let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
         assert!(reset.contains("window.label() == MAIN_LABEL"));
-        assert!(reset.contains(
-            "#[cfg(target_os = \"macos\")]\n                        platform::imp::sidebar_card_lights(&window, false);"
+        let compact: String = reset.split_whitespace().collect();
+        assert!(compact.contains(
+            "#[cfg(target_os=\"macos\")]platform::imp::sidebar_card_lights(&window,false);"
         ));
         assert!(
             reset.find("sidebar_card_lights(&window, false)").unwrap()
@@ -9574,13 +10028,7 @@ mod tests {
             .expect("Linux exclusion for X11-only Tauri plugin");
         assert!(plugin - plugin_gate < 100);
 
-        let setup = production
-            .split(".setup(move |app| {")
-            .nth(1)
-            .expect("desktop setup hook")
-            .split(".build(context)")
-            .next()
-            .expect("bounded desktop setup hook");
+        let setup = composed_setup_source(production);
         let state = setup
             .find("let global_registration = linux_shortcut_portal::GlobalRegistration::default()")
             .expect("Linux global registration state");
@@ -9672,13 +10120,7 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("desktop production source");
-        let setup = production
-            .split(".setup(move |app| {")
-            .nth(1)
-            .expect("desktop setup hook")
-            .split(".build(context)")
-            .next()
-            .expect("bounded desktop setup hook");
+        let setup = composed_setup_source(production);
 
         assert_eq!(
             production
@@ -9749,7 +10191,7 @@ mod tests {
             .find("if !startup_store.transfer_to(&store)")
             .expect("exact Store ownership transfer");
         let blocker_start = setup
-            .find("let blocker = blocker_service::start_with_updates(&data_dir")
+            .find("blocker_service::start_with_updates(&data_dir")
             .expect("managed blocker construction");
         let startup_blocker_owner = setup
             .find("if !startup_blocker.install(blocker.clone())")

@@ -2496,6 +2496,16 @@ impl Hub {
         Ok(file)
     }
 
+    pub(crate) fn set_aside_startup_session(&mut self) -> rusqlite::Result<Option<PathBuf>> {
+        if self.recovery_required.is_none() {
+            if self.load()?.is_none() {
+                return Ok(None);
+            }
+            self.quarantine_current_authoritative("repeated incomplete browser startups")?;
+        }
+        self.set_aside_recovery()
+    }
+
     fn validate_authoritative_registry(&self, state: &SessionState) -> rusqlite::Result<()> {
         if state.profiles.len() > MAX_SESSION_PROFILES
             || state
