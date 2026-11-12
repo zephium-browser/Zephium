@@ -20,6 +20,8 @@ mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
+#[cfg(any(target_os = "windows", test))]
+mod extension_navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod haptics;
