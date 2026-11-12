@@ -154,12 +154,20 @@ fn bare_host_with_port(value: &str) -> bool {
         return false;
     };
     !host.is_empty()
+        && (!host
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            || host.parse::<std::net::Ipv4Addr>().is_ok())
         && !host.contains([':', '@'])
         && !explicit_non_search_scheme(&host.to_ascii_lowercase())
         && !port.is_empty()
         && port.bytes().all(|byte| byte.is_ascii_digit())
         && port.parse::<u16>().is_ok()
-        && url::Host::parse(host).is_ok()
+        && match url::Host::parse(host) {
+            Ok(url::Host::Domain(_)) => true,
+            Ok(url::Host::Ipv4(_)) => host.parse::<std::net::Ipv4Addr>().is_ok(),
+            _ => false,
+        }
 }
 
 fn search_url(value: &str) -> Option<Url> {
@@ -501,12 +509,79 @@ fn looks_like_host(s: &str) -> bool {
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
         return true;
     }
-    matches!(host.rsplit_once('.'), Some((label, tld)) if !label.is_empty() && tld.len() >= 2)
+    // WHATWG host parsing accepts abbreviated/numeric IPv4 forms. A bare
+    // decimal-looking token must not become a network address by expansion.
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return false;
+    }
+    let Ok(url::Host::Domain(host)) = url::Host::parse(host) else {
+        return false;
+    };
+    let host = host.trim_end_matches('.');
+    // Reserved/local input is intentional host syntax even without a public
+    // suffix. Keep these names off the search provider as before.
+    if host == "localhost"
+        || RESERVED_HOSTS.contains(&host)
+        || host.ends_with(".example")
+        || host.ends_with(".invalid")
+    {
+        return true;
+    }
+    if host.contains('.') && crate::certificates::is_local_host(host) {
+        return true;
+    }
+    psl::domain(host.as_bytes()).is_some_and(|domain| domain.suffix().is_known())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn bare_file_names_and_abbreviated_numeric_hosts_search_without_network_navigation() {
+        for input in [
+            "index.html",
+            "node.js",
+            "report.pdf",
+            "1.25",
+            "127.1",
+            "1.25:8080",
+            "0x7f000001:8080",
+            "0177.0.0.1:8080",
+        ] {
+            assert!(is_query(input), "{input}");
+            assert_eq!(classify(input).unwrap().host_str(), Some("duckduckgo.com"));
+        }
+        for input in [
+            "example.com",
+            "example.co.uk",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "printer.local",
+            "router.lan",
+            "localhost:8080",
+            "localhost.",
+            "LOCALHOST.",
+            "mail.example",
+            "private.invalid",
+        ] {
+            assert!(!is_query(input), "{input}");
+            assert!(classify(input).is_some(), "{input}");
+        }
+        assert!(!is_query("tauri.localhost/index.html"));
+        assert!(classify("tauri.localhost/index.html").is_none());
+        assert_eq!(
+            classify("https://index.html/").unwrap().as_str(),
+            "https://index.html/"
+        );
+        assert_eq!(
+            classify("http://127.1/").unwrap().as_str(),
+            "http://127.0.0.1/"
+        );
+    }
 
     #[test]
     fn opaque_prose_with_colons_searches_while_explicit_protocols_stay_refused() {
