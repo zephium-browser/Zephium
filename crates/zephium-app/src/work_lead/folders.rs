@@ -47,6 +47,15 @@ pub(crate) enum Named {
     },
 }
 
+fn drive_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() > 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+        && !path.contains("://")
+}
+
 /// Absolute or home-relative paths written in the text, in order, once each.
 pub(crate) fn paths_in(text: &str, home: Option<&Path>) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
@@ -59,16 +68,18 @@ pub(crate) fn paths_in(text: &str, home: Option<&Path>) -> Vec<PathBuf> {
                 Some(home) => home.join(rest),
                 None => continue,
             }
-        } else if word.starts_with('/') && word.len() > 1 && !word.starts_with("//") {
+        } else if drive_absolute(word)
+            || (word.starts_with('/') && word.len() > 1 && !word.starts_with("//"))
+        {
             PathBuf::from(word)
         } else {
             continue;
         };
         // One name is a slash command or a fraction, not a place on disk.
-        if path.components().count() < 3 || word.contains("://") {
+        if (!drive_absolute(word) && path.components().count() < 3) || word.contains("://") {
             continue;
         }
-        let path = PathBuf::from(path.to_string_lossy().trim_end_matches('/'));
+        let path = PathBuf::from(path.to_string_lossy().trim_end_matches(['/', '\\']));
         if !found.contains(&path) {
             found.push(path);
         }
@@ -192,7 +203,7 @@ pub(crate) fn scope(
 /// and grants the ones the person allows. A named folder the run can already
 /// read becomes this request's own.
 pub(crate) async fn ask_in_place(run: &LeadRun, objective: &str) -> Vec<Named> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::work_files::grant_home() else {
         return Vec::new();
     };
     let mut named = Vec::new();
@@ -265,14 +276,14 @@ pub(crate) fn resolve(named: &str, home: &Path) -> Option<PathBuf> {
     if let Some(rest) = named.strip_prefix("~/") {
         return Some(home.join(rest));
     }
-    if named.starts_with('/') {
+    if drive_absolute(named) || (named.starts_with('/') && !named.starts_with("//")) {
         return Some(PathBuf::from(named));
     }
     let word = named
         .trim_start_matches("my ")
         .trim_end_matches(" folder")
         .trim();
-    if word.is_empty() || word.contains('/') {
+    if word.is_empty() || word.contains(['/', '\\', ':']) {
         return None;
     }
     let found = std::fs::read_dir(home).ok().and_then(|entries| {
@@ -309,8 +320,8 @@ pub(crate) async fn request(run: &LeadRun, named: &str, why: &str) -> (String, b
             )
         };
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return ("No home folder on this Mac".into(), true);
+    let Some(home) = crate::work_files::grant_home() else {
+        return ("No home folder is available on this computer".into(), true);
     };
     let Some(path) = resolve(named, &home) else {
         return (
@@ -553,6 +564,23 @@ mod tests {
             paths_in("read (/tmp/x/y) please", Some(home)),
             vec![PathBuf::from("/tmp/x/y")]
         );
+    }
+
+    #[test]
+    fn windows_drive_paths_are_recognized_without_a_home_variable() {
+        for path in [r"C:\Users\ana\Documents", "D:/Projects/Zephium"] {
+            assert_eq!(
+                paths_in(&format!("Read `{path}` please."), None),
+                [PathBuf::from(path)]
+            );
+            assert_eq!(
+                resolve(path, Path::new("unused")),
+                Some(PathBuf::from(path))
+            );
+        }
+        for relative in [r"C:Documents", r"\\server\share\folder", "C://host/path"] {
+            assert!(paths_in(relative, None).is_empty(), "{relative}");
+        }
     }
 
     #[test]
