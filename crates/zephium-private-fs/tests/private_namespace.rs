@@ -2279,9 +2279,14 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
         .unwrap();
     let source = staging
         .create_new_private_child(&component("source"))
+        .unwrap();
+    let child = source
+        .create_new_private_child(&component("child"))
         .unwrap()
         .seal()
         .unwrap();
+    drop(child);
+    let source = source.seal().unwrap();
     let identity = source.identity();
     let installed = source
         .publish_noreplace(&objects, &component("installed"))
@@ -2289,6 +2294,22 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
     assert_eq!(installed.identity(), identity);
     assert!(!root.join("staging/source").exists());
     assert_eq!(unix_mode(&root.join("objects/installed")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
+
+    let source = staging
+        .create_new_private_child(&component("refused"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let error = source
+        .publish_noreplace(&objects, &component("installed"))
+        .err()
+        .unwrap();
+    let (error, source) = error.into_parts();
+    assert_eq!(error, PrivateFsError::AlreadyExists);
+    source.unwrap().with_verified_path(|_| ()).unwrap();
+    assert_eq!(unix_mode(&root.join("staging/refused")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
 }
 
 #[cfg(target_os = "macos")]
