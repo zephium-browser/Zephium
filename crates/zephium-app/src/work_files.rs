@@ -911,43 +911,46 @@ fn has_test_grant_home() -> bool {
 }
 
 #[cfg(test)]
-fn test_tempdir_root(current_dir: &Path, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
-    if protected_path(current_dir) {
-        let root = fallback();
-        assert!(
-            !protected_path(&root),
-            "test fixture fallback directory is protected"
-        );
-        root
-    } else {
-        current_dir.to_path_buf()
+fn test_tempdir_fallback_root() -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "PUBLIC is unset"))
     }
+
+    #[cfg(not(windows))]
+    {
+        Ok(std::env::temp_dir())
+    }
+}
+
+#[cfg(test)]
+fn test_tempdir_with_fallback(
+    current_dir: &Path,
+    fallback_root: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> std::io::Result<tempfile::TempDir> {
+    if !protected_path(current_dir) {
+        if let Ok(directory) = tempfile::tempdir_in(current_dir) {
+            return Ok(directory);
+        }
+    }
+
+    let fallback = fallback_root()?.canonicalize()?;
+    if protected_path(&fallback) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test fixture fallback directory is protected",
+        ));
+    }
+    tempfile::tempdir_in(fallback)
 }
 
 #[cfg(test)]
 pub(crate) fn test_tempdir() -> tempfile::TempDir {
     let current_dir = std::env::current_dir().expect("test working directory");
-    let root = test_tempdir_root(&current_dir, || {
-        #[cfg(windows)]
-        let path = std::env::var_os("PUBLIC")
-            .map(PathBuf::from)
-            .filter(|path| !protected_path(path))
-            .expect("a safe PUBLIC directory is required for test fixtures");
-
-        #[cfg(not(windows))]
-        let path = {
-            let path = std::env::temp_dir();
-            assert!(
-                !protected_path(&path),
-                "system temporary directory is protected for test fixtures"
-            );
-            path
-        };
-
-        path
-    });
-
-    tempfile::tempdir_in(root).expect("create test directory")
+    test_tempdir_with_fallback(&current_dir, test_tempdir_fallback_root)
+        .unwrap_or_else(|error| panic!("create test directory: {error}"))
 }
 
 /// Current-thread fixture home; never mutates HOME or changes production policy.
@@ -1753,22 +1756,33 @@ mod tests {
 
     #[test]
     fn test_tempdir_avoids_protected_working_directory_components() {
-        let fallback = PathBuf::from("safe-public-root");
-        for current_dir in [
-            Path::new("workspace/.config/project"),
-            Path::new("workspace/AppData/Local/project"),
-        ] {
-            assert_eq!(
-                test_tempdir_root(current_dir, || fallback.clone()),
-                fallback
-            );
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fallback = test_tempdir_fallback_root()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        for component in [".config", "AppData"] {
+            let protected = Path::new("workspace").join(component).join("project");
+            let directory = test_tempdir_with_fallback(&protected, || Ok(fallback.clone()))
+                .expect("safe temporary fallback should be available");
+            assert!(directory.path().starts_with(&fallback));
         }
-        assert_eq!(
-            test_tempdir_root(Path::new("workspace/project"), || {
-                panic!("safe working directory should not use the fallback")
-            }),
-            PathBuf::from("workspace/project")
-        );
+    }
+
+    #[test]
+    fn test_tempdir_falls_back_when_working_directory_cannot_host_fixtures() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fallback = test_tempdir_fallback_root()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let file = tempfile::NamedTempFile::new_in(&fallback).unwrap();
+        let directory = test_tempdir_with_fallback(file.path(), || Ok(fallback.clone())).unwrap();
+        assert!(directory.path().starts_with(fallback));
     }
 
     #[test]
