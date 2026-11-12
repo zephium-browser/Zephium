@@ -14,8 +14,8 @@ const native = vi.hoisted(() => ({
   settle: vi.fn(),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     workCall: native.call,
     workPaneShow: native.paneShow,
     workPaneHide: native.paneHide,

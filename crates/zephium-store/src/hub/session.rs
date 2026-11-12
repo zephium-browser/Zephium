@@ -1658,7 +1658,8 @@ mod qa_settings_recovery_tests {
         assert_eq!(restarted.profiles[0].id, profile);
         assert_eq!(restarted.profiles[0].name, "QA");
         assert_eq!(restarted.profiles[0].kind, ProfileKind::Default);
-        assert!(restarted.items.is_empty() && restarted.spaces.is_empty());
+        assert!(restarted.items.is_empty());
+        assert_eq!(restarted.spaces, saved.spaces);
         // The profile's history is still its own.
         assert!(!hub.search_history(profile, "example", 10).is_empty());
 
@@ -1873,6 +1874,10 @@ mod space_look_wire_tests {
 
 impl Hub {
     pub(crate) fn save(&mut self, s: &SessionState) -> rusqlite::Result<()> {
+        if self.session_backup_checkpoint_pending {
+            checkpoint_session_backup(&self.meta)?;
+            self.session_backup_checkpoint_pending = false;
+        }
         let prepared = self.prepare_session(s)?;
         if self
             .registry
@@ -2023,6 +2028,7 @@ impl Hub {
             }
         }
         Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
+        let composer_erased = super::work_composer::retain_scopes(&tx, &state)?;
         let last = state
             .active_space
             .and_then(|sp| state.spaces.iter().find(|x| x.id == sp))
@@ -2064,6 +2070,11 @@ impl Hub {
             ));
         }
         self.registry = registry;
+        self.session_scopes = state
+            .spaces
+            .iter()
+            .map(|space| (space.profile, space.id))
+            .collect();
         if !self.legacy_state_purged {
             match self.purge_legacy_profile_state() {
                 Ok(()) => self.legacy_state_purged = true,
@@ -2079,6 +2090,11 @@ impl Hub {
         // exact journal authorization plus native-erasure proof permits purge.
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
+        self.session_backup_checkpoint_pending |= composer_erased;
+        if self.session_backup_checkpoint_pending {
+            checkpoint_session_backup(&self.meta)?;
+            self.session_backup_checkpoint_pending = false;
+        }
         Ok(())
     }
 
@@ -2157,6 +2173,11 @@ impl Hub {
                         .map_err(|_| invalid_data("session backup repair could not be encoded"))?,
                 });
             }
+            self.session_scopes = canonical
+                .spaces
+                .iter()
+                .map(|space| (space.profile, space.id))
+                .collect();
             return Ok(Some(canonical));
         }
 
@@ -2415,6 +2436,8 @@ impl Hub {
         // must stay in recovery mode until a dedicated recovery operation
         // explicitly resolves the marker.
         self.recovery_required = recovery_reason(&self.meta)?.or_else(|| Some(reason.into()));
+        self.session_scopes.clear();
+        self.committed_session = None;
         Ok(())
     }
 
@@ -2461,7 +2484,8 @@ impl Hub {
             ),
             _ => None,
         };
-        let restarted = restarted_session(&self.registry, preserved.as_deref());
+        let mut restarted = restarted_session(&self.registry, preserved.as_deref());
+        super::work_composer::recover_spaces(&self.meta, &mut restarted)?;
         self.recovery_required = None;
         if let Err(error) = self.save(&restarted) {
             self.recovery_required = Some(reason);
@@ -2524,12 +2548,12 @@ fn write_set_aside(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathB
     Ok(path)
 }
 
-/// A session with every registered profile and nothing else. Names and kinds
-/// come from the unreadable snapshot where it still holds them; exactly one
-/// profile is the default.
+/// A tab-free session preserving registered profiles and validated Space
+/// identities. Scope preservation keeps unsent composer text reachable.
 fn restarted_session(registry: &HashSet<ProfileId>, preserved: Option<&[u8]>) -> SessionState {
-    let named: Vec<(ProfileId, String, ProfileKind)> = preserved
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+    let value = preserved.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    let named: Vec<(ProfileId, String, ProfileKind)> = value
+        .as_ref()
         .and_then(|value| value.get("profiles")?.as_array().cloned())
         .unwrap_or_default()
         .iter()
@@ -2581,10 +2605,35 @@ fn restarted_session(registry: &HashSet<ProfileId>, preserved: Option<&[u8]>) ->
             }
         }
     }
-    core_session::canonicalize(SessionState {
+    let spaces = value
+        .as_ref()
+        .and_then(|value| value.get("spaces")?.as_array())
+        .into_iter()
+        .flatten()
+        .take(MAX_SESSION_SPACES)
+        .filter_map(|value| {
+            let space: BoundedSpace = serde_json::from_value(value.clone()).ok()?;
+            (registry.contains(&space.profile)
+                && space.name.len() <= MAX_NAME_BYTES
+                && space_look_bounded(&space.look))
+            .then_some(PersistedSpace {
+                id: space.id,
+                profile: space.profile,
+                name: space.name,
+                look: space.look,
+            })
+        })
+        .collect();
+    let active_space = value
+        .as_ref()
+        .and_then(|value| value.get("active_space")?.as_str())
+        .and_then(SpaceId::parse);
+    SessionState {
         profiles,
+        spaces,
+        active_space,
         ..Default::default()
-    })
+    }
 }
 
 fn kind_to_str(kind: ProfileKind) -> Option<&'static str> {

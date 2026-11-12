@@ -2,20 +2,31 @@ import { beforeEach, expect, test, vi } from "vitest";
 import type { WorkCallV1, WorkEnvironmentSnapshot, WorkResponseV1 } from "$shared/ipc/bindings";
 const native = vi.hoisted(() => ({
   call: vi.fn(),
+  draft: vi.fn(),
+  drafts: new Map<string, { text: string; revision: string }>(),
   close: null as null | (() => Promise<boolean>),
+  closeTasks: new Set<() => Promise<boolean>>(),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workCall: native.call });
+  return mockBindings({
+    workCall: (owner, call) =>
+      call.kind === "environment" &&
+      (call.request.kind === "composer_read" || call.request.kind === "composer_save")
+        ? native.draft(owner, call)
+        : native.call(owner, call),
+  });
 });
 vi.mock("$shared/ipc/native-events", () => ({
   events: { workEnvironmentChanged: { listen: async () => () => {} } },
 }));
 vi.mock("$shared/lib/close", () => ({
   registerCloseTask: (task: () => Promise<boolean>) => {
+    native.closeTasks.add(task);
     native.close = task;
     return () => {
-      native.close = null;
+      native.closeTasks.delete(task);
+      if (native.close === task) native.close = [...native.closeTasks].at(-1) ?? null;
     };
   },
 }));
@@ -50,8 +61,46 @@ beforeEach(() => {
   vi.resetModules();
   vi.useRealTimers();
   native.call.mockReset();
+  native.draft.mockReset();
+  native.drafts.clear();
+  native.draft.mockImplementation((owner: string, call: WorkCallV1) => {
+    if (
+      call.kind !== "environment" ||
+      (call.request.kind !== "composer_read" && call.request.kind !== "composer_save")
+    )
+      throw new Error("Expected composer call");
+    const request = call.request;
+    const key = `${owner}.${request.space}`;
+    let draft = native.drafts.get(key) ?? { text: "", revision: "1" };
+    if (request.kind === "composer_save") {
+      if (request.expected !== draft.revision)
+        return { ...response({ kind: "error", error: "conflict" }), profile: owner };
+      draft = { text: request.text, revision: (BigInt(draft.revision) + 1n).toString() };
+      native.drafts.set(key, draft);
+    }
+    return {
+      ...response({
+        kind: "environment",
+        reply: { kind: "composer", draft: { ...draft, profile: owner, space: request.space } },
+      }),
+      profile: owner,
+    };
+  });
   native.close = null;
+  native.closeTasks.clear();
   vi.stubGlobal("localStorage", memory());
+});
+
+test("native composer draft survives replacement of nonpersistent chrome storage", async () => {
+  const { WorkEnvironmentSession } = await import("../environment.svelte");
+  const first = new WorkEnvironmentSession(profile, space);
+  first.composer = "Unsent words that must survive relaunch";
+  expect(await native.close?.()).toBe(true);
+  first.dispose();
+  localStorage.clear();
+  const reopened = new WorkEnvironmentSession(profile, space);
+  await vi.waitFor(() => expect(reopened.composer).toBe("Unsent words that must survive relaunch"));
+  reopened.dispose();
 });
 
 function memory(): Storage {
@@ -445,7 +494,7 @@ test("a busy refusal retries the arrangement save before releasing it", async ()
   }
 });
 
-test("words in the ask bar never hold up a close and are back after a relaunch", async () => {
+test("words in the ask bar settle natively before close and return after relaunch", async () => {
   const { WorkEnvironmentSession } = await import("../environment.svelte");
   native.call.mockImplementation((_profile: string, call: WorkCallV1) => {
     if (call.kind !== "environment") throw new Error("Unexpected call");
@@ -457,12 +506,12 @@ test("words in the ask bar never hold up a close and are back after a relaunch",
   session.composer = "Compare the two plans";
   session.objectiveToAttach = "00000000000000000000000007";
 
-  // A close does not wait for the pause in typing, and is not refused.
+  // Closing flushes the debounce and waits for the native receipt.
   expect(await native.close?.()).toBe(true);
-  expect(localStorage.length).toBe(1);
+  expect(native.drafts.get(`${profile}.${space}`)?.text).toBe("Compare the two plans");
 
   const relaunched = new WorkEnvironmentSession(profile, space);
-  expect(relaunched.composer).toBe("Compare the two plans");
+  await vi.waitFor(() => expect(relaunched.composer).toBe("Compare the two plans"));
   expect(relaunched.objectiveToAttach).toBeNull();
   const elsewhere = new WorkEnvironmentSession(profile, "00000000000000000000000009");
   expect(elsewhere.composer).toBe("");
@@ -471,16 +520,18 @@ test("words in the ask bar never hold up a close and are back after a relaunch",
   elsewhere.dispose();
 });
 
-test("typing is kept once it pauses, and sending or clearing lets the draft go at once", async () => {
+test("typing is kept once it pauses, and clearing settles a native tombstone", async () => {
   vi.useFakeTimers();
   const { WorkEnvironmentSession } = await import("../environment.svelte");
   const session = new WorkEnvironmentSession(profile, space);
   session.composer = "Plan";
   session.composer = "Plan a trip";
   expect(localStorage.length).toBe(0);
-  vi.advanceTimersByTime(600);
-  expect(localStorage.length).toBe(1);
+  await vi.advanceTimersByTimeAsync(600);
+  expect(native.drafts.get(`${profile}.${space}`)?.text).toBe("Plan a trip");
   session.composer = "";
+  expect(await session.flushComposer()).toBe(true);
+  expect(native.drafts.get(`${profile}.${space}`)?.text).toBe("");
   expect(localStorage.length).toBe(0);
   session.dispose();
 });
@@ -513,4 +564,96 @@ test("a deleted space takes the words in its ask bar with it", async () => {
 
   expect(live.composer).toBe("");
   expect(readDraft("work-composer", [profile, space])).toBeNull();
+});
+
+test("deleted scopes retire their cache entries and close tasks without further native writes", async () => {
+  vi.useFakeTimers();
+  const { environmentSession } = await import("../environment.svelte");
+  const { forgetDrafts } = await import("$shared/lib/drafts");
+  for (let index = 1; index <= 24; index++) {
+    const within = String(index).padStart(26, "0");
+    const session = environmentSession(profile, within);
+    expect(session, "deleted scope must not consume a permanent cache slot").not.toBeNull();
+    await session!.flushComposer();
+    session!.composer = `deleted words ${index}`;
+    forgetDrafts(profile, within);
+    const count = native.draft.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(600);
+    await session!.resolveComposer("retry");
+    session!.dispose();
+    expect(native.draft).toHaveBeenCalledTimes(count);
+    expect(session!.composer).toBe("");
+    expect(session!.disposable).toBe(true);
+    expect(native.closeTasks.size).toBe(0);
+  }
+  const next = environmentSession(profile, space)!;
+  expect(next).not.toBeNull();
+  expect(await native.close?.()).toBe(true);
+  forgetDrafts(profile);
+  expect(native.closeTasks.size).toBe(0);
+});
+
+test("retirement releases an already captured close task and ignores its late save receipt", async () => {
+  const { environmentSession } = await import("../environment.svelte");
+  const { forgetDrafts } = await import("$shared/lib/drafts");
+  const session = environmentSession(profile, space)!;
+  await session.flushComposer();
+  let settle!: (reply: WorkResponseV1) => void;
+  native.draft.mockImplementationOnce(
+    () =>
+      new Promise<WorkResponseV1>((resolve) => {
+        settle = resolve;
+      }),
+  );
+  session.composer = "scope deleted while this save is in flight";
+  const closing = native.close!();
+  await vi.waitFor(() => expect(settle).toBeTypeOf("function"));
+  forgetDrafts(profile, space);
+  const count = native.draft.mock.calls.length;
+  settle(
+    response({
+      kind: "environment",
+      reply: {
+        kind: "composer",
+        draft: {
+          profile,
+          space,
+          revision: "2",
+          text: "scope deleted while this save is in flight",
+        },
+      },
+    }),
+  );
+  expect(await closing).toBe(true);
+  expect(session.composer).toBe("");
+  expect(session.composerFailure).toBeNull();
+  expect(native.closeTasks.size).toBe(0);
+  expect(await session.resolveComposer("load")).toBe(false);
+  expect(native.draft).toHaveBeenCalledTimes(count);
+});
+
+test("unresolved live composer failures remain protected while only deleted scopes release capacity", async () => {
+  const { environmentSession } = await import("../environment.svelte");
+  const { forgetDrafts } = await import("$shared/lib/drafts");
+  const scopes = Array.from({ length: 16 }, (_, index) => String(index + 1).padStart(26, "0"));
+  const live = [];
+  for (const within of scopes) {
+    const session = environmentSession(profile, within)!;
+    await session.flushComposer();
+    session.composer = `unresolved ${within}`;
+    native.draft.mockResolvedValueOnce(response({ kind: "error", error: "outcome_unknown" }));
+    expect(await session.flushComposer()).toBe(false);
+    live.push(session);
+  }
+  const seventeenth = "00000000000000000000000017";
+  expect(environmentSession(profile, seventeenth)).toBeNull();
+  forgetDrafts(profile, scopes[0]);
+  expect(environmentSession(profile, seventeenth)).not.toBeNull();
+  expect(environmentSession(profile, scopes[1]!)).toBe(live[1]);
+  expect(live[1]!.composer).toBe(`unresolved ${scopes[1]}`);
+  expect(live[1]!.composerFailure).toBe("outcome_unknown");
+  expect(live[1]!.disposable).toBe(false);
+  expect(await Promise.all([...native.closeTasks].map((close) => close()))).toContain(false);
+  forgetDrafts(profile);
+  expect(native.closeTasks.size).toBe(0);
 });

@@ -12,9 +12,9 @@ import "../components/bar/ModelPicker.svelte";
 import "../components/AgentLine.svelte";
 
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
+  const { mockComposerBindings } = await import("./composer-fixtures");
   const { models } = await import("$shared/testing/work-models");
-  return mockBindings({
+  return mockComposerBindings({
     workModels: vi.fn(async (profile: string) => ({
       ...models({ keys: { anthropic: "valid" }, lead: "anthropic/claude-opus-5-5" }),
       profile,

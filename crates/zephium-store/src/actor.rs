@@ -2427,7 +2427,19 @@ fn actor(
                 let _ = reply.send(result);
             }
             Some(Cmd::WorkDocument(profile, request, _permit, completion)) => {
-                let result = hub.work_document(profile, *request);
+                let composer = matches!(
+                    request.as_ref(),
+                    zephium_core::work::port::WorkRequest::Environment {
+                        call: zephium_core::work::environment::WorkEnvironmentCall::ComposerRead { .. }
+                            | zephium_core::work::environment::WorkEnvironmentCall::ComposerSave { .. },
+                        ..
+                    }
+                );
+                let result = if composer && !flush(&mut hub, &mut pending) {
+                    Err(zephium_core::work::WorkError::Unavailable)
+                } else {
+                    hub.work_document(profile, *request)
+                };
                 let _ =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(result)));
             }

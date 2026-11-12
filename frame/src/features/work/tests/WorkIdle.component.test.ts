@@ -10,8 +10,8 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     faviconProbe: async () => true,
     workCall: native.call,
     workPaneShow: async () => ({ accepted: true, operation_id: null }),

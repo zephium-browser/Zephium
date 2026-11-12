@@ -632,6 +632,8 @@ fn call_name(call: &WorkCallV1) -> &'static str {
     use zephium_core::work::environment::WorkEnvironmentCall;
     match call {
         WorkCallV1::Environment { request, .. } => match request {
+            WorkEnvironmentCall::ComposerRead { .. } => "environment:composer_read",
+            WorkEnvironmentCall::ComposerSave { .. } => "environment:composer_save",
             WorkEnvironmentCall::Checkpoint { .. } => "environment:checkpoint",
             WorkEnvironmentCall::Command { .. } => "environment:command",
             WorkEnvironmentCall::Open { .. } => "environment:open",
