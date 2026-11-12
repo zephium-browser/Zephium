@@ -185,3 +185,21 @@ test("the new tab card after the tabs leaves for a new tab", async () => {
   await screen.getByRole("button", { name: "New Tab" }).click();
   await vi.waitFor(() => expect(native.action.mock.calls).toEqual([["7", { type: "new_tab" }]]));
 });
+
+test("the explicit switcher exposes New Tab as the selected keyboard grid option", async () => {
+  const screen = await render(TabSwitcher, {
+    snapshot: { ...state, keyboard: false, selected: state.entries.length },
+  });
+  const card = screen.getByRole("option", { name: "New Tab" });
+  await expect.element(card).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("listbox").element().getAttribute("aria-activedescendant")).toBe(
+    `switcher-${state.entries.length}`,
+  );
+  await userEvent.keyboard("{ArrowUp}{Enter}");
+  await vi.waitFor(() =>
+    expect(native.action.mock.calls.slice(-2)).toEqual([
+      ["7", { type: "select", index: state.entries.length - 4 }],
+      ["7", { type: "commit" }],
+    ]),
+  );
+});
