@@ -1763,11 +1763,18 @@ mod tests {
             .unwrap()
             .canonicalize()
             .unwrap();
+        let scratch = tempfile::tempdir_in(&fallback).unwrap();
         for component in [".config", "AppData"] {
-            let protected = Path::new("workspace").join(component).join("project");
+            let protected = scratch
+                .path()
+                .join("workspace")
+                .join(component)
+                .join("project");
+            std::fs::create_dir_all(&protected).unwrap();
             let directory = test_tempdir_with_fallback(&protected, || Ok(fallback.clone()))
                 .expect("safe temporary fallback should be available");
             assert!(directory.path().starts_with(&fallback));
+            assert!(directory.path().parent().unwrap().starts_with(&fallback));
         }
     }
 
