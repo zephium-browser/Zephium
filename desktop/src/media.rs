@@ -554,7 +554,7 @@ mod thumb {
     /// scaled: an animation keeps its frames): JPEG, PNG where it has transparency.
     #[cfg(feature = "work-product")]
     pub(super) fn scaled(bytes: &[u8], width: u32) -> Option<(Vec<u8>, &'static str)> {
-        use image::{ImageFormat, ImageReader};
+        use image::{GenericImageView, ImageFormat, ImageReader};
         use std::io::Cursor;
         static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let format = image::guess_format(bytes).ok()?;
@@ -577,14 +577,14 @@ mod thumb {
         let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
         reader.limits(limits);
         let decoded = reader.decode().ok()?;
-        let alpha = decoded.color().has_alpha()
-            && decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255);
         let target = (u64::from(height) * u64::from(width)).div_ceil(u64::from(natural));
         let small = decoded.resize_exact(
             width,
             u32::try_from(target).ok()?.max(1),
             image::imageops::FilterType::Triangle,
         );
+        let alpha =
+            small.color().has_alpha() && small.pixels().any(|(_, _, pixel)| pixel.0[3] < 255);
         let mut out = Vec::new();
         if alpha {
             small
@@ -638,6 +638,26 @@ mod thumb {
             assert_eq!(mime, "image/png");
             assert!(scaled(&png(300, 200, 255), 360).is_none());
             assert!(scaled(b"not a picture", 360).is_none());
+        }
+
+        #[cfg(feature = "work-product")]
+        #[test]
+        fn thumbnail_alpha_is_examined_only_at_display_size() {
+            let mut pixels =
+                image::RgbaImage::from_pixel(1600, 900, image::Rgba([10, 20, 30, 255]));
+            pixels.put_pixel(0, 0, image::Rgba([10, 20, 30, 254]));
+            let mut bytes = Vec::new();
+            pixels
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            let (_, mime) = scaled(&bytes, 160).unwrap();
+            assert_eq!(
+                mime, "image/jpeg",
+                "an opaque thumbnail needs no alpha copy or PNG encoding"
+            );
         }
     }
 }
