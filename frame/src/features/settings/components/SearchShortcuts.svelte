@@ -24,14 +24,14 @@
   let on = $derived(entries.filter((entry) => entry.enabled || touched.has(entry.id)));
   let off = $derived(entries.filter((entry) => !entry.enabled && !touched.has(entry.id)));
 
-  async function save(next: SearchShortcut[] | "") {
+  function save(next: SearchShortcut[] | "") {
     invalid = false;
-    await preferences.set("search.shortcuts", next === "" ? "" : JSON.stringify(next));
-    invalid = preferences.saveFailed();
+    return preferences.set("search.shortcuts", next === "" ? "" : JSON.stringify(next));
   }
 
-  function rename(input: HTMLInputElement, entry: SearchShortcut) {
-    const value = input.value.trim();
+  async function rename(input: HTMLInputElement, entry: SearchShortcut) {
+    const draft = input.value;
+    const value = draft.trim();
     if (value === entry.keywords.join(" ")) return;
     const keywords = shortcutKeywords(value, entry.id, entries);
     if (!keywords) {
@@ -39,7 +39,11 @@
       input.value = entry.keywords.join(" ");
       return;
     }
-    void save(entries.map((item) => (item.id === entry.id ? { ...item, keywords } : item)));
+    await save(entries.map((item) => (item.id === entry.id ? { ...item, keywords } : item)));
+    // The input was edited directly; an unchanged projection won't reset it.
+    if (!input.isConnected || input.value !== draft) return;
+    const saved = preferences.searchShortcuts().find((item) => item.id === entry.id);
+    if (saved) input.value = saved.keywords.join(" ");
   }
 
   async function add(event: SubmitEvent) {
@@ -94,7 +98,7 @@
             event.currentTarget.blur();
           }
         }}
-        onblur={(event) => rename(event.currentTarget, entry)}
+        onblur={(event) => void rename(event.currentTarget, entry)}
       />
     </label>
     <Switch

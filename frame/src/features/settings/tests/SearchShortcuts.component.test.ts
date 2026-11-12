@@ -4,12 +4,13 @@ import { userEvent } from "vitest/browser";
 import { preferences } from "$domain/preferences";
 import SearchShortcuts from "../components/SearchShortcuts.svelte";
 
-const native = vi.hoisted(() => ({ stored: "" }));
+const native = vi.hoisted(() => ({ stored: "", reject: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     settingGet: async (key: string) => (key === "search.shortcuts" ? native.stored : null),
     settingSet: async (_key: string, value: string) => {
+      if (native.reject) return { accepted: false, operation_id: null };
       native.stored = value;
       return { accepted: true, operation_id: null };
     },
@@ -28,14 +29,14 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 vi.mock("$domain/operations", () => ({
-  settle: async (admission: Promise<unknown>) => {
-    await admission;
-    return { outcome: "deferred" };
+  settle: async (admission: Promise<{ accepted: boolean }>) => {
+    return { outcome: (await admission).accepted ? "deferred" : "rejected" };
   },
 }));
 afterEach(() => {
   preferences.dispose();
   native.stored = "";
+  native.reject = false;
 });
 
 async function addExample(screen: Awaited<ReturnType<typeof render>>, keyword: string) {
@@ -75,4 +76,21 @@ test("duplicate keywords are refused without saving", async () => {
   await addExample(screen, "YT");
   await expect.element(screen.getByRole("alert")).toBeVisible();
   expect(native.stored).toBe("");
+});
+
+test("a rejected keyword edit restores the saved keyword without a validation error", async () => {
+  await preferences.init();
+  const screen = await render(SearchShortcuts);
+  const keyword = screen.getByRole("textbox", { name: "Keyword, YouTube" });
+  native.reject = true;
+  await userEvent.fill(keyword, "video");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(preferences.saveFailed).toBe(true);
+  await expect.element(keyword).toHaveValue("yt");
+  await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
+
+  native.reject = false;
+  await userEvent.fill(keyword, "video");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => preferences.searchShortcuts()[0]?.keywords).toEqual(["video"]);
 });
