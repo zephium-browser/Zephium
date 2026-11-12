@@ -1060,8 +1060,18 @@ impl PageAssist {
         if let Some(conversation) = current {
             self.release_marks(&conversation);
         }
-        let picks: Vec<(String, u64)> = self.state().picks.drain().map(|(key, _)| key).collect();
+        let picks: Vec<(String, u64)> = self.state().picks.keys().cloned().collect();
+        let picks: Vec<(String, u64)> = picks
+            .into_iter()
+            .filter(|(tab, _)| {
+                self.ports()
+                    .page
+                    .facts(tab)
+                    .is_some_and(|facts| facts.space.as_deref() == Some(space))
+            })
+            .collect();
         for (tab, pick) in picks {
+            self.state().picks.remove(&(tab.clone(), pick));
             self.ports().page.pick_cancel(&tab);
             self.ports().page.pick_clear(&tab, pick);
         }

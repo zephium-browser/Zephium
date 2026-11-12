@@ -35,6 +35,8 @@ struct PageState {
     cleared: Vec<String>,
     reads: u64,
     picks: Vec<Pick>,
+    cancelled_picks: Vec<String>,
+    cleared_picks: Vec<(String, u64)>,
     outline: Option<Outline>,
     glows: Vec<(String, Glow)>,
 }
@@ -145,8 +147,12 @@ impl PagePort for FakePage {
         let found = self.lock().picks.iter().find(|p| p.pick == pick).cloned();
         Box::pin(async move { found })
     }
-    fn pick_clear(&self, _tab: &str, _pick: u64) {}
-    fn pick_cancel(&self, _tab: &str) {}
+    fn pick_clear(&self, tab: &str, pick: u64) {
+        self.lock().cleared_picks.push((tab.to_owned(), pick));
+    }
+    fn pick_cancel(&self, tab: &str) {
+        self.lock().cancelled_picks.push(tab.to_owned());
+    }
     fn glow(&self, tab: &str, glow: Glow) {
         self.lock().glows.push((tab.to_owned(), glow));
     }
@@ -1609,6 +1615,26 @@ async fn closing_the_panel_drops_its_running_call() {
     assert_eq!(h.state().await, PageAssistReplyStateV1::Cancelled);
     h.ask("Again", false).await.unwrap();
     h.settle().await;
+}
+
+#[tokio::test]
+async fn closing_a_space_preserves_other_spaces_element_picks() {
+    let h = harness(Vec::new());
+    h.page.lock().facts.get_mut("tab-2").unwrap().space = Some("other-space".into());
+    for (tab, pick) in [(TAB, 1), ("tab-2", 2)] {
+        h.service.state().picks.insert(
+            (tab.to_owned(), pick),
+            PickRecord {
+                epoch: 1,
+                label: "Pick".into(),
+            },
+        );
+    }
+    h.service.close(SPACE);
+    assert!(h.service.state().picks.contains_key(&("tab-2".into(), 2)));
+    assert!(!h.service.state().picks.contains_key(&(TAB.into(), 1)));
+    assert_eq!(h.page.lock().cancelled_picks, [TAB]);
+    assert_eq!(h.page.lock().cleared_picks, [(TAB.into(), 1)]);
 }
 
 #[tokio::test]
