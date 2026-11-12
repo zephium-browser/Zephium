@@ -32,6 +32,8 @@ mod motion_curve;
 mod navigation_epoch;
 mod network;
 #[cfg(any(target_os = "windows", test))]
+mod replay_witness;
+#[cfg(any(target_os = "windows", test))]
 mod reputation;
 #[cfg(target_os = "windows")]
 pub use reputation::{
