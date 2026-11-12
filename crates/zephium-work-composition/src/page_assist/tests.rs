@@ -955,6 +955,82 @@ async fn only_links_that_were_read_or_written_open() {
 }
 
 #[tokio::test]
+async fn outbound_links_wait_for_approval_after_other_or_unknown_site_reads() {
+    for name in ["go_to", "open_tabs"] {
+        for unknown in [false, true] {
+            for approve in [false, true] {
+                let navigation = tool(
+                    name,
+                    if name == "go_to" {
+                        json!({"target": if unknown { "https://emudhra.com/exit" } else { "a1" }, "new_tab": true})
+                    } else {
+                        json!({"targets": [if unknown { "https://emudhra.com/exit" } else { "a1" }]})
+                    },
+                );
+                let turns = if unknown {
+                    vec![say("Earlier reply."), navigation, say("Finished.")]
+                } else {
+                    vec![
+                        tool("list_tabs", json!({})),
+                        tool("read_page", json!({"tab": "t2"})),
+                        navigation,
+                        say("Finished."),
+                    ]
+                };
+                let h = harness(turns);
+                if unknown {
+                    h.ask("Earlier", true).await.unwrap();
+                    h.settle().await;
+                    let conversation = h.conversation().await;
+                    for data in h
+                        .service
+                        .state()
+                        .live
+                        .get_mut(&conversation)
+                        .unwrap()
+                        .replies
+                        .values_mut()
+                    {
+                        data.unknown_read_sites = true;
+                        data.reads.clear();
+                    }
+                }
+                let reply = h.ask("Summarize this", !unknown).await.unwrap();
+                h.waiting().await;
+                assert!(h.tabs.0.lock().unwrap().is_empty());
+                let blocks = h.blocks().await;
+                let (block, label) = blocks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, block)| match block {
+                        PageAssistBlockV1::Steps { steps } => Some((index, &steps[0].label)),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(label.contains("https://emudhra.com/exit"), "{label}");
+                let conversation = h.conversation().await;
+                assert!(h.service.decide(
+                    &conversation,
+                    reply,
+                    u16::try_from(block).unwrap(),
+                    if approve {
+                        PageAssistDecisionV1::Approve
+                    } else {
+                        PageAssistDecisionV1::Decline
+                    }
+                ));
+                h.settle().await;
+                assert_eq!(
+                    h.tabs.0.lock().unwrap().len(),
+                    usize::from(approve),
+                    "{name} unknown={unknown}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_later_message_can_open_items_shown_earlier() {
     let h = harness(vec![
         tool(

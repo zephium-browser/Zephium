@@ -923,14 +923,25 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
             .unwrap_or_default()
     };
     for target in targets {
-        let url = match refs::parse(&target) {
-            Some(reference) => reply
-                .record_of(reference)
-                .and_then(|record| record.page.fragments.get(&reference.passage)?.href.clone()),
-            None => Some(target.clone()).filter(|url| links.contains(url)),
+        let (url, source) = match refs::parse(&target) {
+            Some(reference) => match reply.record_of(reference) {
+                Some(record) => (
+                    record
+                        .page
+                        .fragments
+                        .get(&reference.passage)
+                        .and_then(|fragment| fragment.href.clone()),
+                    Some(record.page.site),
+                ),
+                None => (None, None),
+            },
+            None => (Some(target.clone()).filter(|url| links.contains(url)), None),
         };
         match url {
-            Some(url) if !urls.contains(&url) => urls.push(url),
+            Some(url) if !urls.contains(&url) => {
+                approve_navigation(reply, text, &url, source.as_deref()).await?;
+                urls.push(url);
+            }
             Some(_) => {}
             None => refused.push(target),
         }
@@ -1007,6 +1018,88 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
     Ok(summary)
 }
 
+/// A read link is data, not permission to send information to another site.
+/// Missing provenance is conservative: it cannot prove a same-site move.
+async fn approve_navigation(
+    reply: &Reply,
+    text: &mut Text,
+    url: &str,
+    source: Option<&str>,
+) -> Result<(), String> {
+    if super::written_links(&reply.words).any(|written| written == url) {
+        return Ok(());
+    }
+    let inherited_source = if source.is_none() {
+        let state = reply.service.state();
+        let sites: std::collections::BTreeSet<String> = state
+            .live
+            .get(&reply.conversation)
+            .into_iter()
+            .flat_map(|live| live.replies.values())
+            .flat_map(|data| &data.reads)
+            .filter(|record| {
+                record
+                    .page
+                    .fragments
+                    .values()
+                    .any(|fragment| fragment.href.as_deref() == Some(url))
+            })
+            .map(|record| record.page.site.clone())
+            .collect();
+        (sites.len() == 1)
+            .then(|| sites.into_iter().next())
+            .flatten()
+    } else {
+        None
+    };
+    let source = source.or(inherited_source.as_deref());
+    let destination = site_of(Some(url));
+    let cross_site = source
+        .zip(destination.as_deref())
+        .is_none_or(|(from, to)| from != to);
+    let holds_other_data = reply
+        .with_data(|data| {
+            data.unknown_read_sites
+                || data
+                    .read_sites
+                    .iter()
+                    .any(|(_, site)| Some(site.as_str()) != source)
+        })
+        .unwrap_or(true);
+    if !cross_site || !holds_other_data {
+        return Ok(());
+    }
+    if url.chars().count() > 2048 || url != text::clean(url) || destination.is_none() {
+        return Err("That destination cannot be safely reviewed.".into());
+    }
+    let proposal = |state| PageAssistBlockV1::Steps {
+        steps: vec![PageAssistStepV1 {
+            index: 0,
+            label: format!(
+                "Allow opening {url}\nFrom {}",
+                source.unwrap_or("an unknown source")
+            ),
+            category: Some(WorkConfirmCategoryV1::Communication),
+            state,
+            reason: None,
+        }],
+    };
+    let block = reply.add_block(text, proposal(PageAssistStepStateV1::Confirm));
+    let state = match decision(reply, block).await {
+        Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
+            PageAssistStepStateV1::Done
+        }
+        Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+        _ => PageAssistStepStateV1::Skipped,
+    };
+    reply.set_block(block, proposal(state));
+    if state == PageAssistStepStateV1::Done {
+        Ok(())
+    } else {
+        Err("The destination was not approved. Do not send its information another way.".into())
+    }
+}
+
 /// Waits for a new tab's first load, bounded.
 async fn settled(ports: &super::Ports, tab: &str) {
     let started = tokio::time::Instant::now();
@@ -1025,6 +1118,7 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
     let ports = reply.service.ports().clone();
     let target = target.trim();
     let mut search = None;
+    let mut source = None;
     let url = if let Some(query) = target
         .strip_prefix("search:")
         .map(str::trim)
@@ -1070,7 +1164,10 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
     } else if let Some(reference) = refs::parse(target) {
         reply
             .record_of(reference)
-            .and_then(|record| record.page.fragments.get(&reference.passage)?.href.clone())
+            .and_then(|record| {
+                source = Some(record.page.site);
+                record.page.fragments.get(&reference.passage)?.href.clone()
+            })
             .ok_or_else(|| format!("{target} is not a link of a page you read."))?
     } else {
         let known = {
@@ -1085,6 +1182,9 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
         }
         target.to_owned()
     };
+    if search.is_none() {
+        approve_navigation(reply, text, &url, source.as_deref()).await?;
+    }
     let working = reply.with_data(|data| data.working.clone()).flatten();
     let result = match working.filter(|_| !new_tab) {
         Some(tab) => move_tab(reply, text, &ports, &tab, &url).await,
