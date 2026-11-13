@@ -304,6 +304,17 @@ fn public_suspended_agentic_spawn_transfers_and_consumes_the_agent_lifecycle() {
 }
 
 #[test]
+fn glance_actions_are_tracked_operations() {
+    for action in [
+        zephium_ipc::GlanceAction::Close,
+        zephium_ipc::GlanceAction::Expand,
+        zephium_ipc::GlanceAction::Split,
+    ] {
+        assert!(tracked_operation_command(&Command::Glance(action)));
+    }
+}
+
+#[test]
 fn divider_release_is_a_tracked_operation() {
     assert!(tracked_operation_command(&Command::DividerRelease {
         x: None,

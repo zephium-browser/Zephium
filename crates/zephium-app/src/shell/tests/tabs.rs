@@ -1423,3 +1423,50 @@ fn glance_is_refused_when_off_for_other_addresses_and_openers_behind() {
     });
     assert_eq!(shell.read_glance_backdrop(window, source, 1), None);
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn splitting_during_a_glance_ends_it_and_its_actions_settle_as_operations() {
+    use zephium_ipc::{GlanceAction, OperationOutcome};
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        url: "https://example.com/article".into(),
+        modifiers: zephium_core::glance::LinkModifiers {
+            shift: true,
+            ctrl: false,
+        },
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    commit_url(&mut shell, child, "https://example.com/article");
+    shell.show_glance(source, child);
+    assert!(shell.windows.focused().unwrap().glance.is_some());
+
+    shell.handle(Command::GlanceBackdropReady {
+        request: 1,
+        bytes: Some(vec![1]),
+    });
+    let split = shell.handle_operation(Command::SplitWith {
+        other: source,
+        axis: Axis::Row,
+    });
+    assert_ne!(split.outcome, OperationOutcome::Rejected);
+    let window = shell.windows.focused().unwrap();
+    assert!(window.glance.is_none());
+    assert!(window.splits.is_some());
+    assert!(shell
+        .glance_layout(zephium_core::geometry::Rect::new(0.0, 0.0, 1000.0, 800.0))
+        .is_none());
+    assert_eq!(
+        shell
+            .handle_operation(Command::Glance(GlanceAction::Close))
+            .outcome,
+        OperationOutcome::NoOp
+    );
+}

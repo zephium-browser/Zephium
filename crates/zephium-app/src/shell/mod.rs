@@ -685,7 +685,9 @@ impl Shell {
             Command::GlanceBackdropReady { request, bytes } => {
                 self.glance_backdrop_ready(request, bytes)
             }
-            Command::Glance(action) => self.glance_action(action),
+            Command::Glance(action) => {
+                let _ = self.glance_action(action);
+            }
             Command::ReadTabPreview {
                 window,
                 tab,

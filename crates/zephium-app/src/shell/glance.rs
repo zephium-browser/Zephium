@@ -148,7 +148,10 @@ impl Shell {
     pub(super) fn glance_layout(&self, region: Rect) -> Option<(Rect, zephium_ipc::GlanceLayout)> {
         let win = self.windows.focused()?;
         let glance = win.glance.as_ref()?;
-        if win.active != Some(glance.tab) || self.items.tab(glance.parent).is_none() {
+        if win.active != Some(glance.tab)
+            || win.splits.is_some()
+            || self.items.tab(glance.parent).is_none()
+        {
             return None;
         }
         let page = glance_page(region);
@@ -182,39 +185,41 @@ impl Shell {
         }
     }
 
-    pub(super) fn glance_action(&mut self, action: zephium_ipc::GlanceAction) {
+    pub(super) fn glance_action(
+        &mut self,
+        action: zephium_ipc::GlanceAction,
+    ) -> OperationDisposition {
         let Some(glance) = self
             .windows
             .focused()
             .and_then(|win| win.glance.clone().filter(|g| win.active == Some(g.tab)))
         else {
-            return;
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         };
         match action {
-            zephium_ipc::GlanceAction::Close => {
-                let _ = self.close(glance.tab);
-            }
+            zephium_ipc::GlanceAction::Close => mutation_result(self.close(glance.tab)),
             zephium_ipc::GlanceAction::Expand => {
                 if let Some(win) = self.windows.focused_mut() {
                     win.glance = None;
                 }
                 self.glance_backdrop = None;
                 let _ = self.relayout();
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
             zephium_ipc::GlanceAction::Split => {
                 if let Some(win) = self.windows.focused_mut() {
                     win.glance = None;
                 }
                 self.glance_backdrop = None;
-                self.split_glance(glance.parent, glance.tab);
+                self.split_glance(glance.parent, glance.tab)
             }
         }
     }
 
-    fn split_glance(&mut self, parent: ItemId, tab: ItemId) {
+    fn split_glance(&mut self, parent: ItemId, tab: ItemId) -> OperationDisposition {
         let effects = self.focus_tab(parent);
         self.commit(effects);
-        let _ = self.operation_split(tab, Axis::Row);
+        self.operation_split(tab, Axis::Row)
     }
 }
 

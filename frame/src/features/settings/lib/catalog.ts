@@ -332,6 +332,7 @@ export const fields = {
   },
   "tabs.glance": {
     section: "tabs",
+    windowsOnly: true,
     label: m.pref_tabs_glance,
     description: m.pref_tabs_glance_help,
     initial: "shift",

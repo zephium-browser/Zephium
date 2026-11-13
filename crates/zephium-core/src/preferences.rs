@@ -605,8 +605,15 @@ mod tests {
             "tabs.archive",
             "tabs.external-position",
             "tabs.close-button",
+            "tabs.glance",
         ] {
             assert!(KEYS.contains(&key));
+        }
+        for value in ["shift", "ctrl", "always", "off"] {
+            assert!(value_allowed("tabs.glance", value));
+        }
+        for value in ["", "alt", "Shift", "meta", "on"] {
+            assert!(!value_allowed("tabs.glance", value), "{value:?}");
         }
         for value in ["never", "12h", "1d", "7d"] {
             assert!(value_allowed("tabs.archive", value));

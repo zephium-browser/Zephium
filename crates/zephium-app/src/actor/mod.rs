@@ -1296,6 +1296,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::GoForward(_)
             | Command::GoToHistoryEntry { .. }
             | Command::SplitWith { .. }
+            | Command::Glance(_)
             | Command::Unsplit
             | Command::LeaveSplit(_)
             | Command::TabAction { .. }

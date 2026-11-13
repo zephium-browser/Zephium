@@ -93,16 +93,10 @@ pub fn opens_in_glance(
         return false;
     };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
-    let path = match target.query() {
-        Some(query) => format!("{}?{query}", target.path()),
-        None => target.path().to_owned(),
-    };
+    let path = target.path();
     SITES.iter().any(|site| {
         (host == site.host || host.ends_with(&format!(".{}", site.host)))
-            && site
-                .paths
-                .iter()
-                .any(|pattern| matches_glob(pattern, &path))
+            && site.paths.iter().any(|pattern| matches_glob(pattern, path))
     })
 }
 
@@ -196,6 +190,8 @@ mod tests {
         assert!(glances("https://old.reddit.com/r/rust/comments/abc/"));
         assert!(!glances("https://www.reddit.com/r/rust/"));
         assert!(glances("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(!glances("https://github.com/search?q=/pull/12"));
+        assert!(!glances("https://www.reddit.com/search/?q=/comments/x"));
         assert!(glances("https://youtube.com/shorts/xyz"));
         assert!(!glances("https://www.youtube.com/@channel"));
         assert!(glances("https://github.com/owner/repo/pull/12"));
@@ -210,7 +206,7 @@ mod tests {
 
     #[test]
     fn globs_anchor_at_both_ends() {
-        assert!(matches_glob("/watch*", "/watch?v=1"));
+        assert!(matches_glob("/watch*", "/watch"));
         assert!(!matches_glob("/watch*", "/x/watch"));
         assert!(matches_glob("*/comments/*", "/r/a/comments/b"));
         assert!(!matches_glob("/p/*", "/p"));
