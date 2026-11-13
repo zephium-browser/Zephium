@@ -340,6 +340,30 @@ test("a swipe the native side refuses brings the sheet back", async () => {
   await expect.poll(() => sheetOf(screen).style.transform, { timeout: 2000 }).toBe("");
 });
 
+test("reduced motion admits only one swipe until the space arrives", async () => {
+  const screen = await mount();
+  const root = document.documentElement;
+  const previous = root.dataset.reduceMotion;
+  root.dataset.reduceMotion = "true";
+  try {
+    const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+    swipe(list, 30);
+    // The wheel fallback can recognize a sharp increase as a fresh gesture.
+    swipe(list, 100);
+    expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
+    expect(sheetOf(screen).style.transform).toBe("");
+
+    project({ active_space_id: "studio" });
+    await frame();
+    swipe(list, -100);
+    expect(native.step.mock.calls).toEqual([[1], [-1]]);
+    expect(sheetOf(screen).style.transform).toBe("");
+  } finally {
+    if (previous === undefined) delete root.dataset.reduceMotion;
+    else root.dataset.reduceMotion = previous;
+  }
+});
+
 test("a space something else switched to slides in without a sheet", async () => {
   const screen = await mount();
   project({ active_space_id: "studio" });

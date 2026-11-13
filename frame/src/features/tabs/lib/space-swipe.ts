@@ -69,7 +69,7 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   let last = 0;
   let frame = 0;
   /** The step this sheet has committed to and is still waiting for. */
-  let held: SwipeStep | 0 = 0;
+  let held: { step: SwipeStep; animated: boolean } | null = null;
   let soft = false;
   let peeking = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
@@ -143,7 +143,7 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
       motion.v = 0;
       paint();
       // A committed sheet stays where it has arrived until its space does.
-      if (held === 0) home();
+      if (!held) home();
       return;
     }
     paint();
@@ -164,29 +164,33 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
   };
 
   /** Back to the space it was in: the one thing a refused or late step leaves to do. */
-  function recover() {
+  function recover(request: NonNullable<typeof held>) {
+    if (held !== request) return;
     clearTimeout(waiting);
     waiting = undefined;
-    if (held === 0) return;
-    held = 0;
-    run(0);
+    held = null;
+    if (request.animated) run(0);
   }
 
   function commit(reading: Extract<Reading, { kind: "commit" }>) {
     clearTimeout(idle);
     idle = undefined;
     haptic("level");
-    if (!reducedMotion()) {
+    const request = { step: reading.step, animated: !reducedMotion() };
+    held = request;
+    if (request.animated) {
       wake();
       motion.x = Math.max(-spread(), Math.min(spread(), base + reading.offset));
       motion.v = launch(reading.velocity);
-      held = reading.step;
       run(-reading.step * spread());
-      waiting = setTimeout(recover, ARRIVAL);
     }
-    void Promise.resolve(current.step(reading.step)).then((accepted) => {
-      if (accepted === false) recover();
-    });
+    waiting = setTimeout(() => recover(request), ARRIVAL);
+    void Promise.resolve(current.step(reading.step)).then(
+      (accepted) => {
+        if (accepted === false) recover(request);
+      },
+      () => recover(request),
+    );
   }
 
   function apply(reading: Reading) {
@@ -226,7 +230,7 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
 
   const sink: SwipeSink = {
     began(dx, dy, time) {
-      if (held !== 0) return;
+      if (held) return;
       clearTimeout(idle);
       idle = undefined;
       clearTimeout(lost);
@@ -236,19 +240,19 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
       if (dx !== 0 || dy !== 0) sink.moved(dx, dy, time);
     },
     moved(dx, dy, time) {
-      if (held !== 0) return;
+      if (held) return;
       apply(tracker.move(dx, dy, time));
       clearTimeout(lost);
       if (tracker.tracking) lost = setTimeout(() => sink.lifted(), LOST);
     },
     lifted() {
       clearTimeout(lost);
-      if (held === 0) apply(tracker.lift());
+      if (!held) apply(tracker.lift());
     },
   };
 
   function onwheel(event: Wheel) {
-    if (nativeSwipeLive() || event.ctrlKey || event.deltaMode !== 0 || held !== 0) return;
+    if (nativeSwipeLive() || event.ctrlKey || event.deltaMode !== 0 || held) return;
     if (event.target instanceof Element && event.target.closest("input, textarea, select")) return;
     heard = performance.now();
     const natural = event.webkitDirectionInvertedFromDevice !== false;
@@ -263,11 +267,13 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
     arrive(side) {
       clearTimeout(waiting);
       waiting = undefined;
-      if (held !== 0) {
+      if (held) {
+        const request = held;
+        held = null;
+        if (!request.animated) return;
         // The space this sheet was carried to has come: it is the current
         // list now, and the one left behind is its neighbour.
-        motion.x += held * spread();
-        held = 0;
+        motion.x += request.step * spread();
         paint();
         run(0);
         return;
@@ -289,6 +295,7 @@ export function spaceSwipe(node: HTMLElement, options: Options) {
       current = next;
     },
     destroy() {
+      held = null;
       clearTimeout(idle);
       clearTimeout(lost);
       clearTimeout(waiting);
