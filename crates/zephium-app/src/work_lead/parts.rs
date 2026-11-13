@@ -3040,7 +3040,7 @@ mod tests {
     }
 
     #[test]
-    fn a_site_operator_goes_last_so_the_search_is_sent() {
+    fn a_site_operator_is_preserved_in_search_at_either_position() {
         assert_eq!(
             operator_last("site:allegro.pl/oferta LEGO 42115 nowy"),
             "LEGO 42115 nowy site:allegro.pl/oferta"
@@ -3049,12 +3049,21 @@ mod tests {
             operator_last("LEGO 42115 site:x-kom.pl"),
             "LEGO 42115 site:x-kom.pl"
         );
-        assert!(zephium_core::search::SearchEngine::DuckDuckGo
-            .search("site:x-kom.pl LEGO 42115")
-            .is_none());
-        assert!(zephium_core::search::SearchEngine::DuckDuckGo
-            .search(&operator_last("site:x-kom.pl LEGO 42115"))
-            .is_some());
+        for query in [
+            "site:x-kom.pl LEGO 42115".to_owned(),
+            operator_last("site:x-kom.pl LEGO 42115"),
+        ] {
+            let url = zephium_core::search::SearchEngine::DuckDuckGo
+                .search(&query)
+                .expect("site operator is valid at either position");
+            assert_eq!(url.host_str(), Some("duckduckgo.com"));
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(name, _)| name == "q")
+                    .map(|(_, value)| value.into_owned()),
+                Some(query),
+            );
+        }
     }
 
     #[test]

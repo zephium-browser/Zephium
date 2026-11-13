@@ -1,5 +1,34 @@
 use std::path::Path;
 
+pub(crate) fn publish_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let terminated = |path: &Path| {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        wide.push(0);
+        Ok(wide)
+    };
+    let temporary = terminated(temporary)?;
+    let destination = terminated(destination)?;
+    // SAFETY: owned NUL-terminated paths reject interior NUL and live through
+    // the call. The content-addressed destination is replaced only by its own
+    // admitted bytes, and write-through settles publication before return.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temporary.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|_| std::io::Error::last_os_error())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowsFileIdentity {
     volume_serial_number: u64,

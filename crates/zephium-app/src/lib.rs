@@ -35,6 +35,7 @@ mod actor;
 mod api;
 mod lookup;
 mod onboarding;
+pub mod profile_cleanup;
 mod reply;
 mod shell;
 mod store_reads;
@@ -76,8 +77,9 @@ pub use work::{
 };
 
 pub use actor::{
-    spawn, spawn_suspended, CallbackHandle, ContentPolicyStatusRequest,
-    FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
+    spawn, spawn_suspended, spawn_suspended_with_profile_cleanup, CallbackHandle,
+    ContentPolicyStatusRequest, FocusedContentPolicyStatusRequest, Handle, ShutdownRequest,
+    SpawnError, SpawnFailure,
 };
 #[cfg(feature = "agentic-browser")]
 pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};

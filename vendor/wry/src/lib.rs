@@ -406,12 +406,12 @@ use objc2_app_kit::NSWindow;
 use objc2_web_kit::WKUserContentController;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) mod wkwebview;
+#[cfg(target_os = "macos")]
+pub use wkwebview::context_menu_download_in_progress;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use wkwebview::{PrintMargin, PrintOptions, WryWebView};
-#[cfg(target_os = "macos")]
-pub use wkwebview::context_menu_download_in_progress;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod webview2;
@@ -918,6 +918,9 @@ struct WebViewAttributes<'a> {
   pub navigation_failure_handler:
     Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
 
+  /// Metadata-free refusal when a native URL cannot cross the bounded copy boundary.
+  pub native_url_refused_handler: Option<NativeUrlRefusedHandler>,
+
   /// Hide the native presentation surface synchronously at each main-frame
   /// commit, before delivering its identity event. Hardened embedders can
   /// then update trusted chrome and explicitly reveal the exact document.
@@ -1064,6 +1067,7 @@ impl Default for WebViewAttributes<'_> {
       on_page_load_handler: None,
       navigation_event_handler: None,
       navigation_failure_handler: None,
+      native_url_refused_handler: None,
       navigation_presentation_guard: None,
       proxy_config: None,
       focused: true,
@@ -1780,6 +1784,17 @@ impl<'a> WebViewBuilder<'a> {
     handler: impl Fn(NavigationId, NavigationFailure, FailedDocument) + 'static,
   ) -> Self {
     self.attrs.navigation_failure_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Report unreadable/oversized native URL refusal without allocating the
+  /// refused URL or inventing a native navigation identity. Supported on macOS
+  /// and Windows; child-frame events depend on the embedder's frame adapter.
+  pub fn with_native_url_refused_handler(
+    mut self,
+    handler: impl Fn(NativeUrlTarget) + 'static,
+  ) -> Self {
+    self.attrs.native_url_refused_handler = Some(std::rc::Rc::new(handler));
     self
   }
 
@@ -3471,6 +3486,26 @@ impl NavigationId {
   /// identities received through [`NavigationEvent`].
   pub const fn from_raw(raw: u64) -> Self {
     Self(raw)
+  }
+}
+
+/// Which native navigation surface supplied an unreadable or oversized URL.
+/// No navigation identity or partial/untrusted address is manufactured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeUrlTarget {
+  MainFrame,
+  Subframe,
+  NewWindow,
+}
+
+pub(crate) type NativeUrlRefusedHandler = std::rc::Rc<dyn Fn(NativeUrlTarget)>;
+
+pub(crate) fn report_native_url_refused(
+  handler: Option<&NativeUrlRefusedHandler>,
+  target: NativeUrlTarget,
+) {
+  if let Some(handler) = handler {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(target)));
   }
 }
 

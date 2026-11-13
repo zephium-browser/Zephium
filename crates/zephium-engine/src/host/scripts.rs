@@ -39,8 +39,8 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var MAX_DRAWN_CANVASES = 16;
   var drawnCanvases = [];
   var beforeUnload = [];
-  var audioContexts = new Set();
-  var captureTracks = new Set();
+  var audioContexts = [];
+  var captureTracks = [];
   var MAX_TRACKED = 4096;
   // Ordinary article and app pages exceed a few thousand elements. One bounded
   // walk per probe of a hidden page costs milliseconds.
@@ -280,12 +280,35 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     eventTarget.removeEventListener = wrappedRemove;
   } catch (_) { uncertain = true; }
 
+  // Tracking never owns an application's contexts/tracks. Prune closed,
+  // ended and collected entries before checking the active-object ceiling.
+  function pruneTracked(list, terminal, visit) {
+    var retained = 0;
+    for (var i = 0; i < list.length; i++) {
+      var value = apply(weakDeref, list[i], []);
+      if (!value || terminal(value)) continue;
+      list[retained++] = list[i];
+      if (visit) visit(value);
+    }
+    list.length = retained;
+  }
+  function rememberTracked(list, value, terminal) {
+    if (!WeakReference || !weakDeref) { uncertain = true; return; }
+    pruneTracked(list, terminal);
+    if (terminal(value)) return;
+    for (var i = 0; i < list.length; i++) {
+      if (apply(weakDeref, list[i], []) === value) return;
+    }
+    if (list.length >= MAX_TRACKED) { uncertain = true; return; }
+    apply(arrayPush, list, [new WeakReference(value)]);
+  }
+  function endedTrack(track) { return !liveTrack(track); }
+  function closedContext(context) { return callGetter(contextState, context) === 'closed'; }
   function observeStream(stream) {
     try {
       var tracks = apply(getTracks, stream, []);
       for (var i = 0; i < tracks.length; i++) {
-        if (captureTracks.size < MAX_TRACKED) captureTracks.add(tracks[i]);
-        else uncertain = true;
+        rememberTracked(captureTracks, tracks[i], endedTrack);
       }
     } catch (_) { uncertain = true; }
     return stream;
@@ -316,8 +339,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       var wrapped = new Proxy(original, {
         construct: function(target, args, newTarget) {
           var value = construct(target, args, newTarget === wrapped ? target : newTarget);
-          if (audioContexts.size < MAX_TRACKED) audioContexts.add(value);
-          else uncertain = true;
+          rememberTracked(audioContexts, value, closedContext);
           return value;
         }
       });
@@ -455,10 +477,10 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
           for (var t = 0; t < tracks.length; t++) if (liveTrack(tracks[t])) capture = true;
         }
       }
-      audioContexts.forEach(function(context) {
+      pruneTracked(audioContexts, closedContext, function(context) {
         if (callGetter(contextState, context) === 'running') audioContext = true;
       });
-      captureTracks.forEach(function(track) { if (liveTrack(track)) capture = true; });
+      pruneTracked(captureTracks, endedTrack, function() { capture = true; });
       // Native playback state cannot tell muted from audible. A complete scan
       // of a frameless document whose playing media is all muted explains it.
       mutedOnly = playing && !media && complete && elements.length <= MAX_TRACKED &&
@@ -565,6 +587,50 @@ pub(super) const MAX_HTML_CHARS: usize = 2 * 1024 * 1024;
 pub(super) const MAX_HTML_RESULT_BYTES: usize = (MAX_HTML_CHARS + 1) * 6 + 2;
 pub(super) const EXTRACT_HTML_JS: &str = "(function(){try{var f=globalThis.__zephium_extract_html_v1__;return typeof f==='function'?f(__MAX__):null}catch(_){return null}})()";
 
+// WebView2 156 exposes conditional creation but kills the renderer when its
+// browser-side Edge passkey-upgrade feature is disabled (#345). Chromium has
+// removed the old feature switches. Refuse that optional operation during the
+// native dictionary conversion, preserving ordinary WebAuthn and its validation.
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_PASSKEY_UPGRADE_GUARD_JS: &str = r#"(() => {
+  const container = globalThis.CredentialsContainer?.prototype;
+  const credential = globalThis.PublicKeyCredential;
+  if (typeof container?.create !== 'function' || !credential) return;
+  const apply = Reflect.apply;
+  const get = Reflect.get;
+  const toString = String;
+  const Exception = DOMException;
+  const then = Promise.prototype.then;
+  const create = Object.getOwnPropertyDescriptor(container, 'create');
+  Object.defineProperty(container, 'create', {...create, value: new Proxy(create.value, {
+    apply(target, receiver, args) {
+      const options = args[0];
+      if (options !== null && (typeof options === 'object' || typeof options === 'function')) {
+        args[0] = new Proxy({}, {
+          get(_target, key) {
+            const value = get(options, key, options);
+            if (key !== 'mediation' || value === undefined || typeof value === 'symbol') return value;
+            const mediation = toString(value);
+            if (mediation === 'conditional') throw new Exception('', 'NotSupportedError');
+            return mediation;
+          }
+        });
+      }
+      return apply(target, receiver, args);
+    }
+  })});
+  const capabilities = Object.getOwnPropertyDescriptor(credential, 'getClientCapabilities');
+  if (typeof capabilities?.value === 'function') {
+    Object.defineProperty(credential, 'getClientCapabilities', {...capabilities,
+      value: new Proxy(capabilities.value, {
+        apply(target, receiver, args) {
+          return apply(then, apply(target, receiver, args), [value => ({...value, conditionalCreate: false})]);
+        }
+      })
+    });
+  }
+})();"#;
+
 fn style_script(style: &UserStyle) -> UserScript {
     // WebView2 runs document-start scripts before <html> exists; WebKit does
     // not. The observer path injects the instant the root appears.
@@ -619,7 +685,7 @@ struct ProtectedScriptSpec {
 }
 
 const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
-    3 + cfg!(not(target_os = "macos")) as usize + cfg!(target_os = "windows") as usize] = [
+    3 + cfg!(not(target_os = "macos")) as usize + 2 * cfg!(target_os = "windows") as usize] = [
     ProtectedScriptSpec {
         id: 6,
         source: CONTENT_STYLE_JS,
@@ -650,6 +716,12 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         id: 5,
         source: zephium_webext::store::PAGE_SCRIPT,
         all_frames: false,
+    },
+    #[cfg(target_os = "windows")]
+    ProtectedScriptSpec {
+        id: 7,
+        source: WINDOWS_PASSKEY_UPGRADE_GUARD_JS,
+        all_frames: true,
     },
 ];
 
@@ -1007,6 +1079,118 @@ mod tests {
     use super::*;
     use zephium_core::ids::{ExtensionInstallId, ProfileId, UserscriptId};
     use zephium_core::ports::engine::{ScriptPrincipal, UserScriptRefusalReason};
+
+    #[test]
+    fn windows_passkey_upgrade_guard_rejects_before_ipc_and_preserves_explicit_webauthn() {
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(
+                r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const source = process.argv[1];
+function fixture(capabilities = true) {
+  const requests = [];
+  const failure = new Error('native failure');
+  class CredentialsContainer {
+    create(options) {
+      try {
+        assert.equal(this, credentials);
+        if (options !== undefined && options !== null && typeof options !== 'object' && typeof options !== 'function') throw new TypeError();
+        // WebIDL converts the dictionary before sending MakeCredential IPC.
+        const value = options?.mediation;
+        if (typeof value === 'symbol') throw new TypeError();
+        const mediation = value === undefined ? 'optional' : String(value);
+        if (!['optional', 'required', 'silent', 'conditional'].includes(mediation)) throw new TypeError();
+        const publicKey = options?.publicKey;
+        if (!publicKey) throw new TypeError();
+        requests.push({mediation, publicKey, signal: options?.signal});
+        return Promise.resolve(publicKey);
+      } catch (error) { return Promise.reject(error); }
+    }
+    get(options) { assert.equal(this, credentials); return Promise.resolve(options); }
+  }
+  const credentials = new CredentialsContainer();
+  class PublicKeyCredential {}
+  const nativeCapabilities = {conditionalCreate: true, conditionalGet: true, hybridTransport: true};
+  if (capabilities) PublicKeyCredential.getClientCapabilities = function (fail) {
+    assert.equal(this, PublicKeyCredential);
+    return fail ? Promise.reject(failure) : Promise.resolve(nativeCapabilities);
+  };
+  const context = vm.createContext({CredentialsContainer, PublicKeyCredential, DOMException});
+  vm.runInContext(source, context);
+  return {credentials, CredentialsContainer, PublicKeyCredential, nativeCapabilities, requests, failure};
+}
+(async () => {
+  const f = fixture();
+  const publicKey = {challenge: new Uint8Array([1]), rp: {id: 'example.test'}};
+  for (const mediation of ['conditional', {toString: () => 'conditional'}]) {
+    await assert.rejects(f.credentials.create(Object.freeze({mediation, publicKey})), {name: 'NotSupportedError'});
+  }
+  assert.equal(f.requests.length, 0, 'conditional requests must never reach browser IPC');
+  const capabilities = await f.PublicKeyCredential.getClientCapabilities();
+  assert.equal(capabilities.conditionalCreate, false);
+  assert.equal(capabilities.conditionalGet, true);
+  assert.equal(capabilities.hybridTransport, true);
+  assert.equal(f.nativeCapabilities.conditionalCreate, true, 'do not mutate native capability objects');
+  await assert.rejects(f.PublicKeyCredential.getClientCapabilities(true), error => error === f.failure);
+  const signal = new AbortController().signal;
+  for (const mediation of [undefined, 'optional', 'required', 'silent']) {
+    assert.equal(await f.credentials.create(Object.freeze({mediation, publicKey, signal})), publicKey);
+    assert.equal(f.requests.at(-1).signal, signal);
+    assert.equal(f.requests.at(-1).mediation, mediation ?? 'optional');
+  }
+  let reads = 0, conversions = 0;
+  const options = Object.freeze({
+    get mediation() {
+      assert.equal(this, options);
+      reads++;
+      return {toString() { conversions++; return 'required'; }};
+    }, publicKey
+  });
+  assert.equal(await f.credentials.create(options), publicKey);
+  assert.equal(reads, 1);
+  assert.equal(conversions, 1);
+  const getOptions = {publicKey, mediation: 'conditional', signal};
+  assert.equal(await f.credentials.get(getOptions), getOptions, 'conditional sign-in stays native');
+  for (const options of [undefined, null, 42, 'bad', {}, {mediation: Symbol()}, {mediation: 'invalid'}]) {
+    await assert.rejects(f.credentials.create(options), {name: 'TypeError'});
+  }
+  await assert.rejects(f.credentials.create({get mediation() { throw f.failure; }}), error => error === f.failure);
+  await assert.rejects(f.CredentialsContainer.prototype.create.call({}, {publicKey}));
+  const oldRuntime = fixture(false);
+  await assert.rejects(oldRuntime.credentials.create({publicKey, mediation: 'conditional'}), {name: 'NotSupportedError'});
+  vm.runInNewContext(source, {}); // Insecure documents have no WebAuthn globals.
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"#,
+            )
+            .arg(WINDOWS_PASSKEY_UPGRADE_GUARD_JS)
+            .output()
+            .expect("Node runs the passkey compatibility regression");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn passkey_upgrade_guard_is_windows_only_and_covers_every_frame_at_document_start() {
+        let scripts =
+            UserContentRegistry::default().scripts_for(Partition::Persistent(ProfileId::from(17)));
+        let guard = scripts
+            .iter()
+            .find(|script| script.source.as_ref() == WINDOWS_PASSKEY_UPGRADE_GUARD_JS);
+        if cfg!(target_os = "windows") {
+            let guard = guard.expect("Windows content installs the passkey guard");
+            assert_eq!(guard.run_at, RunAt::DocumentStart);
+            assert_eq!(guard.world, World::Page);
+            assert!(guard.all_frames);
+        } else {
+            assert!(guard.is_none());
+        }
+    }
 
     fn generation(value: u64) -> UserContentGeneration {
         UserContentGeneration::new(value).unwrap()

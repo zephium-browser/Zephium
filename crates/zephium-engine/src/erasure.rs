@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 #[cfg(any(not(target_os = "macos"), test))]
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::ProfileDataErasureOutcome;
@@ -349,6 +352,8 @@ impl Completion {
 pub(crate) fn canonical_owned_root(path: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(path)?;
     let canonical = direct_directory_identity(path)?;
+    #[cfg(target_os = "windows")]
+    windows::restrict_directory(&canonical)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -402,6 +407,8 @@ pub(crate) fn prepare_profile_directory(root: &Path, profile: ProfileId) -> io::
             "profile data escaped its owned root",
         ));
     }
+    #[cfg(target_os = "windows")]
+    windows::restrict_directory(&canonical)?;
     Ok(canonical)
 }
 
@@ -540,6 +547,142 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    #[test]
+    fn windows_profile_paths_require_acl_settlement_before_admission() {
+        let source = include_str!("erasure.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        for function in ["canonical_owned_root", "prepare_profile_directory"] {
+            let body = source
+                .split(&format!("fn {function}("))
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap();
+            let secured = body
+                .find("windows::restrict_directory(&canonical)?;")
+                .unwrap();
+            assert!(secured < body.find("Ok(canonical)").unwrap());
+            assert!(body[..secured].ends_with("#[cfg(target_os = \"windows\")]\n    "));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_profile_acl_is_private_inheritable_and_preserves_existing_data() {
+        use ::windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+        use ::windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SetSecurityInfo,
+            SE_FILE_OBJECT,
+        };
+        use ::windows::Win32::Security::{
+            EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+            IsWellKnownSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            PSID, SE_DACL_PROTECTED,
+        };
+        use ::windows::Win32::Storage::FileSystem::{
+            FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL, WRITE_DAC,
+        };
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+
+        fn open(path: &Path) -> fs::File {
+            fs::OpenOptions::new()
+                .access_mode(READ_CONTROL.0 | WRITE_DAC.0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+                .open(path)
+                .unwrap()
+        }
+        fn assert_acl(file: &fs::File, protected: bool, flags: u8) {
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            let mut acl = std::ptr::null_mut::<ACL>();
+            let mut owner = PSID::default();
+            // SAFETY: fixture-owned handle and initialized descriptor outputs.
+            unsafe {
+                GetSecurityInfo(
+                    HANDLE(file.as_raw_handle()),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+                    Some(&mut owner),
+                    None,
+                    Some(&mut acl),
+                    None,
+                    Some(&mut sd),
+                )
+                .ok()
+                .unwrap();
+                let mut control = 0;
+                let mut revision = 0;
+                GetSecurityDescriptorControl(sd, &mut control, &mut revision).unwrap();
+                assert_eq!(control & SE_DACL_PROTECTED.0 != 0, protected);
+                assert!(!acl.is_null());
+                assert_eq!((*acl).AceCount, 2);
+                let mut found_owner = false;
+                let mut found_system = false;
+                for index in 0..2 {
+                    let mut ace = std::ptr::null_mut();
+                    GetAce(acl, index, &mut ace).unwrap();
+                    let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    assert_eq!(ace.Header.AceType, 0);
+                    assert_eq!(ace.Header.AceFlags, flags);
+                    assert_eq!(ace.Mask, FILE_ALL_ACCESS.0);
+                    let sid = PSID((&ace.SidStart as *const u32).cast_mut().cast());
+                    found_owner |= EqualSid(sid, owner).is_ok();
+                    found_system |= IsWellKnownSid(sid, WinLocalSystemSid).as_bool();
+                }
+                assert!(found_owner && found_system);
+                let _ = LocalFree(Some(HLOCAL(sd.0)));
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = canonical_owned_root(&temp.path().join("profiles")).unwrap();
+        let id = ProfileId::from(343);
+        let path = root.join(id.to_string());
+        fs::create_dir(&path).unwrap();
+        let file = open(&path);
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: fixed SDDL deliberately widens only this disposable fixture;
+        // all native allocations remain live through their use and are freed.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                ::windows::core::w!("D:P(A;OICI;FA;;;WD)"),
+                1,
+                &mut sd,
+                None,
+            )
+            .unwrap();
+            let mut acl = std::ptr::null_mut();
+            let mut present = false.into();
+            let mut defaulted = false.into();
+            GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted).unwrap();
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(acl),
+                None,
+            )
+            .ok()
+            .unwrap();
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
+        drop(file);
+        fs::write(path.join("cookie-fixture"), b"retained").unwrap();
+        assert_eq!(prepare_profile_directory(&root, id).unwrap(), path);
+        assert_acl(&open(&path), true, 3);
+        assert_acl(&open(&path.join("cookie-fixture")), false, 0x10);
+        assert_eq!(fs::read(path.join("cookie-fixture")).unwrap(), b"retained");
+        assert_eq!(prepare_profile_directory(&root, id).unwrap(), path);
+        let ordinary_file = root.join("not-a-directory");
+        fs::write(&ordinary_file, b"keep").unwrap();
+        assert!(super::windows::restrict_directory(&ordinary_file).is_err());
+        assert_eq!(fs::read(ordinary_file).unwrap(), b"keep");
+    }
     #[test]
     fn completion_is_exactly_once_and_releases_attempt() {
         let (tx, rx) = mpsc::channel();

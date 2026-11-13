@@ -1,6 +1,11 @@
 <script lang="ts">
   import { hiding } from "$domain/blocker";
   import { tabs } from "$domain/tabs";
+  import * as m from "$shared/i18n/messages";
+  import { acceleratorKeys } from "$shared/lib/accelerator";
+  import { IS_MAC } from "$shared/platform";
+
+  const undoHint = acceleratorKeys("CmdOrCtrl+Z", IS_MAC).join(IS_MAC ? "" : "+");
 
   let added = $derived(hiding.added());
   let last = $derived(added.at(-1));
@@ -30,24 +35,27 @@
   <div class="hiding" role="status" aria-live="polite">
     <span class="text">
       <span class="title"
-        >Hiding elements{#if added.length > 0}<span class="count">{added.length}</span>{/if}</span
+        >{m.blocker_hiding_title()}{#if added.length > 0}<span class="count">{added.length}</span
+          >{/if}</span
       >
       <span class="detail"
         >{hiding.isSaving()
-          ? "Saving…"
+          ? m.blocker_hiding_saving()
           : last
-            ? `${last.label} hidden`
-            : "Click anything on the page"}</span
+            ? m.blocker_hiding_hidden({ label: last.label })
+            : m.blocker_hiding_pick()}</span
       >
     </span>
     <button
       type="button"
       class="undo"
       disabled={!last || hiding.isSaving()}
-      title="Undo (⌘Z)"
-      onclick={() => void hiding.undo()}>Undo</button
+      title="{m.blocker_hiding_undo()} ({undoHint})"
+      onclick={() => void hiding.undo()}>{m.blocker_hiding_undo()}</button
     >
-    <button type="button" class="done" onclick={() => hiding.finish()}>Done</button>
+    <button type="button" class="done" onclick={() => hiding.finish()}
+      >{m.blocker_hiding_done()}</button
+    >
   </div>
 {/if}
 

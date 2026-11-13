@@ -36,7 +36,7 @@ impl EngineHost {
         let state = crate::platform::imp::fullscreen_state(&view.view);
         #[cfg(target_os = "macos")]
         if state == NativeFullscreen::Inactive {
-            crate::platform::imp::set_background_suspension(&view.view, self.dormant.contains(&id));
+            self.apply_background_suspension();
             for stage in self.stages.values() {
                 if stage.has_view(id) {
                     let _ = stage.adopt_after_fullscreen(id);

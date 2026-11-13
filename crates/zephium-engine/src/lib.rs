@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+#[cfg(any(target_os = "macos", test))]
+mod background_groups;
 #[cfg(feature = "agentic-browser")]
 pub use agent_context_port::{
     last_action_timeout_stage, AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES,
@@ -18,6 +20,8 @@ mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
+#[cfg(any(target_os = "windows", test))]
+mod extension_navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod haptics;
@@ -29,6 +33,8 @@ mod layout_queue;
 mod motion_curve;
 mod navigation_epoch;
 mod network;
+#[cfg(any(target_os = "windows", test))]
+mod replay_witness;
 #[cfg(any(target_os = "windows", test))]
 mod reputation;
 #[cfg(target_os = "windows")]
@@ -1172,6 +1178,7 @@ impl RetirementGate {
             | event @ EngineEvent::PresentationReady { id, .. }
             | event @ EngineEvent::NavigationFailed { id, .. }
             | event @ EngineEvent::NavigationFailureReported { id, .. }
+            | event @ EngineEvent::NativeNavigationRefused { id, .. }
             | event @ EngineEvent::ZoomSettled { id, .. }
             | event @ EngineEvent::ZoomGesture { id, .. }
             | event @ EngineEvent::NativeActionFailed { id, .. }
@@ -2486,6 +2493,17 @@ impl Engine for WebviewEngine {
             done,
             |done| done(None),
             move |host, done| host.site_permissions(profile, done),
+        );
+    }
+    fn site_permission_snapshot(
+        &self,
+        profile: ProfileId,
+        done: zephium_core::permissions::SitePermissionsDone,
+    ) {
+        self.answer_on_host(
+            done,
+            |done| done(None),
+            move |host, done| host.site_permission_snapshot(profile, done),
         );
     }
     fn set_site_permission(

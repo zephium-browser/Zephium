@@ -785,6 +785,11 @@ fn tab_view(
                         .to_owned(),
                 }
             }
+            zephium_core::item::PageRequest::NavigationRefused { embedded } => {
+                zephium_ipc::PageRequestView::NavigationRefused {
+                    embedded: *embedded,
+                }
+            }
             zephium_core::item::PageRequest::Unresponsive => {
                 zephium_ipc::PageRequestView::Unresponsive
             }

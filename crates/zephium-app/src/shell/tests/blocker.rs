@@ -2977,6 +2977,7 @@ fn stale_result_from_a_retired_lifecycle_cannot_affect_recreated_same_id_profile
 #[test]
 fn durable_profile_deletion_retires_compiler_work_before_native_erasure() {
     let (mut shell, engine, compiler, store, _screen) = controlled_shell();
+    shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
     shell.handle(Command::Bootstrap);
     let profile = add_inactive_named_profile(&mut shell, 41_000);
     store

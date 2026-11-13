@@ -6,6 +6,8 @@ const ENTRIES: usize = 16;
 const CACHE_BYTES: usize = 1024 * 1024 - 4096;
 const ENTRY_BYTES: usize = 80 * 1024;
 const FRESH: Duration = Duration::from_secs(30);
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_NATIVE_CAPTURES: usize = ENTRIES;
 /// WebView2 captures only a view on screen, and a switch hides the tab it
 /// leaves before its capture runs. There a tab is captured in front: when it
 /// finishes loading, once it is switched to, and when the switcher opens.
@@ -62,11 +64,23 @@ impl Cache {
     }
 }
 
+struct PendingPreview {
+    request: u64,
+    window: WindowId,
+    tab: ItemId,
+    url: String,
+    deadline: Instant,
+    completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 #[derive(Default)]
 pub(super) struct TabPreviews {
     windows: HashMap<WindowId, Cache>,
     queue: VecDeque<(WindowId, ItemId)>,
-    pending: Option<(u64, WindowId, ItemId, String)>,
+    pending: Option<PendingPreview>,
+    // A timed-out callback still owns native work. Keep its reservation until
+    // the callback drains, and never retry that tab around an unknown view.
+    abandoned: HashMap<u64, PendingPreview>,
     revision: u64,
 }
 
@@ -76,22 +90,73 @@ impl TabPreviews {
             cache.0.retain(|p| p.tab != tab);
         }
         self.queue.retain(|(_, id)| *id != tab);
-        // Keep the single native capture slot occupied until its callback drains.
-        if let Some((_, _, id, url)) = &mut self.pending {
-            if *id == tab {
-                url.clear();
+        self.invalidate_capture(tab);
+    }
+    pub(super) fn invalidate_capture(&mut self, tab: ItemId) {
+        for capture in self.pending.iter_mut().chain(self.abandoned.values_mut()) {
+            if capture.tab == tab {
+                capture.url.clear();
             }
         }
     }
+
+    fn may_capture(&self, tab: ItemId) -> bool {
+        self.pending.is_none()
+            && self.abandoned.len() < MAX_NATIVE_CAPTURES
+            && !self.abandoned.values().any(|capture| capture.tab == tab)
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        let before = self.abandoned.len();
+        self.abandoned
+            .retain(|_, capture| !capture.completed.load(std::sync::atomic::Ordering::Acquire));
+        let released = before != self.abandoned.len();
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|capture| capture.deadline > now)
+        {
+            return released;
+        }
+        let Some(capture) = self.pending.take() else {
+            return false;
+        };
+        self.abandoned.insert(capture.request, capture);
+        true
+    }
+
+    fn settle(&mut self, request: u64) -> Option<PendingPreview> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|capture| capture.request == request)
+        {
+            self.pending.take()
+        } else {
+            self.abandoned.remove(&request);
+            None
+        }
+    }
+
     pub(super) fn retain_tabs(&mut self, keep: impl Fn(ItemId) -> bool) {
         for cache in self.windows.values_mut() {
             cache.0.retain(|p| keep(p.tab));
         }
         self.queue.retain(|(_, id)| keep(*id));
+        for capture in self.pending.iter_mut().chain(self.abandoned.values_mut()) {
+            if !keep(capture.tab) {
+                capture.url.clear();
+            }
+        }
     }
     pub(super) fn retain_windows(&mut self, keep: impl Fn(WindowId) -> bool) {
         self.windows.retain(|id, _| keep(*id));
         self.queue.retain(|(id, _)| keep(*id));
+        for capture in self.pending.iter_mut().chain(self.abandoned.values_mut()) {
+            if !keep(capture.window) {
+                capture.url.clear();
+            }
+        }
     }
     pub(super) fn url(&self, window: WindowId, tab: ItemId, url: Option<&str>) -> Option<String> {
         let preview = self
@@ -123,11 +188,14 @@ impl Shell {
             .get(&window)
             .is_some_and(|cache| cache.fresh(tab, url.as_str(), Instant::now(), only_missing))
             || self.tab_previews.queue.contains(&(window, tab))
+            || self.tab_previews.pending.as_ref().is_some_and(|capture| {
+                capture.window == window && capture.tab == tab && capture.url == url.as_str()
+            })
             || self
                 .tab_previews
-                .pending
-                .as_ref()
-                .is_some_and(|(_, w, t, u)| *w == window && *t == tab && u == url.as_str())
+                .abandoned
+                .values()
+                .any(|capture| capture.tab == tab)
         {
             return;
         }
@@ -160,14 +228,17 @@ impl Shell {
     }
 
     pub(super) fn capture_tab_preview(&mut self) {
-        if self.tab_previews.pending.is_some() {
+        self.tab_previews.expire(Instant::now());
+        if self.tab_previews.pending.is_some()
+            || self.tab_previews.abandoned.len() >= MAX_NATIVE_CAPTURES
+        {
             return;
         }
         let Some(queue) = self.self_queue.clone() else {
             return;
         };
         while let Some((window, tab)) = self.tab_previews.queue.pop_front() {
-            if self.windows.get(window).is_none() {
+            if self.windows.get(window).is_none() || !self.tab_previews.may_capture(tab) {
                 continue;
             }
             let Some(url) = self
@@ -183,12 +254,25 @@ impl Shell {
                 return;
             };
             self.tab_previews.revision = request;
-            self.tab_previews.pending = Some((request, window, tab, url.clone()));
+            let deadline = Instant::now() + CAPTURE_TIMEOUT;
+            let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.tab_previews.pending = Some(PendingPreview {
+                completed: completed.clone(),
+                request,
+                window,
+                tab,
+                url: url.clone(),
+                deadline,
+            });
+            queue.schedule_dormancy(deadline);
             self.engine.capture_tab_preview(
                 tab,
                 url,
                 Box::new(move |bytes| {
                     let _ = queue.try_push(Command::TabPreviewReady { request, bytes });
+                    // Even a coalesced/dropped actor reply releases the native
+                    // reservation once maintenance sees this receipt.
+                    completed.store(true, std::sync::atomic::Ordering::Release);
                 }),
             );
             return;
@@ -196,15 +280,12 @@ impl Shell {
     }
 
     pub(super) fn tab_preview_ready(&mut self, request: u64, bytes: Option<Vec<u8>>) {
-        if self
-            .tab_previews
-            .pending
-            .as_ref()
-            .is_none_or(|(id, ..)| *id != request)
-        {
-            return;
-        }
-        let Some((_, window, tab, url)) = self.tab_previews.pending.take() else {
+        self.tab_previews.expire(Instant::now());
+        let Some(PendingPreview {
+            window, tab, url, ..
+        }) = self.tab_previews.settle(request)
+        else {
+            self.capture_tab_preview();
             return;
         };
         if self.windows.get(window).is_some()
@@ -228,6 +309,17 @@ impl Shell {
             }
         }
         self.capture_tab_preview();
+    }
+
+    pub(super) fn expire_tab_preview(&mut self, now: Instant) {
+        if self.tab_previews.expire(now) {
+            self.capture_tab_preview();
+        }
+        // The shared earliest maintenance wake clears its deadline. An early
+        // wake for another owner must not lose this still-pending capture.
+        if let (Some(queue), Some(capture)) = (&self.self_queue, &self.tab_previews.pending) {
+            queue.schedule_dormancy(capture.deadline);
+        }
     }
 
     pub(super) fn read_tab_preview(
@@ -265,6 +357,60 @@ mod tests {
             bytes: vec![1; size].into_boxed_slice(),
         }
     }
+    fn pending(request: u64, tab: u128, now: Instant) -> PendingPreview {
+        PendingPreview {
+            request,
+            window: 1,
+            tab: tab.into(),
+            url: "https://example.test/".into(),
+            deadline: now + CAPTURE_TIMEOUT,
+            completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn timeout_frees_scheduling_but_reserves_hung_tab_and_late_callback_cannot_clear_successor() {
+        let now = Instant::now();
+        let mut previews = TabPreviews {
+            pending: Some(pending(1, 1, now)),
+            ..Default::default()
+        };
+        assert!(!previews.expire(now + CAPTURE_TIMEOUT - Duration::from_millis(1)));
+        assert!(previews.expire(now + CAPTURE_TIMEOUT));
+        assert!(!previews.may_capture(1.into()));
+        assert!(previews.may_capture(2.into()));
+        previews.pending = Some(pending(2, 2, now + CAPTURE_TIMEOUT));
+        assert!(previews.settle(1).is_none());
+        assert_eq!(previews.pending.as_ref().unwrap().request, 2);
+        assert_eq!(previews.settle(2).unwrap().tab, 2.into());
+        assert!(previews.pending.is_none() && previews.abandoned.is_empty());
+    }
+
+    #[test]
+    fn repeated_timeouts_and_retirement_cannot_grow_native_capture_reservations() {
+        let now = Instant::now();
+        let mut previews = TabPreviews::default();
+        for request in 1..=MAX_NATIVE_CAPTURES as u64 {
+            assert!(previews.may_capture((request as u128).into()));
+            previews.pending = Some(pending(request, request as u128, now));
+            assert!(previews.expire(now + CAPTURE_TIMEOUT));
+            previews.forget((request as u128).into());
+            assert_eq!(previews.abandoned.len(), request as usize);
+        }
+        for _ in 0..100 {
+            assert!(!previews.may_capture(999.into()));
+            assert!(!previews.expire(now + CAPTURE_TIMEOUT));
+        }
+        // Native completion receipt releases ownership even if the actor's
+        // bytes-bearing completion message was coalesced away.
+        previews.abandoned[&1]
+            .completed
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(previews.expire(now + CAPTURE_TIMEOUT));
+        assert!(previews.may_capture(999.into()));
+        assert_eq!(previews.abandoned.len(), MAX_NATIVE_CAPTURES - 1);
+    }
+
     #[test]
     fn byte_and_entry_limits_and_lru_access_are_enforced() {
         let mut cache = Cache::default();

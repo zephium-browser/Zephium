@@ -9,8 +9,8 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 import { marquee } from "./marquee";
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ faviconProbe: async () => true, workCall: native.call });
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({ faviconProbe: async () => true, workCall: native.call });
 });
 
 test("Area from a selection creates the area, moves every selected element in, and places it around them", async () => {

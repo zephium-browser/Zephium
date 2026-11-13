@@ -336,3 +336,25 @@ it takes the video back, so without a handler that brings the page on screen
 the button does nothing for a background tab. A missing handler keeps
 upstream's no-op; a panic is contained. Like the other private selectors it
 must be reviewed during upstream rebases.
+
+- Programmatic WebKit navigation records retain their `WKNavigation` objects
+  until terminal settlement or proven policy refusal is superseded. A refused
+  attempt that never starts releases its registry slot before a later owned
+  load. Unstarted attempts without a policy refusal keep their attribution so
+  overlapping and reentrant loads cannot exchange URLs. Action callbacks have
+  no navigation identity: URL correlation is used only when unambiguous; nested
+  or same-address ambiguity remains conservatively retained.
+
+- macOS script-dialog suppression is scoped to a committed main-frame
+  document generation. Same-document history/hash changes do not reopen
+  dialogs. A later document clears suppression; an old sheet's completion
+  cannot silence its replacement. The fork explicitly enables AppKit NSCell
+  and block2 APIs used by the suppression checkbox and sheet completion,
+  including in its independent dependency graph.
+
+- Native page navigation URLs use a 256 KiB allocation ceiling in both UTF-16
+  units and UTF-8 bytes, synchronized with Zephium's domain navigation bound.
+  Unreadable/oversized native main-frame and new-window addresses report a
+  metadata-free refusal instead of silently disappearing. WebKit identifies
+  child-frame refusals separately; these never manufacture a whole-tab
+  navigation failure or a partial URL/native identity.

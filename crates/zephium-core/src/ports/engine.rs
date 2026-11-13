@@ -836,6 +836,16 @@ pub trait Engine {
     fn site_permissions(&self, _profile: ProfileId, done: crate::permissions::SitePermissionsDone) {
         done(None);
     }
+    /// A complete native catalog for negative grant proofs. None if the
+    /// source is unavailable, truncated or contains a malformed known entry.
+    /// UI listings may be partial and cannot establish that a grant is absent.
+    fn site_permission_snapshot(
+        &self,
+        _profile: ProfileId,
+        done: crate::permissions::SitePermissionsDone,
+    ) {
+        done(None);
+    }
     /// Saves one decision in the engine's own store for `profile`; None
     /// forgets it so the site is asked again.
     fn set_site_permission(
@@ -1710,6 +1720,13 @@ pub enum EngineEvent {
     NavigationFailed {
         id: ItemId,
         request: NavigationRequestId,
+    },
+    /// A main-frame URL failed the bounded native copy boundary. This is a
+    /// policy refusal, independent of transport failure or HTTPS fallback.
+    NativeNavigationRefused {
+        id: ItemId,
+        /// Child content refusal does not affect the top-level navigation.
+        embedded: bool,
     },
     /// Why the view's current main-frame navigation failed, reported before
     /// its failure settles.

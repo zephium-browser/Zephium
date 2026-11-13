@@ -1,7 +1,10 @@
 use url::Url;
 
 const SEARCH_BASE: &str = "https://duckduckgo.com/";
-const MAX_URL_BYTES: usize = 8 * 1024;
+/// Bounded page-navigation budget shared by native adapters. Long identity
+/// redirects and deep links are distinct from small search/chrome inputs.
+pub const MAX_URL_BYTES: usize = 256 * 1024;
+const MAX_SEARCH_URL_BYTES: usize = 8 * 1024;
 const RESERVED_HOSTS: &[&str] = &[
     "asset.localhost",
     "ipc.localhost",
@@ -41,10 +44,11 @@ pub fn search_query(input: &str) -> Option<Url> {
     }
     if has_leading_scheme_separator(value) || Url::parse(value).is_ok() {
         let parsed = Url::parse(value).ok()?;
-        if !is_allowed(&parsed) {
+        if !is_allowed(&parsed) && !opaque_search_phrase(value, &parsed) {
             return None;
         }
-    } else if !embedded_web_targets_allowed(value) {
+    }
+    if !embedded_web_targets_allowed(value) {
         return None;
     }
     search_url(value)
@@ -64,24 +68,31 @@ fn classify_input(s: &str) -> InputKind {
     if looks_like_local_path(s) {
         return InputKind::Rejected;
     }
-    if looks_like_host(s) {
+    if looks_like_host(s) || bare_host_with_port(s) {
         return Url::parse(&format!("https://{s}"))
             .ok()
             .filter(is_allowed)
             .map_or(InputKind::Rejected, InputKind::Direct);
     }
 
-    // A syntactically absolute input expresses an intent to navigate, not to
-    // search. This includes schemes without `//` such as file:, data: and
-    // javascript:. Reject every disallowed absolute URL without exfiltrating
-    // its original text to SEARCH_BASE. A malformed leading `scheme://` is
-    // treated the same way because it may still contain credentials or a local
-    // path; a safe web URL embedded later in prose remains ordinary search text.
-    if has_leading_scheme_separator(s) || Url::parse(s).is_ok() {
+    // Absolute targets remain navigation intent, including file:, data: and
+    // javascript:. Only explicit prose/search prefixes such as TypeError or
+    // site are reconsidered as search when followed by a phrase. Arbitrary
+    // custom protocols retain refusal instead of exposing their payloads.
+    // A malformed leading scheme:// also remains an explicit target.
+    if has_leading_scheme_separator(s) {
         return Url::parse(s)
             .ok()
             .filter(is_browser_target)
             .map_or(InputKind::Rejected, InputKind::Direct);
+    }
+    if let Ok(parsed) = Url::parse(s) {
+        if is_browser_target(&parsed) {
+            return InputKind::Direct(parsed);
+        }
+        if !opaque_search_phrase(s, &parsed) {
+            return InputKind::Rejected;
+        }
     }
     if !embedded_web_targets_allowed(s) {
         return InputKind::Rejected;
@@ -90,12 +101,84 @@ fn classify_input(s: &str) -> InputKind {
     search_url(s).map_or(InputKind::Rejected, InputKind::Search)
 }
 
+// These application names avoid ambiguity with a numeric host:port. Opaque
+// phrases search only the explicit prose prefixes below, never arbitrary
+// registered or unknown application protocols.
+const EXPLICIT_APP_SCHEMES: &[&str] = &[
+    "mailto",
+    "tel",
+    "sms",
+    "facetime",
+    "facetime-audio",
+    "slack",
+    "msteams",
+    "zoommtg",
+    "steam",
+    "ssh",
+    "git",
+    "vscode",
+];
+
+fn explicit_non_search_scheme(scheme: &str) -> bool {
+    NOT_FOR_APPS.contains(&scheme)
+        || EXPLICIT_APP_SCHEMES.contains(&scheme)
+        || scheme.starts_with("zephium")
+}
+
+const PROSE_SEARCH_PREFIXES: &[&str] = &[
+    "typeerror",
+    "referenceerror",
+    "syntaxerror",
+    "rangeerror",
+    "urierror",
+    "evalerror",
+    "aggregateerror",
+    "error",
+    "site",
+    "define",
+    "re",
+];
+
+fn opaque_search_phrase(value: &str, parsed: &Url) -> bool {
+    value.contains(char::is_whitespace)
+        && parsed.cannot_be_a_base()
+        && PROSE_SEARCH_PREFIXES.contains(&parsed.scheme())
+}
+
+fn bare_host_with_port(value: &str) -> bool {
+    if value.contains(char::is_whitespace) {
+        return false;
+    }
+    let authority = value.split(['/', '?', '#']).next().unwrap_or(value);
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && (!host
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            || host.parse::<std::net::Ipv4Addr>().is_ok())
+        && !host.contains([':', '@'])
+        && !explicit_non_search_scheme(&host.to_ascii_lowercase())
+        && !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+        && match url::Host::parse(host) {
+            Ok(url::Host::Domain(_)) => true,
+            Ok(url::Host::Ipv4(_)) => host.parse::<std::net::Ipv4Addr>().is_ok(),
+            _ => false,
+        }
+}
+
 fn search_url(value: &str) -> Option<Url> {
+    if value.len() > MAX_SEARCH_URL_BYTES {
+        return None;
+    }
     let mut url = Url::parse(SEARCH_BASE).ok()?;
     url.query_pairs_mut().append_pair("q", value);
     // Percent-encoding can expand an otherwise bounded input. Apply the
     // native URL ceiling to the final request.
-    is_allowed(&url).then_some(url)
+    (url.as_str().len() <= MAX_SEARCH_URL_BYTES && is_allowed(&url)).then_some(url)
 }
 
 /// A malformed absolute URL can fail `Url::parse` but still be target-shaped.
@@ -286,6 +369,7 @@ const NOT_FOR_APPS: &[&str] = &[
     "ws",
     "wss",
     "x-apple-systempreferences",
+    "x-apple.systempreferences",
     "zephium",
 ];
 
@@ -425,12 +509,145 @@ fn looks_like_host(s: &str) -> bool {
     if host.parse::<std::net::Ipv4Addr>().is_ok() {
         return true;
     }
-    matches!(host.rsplit_once('.'), Some((label, tld)) if !label.is_empty() && tld.len() >= 2)
+    // WHATWG host parsing accepts abbreviated/numeric IPv4 forms. A bare
+    // decimal-looking token must not become a network address by expansion.
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return false;
+    }
+    let Ok(url::Host::Domain(host)) = url::Host::parse(host) else {
+        return false;
+    };
+    let host = host.trim_end_matches('.');
+    // Reserved/local input is intentional host syntax even without a public
+    // suffix. Keep these names off the search provider as before.
+    if host == "localhost"
+        || RESERVED_HOSTS.contains(&host)
+        || host.ends_with(".example")
+        || host.ends_with(".invalid")
+    {
+        return true;
+    }
+    if host.contains('.') && crate::certificates::is_local_host(host) {
+        return true;
+    }
+    psl::domain(host.as_bytes()).is_some_and(|domain| domain.suffix().is_known())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn bare_file_names_and_abbreviated_numeric_hosts_search_without_network_navigation() {
+        for input in [
+            "index.html",
+            "node.js",
+            "report.pdf",
+            "1.25",
+            "127.1",
+            "1.25:8080",
+            "0x7f000001:8080",
+            "0177.0.0.1:8080",
+        ] {
+            assert!(is_query(input), "{input}");
+            assert_eq!(classify(input).unwrap().host_str(), Some("duckduckgo.com"));
+        }
+        for input in [
+            "example.com",
+            "example.co.uk",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "printer.local",
+            "router.lan",
+            "localhost:8080",
+            "localhost.",
+            "LOCALHOST.",
+            "mail.example",
+            "private.invalid",
+        ] {
+            assert!(!is_query(input), "{input}");
+            assert!(classify(input).is_some(), "{input}");
+        }
+        assert!(!is_query("tauri.localhost/index.html"));
+        assert!(classify("tauri.localhost/index.html").is_none());
+        assert_eq!(
+            classify("https://index.html/").unwrap().as_str(),
+            "https://index.html/"
+        );
+        assert_eq!(
+            classify("http://127.1/").unwrap().as_str(),
+            "http://127.0.0.1/"
+        );
+    }
+
+    #[test]
+    fn opaque_prose_with_colons_searches_while_explicit_protocols_stay_refused() {
+        for input in [
+            "TypeError: Cannot read properties of undefined",
+            "ERROR: relation users does not exist",
+            "site:reddit.com laptops",
+            "define: serendipity",
+            "Re: meeting notes",
+        ] {
+            assert!(is_query(input), "{input}");
+            assert_eq!(
+                classify(input)
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(key, _)| key == "q")
+                    .unwrap()
+                    .1,
+                input
+            );
+            assert!(search_query(input).is_some());
+        }
+        assert_eq!(
+            classify("myrouter:8080").unwrap().as_str(),
+            "https://myrouter:8080/"
+        );
+        for input in [
+            "javascript: alert(1)",
+            "file: /private/document",
+            "data: text/plain,secret",
+            "mailto: private@example.test",
+            "slack: secret channel",
+            "custom:payload",
+            "custom: payload with spaces",
+            "steam://run/123 text",
+        ] {
+            assert!(classify(input).is_none(), "{input}");
+            assert!(search_query(input).is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn system_settings_links_never_reach_external_app_admission() {
+        for scheme in ["x-apple.systempreferences", "x-apple-systempreferences"] {
+            let target = format!("{scheme}:com.apple.preference.security?Privacy_AllFiles");
+            assert!(external_app_link(&target).is_none());
+            assert!(!app_link_scheme(scheme));
+            assert!(classify(&target).is_none());
+        }
+    }
+
+    #[test]
+    fn long_web_redirects_keep_a_finite_navigation_bound_without_expanding_search_inputs() {
+        let long = format!(
+            "https://sso.example.test/callback?state={}",
+            "a".repeat(32 * 1024)
+        );
+        assert!(is_allowed_str(&long));
+        assert_eq!(classify(&long).unwrap().as_str(), long);
+        let prefix = "https://example.test/";
+        let exact = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
+        assert!(is_allowed_str(&exact));
+        assert!(!is_allowed_str(&(exact + "a")));
+        assert!(search_query(&"x".repeat(8 * 1024)).is_none());
+        assert!(search_query(&"word ".repeat(2000)).is_none());
+    }
 
     #[test]
     fn bracketed_ipv6_input_is_a_web_address_not_a_search() {

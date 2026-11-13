@@ -6,6 +6,7 @@ import {
   type VoiceStartV1,
 } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
+import { listenAll } from "$shared/lib/lifecycle";
 
 /** Why a take ended without words: native's reason, or silence. */
 export type VoiceProblem = VoiceFaultV1 | "nothing_heard";
@@ -29,6 +30,7 @@ export class VoiceTake {
    *  state as it was before the change that tore it down. */
   private current: VoicePhase = "idle";
   private take: number | null = null;
+  private request: string | null = null;
   private generation = 0;
   private listening: Promise<void> | null = null;
   private stops: (() => void)[] = [];
@@ -58,37 +60,54 @@ export class VoiceTake {
 
   /** Subscribes before the first start, so no change is missed. */
   private listen(): Promise<void> {
-    this.listening ??= (async () => {
-      const stops = await Promise.all([
+    if (this.listening) return this.listening;
+    const pending = (async () => {
+      const stops = await listenAll([
         events.voiceChanged.listen(({ payload }) => this.changed(payload)),
         events.voiceLevels.listen(({ payload }) => {
-          if (payload.take !== this.take || this.current !== "listening") return;
+          if (
+            payload.request !== this.request ||
+            payload.take !== this.take ||
+            this.current !== "listening"
+          )
+            return;
           for (const sink of this.sinks) sink(payload.levels);
         }),
       ]);
       if (this.disposed) for (const stop of stops) stop();
       else this.stops = stops;
     })();
-    return this.listening;
+    this.listening = pending;
+    void pending.catch(() => {
+      if (this.listening === pending) this.listening = null;
+    });
+    return pending;
   }
 
   async start() {
     if (this.active || this.disposed) return;
     const generation = ++this.generation;
     this.reset();
+    const request = crypto.randomUUID();
+    this.request = request;
     this.engine = null;
     this.to("starting");
-    await this.listen();
+    try {
+      await this.listen();
+    } catch {
+      if (generation === this.generation && request === this.request) this.fail("unavailable");
+      return;
+    }
     if (generation !== this.generation) return;
     let result: VoiceStartV1;
     try {
-      result = await commands.voiceStart();
+      result = await commands.voiceStart(request);
     } catch {
       result = { take: null, engine: null, fault: "unavailable" };
     }
-    if (generation !== this.generation) {
+    if (generation !== this.generation || request !== this.request) {
       // Cancelled before native had a take to cancel: release it now.
-      if (result.take !== null) void commands.voiceCancel().catch(() => {});
+      if (result.take !== null) void commands.voiceCancel(request, result.take).catch(() => {});
       return;
     }
     if (result.fault) return this.fail(result.fault);
@@ -104,6 +123,7 @@ export class VoiceTake {
   }
 
   private changed(change: VoiceChanged) {
+    if (change.request !== this.request) return;
     // The first change can arrive before `voice_start` answers with its id.
     if (this.take === null && this.current === "starting") this.take = change.take;
     if (change.take !== this.take) return;
@@ -134,15 +154,21 @@ export class VoiceTake {
   stop() {
     if (this.current === "starting") return this.cancel();
     if (this.current !== "listening" || this.take === null) return;
-    void commands.voiceStop(this.take).catch(() => this.fail("unavailable"));
+    const take = this.take;
+    const request = this.request;
+    void commands.voiceStop(take).catch(() => {
+      if (this.take === take && this.request === request) this.fail("unavailable");
+    });
   }
 
   /** Discards the take, whatever its phase, or clears a problem. */
   cancel() {
     const active = this.active;
+    const request = this.request;
+    const take = this.take;
     this.generation += 1;
     this.reset();
-    if (active) void commands.voiceCancel().catch(() => {});
+    if (active && request) void commands.voiceCancel(request, take).catch(() => {});
   }
 
   private fail(problem: VoiceProblem) {
@@ -157,6 +183,7 @@ export class VoiceTake {
     this.partial = "";
     this.since = null;
     this.take = null;
+    this.request = null;
   }
 
   dispose() {

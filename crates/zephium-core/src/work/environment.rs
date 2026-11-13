@@ -10,6 +10,29 @@ pub const MAX_ENVIRONMENT_DECISIONS: usize = 200;
 pub const MAX_DECISION_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_TITLE_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_BODY_BYTES: usize = 262_144;
+pub const MAX_COMPOSER_DRAFT_UTF16: usize = 64 * 1024;
+pub const MAX_COMPOSER_DRAFT_BYTES: usize = 256 * 1024;
+pub const MAX_COMPOSER_DRAFTS_PER_PROFILE: usize = 64;
+pub const MAX_COMPOSER_DRAFT_PROFILE_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkComposerDraft {
+    pub profile: crate::ids::ProfileId,
+    pub space: SpaceId,
+    pub revision: WorkRevision,
+    pub text: String,
+}
+
+pub fn validate_composer_draft(text: &str) -> Result<(), WorkError> {
+    if text.len() > MAX_COMPOSER_DRAFT_BYTES
+        || text.encode_utf16().count() > MAX_COMPOSER_DRAFT_UTF16
+    {
+        return Err(WorkError::Capacity);
+    }
+    Ok(())
+}
 
 pub const WORK_PLACEMENT_LEGACY: u8 = 0;
 pub const WORK_PLACEMENT_LANE: u8 = 2;
@@ -617,6 +640,14 @@ pub enum WorkEnvironmentIntent {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkEnvironmentCall {
+    ComposerRead {
+        space: SpaceId,
+    },
+    ComposerSave {
+        space: SpaceId,
+        expected: WorkRevision,
+        text: String,
+    },
     /// Revision-scoped presentation save; stale identities never execute again.
     Checkpoint {
         id: WorkEnvironmentId,
@@ -644,6 +675,7 @@ pub enum WorkEnvironmentCall {
 impl WorkEnvironmentCall {
     pub fn validate(&self) -> Result<(), WorkError> {
         match self {
+            Self::ComposerSave { text, .. } => validate_composer_draft(text),
             Self::Checkpoint { expected, view, .. } => {
                 view.validate()?;
                 if view.revision != *expected {
@@ -665,7 +697,9 @@ impl WorkEnvironmentCall {
     }
     pub fn space(&self) -> Option<SpaceId> {
         match self {
-            Self::List { space, .. }
+            Self::ComposerRead { space }
+            | Self::ComposerSave { space, .. }
+            | Self::List { space, .. }
             | Self::Command {
                 intent: WorkEnvironmentIntent::Create { space, .. },
                 ..
@@ -702,6 +736,9 @@ pub const MAX_SUMMARY_REQUEST_CHARS: usize = 160;
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkEnvironmentReply {
+    Composer {
+        draft: WorkComposerDraft,
+    },
     Checkpointed {
         expected: WorkRevision,
         applied_view_revision: WorkRevision,
@@ -731,6 +768,7 @@ macro_rules! redacted_debug {
     })+ };
 }
 redacted_debug!(
+    WorkComposerDraft,
     WorkEnvironmentCall,
     WorkEnvironmentReply,
     WorkEnvironmentSnapshot

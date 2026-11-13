@@ -202,6 +202,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSAlert",
   "NSApplication",
   "NSButton",
+  "NSCell",
+  "block2",
   "NSControl",
   "NSEvent",
   "NSWindow",

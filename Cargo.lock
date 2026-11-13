@@ -7564,6 +7564,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "proptest",
+ "psl",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7730,6 +7731,7 @@ dependencies = [
  "specta",
  "specta-serde",
  "specta-typescript",
+ "url",
  "zephium-core",
 ]
 
@@ -7738,6 +7740,7 @@ name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "core-foundation 0.10.1",
  "http",
  "libc",
  "reqwest",
@@ -7768,6 +7771,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "zephium-core",
+ "zephium-private-fs",
 ]
 
 [[package]]

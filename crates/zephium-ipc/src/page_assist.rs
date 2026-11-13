@@ -107,6 +107,8 @@ pub enum PageAssistFaultV1 {
     StepFailed,
     /// The reply reached its limit of steps or time.
     TooLong,
+    /// The model stopped making progress or exceeded the call's overall cap.
+    TimedOut,
     /// The model call failed. `retry_after_ms` is set for `rate_limited`
     /// (and hosted limits) when the provider or server said when to retry.
     Model {

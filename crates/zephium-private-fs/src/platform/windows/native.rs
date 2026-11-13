@@ -18,6 +18,61 @@ use windows::Win32::System::IO::IO_STATUS_BLOCK;
 
 use crate::PrivateFsError;
 
+fn terminated_path(path: &std::path::Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut path: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if path.contains(&0) {
+        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+    }
+    path.push(0);
+    Ok(path)
+}
+
+pub(super) fn rename_file_no_replace(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+    let source = terminated_path(source)?;
+    let target = terminated_path(target)?;
+    // SAFETY: both paths are owned, reject interior NULs, and remain valid
+    // through this synchronous call. Zero flags forbid destination replacement.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVE_FILE_FLAGS(0),
+        )
+    }
+    .map_err(|_| std::io::Error::last_os_error())
+}
+
+#[cfg(test)]
+mod rename_path_tests {
+    use super::terminated_path;
+    use std::path::Path;
+
+    #[test]
+    fn unicode_paths_are_terminated_and_interior_nuls_are_refused() {
+        let path = Path::new("C:\\Notes\\旅行 🦊.md");
+        assert_eq!(
+            terminated_path(path).unwrap(),
+            path.to_str()
+                .unwrap()
+                .encode_utf16()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            terminated_path(Path::new("C:\\Notes\\a\0b.md"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+}
+
 #[repr(C)]
 struct ObjectAttributes {
     length: u32,

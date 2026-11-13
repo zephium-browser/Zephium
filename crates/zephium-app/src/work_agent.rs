@@ -3156,15 +3156,77 @@ pub(crate) fn read_handoff_resolves(
             .is_some_and(|receipt| receipt.includes(kind))
 }
 
-/// Search text may not repeat a private context body: a 24-character window
-/// of the query found inside any private body refuses the whole turn.
+/// Search text may not repeat private context. Short names, diagnoses and
+/// contact details carry private information too; compare complete words and
+/// normalized phone digits as well as longer passages.
 pub fn query_discloses(query: &str, private: &[String]) -> bool {
     const WINDOW: usize = 24;
-    let query: Vec<char> = query.to_lowercase().chars().collect();
-    if query.len() < WINDOW || private.is_empty() {
+    if private.is_empty() {
         return false;
     }
+    let query = query.to_lowercase();
     let bodies: Vec<String> = private.iter().map(|body| body.to_lowercase()).collect();
+    let words = |text: &str| -> std::collections::BTreeSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() >= 2 || !word.is_ascii())
+            .filter(|word| {
+                !matches!(
+                    *word,
+                    "of" | "to"
+                        | "in"
+                        | "is"
+                        | "it"
+                        | "an"
+                        | "on"
+                        | "or"
+                        | "as"
+                        | "at"
+                        | "be"
+                        | "by"
+                        | "we"
+                        | "my"
+                        | "do"
+                        | "no"
+                        | "if"
+                        | "so"
+                        | "the"
+                        | "and"
+                        | "for"
+                        | "that"
+                        | "this"
+                        | "with"
+                        | "from"
+                        | "are"
+                        | "was"
+                        | "has"
+                        | "have"
+                        | "not"
+                        | "you"
+                        | "your"
+                )
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    let query_words = words(&query);
+    if bodies.iter().any(|body| {
+        !query_words.is_disjoint(&words(body))
+            || query_words
+                .iter()
+                .any(|word| !word.is_ascii() && body.contains(word))
+    }) {
+        return true;
+    }
+    let digits = |text: &str| -> String { text.chars().filter(char::is_ascii_digit).collect() };
+    let query_digits = digits(&query);
+    if query_digits.len() >= 4
+        && bodies
+            .iter()
+            .any(|body| digits(body).contains(&query_digits))
+    {
+        return true;
+    }
+    let query: Vec<char> = query.chars().collect();
     query.windows(WINDOW).any(|window| {
         let window: String = window.iter().collect();
         bodies.iter().any(|body| body.contains(&window))
@@ -3534,6 +3596,31 @@ mod tests {
             &private
         ));
         assert!(!query_discloses("best canvas libraries 2026", &private));
-        assert!(!query_discloses("hiring freeze", &private));
+        assert!(query_discloses("hiring freeze", &private));
+    }
+
+    #[test]
+    fn short_private_names_diagnoses_and_contact_details_never_ride_search() {
+        let private =
+            vec!["Ada has diabetes. Contact ada@example.com or +48 123 456 789.".to_owned()];
+        for query in [
+            "ada diabetes",
+            "diabetes",
+            "ada@example.com",
+            "+48123456789",
+        ] {
+            assert!(query_discloses(query, &private), "{query}");
+        }
+        assert!(!query_discloses("the best rust books", &private));
+        assert!(!query_discloses("", &private));
+        for (body, query) in [
+            ("Li", "Li"),
+            ("Li has flu", "Li flu"),
+            ("李患糖尿病", "糖尿病"),
+            ("李患糖尿病", "李"),
+            ("The patient is 李", "李 doctor"),
+        ] {
+            assert!(query_discloses(query, &[body.into()]), "{body}: {query}");
+        }
     }
 }

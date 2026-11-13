@@ -2,6 +2,8 @@
 
 use super::*;
 
+const MAX_SESSION_URL_BYTES: usize = zephium_core::navigation::MAX_URL_BYTES;
+
 pub(super) struct PreparedSession {
     state: SessionState,
     snapshot: String,
@@ -145,7 +147,7 @@ where
             BoundedKind::Tab {
                 url, title, zoom, ..
             } => {
-                url.len() <= MAX_URL_BYTES
+                url.len() <= MAX_SESSION_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
@@ -162,7 +164,7 @@ where
     D: serde::Deserializer<'de>,
 {
     bounded_json::deserialize_bounded_vec(deserializer, MAX_RECENTLY_CLOSED_TABS, |entry| {
-        entry.url.len() <= MAX_URL_BYTES
+        entry.url.len() <= MAX_SESSION_URL_BYTES
             && entry.title.len() <= MAX_TITLE_BYTES
             && entry.zoom.is_finite()
             && (0.3..=3.0).contains(&entry.zoom)
@@ -285,7 +287,12 @@ fn decode_authoritative_snapshot(data: &str) -> Option<SessionState> {
 }
 
 fn decode_snapshot(data: &str, version: i64) -> Option<SessionState> {
-    bounded_json::from_str::<BoundedSessionState>(data)
+    if data.len() > MAX_SESSION_SNAPSHOT_BYTES {
+        return None;
+    }
+    bounded_json::preflight_session(data)
+        .ok()?
+        .deserialize::<BoundedSessionState>()
         .ok()?
         .into_state(version)
 }
@@ -546,6 +553,68 @@ mod qa_settings_recovery_tests {
             active_item: Some(ItemId::from(704)),
             splits: None,
             recently_closed: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn long_browser_urls_round_trip_in_open_and_closed_tabs_without_quarantining_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = saved_qa_session();
+        let url = format!("https://example.test/#{}", "x".repeat(32 * 1024));
+        let PersistedKind::Tab { url: current, .. } = &mut state.items[0].kind else {
+            panic!("fixture tab");
+        };
+        *current = url.clone();
+        state
+            .recently_closed
+            .push(core_session::PersistedClosedTab {
+                profile: state.profiles[0].id,
+                space: state.spaces[0].id,
+                url,
+                title: "Closed long link".into(),
+                zoom: 1.0,
+                session_id: None,
+                closed_at_ms: None,
+                position: None,
+            });
+        assert!(serde_json::to_vec(&state).unwrap().len() < MAX_SESSION_SNAPSHOT_BYTES);
+        let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+        hub.save(&state).unwrap();
+        let PersistedKind::Tab { url, .. } = &state.items[0].kind else {
+            panic!("fixture tab");
+        };
+        hub.record_visit(
+            state.profiles[0].id,
+            url,
+            "long URL remains outside bounded history",
+        );
+        assert!(hub
+            .search_history(state.profiles[0].id, "long URL", 10)
+            .is_empty());
+        assert!(hub
+            .history_page(state.profiles[0].id, "", None, None, 50)
+            .is_empty());
+        drop(hub);
+        let mut reopened = Hub::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.load().unwrap(), Some(state.clone()));
+        assert!(reopened.recovery_required.is_none());
+        for closed in [false, true] {
+            let mut oversized = state.clone();
+            let too_long = format!(
+                "https://example.test/#{}",
+                "x".repeat(MAX_SESSION_URL_BYTES)
+            );
+            if closed {
+                oversized.recently_closed[0].url = too_long;
+            } else if let PersistedKind::Tab { url, .. } = &mut oversized.items[0].kind {
+                *url = too_long;
+            }
+            assert!(
+                decode_authoritative_snapshot(&serde_json::to_string(&oversized).unwrap())
+                    .is_none()
+            );
+            assert!(reopened.save(&oversized).is_err());
+            assert_eq!(reopened.load().unwrap(), Some(state.clone()));
         }
     }
 
@@ -1589,7 +1658,8 @@ mod qa_settings_recovery_tests {
         assert_eq!(restarted.profiles[0].id, profile);
         assert_eq!(restarted.profiles[0].name, "QA");
         assert_eq!(restarted.profiles[0].kind, ProfileKind::Default);
-        assert!(restarted.items.is_empty() && restarted.spaces.is_empty());
+        assert!(restarted.items.is_empty());
+        assert_eq!(restarted.spaces, saved.spaces);
         // The profile's history is still its own.
         assert!(!hub.search_history(profile, "example", 10).is_empty());
 
@@ -1804,6 +1874,10 @@ mod space_look_wire_tests {
 
 impl Hub {
     pub(crate) fn save(&mut self, s: &SessionState) -> rusqlite::Result<()> {
+        if self.session_backup_checkpoint_pending {
+            checkpoint_session_backup(&self.meta)?;
+            self.session_backup_checkpoint_pending = false;
+        }
         let prepared = self.prepare_session(s)?;
         if self
             .registry
@@ -1954,6 +2028,7 @@ impl Hub {
             }
         }
         Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
+        let composer_erased = super::work_composer::retain_scopes(&tx, &state)?;
         let last = state
             .active_space
             .and_then(|sp| state.spaces.iter().find(|x| x.id == sp))
@@ -1995,6 +2070,11 @@ impl Hub {
             ));
         }
         self.registry = registry;
+        self.session_scopes = state
+            .spaces
+            .iter()
+            .map(|space| (space.profile, space.id))
+            .collect();
         if !self.legacy_state_purged {
             match self.purge_legacy_profile_state() {
                 Ok(()) => self.legacy_state_purged = true,
@@ -2010,6 +2090,11 @@ impl Hub {
         // exact journal authorization plus native-erasure proof permits purge.
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
+        self.session_backup_checkpoint_pending |= composer_erased;
+        if self.session_backup_checkpoint_pending {
+            checkpoint_session_backup(&self.meta)?;
+            self.session_backup_checkpoint_pending = false;
+        }
         Ok(())
     }
 
@@ -2088,6 +2173,11 @@ impl Hub {
                         .map_err(|_| invalid_data("session backup repair could not be encoded"))?,
                 });
             }
+            self.session_scopes = canonical
+                .spaces
+                .iter()
+                .map(|space| (space.profile, space.id))
+                .collect();
             return Ok(Some(canonical));
         }
 
@@ -2346,6 +2436,8 @@ impl Hub {
         // must stay in recovery mode until a dedicated recovery operation
         // explicitly resolves the marker.
         self.recovery_required = recovery_reason(&self.meta)?.or_else(|| Some(reason.into()));
+        self.session_scopes.clear();
+        self.committed_session = None;
         Ok(())
     }
 
@@ -2392,7 +2484,8 @@ impl Hub {
             ),
             _ => None,
         };
-        let restarted = restarted_session(&self.registry, preserved.as_deref());
+        let mut restarted = restarted_session(&self.registry, preserved.as_deref());
+        super::work_composer::recover_spaces(&self.meta, &mut restarted)?;
         self.recovery_required = None;
         if let Err(error) = self.save(&restarted) {
             self.recovery_required = Some(reason);
@@ -2401,6 +2494,16 @@ impl Hub {
         self.meta
             .execute("DELETE FROM session_recovery WHERE id = 1", [])?;
         Ok(file)
+    }
+
+    pub(crate) fn set_aside_startup_session(&mut self) -> rusqlite::Result<Option<PathBuf>> {
+        if self.recovery_required.is_none() {
+            if self.load()?.is_none() {
+                return Ok(None);
+            }
+            self.quarantine_current_authoritative("repeated incomplete browser startups")?;
+        }
+        self.set_aside_recovery()
     }
 
     fn validate_authoritative_registry(&self, state: &SessionState) -> rusqlite::Result<()> {
@@ -2455,12 +2558,12 @@ fn write_set_aside(dir: &std::path::Path, bytes: &[u8]) -> std::io::Result<PathB
     Ok(path)
 }
 
-/// A session with every registered profile and nothing else. Names and kinds
-/// come from the unreadable snapshot where it still holds them; exactly one
-/// profile is the default.
+/// A tab-free session preserving registered profiles and validated Space
+/// identities. Scope preservation keeps unsent composer text reachable.
 fn restarted_session(registry: &HashSet<ProfileId>, preserved: Option<&[u8]>) -> SessionState {
-    let named: Vec<(ProfileId, String, ProfileKind)> = preserved
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+    let value = preserved.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok());
+    let named: Vec<(ProfileId, String, ProfileKind)> = value
+        .as_ref()
         .and_then(|value| value.get("profiles")?.as_array().cloned())
         .unwrap_or_default()
         .iter()
@@ -2512,10 +2615,35 @@ fn restarted_session(registry: &HashSet<ProfileId>, preserved: Option<&[u8]>) ->
             }
         }
     }
-    core_session::canonicalize(SessionState {
+    let spaces = value
+        .as_ref()
+        .and_then(|value| value.get("spaces")?.as_array())
+        .into_iter()
+        .flatten()
+        .take(MAX_SESSION_SPACES)
+        .filter_map(|value| {
+            let space: BoundedSpace = serde_json::from_value(value.clone()).ok()?;
+            (registry.contains(&space.profile)
+                && space.name.len() <= MAX_NAME_BYTES
+                && space_look_bounded(&space.look))
+            .then_some(PersistedSpace {
+                id: space.id,
+                profile: space.profile,
+                name: space.name,
+                look: space.look,
+            })
+        })
+        .collect();
+    let active_space = value
+        .as_ref()
+        .and_then(|value| value.get("active_space")?.as_str())
+        .and_then(SpaceId::parse);
+    SessionState {
         profiles,
+        spaces,
+        active_space,
         ..Default::default()
-    })
+    }
 }
 
 fn kind_to_str(kind: ProfileKind) -> Option<&'static str> {

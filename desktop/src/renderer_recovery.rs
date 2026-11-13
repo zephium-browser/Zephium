@@ -3,6 +3,10 @@
 //! The privileged documents recover the same way on every platform; only the
 //! native signal that their content process ended differs.
 
+use std::time::{Duration, Instant};
+
+const STABLE_RECOVERY: Duration = Duration::from_secs(10 * 60);
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::Mutex;
 
@@ -12,19 +16,34 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 #[derive(Default)]
 pub(crate) struct Recovery {
     attempts: u8,
-    pending: Option<u8>,
+    generation: u64,
+    pending: Option<u64>,
+    healthy_since: Option<Instant>,
     terminal: bool,
     restarting: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Action {
-    Reload(u8),
+    Reload(u64),
     Ignore,
     Stop,
 }
 
 impl Recovery {
+    fn failure(&mut self, browser_exited: bool, invalidate_health: impl FnOnce()) -> Action {
+        invalidate_health();
+        if browser_exited {
+            if self.stop() {
+                Action::Stop
+            } else {
+                Action::Ignore
+            }
+        } else {
+            self.crashed()
+        }
+    }
+
     #[cfg(all(test, target_os = "windows"))]
     pub(crate) fn settled_attempts(&self) -> u8 {
         if self.pending.is_none() && !self.terminal {
@@ -35,16 +54,32 @@ impl Recovery {
     }
 
     pub(crate) fn crashed(&mut self) -> Action {
+        self.crashed_at(Instant::now())
+    }
+
+    fn crashed_at(&mut self, now: Instant) -> Action {
         if std::mem::take(&mut self.restarting) || self.terminal || self.pending.is_some() {
             return Action::Ignore;
+        }
+        if self
+            .healthy_since
+            .take()
+            .is_some_and(|since| now.saturating_duration_since(since) >= STABLE_RECOVERY)
+        {
+            self.attempts = 0;
         }
         if self.attempts == 2 {
             self.terminal = true;
             return Action::Stop;
         }
+        let Some(generation) = self.generation.checked_add(1) else {
+            self.terminal = true;
+            return Action::Stop;
+        };
         self.attempts += 1;
-        self.pending = Some(self.attempts);
-        Action::Reload(self.attempts)
+        self.generation = generation;
+        self.pending = Some(generation);
+        Action::Reload(generation)
     }
 
     /// The next end of the content process is one the app asked for.
@@ -60,10 +95,18 @@ impl Recovery {
     }
 
     pub(crate) fn ready(&mut self) -> bool {
-        !self.terminal && self.pending.take().is_some()
+        self.ready_at(Instant::now())
     }
 
-    pub(crate) fn timed_out(&mut self, attempt: u8) -> bool {
+    fn ready_at(&mut self, now: Instant) -> bool {
+        if self.terminal || self.pending.take().is_none() {
+            return false;
+        }
+        self.healthy_since = Some(now);
+        true
+    }
+
+    pub(crate) fn timed_out(&mut self, attempt: u64) -> bool {
         if self.pending != Some(attempt) {
             return false;
         }
@@ -115,15 +158,13 @@ pub(crate) fn failed(app: &AppHandle, label: &str, browser_exited: bool) {
     };
     let action = {
         let mut recovery = surface.lock().unwrap_or_else(|e| e.into_inner());
-        if browser_exited {
-            if recovery.stop() {
-                Action::Stop
-            } else {
-                Action::Ignore
+        recovery.failure(browser_exited, || {
+            if label == crate::MAIN_LABEL {
+                if let Some(gate) = app.try_state::<crate::UiStartupGate>() {
+                    gate.mark_document_started();
+                }
             }
-        } else {
-            recovery.crashed()
-        }
+        })
     };
     let attempt = match action {
         Action::Ignore => return,
@@ -224,7 +265,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repeated_events_do_not_overlap_reloads_or_reset_the_lifetime_budget() {
+    fn every_crash_action_invalidates_startup_health_before_any_reload_event() {
+        use std::sync::atomic::Ordering;
+        for (mut recovery, browser_exited, expected) in [
+            (Recovery::default(), false, Action::Reload(1)),
+            (
+                Recovery {
+                    terminal: true,
+                    ..Default::default()
+                },
+                false,
+                Action::Ignore,
+            ),
+            (Recovery::default(), true, Action::Stop),
+            (
+                Recovery {
+                    pending: Some(1),
+                    ..Default::default()
+                },
+                false,
+                Action::Ignore,
+            ),
+        ] {
+            let gate = crate::UiStartupGate::new(tauri::Url::parse("tauri://localhost/").unwrap());
+            gate.document_loaded.store(true, Ordering::Release);
+            gate.frontend_ready.store(true, Ordering::Release);
+            assert!(gate.healthy_generation(0));
+            assert_eq!(
+                recovery.failure(browser_exited, || gate.mark_document_started()),
+                expected
+            );
+            assert!(!gate.healthy_generation(0));
+            // No navigation or PageLoadStarted signal has been delivered.
+            assert!(!gate.document_loaded.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn repeated_events_do_not_overlap_reloads_or_reset_the_rapid_crash_budget() {
         let mut recovery = Recovery::default();
         assert!(!recovery.ready());
         assert_eq!(recovery.crashed(), Action::Reload(1));
@@ -235,6 +313,33 @@ mod tests {
         assert_eq!(recovery.crashed(), Action::Stop);
         assert_eq!(recovery.crashed(), Action::Ignore);
         assert!(!recovery.ready());
+    }
+
+    #[test]
+    fn stable_recovery_replenishes_budget_without_reusing_deadline_identity() {
+        let now = Instant::now();
+        let mut recovery = Recovery::default();
+        assert_eq!(recovery.crashed_at(now), Action::Reload(1));
+        assert!(recovery.ready_at(now));
+        assert_eq!(recovery.crashed_at(now), Action::Reload(2));
+        assert!(recovery.ready_at(now));
+        assert_eq!(
+            recovery.crashed_at(now + STABLE_RECOVERY),
+            Action::Reload(3)
+        );
+        assert!(!recovery.timed_out(1));
+        assert!(!recovery.timed_out(2));
+        assert!(recovery.timed_out(3));
+    }
+
+    #[test]
+    fn exhausted_generation_space_stops_instead_of_reusing_a_deadline() {
+        let mut recovery = Recovery {
+            generation: u64::MAX,
+            ..Recovery::default()
+        };
+        assert_eq!(recovery.crashed(), Action::Stop);
+        assert_eq!(recovery.crashed(), Action::Ignore);
     }
 
     #[test]

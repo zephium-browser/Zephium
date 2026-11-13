@@ -271,7 +271,11 @@ test("an accepted steer reaches the running execution without queueing", async (
     executions: [agentRun("running")],
   };
   const execute = vi.spyOn(session, "execute").mockResolvedValue(true);
-  const screen = await render(AgentLine, { session, draft: "Prefer linear switches" });
+  const screen = await render(AgentLine, {
+    session,
+    draft: "Prefer linear switches",
+    prepareDraft: async () => ({ text: "Prefer linear switches", clear: async () => true }),
+  });
   await screen.getByRole("button", { name: "Steer", exact: true }).click();
   expect(execute).toHaveBeenCalledExactlyOnceWith({
     kind: "steer",
@@ -283,7 +287,24 @@ test("an accepted steer reaches the running execution without queueing", async (
   session.dispose();
 });
 
-test("a refused steer queues the draft and the queue rides on when the run closes", async () => {
+test("a failed draft preparation never steers or clears unacknowledged words", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  session.projection = { ...structuredClone(projection), executions: [agentRun("running")] };
+  const steer = vi.spyOn(session, "steer").mockResolvedValue(true);
+  const screen = await render(AgentLine, {
+    session,
+    draft: "unsaved words",
+    prepareDraft: async () => null,
+  });
+  await screen.getByRole("button", { name: "Steer", exact: true }).click();
+  expect(steer).not.toHaveBeenCalled();
+  expect(session.queue).toEqual([]);
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a refused steer keeps the durable draft and never substitutes a document queue", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -294,30 +315,30 @@ test("a refused steer queues the draft and the queue rides on when the run close
     input,
     state: { kind: "pending", work: "objective" },
   }));
-  // A refused steer must not drop the message: it waits for the run instead.
+  // Only native acceptance may clear the durable composer.
   const steer = vi.spyOn(session, "steer").mockResolvedValue(false);
-  const onsteered = vi.fn();
+  const clear = vi.fn(async () => true);
+  const prepareDraft = vi.fn(async () => ({ text: "Also compare the wireless ones", clear }));
   const screen = await render(AgentLine, {
     session,
     draft: "Also compare the wireless ones",
-    onsteered,
+    prepareDraft,
   });
   await expect
     .element(screen.getByText("Also compare the wireless ones", { exact: true }))
     .toBeVisible();
   await screen.getByRole("button", { name: "Steer", exact: true }).click();
   expect(steer).toHaveBeenCalledExactlyOnceWith("Also compare the wireless ones");
-  await expect.poll(() => session.queue).toEqual(["Also compare the wireless ones"]);
-  expect(onsteered).toHaveBeenCalledOnce();
+  expect(session.queue).toEqual([]);
+  expect(prepareDraft).toHaveBeenCalledOnce();
+  expect(clear).not.toHaveBeenCalled();
   expect(begin).not.toHaveBeenCalled();
   session.projection = {
     ...session.projection,
     executions: [{ ...execution, status: "completed" }],
   };
-  await expect
-    .poll(() => edit.mock.calls)
-    .toEqual([[{ kind: "set_objective", objective: "Also compare the wireless ones" }]]);
-  await expect.poll(() => begin.mock.calls.length).toBe(1);
+  expect(edit).not.toHaveBeenCalled();
+  expect(begin).not.toHaveBeenCalled();
   expect(session.queue).toEqual([]);
   await screen.unmount();
   session.dispose();

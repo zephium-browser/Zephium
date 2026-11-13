@@ -30,6 +30,7 @@ pub(crate) use time::{TimeBatchId, MAX_TIME_BATCH_RECEIPTS};
 mod userscripts;
 #[cfg(all(windows, feature = "work-execution"))]
 mod windows_work_storage;
+mod work_composer;
 mod work_document;
 #[cfg(feature = "work-execution")]
 mod work_record_media;
@@ -108,6 +109,7 @@ pub struct Hub {
     meta: Connection,
     profiles: HashMap<ProfileId, Connection>,
     registry: HashSet<ProfileId>,
+    session_scopes: HashSet<(ProfileId, SpaceId)>,
     /// Registered profiles whose exact ancillary SQLite file was securely
     /// identified but failed read-only schema/configuration validation. These
     /// files are preserved and never retried, opened read-write, or recreated
@@ -211,6 +213,7 @@ impl Hub {
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),
+            session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
@@ -333,6 +336,7 @@ impl Hub {
             meta,
             profiles: HashMap::new(),
             registry: HashSet::new(),
+            session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
@@ -401,8 +405,9 @@ impl Hub {
             ));
         }
         use std::collections::hash_map::Entry;
-        match self.profiles.entry(id) {
-            Entry::Occupied(slot) => Ok(slot.into_mut()),
+        let media = self.media.clone();
+        let conn = match self.profiles.entry(id) {
+            Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {
                 let mut conn = match &self.dir {
                     Some(dir) => open_database(&dir.join(format!("profile-{id}.sqlite")))?,
@@ -412,9 +417,15 @@ impl Hub {
                 migrations::apply(&mut conn, migrations::PROFILE)?;
                 history::enforce_history_budget(&conn)?;
                 resources::prune_receipts(&conn)?;
-                Ok(slot.insert(conn))
+                slot.insert(conn)
+            }
+        };
+        if let Some(media) = media {
+            if media.reconcile_orphans(id, conn).is_err() {
+                eprintln!("store: media orphan reconciliation deferred");
             }
         }
+        Ok(conn)
     }
 
     pub fn knows(&self, profile: ProfileId) -> bool {

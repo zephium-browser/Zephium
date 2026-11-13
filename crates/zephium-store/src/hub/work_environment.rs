@@ -192,6 +192,9 @@ pub(super) fn apply(
 ) -> Result<(WorkEnvironmentReply, bool), WorkError> {
     call.validate()?;
     match call {
+        WorkEnvironmentCall::ComposerRead { .. } | WorkEnvironmentCall::ComposerSave { .. } => {
+            Err(WorkError::Invalid)
+        }
         WorkEnvironmentCall::Checkpoint { id, expected, view } => {
             checkpoint(tx, profile, id, expected, view)
         }

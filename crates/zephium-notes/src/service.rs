@@ -259,6 +259,18 @@ impl Worker {
                     complete_release(done);
                 }
             }
+            // Watcher wake-ups share the bounded command queue. A full queue
+            // may reject Touched, but draining any queued command must still
+            // notice the collected paths, even if no later event arrives.
+            for open in self.open.values_mut() {
+                let pending = open.pending.lock().unwrap_or_else(|e| e.into_inner());
+                if pending.rescan || !pending.paths.is_empty() {
+                    open.due.get_or_insert_with(|| Instant::now() + SETTLE);
+                }
+            }
+            // A continuously busy caller must not postpone an already due
+            // scan indefinitely by keeping recv_timeout immediately ready.
+            self.settle();
             let due = self.open.values().filter_map(|open| open.due).min();
             let command = match due {
                 Some(due) => receiver.recv_timeout(due.saturating_duration_since(Instant::now())),
@@ -867,5 +879,50 @@ mod tests {
                 error: NoteError::Unavailable
             }
         ));
+    }
+
+    #[test]
+    fn full_command_queue_does_not_lose_the_last_watcher_wake() {
+        let base = tempfile::tempdir().unwrap();
+        let host = Arc::new(Recorder::default());
+        let profile = ProfileId::from(77);
+        let mut library = Library::open(base.path(), &profile.to_string()).unwrap();
+        library.reconcile(now()).unwrap();
+        std::fs::write(library.root().join("External.md"), "# External").unwrap();
+        let pending = Arc::new(Mutex::new(Pending {
+            paths: vec![],
+            rescan: true,
+        }));
+        let (sender, receiver) = sync_channel(QUEUE);
+        for _ in 0..QUEUE {
+            sender.try_send(Command::Wake).unwrap();
+        }
+        assert!(matches!(
+            sender.try_send(Command::Touched(profile)),
+            Err(TrySendError::Full(_))
+        ));
+        let mut worker = Worker::new(base.path().to_path_buf(), host.clone(), sender.clone());
+        worker.open.insert(
+            profile,
+            Open {
+                library,
+                _watcher: None,
+                pending,
+                signalled: Arc::new(AtomicBool::new(false)),
+                due: None,
+            },
+        );
+        let thread =
+            std::thread::spawn(move || worker.run(receiver, &Mutex::new(Releases::default())));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && host.events.lock().unwrap().is_empty() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        sender.send(Command::Stop).unwrap();
+        thread.join().unwrap();
+        assert!(
+            host.events.lock().unwrap().iter().any(|event| event.reset),
+            "pending external edits must reconcile without another watcher event"
+        );
     }
 }

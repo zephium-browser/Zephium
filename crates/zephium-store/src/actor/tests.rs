@@ -1,6 +1,8 @@
 use super::*;
 mod activity_writes;
 mod chats;
+mod composers;
+mod startup_recovery;
 mod zoom;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
@@ -68,6 +70,48 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         }),
         shutdown_clean: AtomicBool::new(false),
     }
+}
+
+#[test]
+fn non_session_history_admission_keeps_the_eight_kib_queue_bound() {
+    let (send, receive) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(send);
+    let profile = ProfileId::from(1);
+    let prefix = "https://example.test/";
+    let at_limit = format!("{prefix}{}", "x".repeat(hub::MAX_URL_BYTES - prefix.len()));
+    let over_limit = format!("{at_limit}x");
+    assert_eq!(at_limit.len(), 8192);
+    assert!(navigation::is_allowed_str(&over_limit));
+    assert!(over_limit.len() < navigation::MAX_URL_BYTES);
+
+    let expanded = format!("{prefix}{}", "é".repeat(2000));
+    assert!(expanded.len() < hub::MAX_URL_BYTES);
+    assert!(url::Url::parse(&expanded).unwrap().as_str().len() > hub::MAX_URL_BYTES);
+    assert!(navigation::is_allowed_str(&expanded));
+    store.record_visit(profile, expanded.clone(), "expanded visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(!store.record_search(profile, "query".into(), expanded.clone()));
+    assert!(!store.amend_visit_title(profile, expanded, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, over_limit.clone(), "oversized visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(receive.try_recv().is_err());
+    assert!(!store.record_search(profile, "query".into(), over_limit.clone()));
+    assert!(!store.amend_visit_title(profile, over_limit, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, at_limit.clone(), "bounded visit".into());
+    assert_eq!(store.pending_visits.lock().unwrap().len(), 1);
+    assert!(matches!(receive.try_recv(), Ok(Cmd::VisitWake)));
+    assert!(store.record_search(profile, "query".into(), at_limit.clone()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::RecordSearch(owner, _, url)) if owner == profile && url == at_limit)
+    );
+    assert!(store.amend_visit_title(profile, at_limit.clone(), "title".into()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::AmendVisitTitle(owner, url, _)) if owner == profile && url == at_limit)
+    );
 }
 
 #[cfg(feature = "work-execution")]
@@ -3309,9 +3353,20 @@ fn windows_style_local_deletion_keeps_authorization_until_restart_confirms_absen
     );
     drop(hub);
 
-    // A new process generation occurs after filesystem recovery. Only
-    // this observation is allowed to retire the Windows tombstone.
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    // Filesystem absence alone cannot prove external credential/cache erasure.
+    // Restart exposes the exact obligation for the composed cleanup owner.
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let pending = hub.pending_profile_deletions().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].native_erasure_verified);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    // The caller reaches finalization only after external release succeeded.
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()
@@ -3401,7 +3456,15 @@ fn restart_reopens_local_cleanup_if_a_completed_artifact_is_observed() {
         );
     }
 
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    assert_eq!(hub.pending_profile_deletions().unwrap().len(), 1);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()

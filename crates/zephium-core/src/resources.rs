@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 pub const MAX_DOCUMENT_NODES: usize = 4096;
 pub const MAX_RESOURCES: usize = 10_000;
+const MAX_TASK_CONTEXT_URL_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -98,7 +99,11 @@ pub struct TaskContext {
 
 impl TaskContext {
     pub fn validate(&self) -> bool {
-        crate::navigation::is_allowed_str(&self.url)
+        self.url.len() <= MAX_TASK_CONTEXT_URL_BYTES
+            && url::Url::parse(&self.url).is_ok_and(|target| {
+                target.as_str().len() <= MAX_TASK_CONTEXT_URL_BYTES
+                    && crate::navigation::is_allowed(&target)
+            })
             && self.title.len() <= 1024
             && !self.title.contains('\0')
     }
@@ -1148,5 +1153,33 @@ impl ResourceCall {
 impl std::fmt::Debug for ResourceCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ResourceCall (content redacted)")
+    }
+}
+
+#[cfg(test)]
+mod task_context_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn task_context_keeps_its_eight_kib_raw_and_serialized_url_budget() {
+        let prefix = "https://example.test/";
+        let at_bound = format!(
+            "{prefix}{}",
+            "x".repeat(MAX_TASK_CONTEXT_URL_BYTES - prefix.len())
+        );
+        let context = |url| TaskContext {
+            url,
+            title: "Source page".into(),
+        };
+        assert!(context(at_bound.clone()).validate());
+        assert!(!context(format!("{at_bound}x")).validate());
+        assert!(!context(format!("{at_bound}\n")).validate());
+        let expanded = format!(
+            "{prefix}{}",
+            "é".repeat((MAX_TASK_CONTEXT_URL_BYTES - prefix.len()) / 2)
+        );
+        assert!(expanded.len() <= MAX_TASK_CONTEXT_URL_BYTES);
+        assert!(crate::navigation::is_allowed_str(&expanded));
+        assert!(!context(expanded).validate());
     }
 }

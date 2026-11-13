@@ -413,6 +413,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_sidebar_button_is_never_a_local_draft_action() {
+        let (observation, frame) = observed(
+            r#"{"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"button","n":"送信する","ak":1,"o":9,"fc":true,"b":{"x":10,"y":10,"w":100,"h":30}}"#,
+        );
+        let planned = plan(
+            &observation,
+            &frame,
+            Some(reference(&observation, 1)),
+            &step(Verb::Click, None),
+        )
+        .unwrap();
+        assert_eq!(
+            planned.resolved.effect,
+            StepEffect::Commit(WorkConfirmCategoryV1::Save)
+        );
+        assert_eq!(planned.proposal.effect(), Consequence::Save.class());
+    }
+
+    #[test]
     fn protected_fields_and_other_sites_are_refused() {
         let (observation, frame) = observed(PAGE);
         assert_eq!(

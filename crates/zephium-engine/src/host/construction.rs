@@ -40,6 +40,22 @@ use objc2::rc::Retained;
 #[cfg(target_os = "windows")]
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
+fn admit_native_url_refusal(
+    target: wry::NativeUrlTarget,
+    clocks: &[Cell<Option<std::time::Instant>>; 2],
+    now: std::time::Instant,
+) -> bool {
+    let last = &clocks[usize::from(target == wry::NativeUrlTarget::Subframe)];
+    if last
+        .get()
+        .is_some_and(|at| now.saturating_duration_since(at) < std::time::Duration::from_secs(1))
+    {
+        return false;
+    }
+    last.set(Some(now));
+    true
+}
+
 pub(super) enum NativeViewPurpose {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     NativeTab(wry::NewWindowOpener),
@@ -1301,6 +1317,46 @@ impl EngineHost {
                 }
             });
 
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let native_url_refusal_clock = Rc::new([Cell::new(None), Cell::new(None)]);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let refused_permit = event_permit.clone();
+            let refused_id = id.clone();
+            let refused_sink = self.sink.clone();
+            let last_refusal = native_url_refusal_clock.clone();
+            builder = builder.with_native_url_refused_handler(move |target| {
+                if !admit_native_url_refusal(target, &last_refusal, std::time::Instant::now()) {
+                    return;
+                }
+                match target {
+                    wry::NativeUrlTarget::MainFrame => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::NativeNavigationRefused {
+                            id: refused_id.get(),
+                            embedded: false,
+                        },
+                    ),
+                    wry::NativeUrlTarget::NewWindow => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::PageOpenBlocked {
+                            id: refused_id.get(),
+                            url: None,
+                        },
+                    ),
+                    // A failed child frame must not replace the whole tab's
+                    // failure state or be presented as a blocked popup.
+                    wry::NativeUrlTarget::Subframe => refused_permit.emit(
+                        &refused_sink,
+                        EngineEvent::NativeNavigationRefused {
+                            id: refused_id.get(),
+                            embedded: true,
+                        },
+                    ),
+                }
+            });
+        }
+
         // WebKit consults this in place of the plain handler above and says
         // which frame is loading, so focus shuts only top-level documents.
         #[cfg(target_os = "macos")]
@@ -2301,9 +2357,28 @@ impl EngineHost {
                 return None;
             }
             let frame_site_scope = site_scope.clone();
-            if let Err(error) = security_policy.judge_frame_navigations(move |uri| {
-                frame_site_scope.blocks_navigation(uri, true).is_some()
-            }) {
+            let frame_refused_permit = event_permit.clone();
+            let frame_refused_id = id.clone();
+            let frame_refused_sink = self.sink.clone();
+            let frame_refused_clock = native_url_refusal_clock.clone();
+            if let Err(error) = security_policy.judge_frame_navigations(
+                move |uri| frame_site_scope.blocks_navigation(uri, true).is_some(),
+                move || {
+                    if admit_native_url_refusal(
+                        wry::NativeUrlTarget::Subframe,
+                        &frame_refused_clock,
+                        std::time::Instant::now(),
+                    ) {
+                        frame_refused_permit.emit(
+                            &frame_refused_sink,
+                            EngineEvent::NativeNavigationRefused {
+                                id: frame_refused_id.get(),
+                                embedded: true,
+                            },
+                        );
+                    }
+                },
+            ) {
                 eprintln!("content blocker: frame navigation check failed: {error}");
                 if report_failure {
                     event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });

@@ -20,7 +20,8 @@
     oncite: (cite: PageAssistCiteV1) => Promise<boolean>;
   } = $props();
 
-  const tree = $derived(parse(text, arrivals));
+  const incoming = $derived(arrivals);
+  const tree = $derived(parse(text, incoming));
   const byNumber = $derived(new Map(cites.map((cite) => [cite.n, cite])));
 
   let root = $state<HTMLElement>();

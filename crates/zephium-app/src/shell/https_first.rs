@@ -44,6 +44,14 @@ impl Shell {
         Some(upgraded.to_string())
     }
 
+    /// Policy refusal revokes fallback authority without teaching the host
+    /// that HTTPS failed. Native identity-bearing cancellation still settles
+    /// the exact browser request; a policy callback has no such identity.
+    pub(super) fn cancel_https_first_attempt(&mut self, id: ItemId) {
+        self.https_first.pending.remove(&id);
+        self.https_first.fallen_back.remove(&id);
+    }
+
     /// The tab's load failed. When it was an https try, the page loads over
     /// http as asked, its host is not tried again, and the failure is not
     /// shown. When that http load can't be sent, the address it was for is

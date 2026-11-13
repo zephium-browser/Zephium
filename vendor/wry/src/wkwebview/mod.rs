@@ -35,7 +35,7 @@ use class::{
   wry_navigation_delegate::WryNavigationDelegate,
   wry_web_view::WryWebViewIvars,
   wry_web_view_delegate::{WryWebViewDelegate, IPC_MESSAGE_HANDLER_NAME},
-  wry_web_view_ui_delegate::WryWebViewUIDelegate,
+  wry_web_view_ui_delegate::{WryWebViewUIDelegate, WryWebViewUIDelegateOptions},
 };
 
 use dpi::{LogicalPosition, LogicalSize};
@@ -887,6 +887,8 @@ impl InnerWebView {
       let new_window_req_handler: Option<
         std::rc::Rc<dyn Fn(String, crate::NewWindowFeatures) -> crate::NewWindowResponse>,
       > = attributes.new_window_req_handler.map(std::rc::Rc::from);
+      #[cfg(target_os = "macos")]
+      let script_dialogs = std::rc::Rc::new(script_dialog::ScriptDialogs::default());
       let navigation_policy_delegate = WryNavigationDelegate::new(
         webview.clone(),
         pending_scripts.clone(),
@@ -909,8 +911,11 @@ impl InnerWebView {
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,
         attributes.navigation_failure_handler,
+        attributes.native_url_refused_handler.clone(),
         attributes.navigation_presentation_guard,
         pl_attrs.on_web_content_process_terminate_handler,
+        #[cfg(target_os = "macos")]
+        script_dialogs.clone(),
         mtm,
       );
 
@@ -919,18 +924,24 @@ impl InnerWebView {
 
       let ui_delegate: Retained<WryWebViewUIDelegate> = WryWebViewUIDelegate::new(
         mtm,
-        #[cfg(target_os = "macos")]
-        attributes.page_close_handler,
-        new_window_req_handler,
-        attributes.permission_handler,
-        #[cfg(target_os = "macos")]
-        pl_attrs.permission_request_handler,
-        #[cfg(target_os = "macos")]
-        pl_attrs.file_upload_handler,
-        #[cfg(target_os = "macos")]
-        pl_attrs.autofill_button_handler,
-        #[cfg(target_os = "macos")]
-        pl_attrs.media_return_handler,
+        WryWebViewUIDelegateOptions {
+          #[cfg(target_os = "macos")]
+          page_close_handler: attributes.page_close_handler,
+          new_window_req_handler,
+          permission_handler: attributes.permission_handler,
+          #[cfg(target_os = "macos")]
+          permission_request_handler: pl_attrs.permission_request_handler,
+          #[cfg(target_os = "macos")]
+          file_upload_handler: pl_attrs.file_upload_handler,
+          #[cfg(target_os = "macos")]
+          autofill_button_handler: pl_attrs.autofill_button_handler,
+          #[cfg(target_os = "macos")]
+          media_return_handler: pl_attrs.media_return_handler,
+          #[cfg(target_os = "macos")]
+          script_dialogs,
+          #[cfg(target_os = "macos")]
+          native_url_refused_handler: attributes.native_url_refused_handler,
+        },
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));

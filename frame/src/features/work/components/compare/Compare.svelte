@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isComposing } from "$shared/lib/keyboard";
   import SubjectPicture from "../cards/SubjectPicture.svelte";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import HostGlyph from "../cards/HostGlyph.svelte";
@@ -102,6 +103,7 @@
                     aria-label={`${row.label}, ${model.columns[cell.subject]?.name ?? ""}`}
                     maxlength="512"
                     onkeydown={(event) => {
+                      if (isComposing(event)) return;
                       if (event.key === "Enter") {
                         event.preventDefault();
                         commit(cell);

@@ -30,6 +30,10 @@
   "page_request_app_detail_page": "This page wants to open a link in another app.",
   "page_request_app_always": "Always allow {site} to open these links",
   "page_request_popup_title": "Pop-up blocked",
+  "page_request_navigation_refused_title": "Navigation blocked",
+  "page_request_embedded_refused_title": "Embedded content blocked",
+  "page_request_embedded_refused_detail": "An embedded address is too long or could not be read. The main page stays open.",
+  "page_request_navigation_refused_detail": "This address is too long or could not be read. The page was not opened.",
   "page_request_open": "Open",
   "page_request_cancel": "Cancel",
   "page_request_dismiss": "OK",
@@ -761,6 +765,7 @@
   "assist_fault_missing_key": "The chosen model has no key. Add one, or pick another model.",
   "assist_fault_rate_limited": "Zephium AI needs a short breather.",
   "assist_fault_provider_down": "The model’s provider is having trouble right now.",
+  "assist_fault_timed_out": "The model stopped responding or took too long. Try again.",
   "assist_fault_unreachable": "Couldn’t reach the model. Check your connection.",
   "assist_fault_too_large": "This page is too large to read in one go. Select the part you care about and ask about the selection.",
   "assist_fault_unreadable": "Zephium couldn’t read this page. It may still be loading, or it may not allow readers.",
@@ -3986,5 +3991,11 @@
   "search_shortcut_invalid": "Use a unique keyword and an HTTPS URL containing {query} once.",
   "search_shortcut_enabled": "Enable {name}",
   "tab_switcher_title": "Switch tabs",
-  "tab_switcher_all": "All tabs ({count})"
+  "tab_switcher_all": "All tabs ({count})",
+  "blocker_hiding_title": "Hiding elements",
+  "blocker_hiding_saving": "Saving…",
+  "blocker_hiding_hidden": "{label} hidden",
+  "blocker_hiding_pick": "Click anything on the page",
+  "blocker_hiding_undo": "Undo",
+  "blocker_hiding_done": "Done"
 }

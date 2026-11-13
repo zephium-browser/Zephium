@@ -35,6 +35,8 @@ struct PageState {
     cleared: Vec<String>,
     reads: u64,
     picks: Vec<Pick>,
+    cancelled_picks: Vec<String>,
+    cleared_picks: Vec<(String, u64)>,
     outline: Option<Outline>,
     glows: Vec<(String, Glow)>,
 }
@@ -145,8 +147,12 @@ impl PagePort for FakePage {
         let found = self.lock().picks.iter().find(|p| p.pick == pick).cloned();
         Box::pin(async move { found })
     }
-    fn pick_clear(&self, _tab: &str, _pick: u64) {}
-    fn pick_cancel(&self, _tab: &str) {}
+    fn pick_clear(&self, tab: &str, pick: u64) {
+        self.lock().cleared_picks.push((tab.to_owned(), pick));
+    }
+    fn pick_cancel(&self, tab: &str) {
+        self.lock().cancelled_picks.push(tab.to_owned());
+    }
     fn glow(&self, tab: &str, glow: Glow) {
         self.lock().glows.push((tab.to_owned(), glow));
     }
@@ -949,6 +955,82 @@ async fn only_links_that_were_read_or_written_open() {
 }
 
 #[tokio::test]
+async fn outbound_links_wait_for_approval_after_other_or_unknown_site_reads() {
+    for name in ["go_to", "open_tabs"] {
+        for unknown in [false, true] {
+            for approve in [false, true] {
+                let navigation = tool(
+                    name,
+                    if name == "go_to" {
+                        json!({"target": if unknown { "https://emudhra.com/exit" } else { "a1" }, "new_tab": true})
+                    } else {
+                        json!({"targets": [if unknown { "https://emudhra.com/exit" } else { "a1" }]})
+                    },
+                );
+                let turns = if unknown {
+                    vec![say("Earlier reply."), navigation, say("Finished.")]
+                } else {
+                    vec![
+                        tool("list_tabs", json!({})),
+                        tool("read_page", json!({"tab": "t2"})),
+                        navigation,
+                        say("Finished."),
+                    ]
+                };
+                let h = harness(turns);
+                if unknown {
+                    h.ask("Earlier", true).await.unwrap();
+                    h.settle().await;
+                    let conversation = h.conversation().await;
+                    for data in h
+                        .service
+                        .state()
+                        .live
+                        .get_mut(&conversation)
+                        .unwrap()
+                        .replies
+                        .values_mut()
+                    {
+                        data.unknown_read_sites = true;
+                        data.reads.clear();
+                    }
+                }
+                let reply = h.ask("Summarize this", !unknown).await.unwrap();
+                h.waiting().await;
+                assert!(h.tabs.0.lock().unwrap().is_empty());
+                let blocks = h.blocks().await;
+                let (block, label) = blocks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, block)| match block {
+                        PageAssistBlockV1::Steps { steps } => Some((index, &steps[0].label)),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(label.contains("https://emudhra.com/exit"), "{label}");
+                let conversation = h.conversation().await;
+                assert!(h.service.decide(
+                    &conversation,
+                    reply,
+                    u16::try_from(block).unwrap(),
+                    if approve {
+                        PageAssistDecisionV1::Approve
+                    } else {
+                        PageAssistDecisionV1::Decline
+                    }
+                ));
+                h.settle().await;
+                assert_eq!(
+                    h.tabs.0.lock().unwrap().len(),
+                    usize::from(approve),
+                    "{name} unknown={unknown}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_later_message_can_open_items_shown_earlier() {
     let h = harness(vec![
         tool(
@@ -1595,6 +1677,43 @@ async fn stop_drops_the_call_and_cancels_the_reply() {
 }
 
 #[tokio::test]
+async fn closing_the_panel_drops_its_running_call() {
+    let h = harness(vec![Turn {
+        deltas: vec!["Thinking".into()],
+        hang: true,
+        ..Turn::default()
+    }]);
+    h.ask("Long one", true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    h.service.close(SPACE);
+    h.settle().await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Cancelled);
+    h.ask("Again", false).await.unwrap();
+    h.settle().await;
+}
+
+#[tokio::test]
+async fn closing_a_space_preserves_other_spaces_element_picks() {
+    let h = harness(Vec::new());
+    h.page.lock().facts.get_mut("tab-2").unwrap().space = Some("other-space".into());
+    for (tab, pick) in [(TAB, 1), ("tab-2", 2)] {
+        h.service.state().picks.insert(
+            (tab.to_owned(), pick),
+            PickRecord {
+                epoch: 1,
+                label: "Pick".into(),
+            },
+        );
+    }
+    h.service.close(SPACE);
+    assert!(h.service.state().picks.contains_key(&("tab-2".into(), 2)));
+    assert!(!h.service.state().picks.contains_key(&(TAB.into(), 1)));
+    assert_eq!(h.page.lock().cancelled_picks, [TAB]);
+    assert_eq!(h.page.lock().cleared_picks, [(TAB.into(), 1)]);
+}
+
+#[tokio::test]
 async fn model_faults_end_the_reply_with_their_reason() {
     let h = harness(vec![Turn {
         error: Some(WorkModelError::RateLimited {
@@ -1613,6 +1732,89 @@ async fn model_faults_end_the_reply_with_their_reason() {
             fault: WorkModelFaultV1::RateLimited,
             retry_after_ms: Some(3_000)
         })
+    );
+}
+
+async fn model_call_with_timeouts(
+    turn: Turn,
+    idle: Duration,
+    overall: Duration,
+) -> Option<PageAssistFaultV1> {
+    let h = harness(vec![say("Warmup"), turn]);
+    h.ask("Warmup", false).await.unwrap();
+    h.settle().await;
+    let request = h.requests()[0].clone();
+    h.client.dropped.store(false, Ordering::Release);
+    let conversation = h.conversation().await;
+    let reply = agent::Reply {
+        service: h.service.clone(),
+        conversation,
+        space: SPACE.into(),
+        profile: profile(),
+        reply: 2,
+        words: String::new(),
+        suggestion: None,
+        attachments: Vec::new(),
+        cancel: Arc::new(Cancel::default()),
+        leased: Arc::new(AtomicBool::new(false)),
+        took_over: Arc::new(AtomicBool::new(false)),
+        glowing: Mutex::new(Vec::new()),
+    };
+    let model = ResolvedModel {
+        entry: entry(true),
+        effort: None,
+        client: h.client.clone(),
+    };
+    let fault = reply.call_for_test(&model, request, idle, overall).await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    fault
+}
+
+#[tokio::test]
+async fn model_stream_progress_resets_the_idle_timeout() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 30],
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_silent_model_times_out_without_claiming_provider_failure() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                hang: true,
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
+    );
+}
+
+#[tokio::test]
+async fn continuous_model_progress_still_has_an_overall_cap() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 100],
+                ..Turn::default()
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(40)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
     );
 }
 
