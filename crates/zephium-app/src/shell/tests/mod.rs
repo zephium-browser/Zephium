@@ -318,6 +318,7 @@ pub(crate) struct FakeEngine {
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    chrome_raises: Mutex<Vec<ChromeRaise>>,
     proxies: Mutex<Vec<Option<String>>>,
     previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
@@ -355,6 +356,7 @@ pub(crate) struct FakeEngine {
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
     reject_discard_dispatch: std::sync::atomic::AtomicBool,
     reject_native_dispatch: std::sync::atomic::AtomicBool,
+    unsupported_chrome_raise: std::sync::atomic::AtomicBool,
     native_favicons: std::sync::atomic::AtomicBool,
     cannot_mute: std::sync::atomic::AtomicBool,
     unsupported_presentation: std::sync::atomic::AtomicBool,
@@ -380,6 +382,15 @@ pub(crate) struct FakeEngine {
     >,
     pub(crate) extension_data_changes:
         Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChromeRaise {
+    window: WindowId,
+    raised: bool,
+    card: Rect,
+    slide: bool,
+    dispatch: NativeDispatch,
 }
 
 impl FakeEngine {
@@ -865,11 +876,26 @@ impl Engine for FakeEngine {
         &self,
         window: WindowId,
         raised: bool,
-        _card: Rect,
-        _slide: bool,
+        card: Rect,
+        slide: bool,
     ) -> NativeDispatch {
         self.log(format!("raise@{window} {raised}"));
-        self.native_admission()
+        let dispatch = if self
+            .unsupported_chrome_raise
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NativeDispatch::Unsupported
+        } else {
+            self.native_admission()
+        };
+        self.chrome_raises.lock().unwrap().push(ChromeRaise {
+            window,
+            raised,
+            card,
+            slide,
+            dispatch,
+        });
+        dispatch
     }
     fn hint_stage_motion(
         &self,
@@ -2622,6 +2648,7 @@ mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod sidebar_card;
 mod site_permissions;
 mod spaces;
 mod tabs;

@@ -6,6 +6,17 @@ use url::Url;
 
 pub const MAX_SHORTCUTS: usize = 64;
 pub const MAX_SHORTCUT_SETTINGS_BYTES: usize = 32 * 1024;
+/// Defaults that were once offered and no longer are.
+const RETIRED: &[&str] = &[
+    "rust-docs",
+    "npm",
+    "pypi",
+    "gitlab",
+    "crates",
+    "imdb",
+    "goodreads",
+    "openstreetmap",
+];
 
 const PREFIX_STOPLIST: &[&str] = &[
     "a",
@@ -84,6 +95,7 @@ pub struct SearchShortcut {
     pub search_url: String,
     pub home_url: String,
     pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestions: Option<SearchEngine>,
     pub enabled: bool,
 }
@@ -124,10 +136,13 @@ impl ShortcutRegistry {
         if value.len() > MAX_SHORTCUT_SETTINGS_BYTES {
             return None;
         }
-        let entries: Vec<SearchShortcut> = serde_json::from_str(value).ok()?;
+        let mut entries: Vec<SearchShortcut> = serde_json::from_str(value).ok()?;
         if entries.len() > MAX_SHORTCUTS {
             return None;
         }
+        // A list saved before a default was taken out still names it; it is
+        // left behind rather than the whole list refused.
+        entries.retain(|entry| !RETIRED.contains(&entry.id.as_str()));
         let defaults = Self::default();
         let mut ids = std::collections::HashSet::new();
         let mut keywords = std::collections::HashSet::new();
@@ -164,6 +179,13 @@ impl ShortcutRegistry {
             }
         }
         Some(Self(entries))
+    }
+
+    /// Serialize only settings that can be read back within the storage limit.
+    pub fn to_setting(&self) -> Option<String> {
+        let value = serde_json::to_string(self.entries()).ok()?;
+        Self::from_setting(&value)?;
+        Some(value)
     }
 
     pub fn get(&self, id: &str) -> Option<&SearchShortcut> {
@@ -338,7 +360,7 @@ mod tests {
     #[test]
     fn defaults_and_settings_are_bounded_and_round_trip() {
         let registry = ShortcutRegistry::default();
-        assert_eq!(registry.entries().len(), 36);
+        assert_eq!(registry.entries().len(), 28);
         let stored = serde_json::to_string(registry.entries()).unwrap();
         assert!(stored.len() < MAX_SHORTCUT_SETTINGS_BYTES);
         assert_eq!(
@@ -356,8 +378,54 @@ mod tests {
         assert_eq!(loaded.parse("ex cats").shortcut, Some("custom:example"));
         assert_eq!(
             ShortcutRegistry::from_setting("").unwrap().entries().len(),
-            36
+            28
         );
+    }
+
+    #[test]
+    fn serialized_settings_omit_absent_suggestions_and_refuse_unreadable_registries() {
+        let registry = ShortcutRegistry(vec![custom()]);
+        let saved = registry.to_setting().unwrap();
+        assert!(!saved.contains("suggestions"));
+        let explicit_null =
+            saved.replace("\"enabled\":true", "\"suggestions\":null,\"enabled\":true");
+        for value in [&saved, &explicit_null] {
+            assert_eq!(
+                ShortcutRegistry::from_setting(value).unwrap().entries(),
+                registry.entries()
+            );
+        }
+        let mut invalid = custom();
+        invalid.home_url = "https://other.example/".into();
+        assert!(ShortcutRegistry(vec![invalid]).to_setting().is_none());
+        assert!(ShortcutRegistry(vec![custom(); MAX_SHORTCUTS])
+            .to_setting()
+            .is_none());
+        let mut oversized = custom();
+        oversized.search_url = "x".repeat(MAX_SHORTCUT_SETTINGS_BYTES);
+        assert!(ShortcutRegistry(vec![oversized]).to_setting().is_none());
+    }
+
+    #[test]
+    fn a_list_saved_with_a_retired_default_loads_without_it() {
+        let mut entries = ShortcutRegistry::default().0;
+        entries[1].enabled = false;
+        entries.push(SearchShortcut {
+            id: "npm".into(),
+            name: "npm".into(),
+            keywords: vec!["npm".into()],
+            search_url: "https://www.npmjs.com/search?q={query}".into(),
+            home_url: "https://www.npmjs.com/".into(),
+            domain: "www.npmjs.com".into(),
+            suggestions: None,
+            enabled: true,
+        });
+        let loaded =
+            ShortcutRegistry::from_setting(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(loaded.entries().len(), 28);
+        assert!(loaded.entries().iter().all(|entry| entry.id != "npm"));
+        assert!(!loaded.entries()[1].enabled);
+        assert_eq!(loaded.parse("npm cats").shortcut, None);
     }
 
     #[test]

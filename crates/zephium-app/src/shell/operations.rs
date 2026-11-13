@@ -915,6 +915,16 @@ impl Shell {
             };
             return self.operation_set_work_screenshots(change);
         }
+        let value = if key == "search.shortcuts" && !value.is_empty() {
+            let Some(filtered) = zephium_core::search::ShortcutRegistry::from_setting(&value)
+                .and_then(|registry| registry.to_setting())
+            else {
+                return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            };
+            filtered
+        } else {
+            value
+        };
         if !self.store.set_app_setting(key.clone(), value.clone()) {
             return operation_result(
                 OperationOutcome::Rejected,
