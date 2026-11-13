@@ -10,6 +10,8 @@ import { adoptMode } from "$session/sidebar-mode.svelte";
 import { retryImage } from "$session/newtab-background.svelte";
 import Shell from "../Shell.svelte";
 
+vi.mock("$shared/platform", () => ({ IS_WINDOWS: true, IS_MAC: false }));
+const caption = vi.hoisted(() => ({ shown: false, replay: vi.fn() }));
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<Record<string, unknown>>()),
@@ -18,6 +20,14 @@ vi.mock("$domain/resources", async (original) => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    captionReplay: async () => {
+      caption.replay();
+      window.dispatchEvent(
+        new CustomEvent("zephium:caption", {
+          detail: { shown: caption.shown, height: 32, duration: 0 },
+        }),
+      );
+    },
     pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
     settingGet: async () => null,
@@ -28,12 +38,52 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 afterEach(() => {
+  caption.shown = false;
+  caption.replay.mockClear();
   adoptMode("default");
   surface.dispose();
   tabs.dispose();
   preferences.dispose();
   retryImage();
   delete document.documentElement.dataset.material;
+});
+
+test("New Tab replays a caption revealed before mount and follows later changes", async () => {
+  await preferences.init();
+  await surface.init();
+  await tabs.init();
+  const fresh = tabFixture({ id: "tab", url: null, title: "", projection_revision: revision(20) });
+  const items = {
+    profile: { id: "00000000000000000000000901", name: "Personal", kind: "default" as const },
+    spaces: [spaceFixture("space", "Home")],
+    active_space_id: "space",
+    nodes: [],
+    split_group: null,
+    projection_revision: revision(20),
+    tabs: [{ ...fresh, url: "https://example.com" }],
+    active: fresh.id,
+  };
+  emitNativeEvent("itemsChanged", items);
+  const screen = await render(Shell);
+  expect(screen.container.querySelector(".newtab")).toBeNull();
+  caption.shown = true;
+  window.dispatchEvent(
+    new CustomEvent("zephium:caption", { detail: { shown: true, height: 32, duration: 220 } }),
+  );
+  emitNativeEvent("itemsChanged", {
+    ...items,
+    projection_revision: revision(21),
+    tabs: [{ ...fresh, projection_revision: revision(21) }],
+  });
+  const control = () => screen.container.querySelector<HTMLElement>(".newtab .control")!;
+  await expect.poll(() => control()?.style.translate).toMatch(/^0(?:px)? [1-9]\d*(?:\.\d+)?px$/u);
+  expect(caption.replay).toHaveBeenCalledTimes(1);
+  expect(control().style.transitionDuration).toBe("0ms");
+  window.dispatchEvent(
+    new CustomEvent("zephium:caption", { detail: { shown: false, height: 32, duration: 220 } }),
+  );
+  await expect.poll(() => control().style.translate).toMatch(/^0(?:px)?(?: 0(?:px)?)?$/u);
+  expect(control().style.transitionDuration).toBe("220ms");
 });
 
 test("custom images remove sky light, and failure restores it; the hidden card wears no picture", async () => {

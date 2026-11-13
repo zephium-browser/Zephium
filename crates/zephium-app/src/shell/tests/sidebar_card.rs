@@ -244,3 +244,39 @@ fn peek_intent_belongs_to_its_window_and_shutdown_retires_every_window() {
     });
     assert!(engine.chrome_raises.lock().unwrap().is_empty());
 }
+
+#[test]
+fn a_hidden_card_is_resized_from_a_guide_at_its_own_edge() {
+    let (mut shell, engine, _) = setup();
+    shell.handle(Command::Bootstrap);
+    raise_hidden_card(&mut shell);
+    let window = shell.windows.focused().unwrap().id;
+    let width = shell.windows.focused().unwrap().metrics.sidebar_width;
+
+    // The guide stands where the card's edge will land, over the page; the
+    // card itself keeps its width until release.
+    shell.handle(Command::SidebarResizeGuide(Some(300.0)));
+    let card = Rect::new(8.0, 8.0, 316.0, 784.0);
+    let guide = Rect::new(card.x + card.width - 2.0, card.y, 2.0, card.height);
+    assert_eq!(
+        engine
+            .calls()
+            .into_iter()
+            .rfind(|call| call.starts_with("resize-guide@")),
+        Some(format!("resize-guide@{window} {:?}", Some(guide)))
+    );
+    assert_eq!(
+        shell.windows.focused().unwrap().metrics.sidebar_width,
+        width
+    );
+
+    // Shown, the column is guided from its own edge as before.
+    shell.handle(Command::SetSidebarHidden(false));
+    shell.handle(Command::SidebarResizeGuide(Some(300.0)));
+    let padding = shell.windows.focused().unwrap().metrics.padding;
+    assert!(engine
+        .calls()
+        .into_iter()
+        .rfind(|call| call.starts_with("resize-guide@"))
+        .is_some_and(|call| call.contains(&format!("x: {:?}", padding + 300.0 - 2.0))));
+}

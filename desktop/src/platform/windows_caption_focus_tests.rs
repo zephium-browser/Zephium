@@ -112,6 +112,7 @@ fn owner_captures_before_default_and_restores_only_a_surviving_child() {
                 });
             });
             let state = Box::into_raw(Box::new(State {
+                window: None,
                 owner,
                 strip: HWND::default(),
                 edge: HWND::default(),
@@ -143,6 +144,10 @@ fn owner_captures_before_default_and_restores_only_a_surviving_child() {
                 geometry: None,
                 render_failed: false,
                 near_top: false,
+                on_caption: false,
+                announced: false,
+                pacer: None,
+                step_queued: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
             assert!(SetWindowSubclass(owner, Some(default_activation), ID + 10, 0).as_bool());
             assert!(SetWindowSubclass(owner, Some(owner_proc), ID, state as usize).as_bool());

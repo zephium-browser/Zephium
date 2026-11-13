@@ -82,3 +82,14 @@ describe("where a query goes", () => {
     expect(withShortcut("cats !nothing", "yt", defaults)).toBe("yt cats !nothing");
   });
 });
+
+describe("shipped marks", () => {
+  it("ships a mark for every default shortcut and registers it", () => {
+    const marks = new URL("../../ui/EngineMark/", import.meta.url);
+    const component = readFileSync(new URL("EngineMark.svelte", marks), "utf8");
+    for (const entry of defaults) {
+      expect(readFileSync(new URL(`marks/${entry.id}.png`, marks)).length).toBeGreaterThan(0);
+      expect(component).toContain(`./marks/${entry.id}.png?no-inline`);
+    }
+  });
+});

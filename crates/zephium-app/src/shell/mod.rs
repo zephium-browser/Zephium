@@ -1089,6 +1089,19 @@ impl Shell {
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {
                     let zone = width.filter(|width| width.is_finite()).map(|width| {
+                        // A hidden sidebar is resized from the card's edge.
+                        if win.metrics.sidebar_hidden {
+                            let mut metrics = win.metrics;
+                            metrics.sidebar_width =
+                                zephium_core::layout::clamp_sidebar_width(width);
+                            let card = layout::hidden_card(win.size, metrics);
+                            return Rect::new(
+                                (card.x + card.width - 2.0).max(card.x),
+                                card.y,
+                                2.0,
+                                card.height,
+                            );
+                        }
                         let padding = win.metrics.padding;
                         let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
                             .min((win.size.width - padding - 2.0).max(padding));

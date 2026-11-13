@@ -71,8 +71,9 @@
   /** The site the query is headed for: one it names, else the engine. */
   let shown = $derived(named ?? (awake || open ? fallback : null));
 
-  // A site's mark is shown only once the profile has it from a visit: the
-  // menu never reaches a site to fetch one.
+  // A default shortcut shows the mark shipped for it; a custom one shows its
+  // site's only once the profile has it from a visit. The menu never reaches
+  // a site to fetch one.
   const markOf = (entry: SearchShortcut | null) =>
     entry ? favicons.forPage(entry.home_url) : null;
 
@@ -94,6 +95,7 @@
             id: `shortcut:${entry.id}`,
             label: entry.name,
             icon: Globe02Icon,
+            image: engineMarkUrl(entry.id),
             site: { image: mark?.image ?? null, tone: mark?.tone },
             hint: shortcutKeyword(entry),
           };

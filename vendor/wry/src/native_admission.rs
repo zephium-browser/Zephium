@@ -9,7 +9,7 @@ use std::{
   sync::{Arc, Mutex, TryLockError},
 };
 
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows", test))]
 use std::collections::VecDeque;
 
 /// Custom-protocol handlers are privileged and asynchronous. A modest ceiling
@@ -21,7 +21,7 @@ pub(crate) const CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT: usize = 32;
 /// module import stays failed until its document reloads, and a lazy view's
 /// static graph routinely arrives as one burst larger than the ceiling. The
 /// wait list is bounded as well, so only a flood beyond both is refused.
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows", test))]
 pub(crate) const CUSTOM_PROTOCOL_WAITING_LIMIT: usize = 512;
 pub(crate) const CUSTOM_PROTOCOL_OVERFLOW_STATUS: http::StatusCode =
   http::StatusCode::SERVICE_UNAVAILABLE;
@@ -132,14 +132,14 @@ impl InFlightAdmission {
 /// Requests waiting for an in-flight slot, in arrival order within each pool.
 /// A pool is one admission scope (one scheme of one webview); a full pool never
 /// holds back another, and within a pool nothing overtakes an earlier arrival.
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows", test))]
 #[derive(Debug)]
 pub(crate) struct WaitList<K, T> {
   entries: VecDeque<(K, T)>,
   limit: usize,
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows", test))]
 impl<K: PartialEq, T> WaitList<K, T> {
   pub(crate) const fn new(limit: usize) -> Self {
     Self {
@@ -189,8 +189,26 @@ impl<K: PartialEq, T> WaitList<K, T> {
     None
   }
 
+  #[cfg(any(target_os = "macos", target_os = "ios", test))]
   pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K, &T) -> bool) {
     self.entries.retain(|(pool, item)| keep(pool, item));
+  }
+
+  /// Takes out every waiter whose pool matches, in arrival order, so the
+  /// caller can complete them after releasing its borrow of the list.
+  #[cfg(any(target_os = "windows", test))]
+  pub(crate) fn take_where(&mut self, mut matches: impl FnMut(&K) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
+    let mut kept = VecDeque::with_capacity(self.entries.len());
+    for (pool, item) in self.entries.drain(..) {
+      if matches(&pool) {
+        taken.push(item);
+      } else {
+        kept.push_back((pool, item));
+      }
+    }
+    self.entries = kept;
+    taken
   }
 }
 
@@ -322,6 +340,20 @@ mod tests {
     let admission = InFlightAdmission::new(4);
     let (first, _permit) = waiting.take_ready(|_| admission.try_acquire()).unwrap();
     assert_eq!(first, 2);
+  }
+
+  #[test]
+  fn a_closing_webview_takes_out_only_its_own_waiters_in_order() {
+    let mut waiting = WaitList::new(8);
+    waiting.push(("one", "assets"), 1).unwrap();
+    waiting.push(("two", "assets"), 2).unwrap();
+    waiting.push(("one", "ipc"), 3).unwrap();
+    waiting.push(("two", "ipc"), 4).unwrap();
+    assert_eq!(waiting.take_where(|(webview, _)| *webview == "one"), [1, 3]);
+    assert!(!waiting.has_waiting(&("one", "assets")));
+    let admission = InFlightAdmission::new(4);
+    let (next, _permit) = waiting.take_ready(|_| admission.try_acquire()).unwrap();
+    assert_eq!(next, 2);
   }
 
   #[test]

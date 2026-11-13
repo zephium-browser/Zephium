@@ -220,11 +220,15 @@
       };
     };
     window.addEventListener("zephium:caption", moved);
+    void commands.captionReplay().catch(() => {});
     return () => window.removeEventListener("zephium:caption", moved);
   });
-  const CAPTION_CLEARANCE = 6;
+  // The caption paints its buttons 3px inside its band: the controls stop
+  // just under them, not under the band, so they step down only as far as
+  // they have to.
+  const CAPTION_TUCK = 1;
   const stepDown = (box: Box) =>
-    caption.height > 0 ? Math.max(0, caption.height + CAPTION_CLEARANCE - box.y) : 0;
+    caption.height > 0 ? Math.max(0, caption.height - CAPTION_TUCK - box.y) : 0;
 
   // Day over a light page, night over a dark one.
   let scene = $derived(skyScene());
