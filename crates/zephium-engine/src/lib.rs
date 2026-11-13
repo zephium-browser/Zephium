@@ -47,6 +47,7 @@ mod platform;
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
     bridge_caption_keys, forget_window_caption_offset, set_window_caption_offset,
+    watch_middle_clicks,
 };
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod work_site_session;
