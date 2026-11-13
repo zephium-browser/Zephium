@@ -89,17 +89,17 @@ pub(crate) enum LifecycleFault {
     RemoveDirectoryParentSync = 1 << 13,
     PublishSameParentSync = 1 << 14,
     RemoveChildOpenIdentity = 1 << 15,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRootWritableCommitted = 1 << 16,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRootResealCommitted = 1 << 17,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRootResealSync = 1 << 18,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRenameRefused = 1 << 19,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRenameCommitted = 1 << 20,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PublishRootResealRefused = 1 << 21,
 }
 
