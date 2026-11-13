@@ -458,6 +458,7 @@ export const commands = {
 	runCommand: (id: string) => __TAURI_INVOKE<OperationAdmission>("run_command", { id }),
 	panelHide: () => __TAURI_INVOKE<void>("panel_hide"),
 	panelReady: () => __TAURI_INVOKE<{
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -472,6 +473,8 @@ export const commands = {
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
 } | null>("panel_ready"),
+	tabSwitcherOpen: () => __TAURI_INVOKE<boolean>("tab_switcher_open"),
+	tabSwitcherAction: (sessionId: string, intent: TabSwitcherAction) => __TAURI_INVOKE<boolean>("tab_switcher_action", { sessionId, intent }),
 	panelIntent: (intent: PanelIntent) => __TAURI_INVOKE<boolean>("panel_intent", { intent }),
 	/**
 	 *  The launcher's content reports what it shows; native sizes the window and
@@ -516,12 +519,14 @@ export const commands = {
 } | null>("launcher_set_double_tap", { mode }),
 	launcherOpenAccessibility: () => __TAURI_INVOKE<void>("launcher_open_accessibility"),
 	settingGet: (key: string) => __TAURI_INVOKE<string | null>("setting_get", { key }),
+	searchShortcutDefaults: () => __TAURI_INVOKE<SearchShortcut_Serialize[]>("search_shortcut_defaults"),
 	settingSet: (key: string, value: string) => __TAURI_INVOKE<OperationAdmission>("setting_set", { key, value }),
 	windowsDiagnosticsSettings: () => __TAURI_INVOKE<boolean>("windows_diagnostics_settings"),
 	/**  None identifies a local launch-read fallback to ON, separate from Windows policy. */
 	windowsReputationManaged: () => __TAURI_INVOKE<boolean | null>("windows_reputation_managed"),
 	uiInfo: () => __TAURI_INVOKE<UiInfo>("ui_info"),
 	uiReady: () => __TAURI_INVOKE<boolean>("ui_ready"),
+	captionReplay: () => __TAURI_INVOKE<void>("caption_replay"),
 	menuPopup: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("menu_popup", { x, y }),
 	addMenuPopup: (x: number | null, y: number | null, canSplit: boolean) => __TAURI_INVOKE<boolean>("add_menu_popup", { x, y, canSplit }),
 	tabMenuPopup: (id: string, x: number | null, y: number | null, context: TabMenuContext) => __TAURI_INVOKE<boolean>("tab_menu_popup", { id, x, y, context }),
@@ -1788,7 +1793,7 @@ export type LoginItemStatus = {
 	needs_approval: boolean,
 };
 
-export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica";
+export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica" | "mica_alt";
 
 /**  Outcome of admitting one public image for a subject on the canvas. */
 export type MediaAdmitV1 =
@@ -2611,6 +2616,7 @@ export type PanelRect = {
 };
 
 export type PanelState = {
+	switcher: TabSwitcherState | null,
 	window_id: string | null,
 	revision: string,
 	session_id: string,
@@ -3014,6 +3020,8 @@ export type SearchContext = {
 	space_id: string,
 };
 
+export type SearchEngine = "google" | "duckduckgo" | "bing" | "brave" | "custom";
+
 export type SearchResult = {
 	kind: string,
 	title: string,
@@ -3023,6 +3031,7 @@ export type SearchResult = {
 };
 
 export type SearchResults = {
+	shortcut?: string | null,
 	pending: boolean,
 	context: SearchContext | null,
 	query: string,
@@ -3033,6 +3042,30 @@ export type SearchResults = {
 	 */
 	completion: string | null,
 	results: SearchResult[],
+};
+
+export type SearchShortcut = SearchShortcut_Serialize | SearchShortcut_Deserialize;
+
+export type SearchShortcut_Deserialize = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions: SearchEngine | null,
+	enabled: boolean,
+};
+
+export type SearchShortcut_Serialize = {
+	id: string,
+	name: string,
+	keywords: string[],
+	search_url: string,
+	home_url: string,
+	domain: string,
+	suggestions?: SearchEngine | null,
+	enabled: boolean,
 };
 
 export type ShutSiteView = {
@@ -3279,6 +3312,31 @@ export type TabMenuContext = {
 	 *  in-use indicator.
 	 */
 	media_only: boolean,
+};
+
+export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
+/**  Leaves the switcher for a new tab in its window. */
+{ type: "new_tab" } |
+/**  Leaves the switcher for this tab, whatever is selected by then. */
+{ type: "activate"; tab_id: string } |
+/**  Closes this tab, whatever is selected by then, and stays open. */
+{ type: "close_tab"; tab_id: string };
+
+export type TabSwitcherEntry = {
+	tab_id: string,
+	title: string,
+	url_host: string,
+	favicon: IconRef | null,
+	preview_url: string | null,
+	active: boolean,
+};
+
+export type TabSwitcherState = {
+	session_id: string,
+	window_id: string,
+	entries: TabSwitcherEntry[],
+	selected: number,
+	keyboard: boolean,
 };
 
 export type TabView = {

@@ -17,7 +17,7 @@ const IDLE_MS = 4000;
  * Focus and pointer interaction release the parked caret. Actual idle
  * rendering behavior depends on the native engine and needs measurement.
  */
-export function parkCaret(input: HTMLInputElement): () => void {
+export function parkCaret(input: HTMLInputElement, onpark?: (parked: boolean) => void): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let caret: HTMLElement | null = null;
 
@@ -66,6 +66,7 @@ export function parkCaret(input: HTMLInputElement): () => void {
       );
     }
     input.dataset.caretParked = "";
+    onpark?.(true);
     window.addEventListener("keydown", wake, true);
     document.addEventListener("focusin", release, true);
     document.addEventListener("pointerdown", release, true);
@@ -92,6 +93,7 @@ export function parkCaret(input: HTMLInputElement): () => void {
     caret.remove();
     caret = null;
     delete input.dataset.caretParked;
+    onpark?.(false);
     window.removeEventListener("keydown", wake, true);
     document.removeEventListener("focusin", release, true);
     document.removeEventListener("pointerdown", release, true);

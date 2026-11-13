@@ -128,6 +128,8 @@ mod startup_alert;
 mod startup_styles;
 mod swipe;
 mod system_time;
+mod tab_previews;
+mod tab_switcher;
 #[cfg(all(target_os = "windows", feature = "work-product"))]
 mod taskbar_badge;
 mod updates;
@@ -1935,6 +1937,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             run_command,
             panel_hide,
             panel_ready,
+            tab_switcher::tab_switcher_open,
+            tab_switcher::tab_switcher_action,
             panel_intent,
             panel_layout,
             launcher_edit,
@@ -1944,11 +1948,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_set_double_tap,
             launcher_open_accessibility,
             setting_get,
+            search_shortcut_defaults,
             setting_set,
             windows_privacy::windows_diagnostics_settings,
             windows_privacy::windows_reputation_managed,
             ui_info,
             ui_ready,
+            caption_replay,
             menu_popup,
             add_menu_popup,
             tab_menu_popup,
@@ -2411,18 +2417,21 @@ const LAUNCHER_THEME_KEYS: &[&str] = &[
     "ui.font-size=",
 ];
 
-fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
-    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
-    // The launcher follows appearance, motion and language only; anything else would
-    // wake its hidden WebView for a command it ignores.
-    if id.starts_with("theme.")
+fn launcher_follows_ui_command(id: &str) -> bool {
+    id.starts_with("theme.")
+        || id.starts_with("preference.search.shortcuts=")
         || id.starts_with("preference.ui.reduce-motion=")
         || id.starts_with("preference.ui.language=")
         || LAUNCHER_THEME_KEYS.iter().any(|key| {
             id.strip_prefix("preference.")
                 .is_some_and(|rest| rest.starts_with(key))
         })
-    {
+}
+
+fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
+    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
+    // Only consumed settings wake the hidden launcher WebView.
+    if launcher_follows_ui_command(id) {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
 }
@@ -3946,6 +3955,16 @@ fn execute_command_or(
         return rejected_operation();
     }
     let id = zephium_core::commands::runs_as(id);
+    if id == "tab.close" && tab_switcher::close_selected(app) {
+        return accepted_ui_operation();
+    }
+    if matches!(id, "tab.recent.next" | "tab.recent.previous") {
+        return if tab_switcher::step(app, id == "tab.recent.previous", true) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     // A feature switched off has no way in, from any menu, key or launcher.
     if !app
         .try_state::<keymap::Keymap>()
@@ -4594,6 +4613,15 @@ fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
     gate.mark_frontend_ready(&caller)
 }
 
+#[tauri::command]
+#[specta::specta]
+fn caption_replay(caller: WebviewWindow) {
+    if authorize(&caller, CallerPolicy::Main, "caption_replay") {
+        #[cfg(target_os = "windows")]
+        platform::imp::replay_caption(&caller);
+    }
+}
+
 fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalPosition<f64>> {
     if !x.is_finite()
         || !y.is_finite()
@@ -5167,6 +5195,33 @@ fn focus_control(
 
 #[tauri::command]
 #[specta::specta]
+fn search_shortcut_defaults(caller: WebviewWindow) -> Vec<zephium_core::search::SearchShortcut> {
+    if !authorize(&caller, CallerPolicy::Both, "search_shortcut_defaults") {
+        return Vec::new();
+    }
+    zephium_core::search::ShortcutRegistry::default()
+        .entries()
+        .to_vec()
+}
+
+fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> {
+    if key == "search.shortcuts" {
+        return stored.map(|value| {
+            if value.is_empty() {
+                return value;
+            }
+            let Some(registry) = zephium_core::search::ShortcutRegistry::from_setting(&value)
+            else {
+                return String::new();
+            };
+            registry.to_setting().unwrap_or(value)
+        });
+    }
+    stored
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
@@ -5181,7 +5236,8 @@ async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     // A synchronous command runs on the main thread, and the store may be
     // busy for seconds (an import, a deletion); the read waits off it.
     tauri::async_runtime::spawn_blocking(move || {
-        APP_STORE.get().and_then(|store| store.app_setting(&key))
+        let stored = APP_STORE.get().and_then(|store| store.app_setting(&key));
+        setting_value_for_frame(&key, stored)
     })
     .await
     .ok()
@@ -5731,7 +5787,7 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
@@ -6797,6 +6853,8 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .manage(tab_switcher::Switcher::default())
+        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -7104,12 +7162,18 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }
-                    // A replaced document has no dialog open yet; it reports
-                    // its own when it opens one.
+                    // A replaced document owns neither a sidebar peek nor an
+                    // open dialog; reset both even if its cleanup never ran.
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                         && window.label() == MAIN_LABEL
                     {
+                        #[cfg(target_os = "macos")]
+                        platform::imp::sidebar_card_lights(&window, false);
                         if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                            shell.dispatch(Command::PeekSidebar {
+                                peek: false,
+                                slide: false,
+                            });
                             shell.dispatch(Command::SetChromeModal(false));
                         }
                     }
@@ -7371,6 +7435,7 @@ pub fn run() {
                     "zephium:work-changed",
                     &change,
                 ),
+                Projection::TabSwitcher { session, state } => tab_switcher::project(&emit_handle, session, state),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     #[cfg(feature = "adblock-qa")]
@@ -8181,6 +8246,72 @@ mod frame_sources;
 mod tests {
 
     #[test]
+    fn shortcut_ipc_reads_omit_retired_entries() {
+        use zephium_core::search::ShortcutRegistry;
+        let mut entries = ShortcutRegistry::default().entries().to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", Some(raw)),
+            Some(expected)
+        );
+        for value in ["", "not json", "null"] {
+            assert_eq!(
+                super::setting_value_for_frame("search.shortcuts", Some(value.into())),
+                Some(String::new())
+            );
+        }
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", None),
+            None
+        );
+        assert_eq!(
+            super::setting_value_for_frame("search.engine", Some("google".into())),
+            Some("google".into())
+        );
+    }
+
+    #[test]
+    fn near_limit_shortcut_projection_remains_readable() {
+        use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let projected = super::setting_value_for_frame("search.shortcuts", Some(raw)).unwrap();
+        assert!(projected.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(&projected)
+                .unwrap()
+                .entries(),
+            registry.entries()
+        );
+    }
+
+    #[test]
     fn only_an_app_link_grant_names_a_scheme() {
         use zephium_core::permissions::SitePermissionKind as Kind;
         assert!(super::site_permission_scheme_admitted(
@@ -8334,6 +8465,46 @@ mod tests {
     }
 
     #[test]
+    fn chrome_document_replacement_lowers_sidebar_before_resetting_modal() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains("shell.dispatch(Command::PeekSidebar {\n                                peek: false,\n                                slide: false,"));
+        assert!(
+            reset.find("Command::PeekSidebar").unwrap()
+                < reset.find("Command::SetChromeModal").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_resets_macos_sidebar_controls() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains(
+            "#[cfg(target_os = \"macos\")]\n                        platform::imp::sidebar_card_lights(&window, false);"
+        ));
+        assert!(
+            reset.find("sidebar_card_lights(&window, false)").unwrap()
+                < reset.find("try_state::<Handle>()").unwrap()
+        );
+    }
+
+    #[test]
     fn quit_menus_use_the_coordinated_exit_request() {
         let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!source.contains(".quit()"));
@@ -8379,6 +8550,23 @@ mod tests {
         assert!(source.contains("help::url(id)"));
         assert!(source.contains("id == help::MENU"));
         assert!(source.contains("id == help::DIAGNOSTICS"));
+    }
+
+    #[test]
+    fn launcher_follows_shortcut_changes_without_unrelated_preferences() {
+        assert!(super::launcher_follows_ui_command(
+            "preference.search.shortcuts=[]"
+        ));
+        assert!(super::launcher_follows_ui_command("theme.dark"));
+        assert!(super::launcher_follows_ui_command(
+            "preference.ui.font=system"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.history=false"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.shortcuts-extra=[]"
+        ));
     }
 
     #[test]
@@ -10071,7 +10259,7 @@ mod tests {
         assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
         assert_eq!(
             directive("img-src"),
-            "'self' data: zephium-media: http://zephium-media.localhost"
+            "'self' data: zephium-media: http://zephium-media.localhost zephium-preview: http://zephium-preview.localhost"
         );
         assert_eq!(directive("font-src"), "'self' data:");
         // Same-origin workers only: the diagram layout engine runs off the page thread.

@@ -6,7 +6,7 @@
   import "../Button/control.css";
   import { menuMaterialFor } from "../Menu/material";
   import { layoutAnchor } from "../Menu/anchor";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   let {
     label,
     labelHidden = false,
@@ -14,7 +14,10 @@
     value = $bindable(""),
     disabled = false,
     onchange,
+    lead,
   }: {
+    /** Drawn before an option's label, in the list and on the trigger. */
+    lead?: Snippet<[string]>;
     label: string;
     labelHidden?: boolean;
     options: ReadonlyArray<{ value: string; label: string; disabled?: boolean }>;
@@ -92,6 +95,7 @@
       aria-label={label}
       onpointerdown={(event) => (pressed = { x: event.clientX, y: event.clientY })}
     >
+      {#if lead && current}<span class="lead" aria-hidden="true">{@render lead(value)}</span>{/if}
       <span class="value">{current}</span>
       <svg
         class="chevron"
@@ -134,6 +138,9 @@
               }}
             >
               {#snippet children({ selected })}
+                {#if lead}<span class="ui-menu-icon" aria-hidden="true"
+                    >{@render lead(option.value)}</span
+                  >{/if}
                 {option.label}
                 <Mark on={selected} />
               {/snippet}
@@ -166,6 +173,12 @@
     min-width: 120px;
     padding-inline: var(--control-inset) 10px;
     font-weight: 450;
+  }
+
+  .lead {
+    display: grid;
+    flex: none;
+    place-items: center;
   }
 
   .value {

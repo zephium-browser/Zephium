@@ -35,9 +35,11 @@ mod private;
 mod profile_deletion;
 mod profile_roster;
 mod projections;
+mod recent_tabs;
 mod scope;
 mod search;
 mod site_permissions;
+mod tab_previews;
 mod tabs;
 mod time;
 mod user_content_status;
@@ -248,6 +250,8 @@ pub struct Shell {
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
     windows: Windows,
+    recent_tabs: recent_tabs::RecentTabs,
+    tab_previews: tab_previews::TabPreviews,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
@@ -519,6 +523,11 @@ impl Shell {
             sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
+                shortcuts: store
+                    .app_setting("search.shortcuts")
+                    .as_deref()
+                    .and_then(zephium_core::search::ShortcutRegistry::from_setting)
+                    .unwrap_or_default(),
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
                     .app_setting("search.engine")
@@ -577,6 +586,8 @@ impl Shell {
             bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
+            recent_tabs: Default::default(),
+            tab_previews: Default::default(),
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
@@ -656,6 +667,24 @@ impl Shell {
             self.note_browsing_activity();
         }
         match cmd {
+            Command::BeginTabSwitcher {
+                session,
+                reverse,
+                keyboard,
+            } => self.begin_tab_switcher(session, reverse, keyboard),
+            Command::TabSwitcher { session, action } => self.tab_switcher_action(session, action),
+            Command::RevealTabSwitcher { session } => self.reveal_tab_switcher(session),
+            Command::CaptureTabPreview => self.capture_tab_preview(),
+            Command::TabPreviewReady { request, bytes } => self.tab_preview_ready(request, bytes),
+            Command::ReadTabPreview {
+                window,
+                tab,
+                revision,
+                done,
+            } => {
+                let bytes = self.read_tab_preview(window, tab, revision);
+                let _ = done.send(bytes);
+            }
             Command::WorkDocument(submission) => self.work_document(submission),
             Command::WorkEnvironmentChanged(change) => {
                 if self.windows.focused().is_some_and(|window| {
@@ -968,6 +997,7 @@ impl Shell {
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
                     win.size = size;
+                    self.refresh_sidebar_peek();
                     // macOS resizes natively via autoresizing masks; Windows
                     // and Linux have no equivalent, the shell must relayout.
                     let _ = self.relayout();
@@ -996,6 +1026,9 @@ impl Shell {
                     // use when the window minimized. The ordinary idle grace
                     // still applies after every content view becomes hidden.
                     if !visible {
+                        if self.windows.focused().is_some_and(|win| win.sidebar_peek) {
+                            self.peek_sidebar(false, false);
+                        }
                         // OS pointer capture cannot remain authoritative while
                         // its window is hidden/minimized.
                         self.drop_divider();
@@ -1018,6 +1051,7 @@ impl Shell {
                 if let Some(win) = self.windows.focused_mut() {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
+                self.refresh_sidebar_peek();
                 if animate {
                     if let Some(win) = self.windows.focused() {
                         let _ = self.engine.hint_stage_motion(win.id, StageMotion::Slide);
@@ -1034,20 +1068,14 @@ impl Shell {
                 }
                 win.metrics.sidebar_hidden = hidden;
                 let id = win.id;
-                // A sidebar shown from its card leaves the chrome over the
-                // page until the page has slid out from under the column;
-                // the frame puts it back beneath then.
+                // A visibility change ends the peek even if the old chrome
+                // document never delivers its delayed lowering.
+                self.peek_sidebar(false, false);
                 let _ = self.engine.hint_stage_motion(id, StageMotion::Slide);
                 let _ = self.relayout_with(true);
             }
             Command::PeekSidebar { peek, slide } => {
-                if let Some(win) = self.windows.focused() {
-                    // Only a hidden sidebar is beneath the page to come over it.
-                    if !peek || win.metrics.sidebar_hidden {
-                        let card = layout::hidden_card(win.size, win.metrics);
-                        let _ = self.engine.raise_chrome(win.id, peek, card, slide);
-                    }
-                }
+                self.peek_sidebar(peek, slide);
             }
             Command::SetPagePermissionCardHost(available) => {
                 self.set_page_permission_card_host(available)
@@ -1061,6 +1089,19 @@ impl Shell {
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {
                     let zone = width.filter(|width| width.is_finite()).map(|width| {
+                        // A hidden sidebar is resized from the card's edge.
+                        if win.metrics.sidebar_hidden {
+                            let mut metrics = win.metrics;
+                            metrics.sidebar_width =
+                                zephium_core::layout::clamp_sidebar_width(width);
+                            let card = layout::hidden_card(win.size, metrics);
+                            return Rect::new(
+                                (card.x + card.width - 2.0).max(card.x),
+                                card.y,
+                                2.0,
+                                card.height,
+                            );
+                        }
                         let padding = win.metrics.padding;
                         let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
                             .min((win.size.width - padding - 2.0).max(padding));
@@ -1339,6 +1380,7 @@ impl Shell {
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
             Command::PanelLoaded => {
                 self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+                self.project_tab_switcher();
             }
             Command::RunSearchAction {
                 context,
@@ -1837,6 +1879,9 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        for window in self.windows.iter_mut() {
+            window.sidebar_peek = false;
+        }
         // Reserve the last quarter of the remaining budget for native teardown.
         let now = std::time::Instant::now();
         let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
@@ -2013,6 +2058,8 @@ impl Shell {
         } else {
             ShutdownOutcome::Unclean
         };
+        self.recent_tabs = Default::default();
+        self.tab_previews = Default::default();
         self.shutdown_result = Some(outcome);
         let _ = ack.send(outcome);
     }

@@ -163,6 +163,11 @@ fn raw_presentation_waits_for_exact_privileged_chrome_callback() {
             .count(),
         layout_calls_before_commit + 1
     );
+    let frame = chrome.last_frame().expect("chrome was placed");
+    assert!(
+        !frame.fill_width,
+        "the layout that admits the page gives it its place beside the chrome: {frame:?}"
+    );
     assert!(engine
         .calls()
         .iter()

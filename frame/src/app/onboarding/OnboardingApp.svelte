@@ -14,7 +14,7 @@
   import { Onboarding } from "$features/onboarding";
   import WindowControls from "$shared/ui/WindowControls";
   import { applyLanguage } from "$shared/lib/locale.svelte";
-  import { decode, scene } from "$shared/sky";
+  import { prepareSky, scene } from "$shared/sky";
 
   $effect(() => void applyLanguage(preferences.value("ui.language")));
 
@@ -72,7 +72,7 @@
         await Promise.all([themeReady, preferencesReady, tabsReady]);
         // Welcome opens on the sky, so the window is shown with it whole.
         await Promise.race([
-          decode(scene()).catch(() => {}),
+          prepareSky(scene()).catch(() => {}),
           new Promise((resolve) => setTimeout(resolve, 1500)),
         ]);
         if (disposed) return;

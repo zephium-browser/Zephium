@@ -2,6 +2,7 @@ import "$styles/global.css";
 import { afterEach, expect, test, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
+import { IS_MAC } from "$shared/platform";
 import WorkBar from "../components/bar/WorkBar.svelte";
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -51,14 +52,20 @@ test.each([false, true])(
     await field.fill("A line of text. ".repeat(10));
     await expect.poll(() => input.clientHeight).toBeGreaterThan(34);
     expect(input.clientHeight).toBe(input.scrollHeight);
-    await screen.rerender({ value: "A line of text. ".repeat(60) });
+    // Use short lines so the next keystroke leaves the scroll geometry unchanged.
+    const draft = "A short line\n".repeat(12) + "Last line";
+    await screen.rerender({ value: draft });
     await expect.poll(() => input.clientHeight).toBe(132);
-    await userEvent.keyboard("{Control>}{End}{/Control}");
-    input.scrollTop = input.scrollHeight;
+    await userEvent.keyboard(IS_MAC ? "{Meta>}{ArrowDown}{/Meta}" : "{Control>}{End}{/Control}");
+    expect(input.selectionStart).toBe(draft.length);
+    const height = input.scrollHeight;
+    input.scrollTop = height;
     const top = input.scrollTop;
     await userEvent.keyboard("x");
     await new Promise((resolve) => requestAnimationFrame(resolve));
+    expect(input.value).toBe(`${draft}x`);
     expect(input.clientHeight).toBe(132);
+    expect(input.scrollHeight).toBe(height);
     expect(input.scrollTop).toBe(top);
     await screen.rerender({ value: "Short" });
     await expect.poll(() => input.clientHeight).toBe(34);

@@ -8,7 +8,6 @@
 <!-- A tool panel as the column hosts it, over the chrome's own ground. -->
 <div class="host">
   <div class="sidebar-columns">
-    <div class="sidebar-browser-column sidebar-tool-rail"></div>
     <div class="sidebar-tool-host">
       <ToolSlot {tool} profile="p" onclose={() => {}} />
     </div>

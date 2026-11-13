@@ -1078,7 +1078,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         &["features", "optional", "version"],
         "zephium-blocker-update rustix dependency",
     )?;
-    require_string(rustix, "version", "=1.1.4")?;
+    require_string(rustix, "version", "=1.1.6")?;
     require_string_array(rustix, "features", &["fs", "process"])?;
     require_bool(rustix, "optional", true)?;
 

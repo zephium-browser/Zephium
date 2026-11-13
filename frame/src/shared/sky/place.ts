@@ -7,7 +7,7 @@ export type Box = { x: number; y: number; w: number; h: number };
 export type SkyPicture = { width: number; height: number; horizon: number };
 
 /** Both skies are one place at two hours, framed alike. */
-export const PICTURE: SkyPicture = { width: 3344, height: 1882, horizon: 0.69 };
+export const PICTURE: SkyPicture = { width: 1586, height: 992, horizon: 0.72 };
 
 /** The picture laid over the page: across all of it, from above its top, with
  *  its horizon on the page's. Whatever it leaves below is the page. */

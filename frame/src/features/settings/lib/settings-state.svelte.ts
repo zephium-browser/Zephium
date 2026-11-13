@@ -24,6 +24,29 @@ export function select(value: SettingsSection, field: string | null = null) {
   target = field;
 }
 
+/** Every page another surface may open Settings at, by its id. */
+const PAGES = [
+  "general",
+  "appearance",
+  "tabs",
+  "newtab",
+  "search",
+  "privacy",
+  "focus",
+  "performance",
+  "profiles",
+  "work",
+  "ai",
+  "skills",
+  "memory",
+  "sites",
+  "mcp",
+  "features",
+  "shortcuts",
+  "about",
+  "account",
+] as const satisfies readonly SettingsSection[];
+
 export function handleNativeSection(id: string) {
   const section = id.slice("settings.section.".length);
   if (
@@ -34,19 +57,6 @@ export function handleNativeSection(id: string) {
     select("mcp", service ? `connection.${decodeURIComponent(service).toLowerCase()}` : null);
     return;
   }
-  if (
-    id.startsWith("settings.section.") &&
-    [
-      "profiles",
-      "newtab",
-      "ai",
-      "focus",
-      "account",
-      "about",
-      "shortcuts",
-      "sites",
-      "privacy",
-    ].includes(section)
-  )
+  if (id.startsWith("settings.section.") && (PAGES as readonly string[]).includes(section))
     select(section as SettingsSection);
 }
