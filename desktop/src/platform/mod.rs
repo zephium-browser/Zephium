@@ -14,3 +14,14 @@ pub use windows as imp;
 pub mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux as imp;
+
+#[cfg(target_os = "windows")]
+pub(crate) use windows::set_window_fullscreen;
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn set_window_fullscreen(
+    window: &tauri::WebviewWindow,
+    enter: bool,
+) -> tauri::Result<()> {
+    window.set_fullscreen(enter)
+}
