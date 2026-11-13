@@ -42,7 +42,10 @@ export const sidebarResizeSettlement = () => resizeSettlement;
 
 export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
-export const isHidden = () => mode === "hidden" && !held;
+export const isHidden = () => mode === "hidden" && !held && !fullColumnShown();
+
+let fullColumnHolds = $state(0);
+export const fullColumnShown = () => fullColumnHolds > 0;
 
 /** A destination that wants the column in view, the rail of Work or a tool,
  *  holds a hidden sidebar out for as long as it is shown. */
@@ -58,12 +61,14 @@ export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>
-  panelExtent > 0
-    ? COMPACT_WIDTH + PANEL_GAP + panelExtent
-    : mode === "compact"
-      ? COMPACT_WIDTH
-      : // Hidden keeps its width: it comes back over the page at that width.
-        expandedWidth;
+  fullColumnShown()
+    ? expandedWidth
+    : panelExtent > 0
+      ? COMPACT_WIDTH + PANEL_GAP + panelExtent
+      : mode === "compact"
+        ? COMPACT_WIDTH
+        : // Hidden keeps its width: it comes back over the page at that width.
+          expandedWidth;
 
 export const hasPanel = () => panelExtent > 0;
 
@@ -269,8 +274,18 @@ export function setMode(next: SidebarMode) {
  * Shows the full column for a moment without touching the preference. The
  * returned function puts the rail back, unless a shape was chosen meanwhile.
  */
-export function expandBriefly(): () => void {
+export function expandBriefly({ fullColumn = false }: { fullColumn?: boolean } = {}): () => void {
   cancelSidebarResize();
+  // A chooser needs the browser list even beside a mounted tool panel.
+  if (fullColumn) {
+    if (++fullColumnHolds === 1) publish(true);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (--fullColumnHolds === 0) publish(true);
+    };
+  }
   const away = mode;
   if (away === "default") return () => {};
   mode = "default";
