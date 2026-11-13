@@ -5,6 +5,7 @@ impl EngineHost {
         &self,
         id: ItemId,
         url: String,
+        full: bool,
         done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
     ) {
         if self.dormant.contains(&id) {
@@ -25,6 +26,7 @@ impl EngineHost {
         };
         crate::platform::imp::tab_preview::capture(
             &view.view,
+            full,
             Box::new(move |bytes| {
                 done(bytes.filter(|_| navigation.matches_committed_snapshot(epoch, &committed)));
             }),

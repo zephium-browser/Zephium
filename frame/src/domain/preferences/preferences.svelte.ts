@@ -61,6 +61,7 @@ const defaults = {
   "ui.code-font": "system",
   "ui.theme-contrast": "50",
   "tabs.archive": "never",
+  "tabs.glance": "shift",
   "tabs.external-position": "new-tab",
   "tabs.close-button": "hover",
   "notes.enabled": "true",

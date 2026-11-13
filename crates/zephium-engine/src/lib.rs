@@ -1677,7 +1677,7 @@ type TabPreviewCompletion = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
 type TabPreviewCapture = (ItemId, String, TabPreviewCompletion);
 type TabPreviewSlot = Arc<Mutex<Option<Arc<TabPreviewRequest>>>>;
 
-struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>);
+struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>, bool);
 
 impl TabPreviewRequest {
     fn take(&self) -> Option<TabPreviewCapture> {
@@ -1687,7 +1687,7 @@ impl TabPreviewRequest {
     fn capture(&self, host: &mut host::EngineHost) {
         if let Some((id, url, done)) = self.take() {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            host.capture_tab_preview(id, url, done);
+            host.capture_tab_preview(id, url, self.1, done);
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = (host, id, url);
@@ -2342,6 +2342,24 @@ impl WebviewEngine {
     }
 }
 
+impl WebviewEngine {
+    fn request_capture(
+        &self,
+        id: ItemId,
+        url: String,
+        full: bool,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done))), full));
+        *self.tab_preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
+        self.answer_on_host(
+            request,
+            |request| request.refuse(),
+            |host, request| request.capture(host),
+        );
+    }
+}
+
 /// Whether a tab can be muted on this system: WebView2 always, WebKit when
 /// it has the page-mute SPI.
 pub fn page_mute_supported() -> bool {
@@ -2366,13 +2384,16 @@ impl Engine for WebviewEngine {
         url: String,
         done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
     ) {
-        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done)))));
-        *self.tab_preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
-        self.answer_on_host(
-            request,
-            |request| request.refuse(),
-            |host, request| request.capture(host),
-        );
+        self.request_capture(id, url, false, done);
+    }
+
+    fn capture_backdrop(
+        &self,
+        id: ItemId,
+        url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        self.request_capture(id, url, true, done);
     }
 
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
@@ -4027,13 +4048,16 @@ mod tests {
         );
         let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let completed = completions.clone();
-        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((
-            outgoing,
-            "https://example.test/".into(),
-            Box::new(move |_| {
-                completed.fetch_add(1, Ordering::SeqCst);
-            }),
-        )))));
+        let request = Arc::new(TabPreviewRequest(
+            Mutex::new(Some((
+                outgoing,
+                "https://example.test/".into(),
+                Box::new(move |_| {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }),
+            ))),
+            false,
+        ));
         *preview.lock().unwrap() = Some(request.clone());
         assert_eq!(
             updates.submit(1, layout(incoming)),

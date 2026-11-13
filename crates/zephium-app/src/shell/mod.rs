@@ -20,6 +20,7 @@ mod extension_store;
 mod favicon_probe;
 mod favicons;
 mod fullscreen;
+mod glance;
 mod history;
 mod history_list;
 mod https_first;
@@ -227,6 +228,7 @@ fn trace_refusal(
 struct NativeOpener {
     source: ItemId,
     activate_when_presentable: bool,
+    glance: bool,
 }
 
 pub struct Shell {
@@ -252,6 +254,8 @@ pub struct Shell {
     windows: Windows,
     recent_tabs: recent_tabs::RecentTabs,
     tab_previews: tab_previews::TabPreviews,
+    glance_backdrop: Option<glance::GlanceBackdrop>,
+    glance_serial: u64,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
@@ -588,6 +592,8 @@ impl Shell {
             shutdown_result: None,
             recent_tabs: Default::default(),
             tab_previews: Default::default(),
+            glance_backdrop: None,
+            glance_serial: 0,
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
@@ -676,6 +682,10 @@ impl Shell {
             Command::RevealTabSwitcher { session } => self.reveal_tab_switcher(session),
             Command::CaptureTabPreview => self.capture_tab_preview(),
             Command::TabPreviewReady { request, bytes } => self.tab_preview_ready(request, bytes),
+            Command::GlanceBackdropReady { request, bytes } => {
+                self.glance_backdrop_ready(request, bytes)
+            }
+            Command::Glance(action) => self.glance_action(action),
             Command::ReadTabPreview {
                 window,
                 tab,

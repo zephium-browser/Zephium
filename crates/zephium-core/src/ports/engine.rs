@@ -929,6 +929,14 @@ pub trait Engine {
     ) {
         done(None);
     }
+    fn capture_backdrop(
+        &self,
+        _id: ItemId,
+        _url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        done(None);
+    }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's
     /// content when `region` is `None`. The engine owns pane geometry so
@@ -1876,6 +1884,8 @@ pub enum EngineEvent {
         id: ItemId,
         child: ItemId,
         foreground: bool,
+        url: String,
+        modifiers: crate::glance::LinkModifiers,
         adoption: NativeTabAdoption,
     },
     NativeTabCloseRequested {

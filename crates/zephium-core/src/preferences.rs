@@ -62,6 +62,7 @@ pub const KEYS: &[&str] = &[
     "tabs.archive",
     "tabs.external-position",
     "tabs.close-button",
+    "tabs.glance",
     "ui.theme-contrast",
     "notes.enabled",
     "tasks.enabled",
@@ -246,6 +247,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         // How long a Today tab may sit unused before it closes into History.
         "tabs.archive" => matches!(value, "never" | "12h" | "1d" | "7d"),
         "tabs.close-button" => matches!(value, "hover" | "always"),
+        "tabs.glance" => matches!(value, "shift" | "ctrl" | "always" | "off"),
         "tabs.after-close" => matches!(value, "next" | "previous" | "recent"),
         // A new tab in front at launch; everything restored stays in the sidebar.
         "tabs.startup" => matches!(value, "continue" | "new-tab" | "pages"),

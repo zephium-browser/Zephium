@@ -1305,6 +1305,32 @@ pub enum WorkFolderAdmitV1 {
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
     pub work_pane: Option<WorkPaneLayout>,
+    pub glance: Option<GlanceLayout>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct GlanceRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct GlanceLayout {
+    pub tab: String,
+    pub parent: String,
+    pub region: GlanceRect,
+    pub page: GlanceRect,
+    pub backdrop: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum GlanceAction {
+    Close,
+    Expand,
+    Split,
 }
 
 /// Immediate result returned by a privileged IPC command. `accepted` with an

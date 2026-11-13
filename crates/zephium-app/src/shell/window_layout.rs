@@ -123,6 +123,13 @@ impl Shell {
         if filling.is_some() {
             l.content = Some(Rect::new(0.0, 0.0, win.size.width, win.size.height));
         }
+        let glance = l
+            .content
+            .filter(|_| filling.is_none() && !browser_page_active)
+            .and_then(|region| self.glance_layout(region));
+        if let Some((page, _)) = &glance {
+            l.content = Some(*page);
+        }
         // Raw native children still receive their final geometry while a
         // first navigation is provisional, but macOS must not shrink the
         // privileged chrome away from a fresh New Tab surface until at least
@@ -176,6 +183,7 @@ impl Shell {
         (self.emit)(Projection::Layout(LayoutState {
             dividers,
             work_pane,
+            glance: glance.map(|(_, view)| view),
         }));
         let applied = self.engine.set_content(win.id, tree, l.content);
         self.reconcile_page_permission_placement();

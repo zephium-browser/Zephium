@@ -20,6 +20,9 @@
     preference="tabs.close-button"
   /></SettingsGroup
 >
+<SettingsGroup title={m.tabs_group_glance()}
+  ><PreferenceSelect id="tabs.glance" preference="tabs.glance" /></SettingsGroup
+>
 <SettingsGroup title={m.tabs_group_archive()}
   ><PreferenceSelect id="tabs.archive" preference="tabs.archive" /></SettingsGroup
 >

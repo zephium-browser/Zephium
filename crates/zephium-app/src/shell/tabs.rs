@@ -52,6 +52,7 @@ pub(super) struct TabPreferences {
     /// Opening an address already open in this space goes to that tab.
     pub(super) switch_to_open: bool,
     pub(super) automatic_pip: bool,
+    pub(super) glance: zephium_core::glance::GlanceTrigger,
     /// Launch puts a new tab in front instead of the one left there.
     pub(super) start_with_new_tab: bool,
     /// Launch opens these pages instead, when there are any.
@@ -70,6 +71,7 @@ impl Default for TabPreferences {
             after_close: AfterClose::default(),
             switch_to_open: true,
             automatic_pip: true,
+            glance: zephium_core::glance::GlanceTrigger::default(),
             start_with_new_tab: true,
             start_with_pages: false,
             startup_pages: Vec::new(),
@@ -96,6 +98,7 @@ impl TabPreferences {
             "tabs.home",
             "tabs.external-position",
             "tabs.archive",
+            "tabs.glance",
         ] {
             if let Some(value) = store.app_setting(key) {
                 preferences.apply(key, &value);
@@ -128,6 +131,11 @@ impl TabPreferences {
             ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
             ("tabs.external-position", "after-current") => {
                 self.external_position = Some(NewTabPosition::AfterCurrent)
+            }
+            ("tabs.glance", value) => {
+                if let Some(trigger) = zephium_core::glance::GlanceTrigger::parse(value) {
+                    self.glance = trigger;
+                }
             }
             ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
             ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,
@@ -205,6 +213,7 @@ impl Shell {
             opener.activate_when_presentable = false;
         }
         self.end_content_fullscreen_unless(id);
+        self.end_glance_unless(id);
         let Some(win) = self.windows.focused_mut() else {
             return Vec::new();
         };
@@ -321,6 +330,10 @@ impl Shell {
         if was_active {
             win.active = None;
         }
+        let glance_parent = win
+            .glance
+            .take_if(|glance| glance.tab == id)
+            .map(|glance| glance.parent);
         let pos = self
             .successor_pool(profile, space)
             .iter()
@@ -329,8 +342,14 @@ impl Shell {
         if let Some(closed) = closed {
             self.remember_closed(closed);
         }
+        if glance_parent.is_some() {
+            self.glance_backdrop = None;
+        }
         if was_active {
-            fx.extend(self.take_over(profile, space, pos));
+            match glance_parent.filter(|parent| self.item_in_scope(*parent, profile, space)) {
+                Some(parent) => fx.extend(self.focus_tab(parent)),
+                None => fx.extend(self.take_over(profile, space, pos)),
+            }
         }
         // Put back after the successor is chosen, so closing never refocuses
         // and reloads the Essential it just ended.
@@ -786,12 +805,15 @@ impl Shell {
         source: ItemId,
         child: ItemId,
         foreground: bool,
+        url: &str,
+        modifiers: zephium_core::glance::LinkModifiers,
         adoption: zephium_core::ports::engine::NativeTabAdoption,
     ) {
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
         };
+        let glance = self.wants_glance(source, url, modifiers);
         if !self.item_in_scope(source, profile, space)
             || self.items.view_ids().len() >= LIVE_VIEW_ABSOLUTE_LIMIT
             || self.items.get(child).is_some()
@@ -818,7 +840,8 @@ impl Shell {
             child,
             NativeOpener {
                 source,
-                activate_when_presentable: foreground,
+                activate_when_presentable: foreground || glance,
+                glance,
             },
         );
         let placement = Placement::Space {
@@ -840,14 +863,20 @@ impl Shell {
     }
 
     pub(super) fn activate_presented_native_tab(&mut self, child: ItemId) {
-        let source = self.native_openers.get_mut(&child).and_then(|opener| {
-            std::mem::take(&mut opener.activate_when_presentable).then_some(opener.source)
+        let opened = self.native_openers.get_mut(&child).and_then(|opener| {
+            std::mem::take(&mut opener.activate_when_presentable)
+                .then_some((opener.source, std::mem::take(&mut opener.glance)))
         });
-        if source.is_some_and(|source| {
+        let Some((source, glance)) = opened.filter(|(source, _)| {
             self.windows
                 .focused()
-                .is_some_and(|window| window.active == Some(source))
-        }) {
+                .is_some_and(|window| window.active == Some(*source))
+        }) else {
+            return;
+        };
+        if glance {
+            self.show_glance(source, child);
+        } else {
             let effects = self.focus_tab(child);
             self.commit(effects);
         }

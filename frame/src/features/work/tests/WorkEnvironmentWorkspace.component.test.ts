@@ -139,6 +139,7 @@ test("the production manual environment attaches a real tab, opens it in the pan
   emitNativeEvent("layoutChanged", {
     dividers: [],
     work_pane: { tab: "retained-tab", ...hole, presented: true, generation: 1 },
+    glance: null,
   });
   await expect.element(screen.getByRole("toolbar", { name: "Move pane" })).toBeVisible();
   const handoff = screen
@@ -147,7 +148,7 @@ test("the production manual environment attaches a real tab, opens it in the pan
   await expect.element(handoff).toBeEnabled();
   await handoff.click();
   await expect.poll(() => onopen.mock.calls).toEqual([["retained-tab"]]);
-  emitNativeEvent("layoutChanged", { dividers: [], work_pane: null });
+  emitNativeEvent("layoutChanged", { dividers: [], work_pane: null, glance: null });
   await expect
     .element(screen.getByRole("region", { name: "Browser pane", exact: true }))
     .not.toBeInTheDocument();

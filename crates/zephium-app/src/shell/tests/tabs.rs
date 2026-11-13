@@ -388,6 +388,8 @@ fn native_tab_adoption_preserves_background_focus_and_does_not_replay_navigation
             id: source,
             child,
             foreground,
+            url: "https://example.com/".into(),
+            modifiers: Default::default(),
             adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
                 send.send(ok).unwrap()
             }),
@@ -422,6 +424,8 @@ fn native_tab_adoption_rejects_an_unknown_source_and_cleans_up_the_lease() {
         id: ItemId::generate(),
         child,
         foreground: true,
+        url: "https://example.com/".into(),
+        modifiers: Default::default(),
         adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
             send.send(ok).unwrap()
         }),
@@ -442,6 +446,8 @@ fn download_cleanup_does_not_close_a_native_tab_that_has_committed_a_document() 
         id: source,
         child,
         foreground: true,
+        url: "https://example.com/".into(),
+        modifiers: Default::default(),
         adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
     }));
     commit_url(&mut shell, child, "https://example.com/other");
@@ -469,6 +475,8 @@ fn native_foreground_selection_waits_for_presentation_and_respects_newer_user_se
             id: source,
             child,
             foreground,
+            url: "https://example.com/".into(),
+            modifiers: Default::default(),
             adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
         }));
         assert_eq!(active_id(&screen), source);
@@ -512,6 +520,8 @@ fn native_close_request_only_closes_an_owned_child() {
         id: source,
         child,
         foreground: true,
+        url: "https://example.com/".into(),
+        modifiers: Default::default(),
         adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
     }));
     shell.handle(Command::Engine(EngineEvent::NativeTabCloseRequested {
@@ -531,6 +541,8 @@ fn native_download_cleanup_survives_a_space_switch() {
         id: source,
         child,
         foreground: true,
+        url: "https://example.com/".into(),
+        modifiers: Default::default(),
         adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
     }));
     let other = SpaceId::from(9001);
@@ -1288,4 +1300,126 @@ fn closing_one_private_tab_hands_over_to_another() {
 
     assert_eq!(active_id(&screen), first);
     assert!(shell.incognito_profile(focused_scope(&shell).0));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_shift_clicked_link_glances_over_its_page_and_closing_returns_to_it() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        url: "https://example.com/article".into(),
+        modifiers: zephium_core::glance::LinkModifiers {
+            shift: true,
+            ctrl: false,
+        },
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    assert!(shell
+        .native_openers
+        .get(&child)
+        .is_some_and(|opener| opener.glance && opener.activate_when_presentable));
+
+    shell.show_glance(source, child);
+    let window = shell.windows.focused().unwrap();
+    let id = window.id;
+    assert_eq!(window.active, Some(child));
+    assert_eq!(
+        window
+            .glance
+            .as_ref()
+            .map(|glance| (glance.tab, glance.parent)),
+        Some((child, source))
+    );
+    let (page, view) = shell
+        .glance_layout(zephium_core::geometry::Rect::new(200.0, 0.0, 1000.0, 800.0))
+        .unwrap();
+    assert_eq!(page.width, 800.0);
+    assert!(view.backdrop.is_none());
+
+    shell.handle(Command::GlanceBackdropReady {
+        request: 1,
+        bytes: Some(vec![7, 8]),
+    });
+    assert_eq!(
+        shell
+            .windows
+            .focused()
+            .unwrap()
+            .glance
+            .as_ref()
+            .unwrap()
+            .backdrop,
+        Some(1)
+    );
+    assert_eq!(shell.read_tab_preview(id, source, 1), Some(vec![7, 8]));
+    assert_eq!(shell.read_tab_preview(id, source, 2), None);
+
+    shell.handle(Command::Glance(zephium_ipc::GlanceAction::Close));
+    let window = shell.windows.focused().unwrap();
+    assert_eq!(window.active, Some(source));
+    assert!(window.glance.is_none());
+    assert!(shell.items.get(child).is_none());
+    assert_eq!(shell.read_tab_preview(id, source, 1), None);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn choosing_another_tab_keeps_a_glance_as_an_ordinary_tab() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        url: "https://example.com/article".into(),
+        modifiers: Default::default(),
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    assert!(shell
+        .native_openers
+        .get(&child)
+        .is_some_and(|opener| !opener.glance && !opener.activate_when_presentable));
+    shell.show_glance(source, child);
+    let effects = shell.focus_tab(source);
+    shell.commit(effects);
+    assert!(shell.windows.focused().unwrap().glance.is_none());
+    assert!(shell.items.tab(child).is_some());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn glance_is_refused_when_off_for_other_addresses_and_openers_behind() {
+    use zephium_core::glance::{GlanceTrigger, LinkModifiers};
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    let window = shell.windows.focused().unwrap().id;
+    let shift = LinkModifiers {
+        shift: true,
+        ctrl: false,
+    };
+    let page = "https://example.com/a";
+    assert!(shell.wants_glance(source, page, shift));
+    assert!(!shell.wants_glance(source, page, LinkModifiers::default()));
+    assert!(!shell.wants_glance(source, "file:///c:/secret", shift));
+    assert!(!shell.wants_glance(ItemId::generate(), page, shift));
+    shell.tab_preferences.glance = GlanceTrigger::Off;
+    assert!(!shell.wants_glance(source, page, shift));
+    assert_eq!(shell.read_glance_backdrop(window, source, 1), None);
+    shell.handle(Command::GlanceBackdropReady {
+        request: 1,
+        bytes: Some(vec![1]),
+    });
+    assert_eq!(shell.read_glance_backdrop(window, source, 1), None);
 }

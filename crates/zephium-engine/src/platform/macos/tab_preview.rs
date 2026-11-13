@@ -93,7 +93,11 @@ fn encode(cg: &CGImage) -> Option<Vec<u8>> {
     (finalized && !bytes.is_empty()).then_some(bytes)
 }
 
-pub(crate) fn capture(view: &wry::WebView, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+pub(crate) fn capture(
+    view: &wry::WebView,
+    _full: bool,
+    done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+) {
     let Some(mtm) = MainThreadMarker::new() else {
         done(None);
         return;

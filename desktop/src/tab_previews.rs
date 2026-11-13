@@ -9,7 +9,7 @@ fn request_key(
     path: &str,
     query: Option<&str>,
 ) -> Option<(WindowId, ItemId, u64)> {
-    if label != super::overlay::PANEL_LABEL
+    if (label != super::overlay::PANEL_LABEL && label != super::MAIN_LABEL)
         || *method != tauri::http::Method::GET
         || path.len() > 128
     {
@@ -80,15 +80,17 @@ pub(crate) fn serve(
 mod tests {
     use super::*;
     #[test]
-    fn only_panel_gets_canonical_preview_keys() {
+    fn only_privileged_windows_get_canonical_preview_keys() {
         let window = 1_u64;
         let tab = ItemId::from(2);
         let path = format!("/{window}/{tab}");
-        assert_eq!(
-            request_key("panel", &tauri::http::Method::GET, &path, Some("v=3")),
-            Some((window, tab, 3))
-        );
-        for label in ["main", "content", "panel-other", ""] {
+        for label in ["panel", "main"] {
+            assert_eq!(
+                request_key(label, &tauri::http::Method::GET, &path, Some("v=3")),
+                Some((window, tab, 3))
+            );
+        }
+        for label in ["content", "panel-other", ""] {
             assert!(request_key(label, &tauri::http::Method::GET, &path, Some("v=3")).is_none());
         }
         for query in [None, Some("v=03"), Some("v=3&x=1"), Some("v=-1")] {
