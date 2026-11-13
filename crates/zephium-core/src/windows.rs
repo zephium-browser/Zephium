@@ -15,6 +15,13 @@ pub enum WindowKind {
     Little,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Glance {
+    pub tab: ItemId,
+    pub parent: ItemId,
+    pub backdrop: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct Window {
     pub id: WindowId,
@@ -28,6 +35,7 @@ pub struct Window {
     pub sidebar_peek: bool,
     pub active: Option<ItemId>,
     pub splits: Option<Pane>,
+    pub glance: Option<Glance>,
 }
 
 #[derive(Default)]
@@ -61,6 +69,7 @@ impl Windows {
                 sidebar_peek: false,
                 active: None,
                 splits: None,
+                glance: None,
             },
         );
         self.order.push(id);

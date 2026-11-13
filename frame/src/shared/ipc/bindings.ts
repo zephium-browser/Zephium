@@ -307,6 +307,7 @@ export const commands = {
 	workPaneSetRect: (rect: WorkPaneRect, generation: number) => __TAURI_INVOKE<void>("work_pane_set_rect", { rect, generation }),
 	workPaneHide: () => __TAURI_INVOKE<OperationAdmission>("work_pane_hide"),
 	tabsSplit: (other: string) => __TAURI_INVOKE<OperationAdmission>("tabs_split", { other }),
+	glanceAct: (action: GlanceAction) => __TAURI_INVOKE<OperationAdmission>("glance_act", { action }),
 	tabsUnsplit: () => __TAURI_INVOKE<OperationAdmission>("tabs_unsplit"),
 	tabsLeaveSplit: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_leave_split", { id }),
 	/**
@@ -1611,6 +1612,23 @@ export type FocusView = {
 	allowed: string[],
 };
 
+export type GlanceAction = "close" | "expand" | "split";
+
+export type GlanceLayout = {
+	tab: string,
+	parent: string,
+	region: GlanceRect,
+	page: GlanceRect,
+	backdrop: string | null,
+};
+
+export type GlanceRect = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
 export type HapticKind = "align" | "level";
 
 /**
@@ -1783,6 +1801,7 @@ export type LayoutChanged = LayoutState;
 export type LayoutState = {
 	dividers: DividerView[],
 	work_pane: WorkPaneLayout | null,
+	glance: GlanceLayout | null,
 };
 
 export type LoginItemStatus = {

@@ -452,6 +452,12 @@
   "pref_tabs_automatic_pip_help": "Keep a playing video with sound visible when switching tabs. Return to its tab to bring it back.",
   "pref_tabs_folders": "Allow folders",
   "pref_tabs_folders_help": "One level of folders within each space.",
+  "pref_tabs_glance": "Open links in a Glance",
+  "pref_tabs_glance_help": "A Glance shows a page over the one you are reading. Links from Essentials and pinned tabs, and posts, videos and issues on the sites Glance knows, always open in one.",
+  "pref_tabs_glance_option_shift": "Shift and click",
+  "pref_tabs_glance_option_ctrl": "Ctrl and click",
+  "pref_tabs_glance_option_always": "Every link that opens a new tab",
+  "pref_tabs_glance_option_off": "Off",
   "pref_tabs_archive": "Archive Today tabs",
   "pref_tabs_archive_help": "Tabs you stop using close on their own and stay in History.",
   "pref_tabs_archive_option_0": "Never",
@@ -3328,6 +3334,7 @@
   "tabs_group_opening": "Opening",
   "tabs_group_closing": "Closing",
   "tabs_group_archive": "Archive",
+  "tabs_group_glance": "Glance",
   "tabs_external": "Links from other apps",
   "tabs_external_help": "Where a link opens when another app hands it to Zephium.",
   "tabs_external_option_same": "Same as new tabs",
@@ -3986,5 +3993,10 @@
   "search_shortcut_invalid": "Use a unique keyword and an HTTPS URL containing {query} once.",
   "search_shortcut_enabled": "Enable {name}",
   "tab_switcher_title": "Switch tabs",
-  "tab_switcher_all": "All tabs ({count})"
+  "tab_switcher_all": "All tabs ({count})",
+  "glance_close": "Close Glance",
+  "glance_expand": "Open as a tab",
+  "glance_split": "Split with this page",
+  "glance_copy": "Copy link",
+  "glance_copied": "Link copied"
 }

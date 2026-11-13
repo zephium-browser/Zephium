@@ -1880,6 +1880,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_pane_set_rect,
             work_pane_hide,
             tabs_split,
+            glance_act,
             tabs_unsplit,
             tabs_leave_split,
             chrome_menu_popup,
@@ -3376,6 +3377,19 @@ fn tabs_split(
             axis: Axis::Row,
         }
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn glance_act(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    action: zephium_ipc::GlanceAction,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "glance_act") {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::Glance(action))
 }
 
 #[tauri::command]

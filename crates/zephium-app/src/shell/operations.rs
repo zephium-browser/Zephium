@@ -60,6 +60,7 @@ impl Shell {
                 self.operation_go_to_history_entry(id, offset, url)
             }
             Command::SplitWith { other, axis } => self.operation_split(other, axis),
+            Command::Glance(action) => self.glance_action(action),
             Command::Unsplit => self.operation_unsplit(),
             Command::LeaveSplit(id) => self.operation_leave_split(id),
             Command::TabAction { id, action } => self.operation_tab_action(id, action),
@@ -837,6 +838,9 @@ impl Shell {
         }
         if let Some(win) = self.windows.focused_mut() {
             win.splits = Some(tree);
+            if win.glance.take().is_some() {
+                self.glance_backdrop = None;
+            }
         }
         native.merge(self.commit(Vec::new()));
         if closing && !native.rejected {

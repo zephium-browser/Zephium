@@ -281,6 +281,11 @@ pub enum Command {
         request: u64,
         bytes: Option<Vec<u8>>,
     },
+    GlanceBackdropReady {
+        request: u64,
+        bytes: Option<Vec<u8>>,
+    },
+    Glance(zephium_ipc::GlanceAction),
     ReadTabPreview {
         window: WindowId,
         tab: ItemId,

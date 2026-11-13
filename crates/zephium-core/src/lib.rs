@@ -13,6 +13,7 @@ pub mod export;
 pub mod extension_data;
 pub mod extensions;
 pub mod geometry;
+pub mod glance;
 pub mod http_auth;
 pub mod icon;
 pub mod ids;

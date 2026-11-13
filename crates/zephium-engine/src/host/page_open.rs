@@ -156,7 +156,31 @@ impl EngineHost {
                 return NewWindowResponse::Deny;
             }
         }
-        self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
+        #[cfg(target_os = "windows")]
+        let glance = {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{
+                GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_SHIFT,
+            };
+            let held = |key: VIRTUAL_KEY| {
+                clicked && (unsafe { GetAsyncKeyState(i32::from(key.0)) } as u16) & 0x8000 != 0
+            };
+            zephium_core::glance::LinkModifiers {
+                shift: held(VK_SHIFT),
+                ctrl: held(VK_CONTROL),
+            }
+        };
+        #[cfg(not(target_os = "windows"))]
+        let glance = zephium_core::glance::LinkModifiers::default();
+        self.adopt_native_tab(
+            source,
+            permit,
+            activity,
+            url,
+            features,
+            clicked,
+            glance,
+            || true,
+        )
     }
 
     /// Both callers authenticate their native opener first. Preserve WebView2's
@@ -171,6 +195,7 @@ impl EngineHost {
         url: &str,
         features: NewWindowFeatures,
         clicked: bool,
+        modifiers: zephium_core::glance::LinkModifiers,
         opener_current: impl Fn() -> bool,
     ) -> NewWindowResponse {
         let Some(token) = permit.active_token() else {
@@ -254,6 +279,8 @@ impl EngineHost {
                 id: source,
                 child,
                 foreground,
+                url: url.to_owned(),
+                modifiers,
                 adoption,
             },
         );

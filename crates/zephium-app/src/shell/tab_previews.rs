@@ -240,6 +240,9 @@ impl Shell {
         if focused.id != window || !self.item_in_focused_scope(tab) {
             return None;
         }
+        if let Some(bytes) = self.read_glance_backdrop(window, tab, revision) {
+            return Some(bytes);
+        }
         let url = self.items.tab(tab)?.url.as_ref()?.as_str();
         let cache = self.tab_previews.windows.get_mut(&window)?;
         if !cache

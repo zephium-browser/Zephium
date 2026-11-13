@@ -21,6 +21,8 @@
   import { Dock } from "$features/dock";
   import { DownloadPulse, DownloadStatus } from "$features/downloads";
   import { loadMediaPlayer } from "$features/media";
+  import { loadGlanceOverlay } from "$features/glance";
+  import { layout } from "$domain/layout";
   import { mediaPlayer } from "$domain/media-player";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
@@ -792,6 +794,10 @@
     {/if}
   </div>
 </div>
+{#if layout.glance()}{@const glance =
+    layout.glance()}{#await loadGlanceOverlay() then { default: GlanceOverlay }}{#if glance}<GlanceOverlay
+        view={glance}
+      />{/if}{/await}{/if}
 {#if ClearSiteData}<ClearSiteData />{/if}
 
 <style>

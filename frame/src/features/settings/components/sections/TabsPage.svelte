@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { IS_WINDOWS } from "$shared/platform";
   import * as m from "$shared/i18n/messages";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import PreferenceSelect from "../PreferenceSelect.svelte";
@@ -20,6 +21,9 @@
     preference="tabs.close-button"
   /></SettingsGroup
 >
+{#if IS_WINDOWS}<SettingsGroup title={m.tabs_group_glance()}
+    ><PreferenceSelect id="tabs.glance" preference="tabs.glance" /></SettingsGroup
+  >{/if}
 <SettingsGroup title={m.tabs_group_archive()}
   ><PreferenceSelect id="tabs.archive" preference="tabs.archive" /></SettingsGroup
 >
