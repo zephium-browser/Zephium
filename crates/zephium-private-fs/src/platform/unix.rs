@@ -581,8 +581,10 @@ pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
 }
 
 pub(crate) fn unlock_exclusive(file: &File) {
-    // Drop cannot report an error. Keep interruption handling bounded; closing
-    // the owned descriptor remains the fail-closed fallback if unlock fails.
+    // Drop cannot report an error, and this crate has no logger. Interruption
+    // handling stays bounded. If unlock fails, closing the descriptor releases
+    // the lock only once no inherited duplicate remains open; until then,
+    // admission reports `LockUnavailable` rather than sharing the namespace.
     for _ in 0..4 {
         match rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock) {
             Err(rustix::io::Errno::INTR) => continue,
