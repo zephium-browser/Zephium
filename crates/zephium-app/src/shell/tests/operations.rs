@@ -259,6 +259,27 @@ fn browser_page_hides_native_content_and_restores_exact_tab() {
 }
 
 #[test]
+fn leaving_the_extensions_manager_returns_to_a_browser_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    navigate_and_commit(&mut shell, web, "options.example");
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Extensions)));
+    let manager = active_id(&screen);
+    assert_ne!(manager, web);
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Extensions)
+    );
+
+    // The manager is a browser-owned tab with no native view, so leaving it
+    // must hand the window back to a tab the engine can open from.
+    shell.handle_operation(Command::ShowBrowserPage(None));
+    assert_eq!(active_id(&screen), web);
+    assert_eq!(shell.active_browser_page(), None);
+}
+
+#[test]
 fn settings_is_a_window_page_and_extensions_is_a_deduplicated_tab() {
     use zephium_core::item::{BrowserOwnedTab, TabContent};
 
