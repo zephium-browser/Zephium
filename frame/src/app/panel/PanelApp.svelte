@@ -106,11 +106,11 @@
         }
         // The launcher is loaded while the window is still hidden, and native
         // shows nothing before `panelReady`, so the first frame is never empty.
-        // Nothing below waits on anything else, so the wait is the slowest one.
-        const [launcher, , , [motion, language, notesOn, tasksOn, ...look]] = await Promise.all([
-          loadLauncherPanel(),
+        // Asset loads and IPC share the WebKitGTK protocol request budget.
+        const [launcher] = await Promise.all([loadLauncherPanel(), faviconsReady]);
+        if (disposed) return;
+        const [, [motion, language, notesOn, tasksOn, ...look]] = await Promise.all([
           theme.init(),
-          faviconsReady,
           Promise.all([
             commands.settingGet("ui.reduce-motion").catch(() => null),
             commands.settingGet("ui.language").catch(() => null),

@@ -72,6 +72,8 @@ const defaults = {
   "privacy.smartscreen": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
+const STARTUP_CONCURRENCY = 8;
+const STARTUP_TIMEOUT_MS = 2000;
 let shortcutDefaults = $state.raw<SearchShortcut[]>([]);
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
 let pending = $state<PreferenceKey | null>(null);
@@ -145,23 +147,34 @@ async function initialize(generation: number, signal: AbortSignal) {
     return;
   }
   stop = unsubscribe;
-  try {
-    const result = await observe(commands.searchShortcutDefaults(), 2000, signal);
-    if (generation === epoch && result.state === "received") shortcutDefaults = result.value;
-  } catch {
-    /* The next initialization can retry the catalogue read. */
-  }
-  await Promise.all(
-    (Object.keys(defaults) as PreferenceKey[]).map(async (key) => {
+  const reads = ["shortcutCatalogue", ...(Object.keys(defaults) as PreferenceKey[])] as const;
+  // An observation timeout leaves its native request in flight. Every worker
+  // shares the same deadline and stops after a timeout.
+  const deadline = performance.now() + STARTUP_TIMEOUT_MS;
+  let next = 0;
+  async function read() {
+    while (generation === epoch && !signal.aborted) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return;
+      const key = reads[next++];
+      if (key === undefined) return;
       try {
-        const stored = await observe(commands.settingGet(key), 2000, signal);
-        if (generation === epoch && !updated[key] && stored.state === "received")
-          apply(key, stored.value ?? defaults[key]);
+        if (key === "shortcutCatalogue") {
+          const result = await observe(commands.searchShortcutDefaults(), remaining, signal);
+          if (result.state === "timeout") return;
+          if (generation === epoch && result.state === "received") shortcutDefaults = result.value;
+        } else if (!updated[key]) {
+          const stored = await observe(commands.settingGet(key), remaining, signal);
+          if (stored.state === "timeout") return;
+          if (generation === epoch && !updated[key] && stored.state === "received")
+            apply(key, stored.value ?? defaults[key]);
+        }
       } catch {
         /* Retain safe defaults if a read is unavailable. */
       }
-    }),
-  );
+    }
+  }
+  await Promise.all(Array.from({ length: STARTUP_CONCURRENCY }, read));
   if (generation === epoch) initialized = true;
 }
 
