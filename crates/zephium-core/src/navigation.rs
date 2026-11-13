@@ -236,6 +236,15 @@ pub fn is_subframe_document(target: &str) -> bool {
     })
 }
 
+/// An extension's own document in a frame (autofill menus and prompts that
+/// extensions such as password managers show inside a page). WebView2 still
+/// enforces the extension's `web_accessible_resources` and its enablement; this
+/// only stops the frame policy from cancelling the load before that check.
+pub fn is_extension_frame_document(target: &str) -> bool {
+    target.len() <= MAX_URL_BYTES
+        && Url::parse(target).is_ok_and(|url| extension_document_id(&url).is_some())
+}
+
 /// Schemes a page never hands to another application: they load browser
 /// content, run script, reach files or shares, or reach Windows handlers
 /// that have been used to run code from a link.
@@ -470,6 +479,23 @@ mod tests {
             "zoommtg://x",
         ] {
             assert!(!super::is_subframe_document(frame), "{frame}");
+        }
+    }
+
+    #[test]
+    fn frames_may_hold_an_extensions_own_documents() {
+        let id = "ghmbeldphafepmbegfdlkpapadhbakde";
+        assert!(super::is_extension_frame_document(&format!(
+            "chrome-extension://{id}/dropdown.html#/x"
+        )));
+        for frame in [
+            "chrome-extension://short/dropdown.html",
+            "chrome-extension://GHMBELDPHAFEPMBEGFDLKPAPADHBAKDE/x.html",
+            "chrome://settings",
+            "https://example.com/",
+            "javascript:alert(1)",
+        ] {
+            assert!(!super::is_extension_frame_document(frame), "{frame}");
         }
     }
 
