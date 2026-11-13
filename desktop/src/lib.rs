@@ -10223,6 +10223,24 @@ mod tests {
     }
 
     #[test]
+    fn macos_bundle_allows_http_only_in_web_content() {
+        let plist = include_str!("../Info.plist");
+        assert!(plist.contains("<key>NSAppTransportSecurity</key>"));
+        assert!(plist.contains("<key>NSAllowsArbitraryLoadsInWebContent</key>\n    <true/>"));
+        for forbidden in [
+            "NSAllowsArbitraryLoads",
+            "NSAllowsArbitraryLoadsForMedia",
+            "NSExceptionDomains",
+            "NSAllowsLocalNetworking",
+        ] {
+            assert!(
+                !plist.contains(&format!("<key>{forbidden}</key>")),
+                "{forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn macos_bundle_explains_download_folder_consent() {
         let plist = include_str!("../Info.plist");
         for key in [
