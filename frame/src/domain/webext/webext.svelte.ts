@@ -5,6 +5,7 @@ import {
   type WebExtensionStoreButtonState,
   type WebExtensionView,
 } from "$shared/ipc/bindings";
+import { surface } from "$domain/surface";
 import { events } from "$shared/ipc/native-events";
 
 let available = $state<boolean | null>(null);
@@ -190,6 +191,9 @@ export async function setAccess(id: string, mode: string, sites: string[] = []):
 }
 
 export async function openOptions(id: string): Promise<void> {
+  // The manager is a browser-owned page: it has no native tab for the engine
+  // to open from, so leave it first and ask once the browser is back.
+  if (surface.currentPage() !== null) await surface.open(null);
   const result = await commands.webExtensionOpenOptions(id);
   if (result.status !== "ok") failure = result.error;
 }
