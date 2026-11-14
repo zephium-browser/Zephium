@@ -1,0 +1,34 @@
+[package]
+name = "zephium-webext-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zephium-core.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
+zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
+
+[features]
+native-tests = []
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"
+glib = "0.18"
+gtk = "0.18"
+javascriptcore-rs = "=1.1.2"
+ring.workspace = true
+rustix = { version = "=1.1.6", features = ["fs", "rand"] }
+serde_json.workspace = true
+sha2 = "=0.10.9"
+soup = { package = "soup3", version = "0.5" }
+thiserror.workspace = true
+url.workspace = true
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+zephium-webkit-web-process-protocol = { path = "../zephium-webkit-web-process-protocol", version = "=0.1.0" }
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0" }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

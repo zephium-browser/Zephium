@@ -1,0 +1,423 @@
+{
+  "caseId": "storage-get-forms",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "local.get.omitted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.omitted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "local.get.null:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.null:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "local.get.string:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.string:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A"
+        }
+      }
+    },
+    {
+      "label": "local.get.array:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.array:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "count": 7
+        }
+      }
+    },
+    {
+      "label": "local.get.defaults:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.defaults:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "missing": 42
+        }
+      }
+    },
+    {
+      "label": "local.get.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.get.callback:callback",
+      "value": {
+        "args": [
+          {
+            "missing": false,
+            "nested": {
+              "enabled": true
+            }
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "local.get.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "local.get.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "sync.get.omitted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.omitted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.get.null:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.null:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.get.string:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.string:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A"
+        }
+      }
+    },
+    {
+      "label": "sync.get.array:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.array:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "count": 7
+        }
+      }
+    },
+    {
+      "label": "sync.get.defaults:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.defaults:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "missing": 42
+        }
+      }
+    },
+    {
+      "label": "sync.get.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.get.callback:callback",
+      "value": {
+        "args": [
+          {
+            "missing": false,
+            "nested": {
+              "enabled": true
+            }
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "sync.get.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "sync.get.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "session.get.omitted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.omitted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "session.get.null:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.null:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "count": 7,
+          "nested": {
+            "enabled": true
+          }
+        }
+      }
+    },
+    {
+      "label": "session.get.string:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.string:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A"
+        }
+      }
+    },
+    {
+      "label": "session.get.array:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.array:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "count": 7
+        }
+      }
+    },
+    {
+      "label": "session.get.defaults:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.defaults:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "alpha": "A",
+          "missing": 42
+        }
+      }
+    },
+    {
+      "label": "session.get.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.get.callback:callback",
+      "value": {
+        "args": [
+          {
+            "missing": false,
+            "nested": {
+              "enabled": true
+            }
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "session.get.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "session.get.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "managed.get.null:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "managed.get.null:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {}
+      }
+    },
+    {
+      "label": "managed.get.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "managed.get.callback:callback",
+      "value": {
+        "args": [
+          {
+            "missing": "default"
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "managed.get.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "managed.get.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

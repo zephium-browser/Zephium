@@ -596,7 +596,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
 };
@@ -2739,7 +2739,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn load_web_extension(
         &self,
         profile: ProfileId,
@@ -2753,7 +2753,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn unload_web_extension(
         &self,
         profile: ProfileId,
@@ -2764,7 +2764,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn open_web_extension_options(
         &self,
         profile: ProfileId,
@@ -2777,7 +2777,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn answer_web_extension_access(
         &self,
         profile: ProfileId,
@@ -2791,7 +2791,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn answer_web_extension_data(
         &self,
         profile: ProfileId,
@@ -2805,7 +2805,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn web_extension_data_changed(
         &self,
         profile: ProfileId,
@@ -2816,7 +2816,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn remove_web_extension(
         &self,
         profile: ProfileId,
@@ -2833,7 +2833,7 @@ impl Engine for WebviewEngine {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
                 return NativeDispatch::Rejected;
@@ -2872,7 +2872,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (profile, tab, surface_generation);
             NativeDispatch::Unsupported
@@ -2880,7 +2880,7 @@ impl Engine for WebviewEngine {
     }
 
     fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let profile = request.runtime().profile();
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
@@ -2918,7 +2918,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = request;
             NativeDispatch::Unsupported
@@ -2988,7 +2988,17 @@ impl Engine for WebviewEngine {
             }
             NativeDispatch::from_scheduled(scheduled)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let _ = first_url_after_reply;
+            NativeDispatch::from_scheduled(self.run(move || {
+                host::best_effort_with(move |host| {
+                    let _ =
+                        host.settle_linux_extension_browser_request(profile, request, settlement);
+                });
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (profile, request, settlement, first_url_after_reply);
             NativeDispatch::Unsupported

@@ -782,6 +782,14 @@ impl EngineHost {
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
         }
+        #[cfg(target_os = "linux")]
+        if let Some(profile) = self
+            .partitions
+            .get(&id)
+            .map(|partition| partition.profile())
+        {
+            self.webext_linux.authorize_navigation(profile, id, url);
+        }
         let Some(view) = self.views.get(&id) else {
             // Core believed this id had a live controller. A missing native
             // view is a lifecycle failure, not merely a rejected URL.

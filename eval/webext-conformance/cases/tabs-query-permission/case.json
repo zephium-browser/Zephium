@@ -1,0 +1,6 @@
+{
+  "id": "tabs-query-permission",
+  "title": "Tab query metadata and combined filters with tabs permission",
+  "apis": ["tabs.query", "tabs.get", "tabs.update"],
+  "permissions": ["tabs"]
+}

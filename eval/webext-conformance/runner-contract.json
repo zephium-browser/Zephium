@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "caseLayout": {
+    "case.json": "id, title, apis[], permissions[], optional timeoutMs (default 20000); id equals directory name",
+    "manifest.json": "MV3 manifest; runner fills name/version and adds only http://127.0.0.1/* for collector transport",
+    "case.js": "ES module exporting async run(h), executed in the extension-owned runner.html",
+    "otherFiles": "Copied verbatim into a disposable extension installation; shared harness.js, entry.js, runner.html and config.js reserved"
+  },
+  "installation": "Fresh private disposable profile per case. Install unpacked extension, wait for background registration, open extension runner.html. Never reuse personal or installed browser profiles. Default no-op worker supplied only if case has none.",
+  "fixtures": {
+    "a": "http://127.0.0.1:<ephemeral-port>",
+    "b": "http://localhost:<same-port>; distinct origin with independent host permission",
+    "paths": [
+      "/page.html",
+      "/frame.html",
+      "/frames.html",
+      "/data.json",
+      "/resource.txt"
+    ],
+    "frames": "same-origin and cross-origin frame.html?kind=same|cross, about:blank and srcdoc; names same,cross,blank,srcdoc",
+    "network": "Localhost only. No fixture CORS grant by default. Runner rejects non-localhost routed traffic and disables background networking. Production CSP and sandbox remain enabled."
+  },
+  "harness": {
+    "record(label,value)": "Append ordered JSON observation immediately, snapshot value; undefined encoded {$undefined:true}",
+    "call(label,invoke)": "Record call and result/error, timing class and runtime.lastError; expected API errors captured with exact message; use assert for required setup results",
+    "callback(label,invoke)": "Record callback arguments, synchronous/asynchronous timing, lastError in callback and following microtask",
+    "event(event,predicate,timeoutMs)": "Register immediately, resolve argument array on match, remove listener on completion/timeout; default 5000ms",
+    "openTab(url)": "Create inactive tab and wait for completed load, returning tab; timeout 10000ms",
+    "host(operation,args)": "POST capability-token collector /control; engine adapter must implement case-required operations or fail explicitly",
+    "sleep(ms)": "Bounded case-local delay; no wall-clock measurements in observations",
+    "assert(condition,message)": "Fail case on unmet setup or synchronization precondition"
+  },
+  "transport": "config.js provides origins and collector URL containing per-run random capability. POST JSON /complete {status:complete|error,observations:[{label,value}],error?}. Collector bound to loopback, max 2 MiB, one terminal completion. Host RPC errors use non-2xx JSON {error}. Completion is sent by entry.js after run settles.",
+  "timeout": "Runner enforces case timeout including installation. Timeout, thrown setup error, launch failure or collector failure produces status:error and nonzero exit. Partial/error transcripts never replace references. External runner process must additionally have a hard timeout.",
+  "output": "One UTF-8 JSON file <case-id>.json: {schemaVersion:1,caseId,engine:{name,version,playwrightVersion?,chromiumRevision?},status,observations,error?}. Chromium version present in every Chromium transcript. Stable sorted object keys; observation arrays preserve order. normalize.mjs maps origins, extension IDs, typed runtime IDs and timestamps without hiding error text.",
+  "comparison": "diff.mjs REFERENCE ACTUAL [ALLOWLIST] emits per-case pass/deviation/fail. Cross-engine metadata differs freely; Chromium check requires same engine metadata. deviations.json entries require caseId, engine, exact JSON-pointer path, expected, actual, reason and source. Unexpected or stale deviations fail; no wildcard ignores. Empty allowlist until actual second-engine evidence exists.",
+  "commands": {
+    "record": "node eval/webext-conformance/run.mjs --record",
+    "check": "node eval/webext-conformance/run.mjs --check",
+    "subset": "node eval/webext-conformance/run.mjs --case CASE_ID --output /tmp/webext-results",
+    "unit": "node --test eval/webext-conformance/*.test.mjs",
+    "node": "node eval/webext-conformance/run-node.mjs"
+  },
+  "hostOperations": {
+    "consoleMessages": "Return observed console and CDP Log entries as {type,text}[]; cases select relevant diagnostics, deduplicating duplicate delivery.",
+    "stopBackground": "Stop only the extension background in this disposable case profile through native engine lifecycle control; return {stopped:true}; case independently verifies port disconnect.",
+    "invoke-action": "Activate case tabId and invoke its real extension action. Chromium uses browser CDP Extensions.triggerAction with actual tab target obtained by Target.getTargets filter; no synthetic onClicked event or grant injection. Return {supported:true,method}; case requires action event, grant and revocation."
+  },
+  "nodeRunner": {
+    "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/home/crynta/Dev/zephium-linux/audit/target node eval/webext-conformance/run-node.mjs --check [--case ID] [--output DIR] [--host EXECUTABLE]",
+    "dependency": "This checkout by default; optional --runtime-root PATH selects another checkout explicitly. Builds its locked tests/js_e2e.rs host and records that checkout revision; --host must be a matching already-built host.",
+    "supportedCases": [
+      "action-tab-state",
+      "alarms-clamp",
+      "alarms-create-forms",
+      "alarms-order",
+      "commands-inventory",
+      "i18n-fallback",
+      "i18n-placeholders",
+      "i18n-predefined",
+      "navigation-document",
+      "permissions-inventory",
+      "permissions-request-gesture",
+      "ports-disconnect",
+      "runtime-callback-promise",
+      "runtime-last-error-unchecked",
+      "runtime-response-styles",
+      "storage-bytes",
+      "storage-get-forms",
+      "storage-on-changed",
+      "storage-quota",
+      "storage-session-access",
+      "tabs-lifecycle",
+      "tabs-query-permission",
+      "tabs-query-redaction",
+      "windows-lifecycle"
+    ],
+    "execution": "Same case.js and shared harness in fresh Node vm realms using actual generated bindings and byte envelopes through Rust stdio_host. The fake browser models tab/window/action state and deterministic single-document loading, not native page execution or network. Manifest permissions, resource inventory and locale catalogs are passed into the runtime before contexts bind. Runtime-message and port cases load the original background.js in a distinct authenticated realm. Manual host epoch and realm Date.now both 1000000. Session storage access loads the original API-only content.js in an independently authenticated fake content principal after fake tab creation. This qualifies principal enforcement, not native content injection.",
+    "limitations": "node-plan.mjs classifies all 57 cases, with explicit reasons for unavailable cases; output/coverage/inventory.json preserves that inventory. Real page/network/worker/world injection is not simulated, native event acceptance is untested, and DNR metadata cases remain unavailable-runtime because no DNR backend is installed. --host matching is the caller responsibility.",
+    "partialCases": {
+      "scripting-register-lifecycle": "Registration metadata and refusals only. Five native injection calls (ten observations) are omitted explicitly; result is always labelled partial. Oracle observations are projected by validated labels without modifying reference files."
+    }
+  },
+  "ci": "check.sh is the bounded CI entry point. Automatic hosted job deferred: checked reference includes Linux ARM64 getPlatformInfo and allocator-sensitive session bytes; current hosted Ubuntu job is x86_64. Do not silently normalize genuine platform facts. Run on the matching host or qualify a separate reference before wiring CI.",
+  "normalization": "Identity placeholders retain equality relationships. Tab/window IDs in exact known error templates are replaced without changing punctuation or other words; UUID document IDs and fixture HTTP/HTTPS origins are mapped. Rule IDs, alarm periods, byte counts, platform facts, and observation order remain evidence. Concurrent cross-frame event collection is projected into ordered per-frame sequences explicitly in case code."
+}

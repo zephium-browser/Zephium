@@ -526,6 +526,8 @@ pub(crate) fn install(
             scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
+            #[cfg(target_os = "linux")]
+            webext_linux: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]

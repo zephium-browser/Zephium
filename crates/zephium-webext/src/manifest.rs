@@ -39,6 +39,10 @@ pub enum RunAt {
 pub struct ContentScript {
     pub matches: Vec<String>,
     pub exclude_matches: Vec<String>,
+    pub include_globs: Vec<String>,
+    pub exclude_globs: Vec<String>,
+    pub match_about_blank: bool,
+    pub match_origin_as_fallback: bool,
     pub js: Vec<String>,
     pub css: Vec<String>,
     pub world: World,
@@ -217,6 +221,16 @@ impl Manifest {
                 exclude_matches: strings(&script["exclude_matches"])
                     .map(str::to_owned)
                     .collect(),
+                include_globs: strings(&script["include_globs"])
+                    .map(str::to_owned)
+                    .collect(),
+                exclude_globs: strings(&script["exclude_globs"])
+                    .map(str::to_owned)
+                    .collect(),
+                match_about_blank: script["match_about_blank"].as_bool().unwrap_or(false),
+                match_origin_as_fallback: script["match_origin_as_fallback"]
+                    .as_bool()
+                    .unwrap_or(false),
                 js: resources(&script["js"]),
                 css: resources(&script["css"]),
                 world: match script["world"].as_str() {
@@ -683,7 +697,9 @@ mod tests {
         let manifest = Manifest::from_value(json!({
             "content_scripts": [
                 {"matches": ["<all_urls>"], "js": ["/cs.js"], "world": "MAIN",
-                 "run_at": "document_start", "all_frames": true},
+                 "run_at": "document_start", "all_frames": true,
+                 "include_globs": ["*/news/*"], "exclude_globs": ["*private*"],
+                 "match_about_blank": true, "match_origin_as_fallback": true},
                 {"matches": ["https://a.test/*"], "css": ["a.css"]}
             ],
             "browser_action": {"default_popup": "popup/index.html?mode=popup",
@@ -698,6 +714,14 @@ mod tests {
         assert_eq!(scripts[0].world, World::Main);
         assert_eq!(scripts[0].run_at, RunAt::DocumentStart);
         assert!(scripts[0].all_frames);
+        assert_eq!(scripts[0].include_globs, ["*/news/*"]);
+        assert_eq!(scripts[0].exclude_globs, ["*private*"]);
+        assert!(scripts[0].match_about_blank);
+        assert!(scripts[0].match_origin_as_fallback);
+        assert!(scripts[1].include_globs.is_empty());
+        assert!(scripts[1].exclude_globs.is_empty());
+        assert!(!scripts[1].match_about_blank);
+        assert!(!scripts[1].match_origin_as_fallback);
         assert_eq!(scripts[1].world, World::Isolated);
         assert_eq!(scripts[1].run_at, RunAt::DocumentIdle);
 

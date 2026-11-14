@@ -1,0 +1,112 @@
+{
+  "caseId": "tabs-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": false,
+          "tabId": "<tab:1>"
+        }
+      }
+    },
+    {
+      "label": "update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "tabId": "<tab:1>"
+        }
+      }
+    },
+    {
+      "label": "remove:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "event order",
+      "value": [
+        {
+          "event": "created",
+          "tabId": "<tab:1>"
+        },
+        {
+          "event": "updated",
+          "status": "loading",
+          "tabId": "<tab:1>"
+        },
+        {
+          "event": "updated",
+          "status": "complete",
+          "tabId": "<tab:1>"
+        },
+        {
+          "event": "updated",
+          "status": "loading",
+          "tabId": "<tab:1>"
+        },
+        {
+          "event": "updated",
+          "status": "complete",
+          "tabId": "<tab:1>"
+        },
+        {
+          "event": "removed",
+          "info": {
+            "isWindowClosing": false,
+            "windowId": "<window:1>"
+          },
+          "tabId": "<tab:1>"
+        }
+      ]
+    },
+    {
+      "label": "get removed tab:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get removed tab:error",
+      "value": {
+        "lastError": null,
+        "message": "No tab with id: <tab:1>."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

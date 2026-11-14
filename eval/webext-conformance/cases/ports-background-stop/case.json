@@ -1,0 +1,6 @@
+{
+  "id": "ports-background-stop",
+  "title": "Stopping a service worker disconnects its live port",
+  "apis": ["runtime.connect", "runtime.onConnect", "runtime.Port"],
+  "permissions": []
+}

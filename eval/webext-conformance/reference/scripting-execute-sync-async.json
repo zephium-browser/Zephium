@@ -1,0 +1,119 @@
+{
+  "caseId": "scripting-execute-sync-async",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "sync function with JSON arguments:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync function with JSON arguments:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "count": 4,
+              "text": "hello",
+              "top": true,
+              "values": [
+                true,
+                null,
+                "x"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "promise result is awaited:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "promise result is awaited:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "awaited": true,
+              "value": 14
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "undefined result shape:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "undefined result shape:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "executeScript callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "executeScript callback:callback",
+      "value": {
+        "args": [
+          [
+            {
+              "documentId": "<document:1>",
+              "frameId": 0,
+              "result": "callback"
+            }
+          ]
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "executeScript callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "executeScript callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

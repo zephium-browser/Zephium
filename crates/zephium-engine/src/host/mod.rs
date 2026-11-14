@@ -76,6 +76,8 @@ mod style_worker;
 mod webext;
 #[cfg(target_os = "macos")]
 mod webext_downloads;
+#[cfg(target_os = "linux")]
+mod webext_linux;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(
@@ -721,6 +723,8 @@ pub(crate) struct EngineHost {
     scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
+    #[cfg(target_os = "linux")]
+    webext_linux: webext_linux::LinuxExtensions,
     // Off-screen views, and the subset the shell's idle policy asked WebView2
     // to suspend.
     #[cfg(target_os = "windows")]

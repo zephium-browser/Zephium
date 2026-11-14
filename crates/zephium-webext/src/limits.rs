@@ -10,11 +10,13 @@ use crate::manifest::Manifest;
 pub enum Platform {
     Macos,
     Windows,
+    Linux,
 }
 
 const MAC: u8 = 1;
 const WIN: u8 = 2;
-const BOTH: u8 = MAC | WIN;
+const LIN: u8 = 4;
+const ALL: u8 = MAC | WIN | LIN;
 
 enum Uses {
     /// An API permission; a trailing `.` matches the whole family.
@@ -31,82 +33,102 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (
         &[Permission("sidePanel"), Key("side_panel")],
         "Can't show its side panel",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("devtools_page")],
         "Developer tools panels aren't available",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.newtab")],
         "Can't replace the new tab page",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.history")],
         "Can't replace the history page",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.bookmarks")],
         "Can't replace the bookmarks page",
-        BOTH,
+        ALL,
     ),
     (
         &[Permission("nativeMessaging")],
         "Can't talk to apps on your computer (native messaging)",
-        WIN,
+        WIN | LIN,
     ),
     (
         &[Permission("webRequestBlocking")],
         "Can't block requests the old way (webRequestBlocking)",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("tabGroups")], "Can't manage tab groups", MAC),
+    (
+        &[Permission("tabGroups")],
+        "Can't manage tab groups",
+        MAC | LIN,
+    ),
     (
         &[Permission("readingList")],
         "Can't use the reading list",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("userScripts")], "Can't run user scripts", MAC),
+    (
+        &[Permission("userScripts")],
+        "Can't run user scripts",
+        MAC | LIN,
+    ),
     (
         &[Permission("debugger")],
         "Can't use the page debugger",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("proxy")], "Can't change proxy settings", MAC),
+    (
+        &[Permission("proxy")],
+        "Can't change proxy settings",
+        MAC | LIN,
+    ),
     (
         &[Permission("tts"), Permission("ttsEngine")],
         "Can't use text to speech",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("fontSettings")],
         "Can't change font settings",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("search")],
         "Can't search with the browser's search engine",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("pageCapture")],
         "Can't save pages as MHTML",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("desktopCapture")],
         "Can't capture your screen",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("geolocation")], "Can't use your location", MAC),
-    (&[Permission("gcm")], "Can't receive push messages", MAC),
+    (
+        &[Permission("geolocation")],
+        "Can't use your location",
+        MAC | LIN,
+    ),
+    (
+        &[Permission("gcm")],
+        "Can't receive push messages",
+        MAC | LIN,
+    ),
     (
         &[Permission("management")],
         "Can't see or manage other extensions",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("privacy")],
@@ -114,19 +136,89 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         MAC,
     ),
     (
+        &[Permission("privacy")],
+        "Can't change privacy settings",
+        LIN,
+    ),
+    (
+        &[
+            Permission("declarativeNetRequest"),
+            Permission("declarativeNetRequestWithHostAccess"),
+        ],
+        "Can't change response headers with rules",
+        LIN,
+    ),
+    (
+        &[
+            Permission("declarativeNetRequest"),
+            Permission("declarativeNetRequestWithHostAccess"),
+        ],
+        "Rules don't apply to WebSockets or service-worker requests",
+        LIN,
+    ),
+    (
+        &[
+            Permission("declarativeNetRequest"),
+            Permission("declarativeNetRequestWithHostAccess"),
+        ],
+        "Rules tell some request types apart less precisely on non-HTTPS sites",
+        LIN,
+    ),
+    (
+        &[Permission("webRequest")],
+        "Can't watch the requests pages make",
+        LIN,
+    ),
+    (
+        &[Permission("webRequestAuthProvider")],
+        "Can't answer websites' sign-in prompts",
+        LIN,
+    ),
+    (
+        &[Permission("contextMenus"), Permission("menus")],
+        "Can't add items to the right-click menu",
+        LIN,
+    ),
+    (
+        &[Permission("notifications")],
+        "Can't show notifications",
+        LIN,
+    ),
+    (
+        &[Permission("cookies")],
+        "Can't read or change cookies",
+        LIN,
+    ),
+    (&[Permission("downloads")], "Can't manage downloads", LIN),
+    (
+        &[Permission("identity")],
+        "Can't sign in to services through the browser",
+        LIN,
+    ),
+    (
+        &[Key("commands")],
+        "Its keyboard shortcuts aren't available yet",
+        LIN,
+    ),
+    (
+        &[Key("externally_connectable")],
+        "Websites can't message it directly",
+        LIN,
+    ),
+    (
         &[Key("oauth2")],
         "Can't sign in with a Google account (identity.getAuthToken)",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("enterprise.")],
         "Enterprise features aren't available",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("system.")],
         "Can't read system information",
-        MAC,
+        MAC | LIN,
     ),
 ];
 
@@ -136,6 +228,7 @@ pub fn limitations(manifest: &Manifest, permissions: &[String], platform: Platfo
     let bit = match platform {
         Platform::Macos => MAC,
         Platform::Windows => WIN,
+        Platform::Linux => LIN,
     };
     GAPS.iter()
         .filter(|(uses, _, platforms)| {
@@ -274,6 +367,34 @@ mod tests {
         );
         assert!(assess(json!({"permissions": ["identity"]}), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
+    }
+
+    #[test]
+    fn linux_names_its_own_gaps_and_no_others() {
+        let raw = json!({
+            "manifest_version": 3,
+            "permissions": ["declarativeNetRequest", "storage", "tabs", "scripting", "notifications", "privacy"],
+            "host_permissions": ["<all_urls>"],
+        });
+        assert_eq!(
+            assess(raw.clone(), Platform::Linux),
+            [
+                "Can't change privacy settings",
+                "Can't change response headers with rules",
+                "Rules don't apply to WebSockets or service-worker requests",
+                "Rules tell some request types apart less precisely on non-HTTPS sites",
+                "Can't show notifications",
+            ]
+        );
+        assert_eq!(
+            assess(raw, Platform::Macos),
+            ["Can only change password and autofill privacy settings"]
+        );
+        let reader = json!({"manifest_version": 3, "permissions": ["storage", "alarms", "scripting", "fontSettings"]});
+        assert_eq!(
+            assess(reader, Platform::Linux),
+            ["Can't change font settings"]
+        );
     }
 
     #[test]

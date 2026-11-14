@@ -1,0 +1,114 @@
+{
+  "caseId": "injection-css",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "manifest stylesheet:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "manifest stylesheet:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "color": "rgb(12, 34, 56)",
+              "marker": "manifest"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "insert CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "insert CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "programmatic stylesheet:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "programmatic stylesheet:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "color": "rgb(21, 43, 65)",
+              "marker": "programmatic"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "remove CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "manifest stylesheet restored:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "manifest stylesheet restored:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "color": "rgb(12, 34, 56)",
+              "marker": "manifest"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

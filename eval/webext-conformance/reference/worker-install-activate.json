@@ -1,0 +1,36 @@
+{
+  "caseId": "worker-install-activate",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "worker lifecycle:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "worker lifecycle:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "events": [
+            "install",
+            "install settled",
+            "runtime.onInstalled:install",
+            "activate",
+            "activate settled"
+          ],
+          "state": "activated"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

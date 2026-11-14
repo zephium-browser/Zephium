@@ -244,6 +244,10 @@ pub(super) fn stage(
         let source = original_identity(&original)?;
         let manifest = Manifest::load(&dir)
             .map_err(|error| format!("The extension's manifest is invalid ({error})."))?;
+        #[cfg(target_os = "linux")]
+        zephium_webext_linux::runtime::ProfileRuntime::check_manifest(&manifest, &dir).map_err(
+            |refusal| format!("This extension can't run in Zephium on Linux: {refusal}"),
+        )?;
         let warnings = permissions::warnings(&manifest);
         let limitations = limits::limitations(&manifest, &manifest.permissions(), platform());
         let icon = icon_data_url(&dir, &manifest);

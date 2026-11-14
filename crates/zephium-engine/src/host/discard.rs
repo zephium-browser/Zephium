@@ -876,12 +876,40 @@ impl EngineHost {
         if pressure == zephium_core::ports::engine::MemoryPressure::Normal {
             return;
         }
+        #[cfg(target_os = "linux")]
+        self.webext_linux.memory_pressure(pressure);
         self.release_spare();
     }
 
+    /// WebKitGTK keeps a page left by a cross-site navigation alive in its
+    /// own suspended Web process for back/forward navigation, with no time
+    /// limit. Clearing the in-memory cache data type ends those processes and
+    /// drops dead cached resources; disk caches and site data are untouched.
+    #[cfg(target_os = "linux")]
+    fn release_webkit_memory(&self) {
+        use webkit2gtk::{WebsiteDataManagerExtManual, WebsiteDataTypes};
+        for manager in self.linux_data_managers.values().flatten() {
+            manager.clear(
+                WebsiteDataTypes::MEMORY_CACHE,
+                gtk::glib::TimeSpan::from_seconds(0),
+                None::<&gtk::gio::Cancellable>,
+                |_| {},
+            );
+        }
+        // glibc keeps freed heap pages resident until asked.
+        #[cfg(target_env = "gnu")]
+        // SAFETY: malloc_trim only walks allocator state under its own locks.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+
     /// Closes the warm spare view, if one is waiting; the next completed load
-    /// may build another.
+    /// may build another. Linux has no spare; the same quiet-browsing and
+    /// pressure signals release WebKit's suspended back/forward processes.
     pub(crate) fn release_spare(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.release_webkit_memory();
         #[cfg(target_os = "windows")]
         if self.spare_serves_a_call() {
             return;

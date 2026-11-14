@@ -163,8 +163,18 @@ windows-core = "0.61"
 windows-numerics = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Anchored popup placement (`gdk_window_move_to_rect`) needs the GTK 3.24 API.
+gdk = { version = "0.18", features = ["v3_24"] }
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+javascriptcore-rs = "=1.1.2"
+libc = "0.2"
+tempfile.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
+zephium-webext-linux = { path = "../zephium-webext-linux", version = "=0.1.0" }
+zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

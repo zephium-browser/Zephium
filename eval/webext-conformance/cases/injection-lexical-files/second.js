@@ -1,0 +1,1 @@
+sharedLexicalFiles.count += 1;

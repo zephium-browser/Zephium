@@ -1,0 +1,11 @@
+{
+  "id": "scripting-register-lifecycle",
+  "title": "Register, update, and unregister dynamic content scripts",
+  "apis": [
+    "scripting.registerContentScripts",
+    "scripting.getRegisteredContentScripts",
+    "scripting.updateContentScripts",
+    "scripting.unregisterContentScripts"
+  ],
+  "permissions": ["scripting"]
+}

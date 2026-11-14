@@ -1,0 +1,101 @@
+{
+  "caseId": "injection-exclusions-globs",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "included=1:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "included=1:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "marker": "yes"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "included=1&skip=1:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "included=1&skip=1:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:2>",
+            "frameId": 0,
+            "result": {
+              "marker": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "excluded=included:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "excluded=included:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:3>",
+            "frameId": 0,
+            "result": {
+              "marker": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "plain=1:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "plain=1:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:4>",
+            "frameId": 0,
+            "result": {
+              "marker": null
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

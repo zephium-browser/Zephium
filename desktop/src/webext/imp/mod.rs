@@ -751,6 +751,8 @@ pub(in crate::webext) async fn list(
 fn platform() -> Platform {
     if cfg!(target_os = "windows") {
         Platform::Windows
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
     } else {
         Platform::Macos
     }
@@ -964,7 +966,7 @@ pub(in crate::webext) async fn set_access(
 ) -> Result<(), String> {
     let access = match mode {
         "all" => Access::All,
-        "click" if !cfg!(target_os = "windows") => Access::Click,
+        "click" if !cfg!(any(target_os = "windows", target_os = "linux")) => Access::Click,
         "sites" => {
             let mut sites: Vec<String> = sites.iter().filter_map(|site| site_host(site)).collect();
             sites.sort();

@@ -150,7 +150,15 @@ impl EngineHost {
         );
         // Restored and explicitly opened tabs need the same live profile grant
         // as native child adoption, before either fresh or spare construction.
-        if !event_permit.allows_navigation(url) {
+        // The tab's own extension gate exists only once it is built; the
+        // browser opening an installed extension's page is admitted here.
+        #[cfg(target_os = "linux")]
+        let admitted = event_permit.allows_navigation(url)
+            || (event_permit.allows_navigation("about:blank")
+                && self.webext_linux.admits_initial(partition, url));
+        #[cfg(not(target_os = "linux"))]
+        let admitted = event_permit.allows_navigation(url);
+        if !admitted {
             eprintln!("security: rejected invalid native view target");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });
@@ -416,6 +424,11 @@ impl EngineHost {
             self.windows_extensions
                 .navigation_grants(partition.profile()),
         );
+        #[cfg(target_os = "linux")]
+        let event_permit = match partition {
+            Partition::Ephemeral(_) => event_permit,
+            _ => event_permit.with_extension_tab(partition.profile(), id.get()),
+        };
         let target_resource_class = purpose.resource_class();
         let logical_id = id.get();
         let reservation_failure_permit = event_permit.clone();
@@ -974,6 +987,17 @@ impl EngineHost {
                     self.linux_unverifiable_data_managers.insert(profile);
                     return None;
                 };
+                // Extensions configure the context before its first WebView.
+                #[cfg(target_os = "linux")]
+                {
+                    let sink = self.sink.clone();
+                    self.webext_linux.prepare_context(
+                        partition,
+                        context.webkit_context(),
+                        expected_directory.as_deref(),
+                        &sink,
+                    );
+                }
                 WebViewBuilder::new_with_web_context(context)
             } else {
                 let Some(context) = self.web_contexts.get_mut(&profile) else {
@@ -2470,6 +2494,14 @@ impl EngineHost {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
             }
             return None;
+        }
+        // Ordinary tabs are the only views extensions reach; they attach
+        // before the first load, which the browser itself asked for.
+        #[cfg(target_os = "linux")]
+        {
+            self.webext_linux.attach_tab(partition, id.get(), &view);
+            self.webext_linux
+                .authorize_navigation(partition.profile(), id.get(), url);
         }
         // Native hardening and profile-storage attestation must precede
         // content-policy registration, while registration must precede every

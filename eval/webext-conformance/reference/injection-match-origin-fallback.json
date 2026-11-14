@@ -1,0 +1,75 @@
+{
+  "caseId": "injection-match-origin-fallback",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "create related data and blob frames:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create related data and blob frames:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "created": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "origin fallback content messages",
+      "value": [
+        {
+          "kind": "blank",
+          "probe": "origin-fallback",
+          "protocol": "about:"
+        },
+        {
+          "kind": "blob",
+          "probe": "origin-fallback",
+          "protocol": "blob:"
+        },
+        {
+          "kind": "cross",
+          "probe": "origin-fallback",
+          "protocol": "http:"
+        },
+        {
+          "kind": "data",
+          "probe": "origin-fallback",
+          "protocol": "data:"
+        },
+        {
+          "kind": "same",
+          "probe": "origin-fallback",
+          "protocol": "http:"
+        },
+        {
+          "kind": "srcdoc",
+          "probe": "origin-fallback",
+          "protocol": "about:"
+        },
+        {
+          "kind": "top",
+          "probe": "origin-fallback",
+          "protocol": "http:"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

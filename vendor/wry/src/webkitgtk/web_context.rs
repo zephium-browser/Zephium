@@ -224,6 +224,15 @@ pub trait WebContextExt {
   );
 }
 
+impl super::WebContext {
+  /// The native context, for embedder setup that WebKit accepts only before
+  /// the context has a WebView or Web process (sandbox paths, Web-process
+  /// extension directory and initialization data).
+  pub fn webkit_context(&self) -> &WebContext {
+    &self.os.context
+  }
+}
+
 impl WebContextExt for super::WebContext {
   fn context(&self) -> &WebContext {
     &self.os.context

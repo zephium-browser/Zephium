@@ -1,0 +1,6 @@
+{
+  "id": "tabs-query-redaction",
+  "title": "Tab query filters and metadata without tabs permission",
+  "apis": ["tabs.query", "tabs.get", "tabs.remove"],
+  "permissions": []
+}

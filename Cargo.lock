@@ -7572,6 +7572,7 @@ dependencies = [
  "ulid",
  "url",
  "winreg 0.56.0",
+ "zephium-webext-matcher",
  "zeroize",
 ]
 
@@ -7662,7 +7663,9 @@ dependencies = [
  "zephium-store",
  "zephium-voice",
  "zephium-webext",
+ "zephium-webext-linux",
  "zephium-webext-macos",
+ "zephium-webext-runtime",
  "zephium-work-composition",
 ]
 
@@ -7675,8 +7678,10 @@ dependencies = [
  "dirs",
  "dispatch2",
  "flate2",
+ "gdk",
  "gtk",
  "image",
+ "javascriptcore-rs",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -7705,7 +7710,9 @@ dependencies = [
  "zephium-blocker",
  "zephium-core",
  "zephium-webext",
+ "zephium-webext-linux",
  "zephium-webext-macos",
+ "zephium-webext-runtime",
  "zeroize",
 ]
 
@@ -7877,6 +7884,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-dnr"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "memchr",
+ "psl",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
+name = "zephium-webext-linux"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "gtk",
+ "javascriptcore-rs",
+ "proptest",
+ "ring",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "soup3",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+ "webkit2gtk",
+ "zephium-core",
+ "zephium-webext",
+ "zephium-webext-dnr",
+ "zephium-webext-runtime",
+ "zephium-webkit-web-process-protocol",
+]
+
+[[package]]
 name = "zephium-webext-macos"
 version = "0.1.0"
 dependencies = [
@@ -7895,6 +7942,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-matcher"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "url",
+]
+
+[[package]]
+name = "zephium-webext-runtime"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+ "zephium-core",
+ "zephium-webext",
+ "zephium-webext-dnr",
+ "zephium-webext-matcher",
+]
+
+[[package]]
 name = "zephium-webext-windows"
 version = "0.1.0"
 dependencies = [
@@ -7906,6 +7978,35 @@ dependencies = [
  "windows",
  "wry",
  "zephium-webext",
+]
+
+[[package]]
+name = "zephium-webkit-web-process"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "gtk",
+ "javascriptcore-rs",
+ "libc",
+ "pkg-config",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "webkit2gtk",
+ "zephium-webext-dnr",
+ "zephium-webext-runtime",
+ "zephium-webkit-web-process-protocol",
+]
+
+[[package]]
+name = "zephium-webkit-web-process-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "url",
+ "zephium-webext-dnr",
+ "zephium-webext-matcher",
 ]
 
 [[package]]

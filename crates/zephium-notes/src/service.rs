@@ -394,6 +394,12 @@ impl Worker {
         let signalled = Arc::clone(signalled);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if event
+                    .as_ref()
+                    .is_ok_and(|event| !changes_content(&event.kind))
+                {
+                    return;
+                }
                 {
                     let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
                     match event {
@@ -466,6 +472,16 @@ impl Worker {
         if imported.is_empty() || self.host.retire_legacy_notes(profile, imported) {
             let _ = library.index().set_setting(LEGACY_IMPORTED, "1");
         }
+    }
+}
+
+/// inotify also reports opens and reads; the service's own scan opens every
+/// note, so treating those as edits would rescan the folder forever.
+fn changes_content(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode, EventKind};
+    match kind {
+        EventKind::Access(access) => *access == AccessKind::Close(AccessMode::Write),
+        _ => true,
     }
 }
 
@@ -817,6 +833,24 @@ mod tests {
             }
         ));
         assert!(!folder.exists());
+    }
+
+    #[test]
+    fn opening_or_reading_notes_is_not_a_change() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind};
+        assert!(!changes_content(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!changes_content(&EventKind::Access(AccessKind::Read)));
+        assert!(!changes_content(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(changes_content(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(changes_content(&EventKind::Create(CreateKind::File)));
+        assert!(changes_content(&EventKind::Modify(ModifyKind::Any)));
+        assert!(changes_content(&EventKind::Any));
     }
 
     #[test]

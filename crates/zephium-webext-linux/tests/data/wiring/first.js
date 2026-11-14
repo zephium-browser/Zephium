@@ -1,0 +1,1 @@
+const wiringStarted = location.href;
