@@ -65,6 +65,20 @@ pub enum FrameLifecycle {
         /// The document.
         document: DocumentGeneration,
     },
+    /// A document reached `DOMContentLoaded`, or its window `load` when
+    /// `completed`. Renderer-reported, for the document the bridge records.
+    DocumentProgress {
+        /// The view.
+        view: BridgeViewId,
+        /// The host object.
+        owner: ViewRef,
+        /// Chrome's frame id.
+        frame: FrameId,
+        /// The document.
+        document: DocumentGeneration,
+        /// `load` rather than `DOMContentLoaded`.
+        completed: bool,
+    },
     /// A document went away, by navigation or frame removal.
     DocumentRemoved {
         /// The view.

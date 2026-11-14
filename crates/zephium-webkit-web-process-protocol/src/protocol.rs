@@ -203,6 +203,16 @@ pub enum FrameEvent {
         frame_id: u64,
         document_seq: u64,
     },
+    /// The document's trusted `DOMContentLoaded` reached its window.
+    ContentLoaded {
+        frame_id: u64,
+        document_seq: u64,
+    },
+    /// The document's trusted window `load` event fired.
+    Completed {
+        frame_id: u64,
+        document_seq: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -804,6 +814,22 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
                         w.u64(*frame_id);
                         w.u64(*document_seq);
                     }
+                    FrameEvent::ContentLoaded {
+                        frame_id,
+                        document_seq,
+                    } => {
+                        w.u8(7);
+                        w.u64(*frame_id);
+                        w.u64(*document_seq);
+                    }
+                    FrameEvent::Completed {
+                        frame_id,
+                        document_seq,
+                    } => {
+                        w.u8(8);
+                        w.u64(*frame_id);
+                        w.u64(*document_seq);
+                    }
                 }
             }
         }
@@ -917,6 +943,14 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
                     5 => FrameEvent::Evaluated(r.evaluation()?),
                     6 => FrameEvent::ExternalPage {
                         install_id: r.string(MAX_INSTALL_ID_BYTES)?,
+                        frame_id: r.u64()?,
+                        document_seq: r.u64()?,
+                    },
+                    7 => FrameEvent::ContentLoaded {
+                        frame_id: r.u64()?,
+                        document_seq: r.u64()?,
+                    },
+                    8 => FrameEvent::Completed {
                         frame_id: r.u64()?,
                         document_seq: r.u64()?,
                     },
@@ -1106,6 +1140,14 @@ mod tests {
                 FrameEvent::Destroyed {
                     frame_id: 9,
                     document_seq: 1,
+                },
+                FrameEvent::ContentLoaded {
+                    frame_id: 9,
+                    document_seq: 2,
+                },
+                FrameEvent::Completed {
+                    frame_id: 9,
+                    document_seq: 2,
                 },
                 FrameEvent::Reset,
             ],

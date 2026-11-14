@@ -543,7 +543,23 @@ unsafe extern "C" fn lifecycle(value: *mut Object, data: *mut c_void) -> c_int {
         if !live(document) {
             return 0;
         }
-        match raw::jsc_value_to_int32(value) {
+        let phase = raw::jsc_value_to_int32(value);
+        let event = match phase {
+            1 => Some(FrameEvent::ContentLoaded {
+                frame_id: document.frame,
+                document_seq: document.sequence,
+            }),
+            2 => Some(FrameEvent::Completed {
+                frame_id: document.frame,
+                document_seq: document.sequence,
+            }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            with_runtime(|runtime| runtime.state.queue_frame_event(document.page, event));
+            flush_frame_events(document.page);
+        }
+        match phase {
             1 => {
                 run_scripts(
                     document.page,

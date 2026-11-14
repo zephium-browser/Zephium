@@ -56,6 +56,12 @@ pub(crate) enum FrameChange {
         frame: FrameId,
         document: DocumentGeneration,
     },
+    /// The current document reached `DOMContentLoaded`, or `load` when `completed`.
+    Progress {
+        frame: FrameId,
+        document: DocumentGeneration,
+        completed: bool,
+    },
 }
 
 /// A record the table refused.
@@ -138,6 +144,26 @@ impl FrameTable {
                 {
                     self.remove(*frame_id, changes);
                 }
+                Ok(())
+            }
+            FrameEvent::ContentLoaded {
+                frame_id,
+                document_seq,
+            }
+            | FrameEvent::Completed {
+                frame_id,
+                document_seq,
+            } => {
+                let frame = self
+                    .frames
+                    .get(frame_id)
+                    .filter(|frame| frame.document.seq == *document_seq)
+                    .ok_or(FrameRefusal::StaleDocument)?;
+                changes.push(FrameChange::Progress {
+                    frame: frame.chrome,
+                    document: frame.document.generation,
+                    completed: matches!(event, FrameEvent::Completed { .. }),
+                });
                 Ok(())
             }
             FrameEvent::Evaluated(_) | FrameEvent::ExternalPage { .. } => Ok(()),
@@ -471,6 +497,61 @@ mod tests {
             FrameEvent::Committed(info(1, 1, "https://a.test/", true)),
         );
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn load_phases_belong_to_the_current_document_only() {
+        let (mut table, mut minter) = (FrameTable::default(), Minter(0));
+        for created in [
+            info(1, 1, "https://a.test/", true),
+            info(2, 2, "https://a.test/frame", false),
+        ] {
+            let (result, _) = apply(&mut table, &mut minter, FrameEvent::Created(created));
+            assert_eq!(result, Ok(()));
+        }
+        let (result, changes) = apply(
+            &mut table,
+            &mut minter,
+            FrameEvent::ContentLoaded {
+                frame_id: 2,
+                document_seq: 2,
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert!(matches!(
+            changes[..],
+            [FrameChange::Progress { frame, completed: false, .. }] if frame != FrameId::MAIN
+        ));
+        let (_, changes) = apply(
+            &mut table,
+            &mut minter,
+            FrameEvent::Completed {
+                frame_id: 1,
+                document_seq: 1,
+            },
+        );
+        assert!(matches!(
+            changes[..],
+            [FrameChange::Progress {
+                frame: FrameId::MAIN,
+                completed: true,
+                ..
+            }]
+        ));
+        for stale in [
+            FrameEvent::Completed {
+                frame_id: 2,
+                document_seq: 1,
+            },
+            FrameEvent::ContentLoaded {
+                frame_id: 9,
+                document_seq: 2,
+            },
+        ] {
+            let (result, changes) = apply(&mut table, &mut minter, stale);
+            assert_eq!(result, Err(FrameRefusal::StaleDocument));
+            assert!(changes.is_empty());
+        }
     }
 
     #[test]

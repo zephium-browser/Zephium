@@ -1130,6 +1130,20 @@ impl Core {
                             document,
                         }));
                 }
+                FrameChange::Progress {
+                    frame,
+                    document,
+                    completed,
+                } => {
+                    self.effects
+                        .push(Effect::Lifecycle(FrameLifecycle::DocumentProgress {
+                            view: BridgeViewId(id),
+                            owner,
+                            frame,
+                            document,
+                            completed,
+                        }));
+                }
                 FrameChange::Removed {
                     module_frame,
                     frame,
