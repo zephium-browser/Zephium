@@ -146,26 +146,30 @@ fn binding_tests_pass_in_node() {
         .collect();
     tests.sort();
     assert!(!tests.is_empty());
-    let output = match Command::new("node")
-        .arg("--test")
-        .args(&tests)
-        .env("ZEPHIUM_WEBEXT_BUNDLE_DIR", &bundles)
-        .output()
-    {
-        Ok(output) => output,
-        // CI must run them; elsewhere Node is optional.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound && std::env::var_os("CI").is_none() =>
+    for surface in ["generated", "fixture"] {
+        let output = match Command::new("node")
+            .arg("--test")
+            .args(&tests)
+            .env("ZEPHIUM_WEBEXT_BUNDLE_DIR", &bundles)
+            .env("ZEPHIUM_WEBEXT_TEST_SURFACE", surface)
+            .output()
         {
-            eprintln!("skipping: node is not installed");
-            return;
-        }
-        Err(error) => panic!("could not run node: {error}"),
-    };
-    assert!(
-        output.status.success(),
-        "binding tests failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+            Ok(output) => output,
+            // CI must run them; elsewhere Node is optional.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::env::var_os("CI").is_none() =>
+            {
+                eprintln!("skipping: node is not installed");
+                return;
+            }
+            Err(error) => panic!("could not run node: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "binding tests failed with {surface} surface:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

@@ -1,3 +1,4 @@
+mod binding;
 mod idl;
 mod json;
 
@@ -13,6 +14,8 @@ use sha2::{Digest, Sha256};
 const SNAPSHOT: &str = "vendor/chromium-extension-api";
 const RUST_OUTPUT: &str = "crates/zephium-webext-runtime/src/api/generated.rs";
 const JS_OUTPUT: &str = "crates/zephium-webext-runtime/js/surface.generated.js";
+const JS_FIXTURE: &str = "crates/zephium-webext-runtime/js/test/surface.fixture.json";
+const JS_MEMBERS: &str = "crates/zephium-webext-runtime/js/test/surface.members.json";
 
 pub fn run(arguments: &[String]) -> Result<(), String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -50,6 +53,9 @@ pub fn run(arguments: &[String]) -> Result<(), String> {
     let (rust, javascript) = generate(&catalog)?;
     output(&root.join(RUST_OUTPUT), &rust, check)?;
     output(&root.join(JS_OUTPUT), &javascript, check)?;
+    let members = fs::read_to_string(root.join(JS_MEMBERS)).map_err(|error| error.to_string())?;
+    let fixture = binding::fixture(&binding::surface(&catalog)?, &members)?;
+    output(&root.join(JS_FIXTURE), &fixture, check)?;
     if let Some(path) = coverage {
         let absolute = if path.is_absolute() {
             path
@@ -475,7 +481,6 @@ fn generate(catalog: &Catalog) -> Result<(String, String), String> {
     rust.push_str(";\n\n/// Original feature rule alternatives, dependencies and platform restrictions.\npub const FEATURES_JSON: &str = ");
     rust.push_str(&rust_literal(&features));
     rust.push_str(";\n\n/// Schema validators for each callable dotted member name.\npub const METHOD_VALIDATORS: &[(&str, crate::dispatch::Validator)] = &[\n");
-    let mut surfaces = Vec::new();
     for schema in &catalog.schemas {
         let namespace = schema["namespace"]
             .as_str()
@@ -483,7 +488,6 @@ fn generate(catalog: &Catalog) -> Result<(String, String), String> {
         let functions = schema["functions"]
             .as_array()
             .ok_or("namespace missing functions")?;
-        let mut methods = Vec::new();
         for function in functions {
             let name = function["name"].as_str().ok_or("function missing name")?;
             let full_name = format!("{namespace}.{name}");
@@ -491,45 +495,10 @@ fn generate(catalog: &Catalog) -> Result<(String, String), String> {
             rust.push_str(&format!(
                 "    ({quoted}, |args| crate::schema::validate({quoted}, args)),\n"
             ));
-            let parameters = function["parameters"]
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let callback_param = parameters
-                .last()
-                .is_some_and(|parameter| parameter["type"] == "function");
-            let callback = callback_param || function.get("returns_async").is_some();
-            let async_schema = function.get("returns_async").unwrap_or(function);
-            let promise = callback
-                && async_schema
-                    .get("supportsPromises")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true)
-                && async_schema
-                    .get("does_not_support_promises")
-                    .is_none_or(|value| value == false);
-            let parameters = if callback_param {
-                &parameters[..parameters.len() - 1]
-            } else {
-                parameters
-            };
-            let min_args = parameters
-                .iter()
-                .filter(|parameter| parameter["optional"] != true)
-                .count();
-            let mut method = json!({"name":name,"minArgs":min_args,"maxArgs":parameters.len(),"callback":callback,"promise":promise,"asyncMode":if promise {"callbackOrPromise"} else if callback {"callback"} else {"sync"}});
-            copy_flags(
-                function,
-                method.as_object_mut().ok_or("invalid method metadata")?,
-            );
-            methods.push(method);
         }
-        let mut surface = json!({"namespace":namespace,"methods":methods,"events":schema["events"],"properties":schema.get("properties").cloned().unwrap_or_else(|| json!({})),"enums":enum_values(schema),"feature_rules":schema["feature_rules"]});
-        copy_flags(schema, surface.as_object_mut().ok_or("invalid surface")?);
-        surfaces.push(surface);
     }
     rust.push_str("];\n\n/// Finds the validator for a dotted method name.\npub fn validator(name: &str) -> Option<crate::dispatch::Validator> {\n    METHOD_VALIDATORS\n        .iter()\n        .find_map(|(member, validate)| (*member == name).then_some(*validate))\n}\n");
-    let javascript = format!("// Chromium BSD-3-Clause metadata; see vendor/chromium-extension-api/UPSTREAM.md.\n// Regenerate with cargo xtask webext-api.\nglobalThis.__zephiumWebExtensionSurface = Object.freeze({});\n", serde_json::to_string(&json!({"version":1,"namespaces":surfaces})).map_err(|error| error.to_string())?);
+    let javascript = format!("// Chromium BSD-3-Clause metadata; see vendor/chromium-extension-api/UPSTREAM.md.\n// Regenerate with cargo xtask webext-api.\nglobalThis.__zephiumWebExtensionSurface = Object.freeze({});\n", serde_json::to_string(&binding::surface(catalog)?).map_err(|error| error.to_string())?);
     Ok((format_rust(&rust)?, javascript))
 }
 
@@ -557,24 +526,6 @@ fn format_rust(source: &str) -> Result<String, String> {
         ));
     }
     String::from_utf8(output.stdout).map_err(|error| error.to_string())
-}
-
-fn copy_flags(source: &Value, target: &mut Map<String, Value>) {
-    for key in [
-        "deprecated",
-        "nodoc",
-        "platforms",
-        "extension_types",
-        "contexts",
-        "unprivileged",
-        "feature_rules",
-        "nocompile",
-        "supportsPromises",
-    ] {
-        if let Some(value) = source.get(key) {
-            target.insert(key.into(), value.clone());
-        }
-    }
 }
 
 fn enum_values(schema: &Value) -> Value {
@@ -753,7 +704,7 @@ mod tests {
         assert_eq!(first, generate(&catalog).unwrap());
         assert!(!first.0.contains("private prose"));
         assert!(!first.1.contains("more prose"));
-        assert!(first.1.contains("\"minArgs\":0"));
+        assert!(first.1.contains("\"optional\":true"));
         assert!(first
             .0
             .contains("crate::schema::validate(\"sample.get\", args)"));

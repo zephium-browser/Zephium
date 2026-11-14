@@ -309,7 +309,7 @@ fn aggregate_dispatch_reaches_each_host_only_after_authorization() {
         ("scripting.getRegisteredContentScripts", json!([])),
         ("i18n.getUILanguage", json!([])),
         ("runtime.onMessage.addListener", json!([1])),
-        ("runtime.sendMessage", json!([{"ping": true}])),
+        ("runtime.sendMessage", json!([r#"{"ping":true}"#])),
     ] {
         assert_eq!(
             call(
@@ -363,7 +363,7 @@ fn external_pages_reach_only_the_two_explicit_messaging_entry_points() {
             &sender,
             &none,
             "runtime.sendMessage",
-            json!([EXTENSION, {"ping": true}])
+            json!([EXTENSION, r#"{"ping":true}"#])
         ),
         Err(HOST_REACHED.into())
     );
@@ -461,16 +461,16 @@ fn normalized_optional_arguments_reach_services_and_invalid_shapes_do_not() {
         ("scripting.unregisterContentScripts", json!([])),
         ("runtime.connect", json!([])),
         ("runtime.connect", json!([{"name":"port"}])),
-        ("runtime.sendMessage", json!([{"nested":null}])),
+        ("runtime.sendMessage", json!([r#"{"nested":null}"#])),
         (
             "runtime.sendMessage",
-            json!([EXTENSION, {"nested":null}, null]),
+            json!([EXTENSION, r#"{"nested":null}"#, null]),
         ),
         ("tabs.connect", json!([1])),
-        ("tabs.sendMessage", json!([1, null])),
+        ("tabs.sendMessage", json!([1, "null"])),
         (
             "runtime.sendNativeMessage",
-            json!(["org.example.host", {"nested":null}]),
+            json!(["org.example.host", r#"{"nested":null}"#]),
         ),
         ("webNavigation.onCommitted.addListener", json!([1])),
         (

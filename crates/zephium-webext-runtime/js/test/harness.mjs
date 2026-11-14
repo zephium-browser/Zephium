@@ -19,8 +19,13 @@ const MODULES = [
   ['workerScope', 'worker_scope.js', 'Z'],
 ];
 export const sources = Object.fromEntries(MODULES.map(([key, file]) => [key === 'I' ? 'intrinsics' : key, read(file)]));
-const surfaceText = read('test/surface.fixture.json');
-export const surface = surfaceText === null ? null : JSON.parse(surfaceText);
+export const fixtureSurface = JSON.parse(read('test/surface.fixture.json'));
+const generatedRealm = vm.createContext({});
+vm.runInContext(read('surface.generated.js'), generatedRealm);
+export const generatedSurface = JSON.parse(JSON.stringify(generatedRealm.__zephiumWebExtensionSurface));
+// Every suite uses the shipping metadata by default. Fixture mode checks the
+// same behavior against the generator's small, reviewable member selection.
+export const surface = process.env.ZEPHIUM_WEBEXT_TEST_SURFACE === 'fixture' ? fixtureSurface : generatedSurface;
 
 export const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 

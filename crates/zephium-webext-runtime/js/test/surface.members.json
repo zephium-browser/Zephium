@@ -1,0 +1,230 @@
+{
+  "runtime": {
+    "functions": [
+      "connect",
+      "connectNative",
+      "getContexts",
+      "getManifest",
+      "getPlatformInfo",
+      "getURL",
+      "openOptionsPage",
+      "reload",
+      "sendMessage",
+      "sendNativeMessage",
+      "setUninstallURL"
+    ],
+    "events": [
+      "onConnect",
+      "onConnectExternal",
+      "onInstalled",
+      "onMessage",
+      "onMessageExternal",
+      "onStartup"
+    ],
+    "properties": [
+      "OnInstalledReason",
+      "PlatformOs"
+    ]
+  },
+  "storage": {
+    "events": [
+      "onChanged"
+    ]
+  },
+  "storage.local": {
+    "functions": [
+      "clear",
+      "get",
+      "getBytesInUse",
+      "getKeys",
+      "remove",
+      "set"
+    ],
+    "events": [
+      "onChanged"
+    ],
+    "properties": [
+      "QUOTA_BYTES"
+    ]
+  },
+  "storage.sync": {
+    "functions": [
+      "clear",
+      "get",
+      "getBytesInUse",
+      "getKeys",
+      "remove",
+      "set"
+    ],
+    "events": [
+      "onChanged"
+    ],
+    "properties": [
+      "QUOTA_BYTES"
+    ]
+  },
+  "storage.session": {
+    "functions": [
+      "clear",
+      "get",
+      "getBytesInUse",
+      "getKeys",
+      "remove",
+      "set",
+      "setAccessLevel"
+    ],
+    "events": [
+      "onChanged"
+    ],
+    "properties": [
+      "QUOTA_BYTES"
+    ]
+  },
+  "storage.managed": {
+    "functions": [
+      "get"
+    ],
+    "events": [
+      "onChanged"
+    ]
+  },
+  "tabs": {
+    "functions": [
+      "connect",
+      "create",
+      "get",
+      "getCurrent",
+      "query",
+      "remove",
+      "sendMessage",
+      "update"
+    ],
+    "events": [
+      "onActivated",
+      "onCreated",
+      "onRemoved",
+      "onUpdated"
+    ],
+    "properties": [
+      "TAB_ID_NONE"
+    ]
+  },
+  "alarms": {
+    "functions": [
+      "clear",
+      "clearAll",
+      "create",
+      "get",
+      "getAll"
+    ],
+    "events": [
+      "onAlarm"
+    ]
+  },
+  "i18n": {
+    "functions": [
+      "detectLanguage",
+      "getAcceptLanguages",
+      "getMessage",
+      "getUILanguage"
+    ]
+  },
+  "scripting": {
+    "functions": [
+      "executeScript",
+      "getRegisteredContentScripts",
+      "insertCSS",
+      "registerContentScripts",
+      "removeCSS",
+      "unregisterContentScripts",
+      "updateContentScripts"
+    ],
+    "properties": [
+      "ExecutionWorld"
+    ]
+  },
+  "action": {
+    "functions": [
+      "getBadgeText",
+      "openPopup",
+      "setBadgeText",
+      "setIcon",
+      "setPopup"
+    ],
+    "events": [
+      "onClicked"
+    ]
+  },
+  "permissions": {
+    "functions": [
+      "contains",
+      "getAll",
+      "remove",
+      "request"
+    ],
+    "events": [
+      "onAdded",
+      "onRemoved"
+    ]
+  },
+  "extension": {
+    "functions": [
+      "getViews",
+      "isAllowedFileSchemeAccess",
+      "isAllowedIncognitoAccess"
+    ]
+  },
+  "dom": {
+    "functions": [
+      "openOrClosedShadowRoot"
+    ]
+  },
+  "webNavigation": {
+    "functions": [
+      "getAllFrames",
+      "getFrame"
+    ],
+    "events": [
+      "onCommitted",
+      "onCompleted"
+    ]
+  },
+  "webRequest": {
+    "events": [
+      "onAuthRequired",
+      "onBeforeRequest"
+    ]
+  },
+  "privacy": {},
+  "privacy.network": {},
+  "privacy.network.webRTCIPHandlingPolicy": {
+    "functions": [
+      "set"
+    ]
+  },
+  "privacy.services": {},
+  "privacy.services.passwordSavingEnabled": {
+    "functions": [
+      "get",
+      "set"
+    ]
+  },
+  "privacy.services.autofillSettings": {
+    "functions": [
+      "set"
+    ]
+  },
+  "contextMenus": {
+    "functions": [
+      "create"
+    ],
+    "events": [
+      "onClicked"
+    ]
+  },
+  "windows": {
+    "events": [
+      "onCreated"
+    ]
+  }
+}

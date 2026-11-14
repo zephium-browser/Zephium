@@ -693,6 +693,24 @@ pub fn normalize(name: &str, args: &[Value]) -> Result<Vec<Value>, ApiError> {
     catalog()?.normalize(source_method(name), args)
 }
 
+/// Validates the binding's wire arguments. Native message bodies are opaque
+/// JSON text on the bridge; their public object type is checked by the binding
+/// before serialization. All target and optional slots retain generated checks.
+pub fn normalize_wire(name: &str, args: &[Value]) -> Result<Vec<Value>, ApiError> {
+    if name != "runtime.sendNativeMessage" {
+        return normalize(name, args);
+    }
+    let payload = args
+        .get(1)
+        .and_then(Value::as_str)
+        .ok_or_else(ApiError::malformed_arguments)?;
+    let mut projected = args.to_vec();
+    projected[1] = Value::Object(Map::new());
+    let mut normalized = normalize(name, &projected)?;
+    normalized[1] = Value::String(payload.to_owned());
+    Ok(normalized)
+}
+
 pub(crate) fn source_method(name: &str) -> &str {
     // The binding uses a background-only internal name for this notification.
     if name == "events.completeRegistration" {

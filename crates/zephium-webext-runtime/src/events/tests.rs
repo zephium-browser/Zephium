@@ -196,7 +196,8 @@ fn snapshot_restore_validates_budget_before_replacing_saved_interests() {
         listeners: vec![
             ListenerSpec {
                 event: "webNavigation.onCommitted".into(),
-                filter: Some(json!({"url":[{"urlMatches":"x", "originAndPathMatches":"/"}]}))
+                filter: Some(json!({"url":[{"urlMatches":"x", "originAndPathMatches":"/"}]})),
+                extra: Vec::new()
             };
             33
         ],

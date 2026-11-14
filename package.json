@@ -8,7 +8,8 @@
     "dev": "pnpm -C desktop dev",
     "build": "pnpm -C desktop build",
     "frame:dev": "pnpm -C frame dev",
-    "frame:build": "pnpm -C frame build"
+    "frame:build": "pnpm -C frame build",
+    "test:webext-js": "cargo test -p zephium-webext-runtime --test js_binding --test js_e2e --locked"
   },
   "packageManager": "pnpm@11.17.0"
 }
