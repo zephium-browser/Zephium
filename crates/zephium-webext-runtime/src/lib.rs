@@ -13,7 +13,15 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+pub mod context;
+pub mod envelope;
 pub mod errors;
+pub mod limits;
 pub mod pattern;
 
+pub use context::{
+    Authority, BindError, ClaimedWorld, CommittedDocument, ContextKey, ContextKind, ContextMask,
+    DocumentGeneration, ExtensionId, ExtensionScheme, ExtensionView, FrameId, InjectedWorld,
+    InstallAdmission, Sender, TabDocument, ViewKind,
+};
 pub use errors::{ApiError, ApiErrorKind};
