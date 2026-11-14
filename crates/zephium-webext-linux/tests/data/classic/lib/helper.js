@@ -1,0 +1,1 @@
+self.helperValue = 42;
