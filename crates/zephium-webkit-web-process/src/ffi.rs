@@ -1641,7 +1641,7 @@ unsafe extern "C" fn send_request(
             }
         };
         // WebKit labels object/embed documents as iframe navigations.
-        if resource_type == ResourceType::SubFrame && embedded_by_plugin_element(page_id, &url) {
+        if resource_type == ResourceType::SubFrame && embedded_by_plugin_element(page, &url) {
             resource_type = ResourceType::Object;
         }
         // These headers are supplied by WebKit's loader; URL suffixes never
@@ -1856,59 +1856,46 @@ unsafe extern "C" fn send_request(
     })
 }
 
-const EMBED_SOURCE: &str = "(url => { for (const element of document.querySelectorAll('object,embed')) { if ((element instanceof HTMLObjectElement ? element.data : element.src) === url) return true; } return false; })";
-
-/// Runs only for sub-frame navigations, in the private facts world of each
-/// live non-opaque frame, so page scripts cannot alter the DOM accessors used.
-fn embedded_by_plugin_element(page_id: u64, url: &str) -> bool {
-    let Ok(url) = CString::new(url) else {
-        return false;
-    };
-    let Some((world, frames)) = with_runtime(|runtime| {
-        let world = *runtime.worlds.get(FACT_WORLD)?;
-        let native = runtime.pages.get(&page_id)?;
-        let frames: Vec<_> = native
-            .frames
-            .iter()
-            .filter(|(id, _)| {
-                runtime
-                    .state
-                    .frame(page_id, **id)
-                    .is_some_and(|frame| !frame.opaque)
-            })
-            .map(|(_, frame)| frame.pointer)
-            .take(64)
-            .collect();
-        Some((world, frames))
-    })
-    .flatten() else {
-        return false;
-    };
-    let frames: Vec<_> = frames.into_iter().filter_map(Owned::borrowed).collect();
-    frames.iter().any(|frame| unsafe {
-        let Some(context) = Owned::full(raw::webkit_frame_get_js_context_for_script_world(
-            frame.0, world,
-        )) else {
-            return false;
-        };
-        let Some(helper) = Owned::full(raw::jsc_context_evaluate(
-            context.0,
-            EMBED_SOURCE.as_ptr().cast(),
-            EMBED_SOURCE.len() as isize,
-        )) else {
-            return false;
-        };
-        let Some(argument) = Owned::full(raw::jsc_value_new_string(context.0, url.as_ptr())) else {
-            return false;
-        };
-        let mut argument = argument.0;
-        let result = Owned::full(raw::jsc_value_function_callv(helper.0, 1, &mut argument));
-        if !raw::jsc_context_get_exception(context.0).is_null() {
-            raw::jsc_context_clear_exception(context.0);
+/// Runs only for sub-frame navigations. Reads the main document's object and
+/// embed elements through WebKit's native DOM bindings, which page scripts
+/// cannot override; plugin elements inside subframes stay sub_frame.
+fn embedded_by_plugin_element(page: *mut Object, url: &str) -> bool {
+    unsafe {
+        let document = raw::webkit_web_page_get_dom_document(page);
+        if document.is_null() {
             return false;
         }
-        result.is_some_and(|value| raw::jsc_value_to_boolean(value.0) != 0)
-    })
+        let mut error = ptr::null_mut();
+        let Some(list) = Owned::full(raw::webkit_dom_document_query_selector_all(
+            document,
+            c"object,embed".as_ptr(),
+            &mut error,
+        )) else {
+            if !error.is_null() {
+                raw::g_error_free(error);
+            }
+            return false;
+        };
+        let object_type = raw::webkit_dom_html_object_element_get_type();
+        let count = raw::webkit_dom_node_list_get_length(list.0).min(256);
+        (0..count).any(|index| {
+            let element = raw::webkit_dom_node_list_item(list.0, index);
+            if element.is_null() {
+                return false;
+            }
+            let value = if raw::g_type_check_instance_is_a(element, object_type) != 0 {
+                raw::webkit_dom_html_object_element_get_data(element)
+            } else {
+                raw::webkit_dom_html_embed_element_get_src(element)
+            };
+            if value.is_null() {
+                return false;
+            }
+            let matches = std::ffi::CStr::from_ptr(value).to_bytes() == url.as_bytes();
+            raw::g_free(value.cast());
+            matches
+        })
+    }
 }
 
 // This world is private to the native form manager; page and extension scripts

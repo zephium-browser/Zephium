@@ -21,6 +21,18 @@ unsafe extern "C" {
     ) -> *mut Object;
     pub fn webkit_web_page_get_id(page: *mut Object) -> u64;
     pub fn webkit_web_page_get_uri(page: *mut Object) -> *const c_char;
+    pub fn webkit_web_page_get_dom_document(page: *mut Object) -> *mut Object;
+    pub fn webkit_dom_document_query_selector_all(
+        document: *mut Object,
+        selectors: *const c_char,
+        error: *mut *mut Object,
+    ) -> *mut Object;
+    pub fn webkit_dom_node_list_get_length(list: *mut Object) -> std::ffi::c_ulong;
+    pub fn webkit_dom_node_list_item(list: *mut Object, index: std::ffi::c_ulong) -> *mut Object;
+    pub fn webkit_dom_html_object_element_get_type() -> usize;
+    pub fn webkit_dom_html_object_element_get_data(element: *mut Object) -> *mut c_char;
+    pub fn webkit_dom_html_embed_element_get_src(element: *mut Object) -> *mut c_char;
+    pub fn g_type_check_instance_is_a(instance: *mut Object, ty: usize) -> c_int;
     pub fn webkit_uri_response_get_uri(response: *mut Object) -> *const c_char;
     pub fn webkit_web_page_get_form_manager(page: *mut Object, world: *mut Object) -> *mut Object;
     pub fn webkit_web_page_send_message_to_view(
@@ -116,7 +128,6 @@ unsafe extern "C" {
     pub fn jsc_value_is_array(value: *mut Object) -> c_int;
     pub fn jsc_value_to_string(value: *mut Object) -> *mut c_char;
     pub fn jsc_value_is_string(value: *mut Object) -> c_int;
-    pub fn jsc_value_new_string(context: *mut Object, string: *const c_char) -> *mut Object;
     pub fn jsc_value_object_get_property(value: *mut Object, name: *const c_char) -> *mut Object;
     pub fn jsc_value_is_function(value: *mut Object) -> c_int;
     pub fn jsc_value_function_callv(
