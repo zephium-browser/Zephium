@@ -74,7 +74,9 @@ fn platform_info() -> Value {
         arch => arch,
     };
     let mut info = serde_json::json!({"os":os, "arch":arch});
-    if matches!(arch, "arm" | "x86-32" | "x86-64" | "mips" | "mips64") {
+    if arch == "arm64" {
+        info["nacl_arch"] = "arm".into();
+    } else if matches!(arch, "arm" | "x86-32" | "x86-64" | "mips" | "mips64") {
         info["nacl_arch"] = arch.into();
     }
     info

@@ -242,7 +242,7 @@ fn settled_script_results_fence_generation_and_order_main_first() {
         .rev()
         .map(|frame| FrameResult {
             frame: frame.clone(),
-            result: Ok(json!(frame.frame.get())),
+            result: Ok(ExecutionResult::Value(json!(frame.frame.get()))),
         })
         .collect();
     let result = reply(&request, results).unwrap();
@@ -256,11 +256,11 @@ fn settled_script_results_fence_generation_and_order_main_first() {
         vec![
             FrameResult {
                 frame: host.frames[0].clone(),
-                result: Ok(Value::Null)
+                result: Ok(ExecutionResult::Value(Value::Null))
             },
             FrameResult {
                 frame: stale,
-                result: Ok(Value::Null)
+                result: Ok(ExecutionResult::Value(Value::Null))
             }
         ]
     )
@@ -270,7 +270,7 @@ fn settled_script_results_fence_generation_and_order_main_first() {
         vec![
             FrameResult {
                 frame: host.frames[0].clone(),
-                result: Ok(Value::Null),
+                result: Ok(ExecutionResult::Value(Value::Null)),
             },
             FrameResult {
                 frame: host.frames[1].clone(),
@@ -335,6 +335,57 @@ fn injection_results_preserve_chrome_single_and_multiple_frame_failure_shapes() 
         .message(),
         "Error: failed"
     );
+}
+
+#[test]
+fn script_exceptions_resolve_null_without_masking_adapter_failures() {
+    let host = fixture();
+    for frames in [&host.frames[..1], &host.frames[..]] {
+        let request = Request::Execute {
+            target: InjectionTarget {
+                tab_id: 1,
+                main_document: host.frames[0].document,
+                frames: frames.to_vec(),
+            },
+            source: ScriptSource::Function {
+                source: "() => { throw new Error('boom'); }".into(),
+                args: vec![],
+            },
+            world: ExecutionWorld::Isolated,
+            inject_immediately: false,
+        };
+        let results = frames
+            .iter()
+            .map(|frame| FrameResult {
+                frame: frame.clone(),
+                result: Ok(ExecutionResult::Exception),
+            })
+            .collect();
+        let expected: Vec<_> = frames
+            .iter()
+            .map(|frame| {
+                json!({
+                    "frameId": frame.frame.get(),
+                    "documentId": frame.document_id,
+                    "result": null,
+                })
+            })
+            .collect();
+        assert_eq!(reply(&request, results).unwrap(), json!(expected));
+        let mut stale = frames.to_vec();
+        stale[0].document = doc(99);
+        assert!(reply(
+            &request,
+            stale
+                .into_iter()
+                .map(|frame| FrameResult {
+                    frame,
+                    result: Ok(ExecutionResult::Exception),
+                })
+                .collect()
+        )
+        .is_err());
+    }
 }
 
 #[test]

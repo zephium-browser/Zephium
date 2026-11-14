@@ -1,10 +1,16 @@
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, readdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { RustPeer } from "./node-peer.mjs";
 import { normalize } from "./normalize.mjs";
 import { compare } from "./diff.mjs";
+import {
+  supportedCases,
+  omittedCalls,
+  inventory,
+  projectReference,
+} from "./node-plan.mjs";
 const root = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -13,14 +19,7 @@ const option = (name) => {
 };
 const runtime = resolve(option("--runtime-root") || join(root, "../.."));
 const output = resolve(option("--output") || join(root, "local-results/node"));
-const supported = [
-  "alarms-create-forms",
-  "runtime-last-error-unchecked",
-  "storage-bytes",
-  "storage-get-forms",
-  "storage-on-changed",
-  "storage-quota",
-];
+const supported = supportedCases;
 const selected = option("--case");
 if (selected && !supported.includes(selected))
   throw new Error(
@@ -30,7 +29,7 @@ try {
   await access(join(runtime, "crates/zephium-webext-runtime/tests/js_e2e.rs"));
 } catch {
   console.error(
-    "Node runner unavailable: JS-to-Rust dispatcher harness has not landed in this checkout. Pass --runtime-root PATH to a checkout containing feat/webext-js-integration commit 18c14044a or its descendant. No case executed.",
+    "Node runner unavailable: JS-to-Rust dispatcher harness has not landed in this checkout. The selected runtime checkout must contain tests/js_e2e.rs. No case executed.",
   );
   process.exit(2);
 }
@@ -87,6 +86,13 @@ const harness = (
   await readFile(join(root, "shared/harness.js"), "utf8")
 ).replace("export function createHarness", "function createHarness");
 await mkdir(output, { recursive: true });
+const origins = { a: "http://127.0.0.1:1", b: "http://localhost:1" };
+const caseIds = (await readdir(join(root, "cases"))).sort();
+await mkdir(join(output, "coverage"), { recursive: true });
+await writeFile(
+  join(output, "coverage/inventory.json"),
+  JSON.stringify(inventory(caseIds), null, 2) + "\n",
+);
 let failures = 0;
 console.log("| Case | Result | Differences |");
 console.log("| --- | --- | --- |");
@@ -97,12 +103,61 @@ for (const id of selected ? [selected] : supported) {
     const manifest = JSON.parse(
       await readFile(join(root, "cases", id, "manifest.json"), "utf8"),
     );
-    const realm = await peer.context(binding, manifest);
+    manifest.name ||= id;
+    manifest.version ||= "1.0";
+    manifest.host_permissions = [
+      ...new Set([...(manifest.host_permissions || []), "http://127.0.0.1/*"]),
+    ];
+    const resources = [];
+    const catalogs = {};
+    async function scan(directory, prefix = "") {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const name = `${prefix}${entry.name}`;
+        if (entry.isDirectory())
+          await scan(join(directory, entry.name), `${name}/`);
+        else {
+          resources.push(name);
+          const locale = /^_locales\/([^/]+)\/messages\.json$/.exec(name)?.[1];
+          if (locale)
+            catalogs[locale] = JSON.parse(
+              await readFile(join(directory, entry.name), "utf8"),
+            );
+        }
+      }
+    }
+    await scan(join(root, "cases", id));
+    const bootstrap = await peer.command("configure", {
+      manifest,
+      resources,
+      catalogs,
+    });
+    const background = resources.includes("background.js")
+      ? await peer.context(binding, bootstrap.manifest, {
+          label: "background",
+          bootstrap,
+        })
+      : null;
+    if (background)
+      background.run(
+        await readFile(join(root, "cases", id, "background.js"), "utf8"),
+      );
+    const realm = await peer.context(binding, bootstrap.manifest, {
+      label: "runner",
+      kind: "extension",
+      bootstrap,
+    });
+    realm.run(
+      "globalThis.navigator = {userActivation:{isActive:false,hasBeenActive:false}}",
+    );
     realm.run("Date.now = () => 1000000");
     const global = realm.run("globalThis");
     global.__host = async (operation) => {
       if (operation === "consoleMessages")
         return [
+          ...peer.console,
+          ...(background
+            ? background.logs.error.map((text) => ({ type: "error", text }))
+            : []),
           ...realm.logs.error.map((text) => ({ type: "error", text })),
           ...realm.logs.warn.map((text) => ({ type: "warning", text })),
         ];
@@ -111,6 +166,28 @@ for (const id of selected ? [selected] : supported) {
     realm.run(
       `${harness}\nglobalThis.h=createHarness({origins:{a:'http://127.0.0.1:1',b:'http://localhost:1'}});h.host=__host;`,
     );
+    if (id === "storage-session-access") {
+      global.__attachContent = async (tabId) => {
+        const content = await peer.context(binding, bootstrap.manifest, {
+          label: `content-${tabId}`,
+          kind: "contentScript",
+          tabId,
+          bootstrap,
+        });
+        content.run(
+          await readFile(join(root, "cases", id, "content.js"), "utf8"),
+        );
+      };
+      realm.run(
+        "const conformanceOpenTab=h.openTab;h.openTab=async url=>{const tab=await conformanceOpenTab(url);await __attachContent(tab.id);return tab}",
+      );
+    }
+    if (omittedCalls[id]) {
+      global.__omittedCalls = omittedCalls[id];
+      realm.run(
+        "const conformanceCall=h.call; h.call=(label,invoke)=>__omittedCalls.includes(label)?Promise.resolve(undefined):conformanceCall(label,invoke)",
+      );
+    }
     const source = (
       await readFile(join(root, "cases", id, "case.js"), "utf8")
     ).replace("export async function run", "async function run");
@@ -147,11 +224,14 @@ for (const id of selected ? [selected] : supported) {
         name: "node-rust",
         version: revision.stdout.trim(),
         node: process.version,
-        hostContext: "background",
+        hostContext: "extension-page",
       },
       ...transcript,
+      coverage: omittedCalls[id]
+        ? { kind: "partial", omittedCalls: omittedCalls[id] }
+        : { kind: "full" },
     },
-    { extensionId: binding.EXTENSION_ID },
+    { extensionId: binding.EXTENSION_ID, origins },
   );
   await writeFile(
     join(output, `${id}.json`),
@@ -163,12 +243,21 @@ for (const id of selected ? [selected] : supported) {
   };
   if (args.includes("--check") && result.status === "complete")
     comparison = compare(
-      JSON.parse(await readFile(join(root, "reference", `${id}.json`), "utf8")),
+      omittedCalls[id]
+        ? projectReference(
+            JSON.parse(
+              await readFile(join(root, "reference", `${id}.json`), "utf8"),
+            ),
+            omittedCalls[id],
+          )
+        : JSON.parse(
+            await readFile(join(root, "reference", `${id}.json`), "utf8"),
+          ),
       result,
       JSON.parse(await readFile(join(root, "deviations.json"), "utf8")),
     );
   console.log(
-    `| ${id} | ${comparison.status} | ${comparison.differences.length} |`,
+    `| ${id} | ${omittedCalls[id] ? "partial-" : ""}${comparison.status} | ${comparison.differences.length} |`,
   );
   if (comparison.status === "fail") {
     failures++;

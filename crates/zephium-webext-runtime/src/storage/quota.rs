@@ -20,9 +20,45 @@ const HOUR: u64 = 60 * MINUTE;
 
 /// UTF-8 key bytes plus Chromium's compact JSON value size. The top-level
 /// key has no quotes; nested keys do. Chromium also escapes `<`, U+2028 and
-/// U+2029. Session uses the same reproducible accounting in this runtime.
+/// U+2029. Session uses Chromium's in-memory allocation estimate instead.
 pub fn item_bytes(key: &str, value: &Value) -> u64 {
     key.len() as u64 + json_bytes(value)
+}
+
+pub(super) fn area_item_bytes(area: Area, key: &str, value: &Value) -> u64 {
+    if area == Area::Session {
+        session_string_bytes(key) + session_value_bytes(value)
+    } else {
+        item_bytes(key, value)
+    }
+}
+
+// Chromium's 64-bit libc++ layout: inline strings have 22 bytes; allocated
+// strings round up to 16 bytes. Values occupy 32 bytes, dictionary pairs 32.
+fn session_string_bytes(value: &str) -> u64 {
+    let length = value.len() as u64;
+    if length <= 22 {
+        0
+    } else {
+        (length + 1).next_multiple_of(16)
+    }
+}
+
+fn session_value_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+        Value::String(value) => session_string_bytes(value),
+        Value::Array(values) => {
+            32 * values.len() as u64 + values.iter().map(session_value_bytes).sum::<u64>()
+        }
+        Value::Object(values) => {
+            64 * values.len() as u64
+                + values
+                    .iter()
+                    .map(|(key, value)| session_string_bytes(key) + session_value_bytes(value))
+                    .sum::<u64>()
+        }
+    }
 }
 
 fn string_bytes(value: &str) -> u64 {
@@ -156,18 +192,37 @@ pub(super) fn prepare(
     if matches!(mutation, Mutation::Set(_)) {
         let mut bytes: u64 = items
             .iter()
-            .map(|(key, value)| item_bytes(key, value))
+            .map(|(key, value)| area_item_bytes(area, key, value))
             .sum();
+        // Keep the runtime's existing serialized ceiling independently: inline
+        // strings and scalar values can consume zero Chromium quota bytes.
+        let mut serialized_bytes: u64 = if area == Area::Session {
+            items
+                .iter()
+                .map(|(key, value)| item_bytes(key, value))
+                .sum()
+        } else {
+            0
+        };
         let mut count = items.len();
         for (key, change) in &changes {
             if let Some(old) = &change.old_value {
-                bytes -= item_bytes(key, old);
+                bytes -= area_item_bytes(area, key, old);
+                if area == Area::Session {
+                    serialized_bytes -= item_bytes(key, old);
+                }
             } else {
                 count += 1;
             }
             if let Some(new) = &change.new_value {
-                bytes = bytes.saturating_add(item_bytes(key, new));
+                bytes = bytes.saturating_add(area_item_bytes(area, key, new));
+                if area == Area::Session {
+                    serialized_bytes = serialized_bytes.saturating_add(item_bytes(key, new));
+                }
             }
+        }
+        if area == Area::Session && (bytes >= maximum || serialized_bytes > maximum) {
+            return Err(StorageError::SessionQuotaExceeded);
         }
         if bytes > maximum {
             return Err(StorageError::QuotaExceeded("Resource::kQuotaBytes"));

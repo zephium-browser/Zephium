@@ -19,8 +19,8 @@ pub const MAX_ALARM_NAME_BYTES: usize = 1024;
 pub const MAX_ALARM_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 /// The runtime's packed-extension alarm minimum, as required by its policy.
 pub const MIN_PACKED_DELAY_NANOS: u64 = 30_000_000_000;
-/// Smallest unpacked delay; a zero-period alarm cannot spin at one instant.
-pub const MIN_UNPACKED_DELAY_NANOS: u64 = 1_000_000;
+/// Chromium's development minimum; a zero-period alarm cannot spin.
+pub const MIN_UNPACKED_DELAY_NANOS: u64 = 1_000_000_000;
 const NANOS_PER_MILLI: f64 = 1_000_000.0;
 const MILLIS_PER_MINUTE: f64 = 60_000.0;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -135,6 +135,17 @@ impl Alarms {
         info: AlarmCreateInfo,
         now: AlarmEnvironment,
     ) -> Result<(), ApiError> {
+        self.create_with_warnings(name, info, now).map(|_| ())
+    }
+
+    /// Creates an alarm and returns diagnostics for the calling context's console.
+    pub fn create_with_warnings(
+        &mut self,
+        name: Option<&str>,
+        info: AlarmCreateInfo,
+        now: AlarmEnvironment,
+    ) -> Result<Vec<String>, ApiError> {
+        let warnings = alarm_warnings(name, &info, now);
         let (name, alarm) = prepare(name, info, now)?;
         if !self.alarms.contains_key(&name) && self.alarms.len() >= MAX_ALARMS {
             return Err(ApiError::other(
@@ -142,7 +153,7 @@ impl Alarms {
             ));
         }
         self.alarms.insert(name, alarm);
-        Ok(())
+        Ok(warnings)
     }
 
     /// Looks up one alarm without changing its schedule.
@@ -247,7 +258,7 @@ impl Alarms {
         }
         let mut restored = BTreeMap::new();
         for persisted in snapshot.alarms {
-            let alarm = persisted.alarm;
+            let mut alarm = persisted.alarm;
             validate_name(&alarm.name)?;
             if !alarm.persist_across_sessions
                 || !valid_timestamp(alarm.scheduled_time)
@@ -256,6 +267,11 @@ impl Alarms {
                 return Err(ApiError::other("Invalid alarm snapshot."));
             }
             let period = period_nanos(alarm.period_in_minutes, now.minimum())?;
+            if !now.unpacked {
+                alarm.period_in_minutes = alarm.period_in_minutes.map(|minutes| {
+                    minutes.max(now.minimum() as f64 / NANOS_PER_MILLI / MILLIS_PER_MINUTE)
+                });
+            }
             let delay =
                 millis_to_nanos((persisted.wake_unix_millis - now.unix_millis as f64).max(0.0))?;
             let deadline = now
@@ -302,6 +318,17 @@ impl Alarms {
         args: &[Value],
         now: AlarmEnvironment,
     ) -> Result<Value, ApiError> {
+        self.handle_with_warnings(method, args, now)
+            .map(|(value, _)| value)
+    }
+
+    /// Handles a call, returning warnings to route to its authenticated console.
+    pub fn handle_with_warnings(
+        &mut self,
+        method: &str,
+        args: &[Value],
+        now: AlarmEnvironment,
+    ) -> Result<(Value, Vec<String>), ApiError> {
         let args = crate::schema::normalize(method, args)?;
         let args = args.as_slice();
         match method {
@@ -311,8 +338,8 @@ impl Alarms {
                 };
                 let info = serde_json::from_value(value.clone())
                     .map_err(|_| ApiError::malformed_arguments())?;
-                self.create(name.as_str(), info, now)?;
-                Ok(Value::Null)
+                let warnings = self.create_with_warnings(name.as_str(), info, now)?;
+                return Ok((Value::Null, warnings));
             }
             "alarms.get" => serialize(self.get(optional_name(args))),
             "alarms.getAll" => serialize(self.get_all()),
@@ -320,12 +347,13 @@ impl Alarms {
             "alarms.clearAll" => Ok(Value::Bool(self.clear_all())),
             _ => Err(ApiError::unknown_method()),
         }
+        .map(|value| (value, Vec::new()))
     }
 }
 
 fn prepare(
     name: Option<&str>,
-    info: AlarmCreateInfo,
+    mut info: AlarmCreateInfo,
     now: AlarmEnvironment,
 ) -> Result<(String, Scheduled), ApiError> {
     if name.is_some() && info.name.is_some() {
@@ -347,6 +375,11 @@ fn prepare(
         }
     }
     let period = period_nanos(info.period_in_minutes, now.minimum())?;
+    if !now.unpacked {
+        info.period_in_minutes = info
+            .period_in_minutes
+            .map(|minutes| minutes.max(now.minimum() as f64 / NANOS_PER_MILLI / MILLIS_PER_MINUTE));
+    }
     let scheduled_time = match info.when {
         Some(when) if valid_timestamp(when) => when,
         Some(_) => return Err(time_error()),
@@ -391,6 +424,29 @@ fn validate_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn alarm_warnings(
+    name: Option<&str>,
+    info: &AlarmCreateInfo,
+    now: AlarmEnvironment,
+) -> Vec<String> {
+    let name = name.or(info.name.as_deref()).unwrap_or_default();
+    let seconds = now.minimum() / 1_000_000_000;
+    let unit = if seconds == 1 { "second" } else { "seconds" };
+    [
+        ("delay", info.delay_in_minutes),
+        ("period", info.period_in_minutes),
+    ]
+    .into_iter()
+    .filter_map(|(field, minutes)| {
+        minutes
+            .filter(|minutes| *minutes * 60.0 < seconds as f64)
+            .map(|_| format!(
+                "Alarm {field} is less than the minimum duration of {seconds} {unit}. Alarm \"{name}\" will fire after the minimum duration.",
+            ))
+    })
+    .collect()
+}
+
 fn valid_timestamp(value: f64) -> bool {
     value.is_finite() && value.abs() <= MAX_SAFE_INTEGER
 }
@@ -406,10 +462,10 @@ fn millis_to_nanos(millis: f64) -> Result<u64, ApiError> {
 fn period_nanos(period: Option<f64>, minimum: u64) -> Result<Option<u64>, ApiError> {
     period
         .map(|minutes| {
-            if !minutes.is_finite() || minutes < 0.0 {
+            if !minutes.is_finite() {
                 return Err(time_error());
             }
-            millis_to_nanos(minutes * MILLIS_PER_MINUTE).map(|nanos| nanos.max(minimum))
+            millis_to_nanos(minutes.max(0.0) * MILLIS_PER_MINUTE).map(|nanos| nanos.max(minimum))
         })
         .transpose()
 }
@@ -543,6 +599,126 @@ mod tests {
     }
 
     #[test]
+    fn unpacked_periods_are_preserved_and_only_subsecond_values_warn() {
+        let clock = ManualClock::default();
+        let environment = AlarmEnvironment {
+            unpacked: true,
+            ..now(&clock)
+        };
+        let mut alarms = Alarms::new();
+        for (name, period, expected_warning) in [
+            ("below-minimum", 0.1, false),
+            ("at-minimum", 0.5, false),
+            ("below-one-second", 0.001, true),
+            ("negative-period", -1.0, true),
+        ] {
+            let (_, warnings) = alarms
+                .handle_with_warnings(
+                    "alarms.create",
+                    &[
+                        json!(name),
+                        json!({"delayInMinutes": 2, "periodInMinutes": period}),
+                    ],
+                    environment,
+                )
+                .unwrap();
+            assert_eq!(alarms.get(name).unwrap().period_in_minutes, Some(period));
+            assert_eq!(
+                warnings,
+                if expected_warning {
+                    vec![format!("Alarm period is less than the minimum duration of 1 second. Alarm \"{name}\" will fire after the minimum duration.")]
+                } else {
+                    vec![]
+                },
+            );
+        }
+        let mut restored = Alarms::new();
+        restored.restore(alarms.snapshot(), environment).unwrap();
+        assert_eq!(restored.get_all(), alarms.get_all());
+        let due = AlarmEnvironment {
+            monotonic_nanos: 120_000_000_000,
+            unix_millis: environment.unix_millis + 120_000,
+            ..environment
+        };
+        assert_eq!(restored.take_due(due).len(), 4);
+        assert!(restored.take_due(due).is_empty());
+        assert_eq!(
+            restored.next_wake(),
+            Some(due.monotonic_nanos + MIN_UNPACKED_DELAY_NANOS)
+        );
+    }
+
+    #[test]
+    fn packed_periods_clamp_and_both_timer_fields_report_diagnostics() {
+        let clock = ManualClock::default();
+        let mut alarms = Alarms::new();
+        for period in [-1.0, 0.0, 0.001, 0.1] {
+            let (_, warnings) = alarms
+                .handle_with_warnings(
+                    "alarms.create",
+                    &[
+                        json!("packed"),
+                        json!({"delayInMinutes": 0, "periodInMinutes": period}),
+                    ],
+                    now(&clock),
+                )
+                .unwrap();
+            assert_eq!(alarms.get("packed").unwrap().period_in_minutes, Some(0.5));
+            assert_eq!(alarms.next_wake(), Some(MIN_PACKED_DELAY_NANOS));
+            assert_eq!(warnings, [
+                "Alarm delay is less than the minimum duration of 30 seconds. Alarm \"packed\" will fire after the minimum duration.",
+                "Alarm period is less than the minimum duration of 30 seconds. Alarm \"packed\" will fire after the minimum duration.",
+            ]);
+        }
+    }
+
+    #[test]
+    fn nonfinite_alarm_fields_are_refused_without_replacing_live_state() {
+        let clock = ManualClock::default();
+        let mut alarms = Alarms::new();
+        alarms
+            .create(
+                None,
+                AlarmCreateInfo {
+                    delay_in_minutes: Some(1.0),
+                    ..Default::default()
+                },
+                now(&clock),
+            )
+            .unwrap();
+        let before = alarms.snapshot();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for unpacked in [false, true] {
+                let environment = AlarmEnvironment {
+                    unpacked,
+                    ..now(&clock)
+                };
+                assert!(alarms
+                    .create_with_warnings(
+                        None,
+                        AlarmCreateInfo {
+                            period_in_minutes: Some(value),
+                            ..Default::default()
+                        },
+                        environment
+                    )
+                    .is_err());
+                assert!(alarms
+                    .create_with_warnings(
+                        None,
+                        AlarmCreateInfo {
+                            delay_in_minutes: Some(value),
+                            ..Default::default()
+                        },
+                        environment
+                    )
+                    .is_err());
+                assert_eq!(alarms.snapshot(), before);
+            }
+        }
+    }
+
+    #[test]
     fn zero_repeat_period_is_clamped_and_cannot_spin() {
         let clock = ManualClock::default();
         let mut alarms = Alarms::new();
@@ -653,7 +829,6 @@ mod tests {
             json!([]),
             json!([{}]),
             json!([{"when": 3, "delayInMinutes": 1}]),
-            json!([{"periodInMinutes": -1}]),
             json!([{"delayInMinutes": -1}]),
             json!([{"when": "tomorrow"}]),
             json!([{"when": 1e100}]),

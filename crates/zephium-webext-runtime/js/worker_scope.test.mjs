@@ -10,7 +10,12 @@ const SCRIPT_URL = `chrome-extension://${EXTENSION_ID}/background.js`;
 function workerRealm(workerConfig = {}, options = {}) {
   const realm = createRealm();
   const self = realm.run(`(() => {
-    class WorkerGlobalScope extends EventTarget {}
+    class WorkerGlobalScope extends EventTarget {
+      importScripts(...urls) {
+        if (urls.some((url) => url === this.failImport)) throw new DOMException('Import failed', 'NetworkError');
+        this.imported.push(...urls);
+      }
+    }
     class DedicatedWorkerGlobalScope extends WorkerGlobalScope {
       postMessage() {}
       close() {}
@@ -20,7 +25,6 @@ function workerRealm(workerConfig = {}, options = {}) {
     class WorkerNavigator {}
     const self = new DedicatedWorkerGlobalScope();
     Object.assign(self, { WorkerGlobalScope, DedicatedWorkerGlobalScope, WorkerLocation, navigator: new WorkerNavigator(), imported: [] });
-    self.importScripts = (...urls) => self.imported.push(...urls);
     self.self = self;
     return self;
   })()`);
@@ -85,7 +89,10 @@ test('install then activate run once the script finished, with waitUntil and han
   assert.deepEqual(order, ['script done']);
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(order, ['script done', 'oninstall:true', 'install listener', 'install settled', 'activate']);
-  assert.deepEqual(plain(self.imported), ['chunk-1.js', 'chunk-2.js']);
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/chunk-1.js`,
+    `chrome-extension://${EXTENSION_ID}/chunk-2.js`,
+  ]);
   assert.deepEqual(lifecycle(host), [['activated', null]]);
   assert.equal(typeof self.onfetch, 'object');
 });
@@ -170,12 +177,117 @@ test('clients.openWindow without tabs authority rejects with InvalidAccessError'
   });
 });
 
-test("module workers refuse importScripts with Chrome's message", () => {
+test('classic workers reuse installation imports and refuse fresh imports after installation', async () => {
+  const { inWorker, self, host } = workerRealm();
+  inWorker('importScripts("initial.js")');
+  inWorker(`self.addEventListener('install', (event) => {
+    event.waitUntil(new Promise((resolve) => setTimeout(() => {
+      importScripts('during-install.js');
+      resolve();
+    }, 0)));
+  })`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(lifecycle(host), [['activated', null]]);
+  inWorker('importScripts("./initial.js#again", "during-install.js")');
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/initial.js`,
+    `chrome-extension://${EXTENSION_ID}/during-install.js`,
+    `chrome-extension://${EXTENSION_ID}/initial.js`,
+    `chrome-extension://${EXTENSION_ID}/during-install.js`,
+  ]);
+  assert.throws(() => inWorker('importScripts("late-import.js")'), {
+    name: 'NetworkError',
+    message: `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://${EXTENSION_ID}/late-import.js' failed to load.`,
+  });
+  assert.equal(self.imported.length, 4, 'refused imports never reach the native loader');
+});
+
+test('classic imports close before activate handlers run', async () => {
+  const { inWorker, self } = workerRealm();
+  inWorker(`self.addEventListener('activate', () => {
+    try { importScripts('new.js'); } catch (error) { self.activationImportError = error.name; }
+  })`);
+  await flush();
+  assert.equal(self.activationImportError, 'NetworkError');
+  assert.deepEqual(plain(self.imported), []);
+});
+
+test('restarted classic workers only load imports from the installed graph', async () => {
+  const { inWorker, self } = workerRealm({ install: false, installedScripts: ['installed.js'] });
+  inWorker('importScripts("./installed.js")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  await flush();
+  inWorker('importScripts("installed.js#again")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+  ]);
+
+  const missing = workerRealm({ install: false });
+  assert.throws(() => missing.inWorker('importScripts("unrecorded.js")'), { name: 'NetworkError' });
+  missing.inWorker('importScripts("background.js")');
+  assert.deepEqual(plain(missing.self.imported), [SCRIPT_URL]);
+});
+
+test('classic prototype imports and deletion of the global wrapper retain installation checks', async () => {
+  const { inWorker, self } = workerRealm();
+  inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "installed.js")');
+  await flush();
+  assert.throws(
+    () => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "fresh.js")'),
+    { name: 'NetworkError' },
+  );
+  assert.equal(inWorker('delete self.importScripts'), true);
+  inWorker('importScripts("installed.js")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+  ]);
+});
+
+test('failed installation imports do not authorize later native loads', async () => {
+  const { inWorker, self } = workerRealm();
+  self.failImport = `chrome-extension://${EXTENSION_ID}/failed.js`;
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  await flush();
+  self.failImport = undefined;
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), []);
+});
+
+test('successful imports before a later failure remain installed and inputs convert before loading', async () => {
+  const { inWorker, self } = workerRealm();
+  self.failImport = `chrome-extension://${EXTENSION_ID}/failed.js`;
+  assert.throws(() => inWorker('importScripts("loaded.js", "failed.js")'), { name: 'NetworkError' });
+  self.converted = [];
+  inWorker(`importScripts({ toString() { self.converted.push(self.imported.length); return 'converted.js'; } },
+    { toString() { self.converted.push(self.imported.length); return 'last.js'; } })`);
+  assert.deepEqual(plain(self.converted), [1, 1]);
+  await flush();
+  self.failImport = undefined;
+  inWorker('importScripts("loaded.js")');
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/loaded.js`,
+    `chrome-extension://${EXTENSION_ID}/converted.js`,
+    `chrome-extension://${EXTENSION_ID}/last.js`,
+    `chrome-extension://${EXTENSION_ID}/loaded.js`,
+  ]);
+});
+
+test("module workers refuse importScripts before and after installation with Chrome's message", async () => {
   const { inWorker } = workerRealm({ type: 'module' });
-  assert.throws(() => inWorker('importScripts("x.js")'), {
+  const error = {
     name: 'TypeError',
     message: "Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts().",
-  });
+  };
+  assert.throws(() => inWorker('importScripts("x.js")'), error);
+  assert.throws(() => inWorker('importScripts()'), error);
+  await flush();
+  assert.throws(() => inWorker('importScripts("late-import.js")'), error);
+  assert.throws(() => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "x.js")'), error);
 });
 
 test("navigator.storage is shimmed with the host's figures; clients are inert", async () => {

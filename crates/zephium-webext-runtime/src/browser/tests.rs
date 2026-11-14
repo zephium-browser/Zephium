@@ -120,3 +120,12 @@ fn malformed_browser_facts_fail_closed() {
         .authorize(&sender, &ExtensionInfo::default())
         .is_err());
 }
+
+#[test]
+fn native_arm64_platform_reports_chromium_nacl_arch() {
+    if std::env::consts::ARCH == "aarch64" {
+        let info = super::ExtensionInfo::default().platform;
+        assert_eq!(info["arch"], "arm64");
+        assert_eq!(info["nacl_arch"], "arm");
+    }
+}

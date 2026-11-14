@@ -105,8 +105,17 @@ impl Request {
 pub struct FrameResult {
     /// Native frame identity and document generation actually executed.
     pub frame: BrowserFrame,
-    /// JSON result, null for JavaScript undefined; an engine error is preserved.
-    pub result: Result<Value, ApiError>,
+    /// Script completion, or an adapter/access/lifecycle failure.
+    pub result: Result<ExecutionResult, ApiError>,
+}
+
+/// Completion of code that actually ran in the admitted document.
+#[derive(Clone, Debug)]
+pub enum ExecutionResult {
+    /// JSON result, with JavaScript undefined represented as null.
+    Value(Value),
+    /// A thrown exception or rejected promise; Chrome returns a null result.
+    Exception,
 }
 
 /// Shapes settled results, with the main frame first and individual multi-frame failures omitted.
@@ -139,7 +148,18 @@ pub fn reply(request: &Request, mut results: Vec<FrameResult>) -> Result<Value, 
         return Ok(Value::Null);
     }
     results.sort_by_key(|result| result.frame.frame.get());
-    let values: Vec<_> = results.into_iter().filter_map(|result| result.result.ok().map(|value| json!({"frameId": result.frame.frame.get(), "documentId": result.frame.document_id, "result": value}))).collect();
+    let values: Vec<_> = results
+        .into_iter()
+        .filter_map(|result| {
+            result.result.ok().map(|completion| {
+                let value = match completion {
+                    ExecutionResult::Value(value) => value,
+                    ExecutionResult::Exception => Value::Null,
+                };
+                json!({"frameId": result.frame.frame.get(), "documentId": result.frame.document_id, "result": value})
+            })
+        })
+        .collect();
     let value = Value::Array(values);
     if serde_json::to_vec(&value)
         .map_err(|_| ApiError::malformed_arguments())?

@@ -1,4 +1,4 @@
-// Chrome's error surfaces: `runtime.lastError` for the duration of a callback
+// Chrome's error surfaces: `runtime.lastError` through a callback's microtasks
 // with the unchecked warning, invocation errors, and console reports for
 // exceptions thrown by listeners and callbacks.
 (function errors(Z) {
@@ -35,25 +35,34 @@
     new I.TypeError(`Error in invocation of ${name}(${signature}): ${detail}`);
 
   // One `lastError` slot shared by `runtime.lastError` and
-  // `extension.lastError`, set only while a callback runs.
+  // `extension.lastError`, cleared before the callback's next task.
   function createLastError() {
     let current;
-    let checked = true;
+    let running = 0;
     const read = () => {
-      checked = true;
-      return current;
+      if (current !== undefined) current.checked = true;
+      return current === undefined ? undefined : current.value;
     };
     const run = (message, fn) => {
       const previous = current;
-      const previousChecked = checked;
-      current = message === null || message === undefined ? undefined : { message };
-      checked = current === undefined;
+      const nested = running > 0;
+      const scope =
+        message === null || message === undefined
+          ? undefined
+          : { __proto__: null, value: { message }, checked: false };
+      current = scope;
+      running++;
       try {
         return fn();
       } finally {
-        if (!checked) I.consoleError(`Unchecked runtime.lastError: ${message}`);
-        current = previous;
-        checked = previousChecked;
+        running--;
+        if (nested) current = previous;
+        if (scope !== undefined) {
+          I.queueMicrotask(() => {
+            if (current === scope) current = undefined;
+            if (!scope.checked) I.consoleError(`Unchecked runtime.lastError: ${message}`);
+          });
+        }
       }
     };
     const install = (target) => {
