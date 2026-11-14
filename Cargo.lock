@@ -7895,6 +7895,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-runtime"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "url",
+ "zephium-core",
+ "zephium-webext",
+]
+
+[[package]]
 name = "zephium-webext-windows"
 version = "0.1.0"
 dependencies = [
