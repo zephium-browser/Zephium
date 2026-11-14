@@ -1,0 +1,15 @@
+[[extension]]
+id = "eimadpbcbfnmbkopoojfekhnkhdbieeh"
+name = "Dark Reader"
+version = "4.9.135"
+sha256 = "0b7857ae92fd3aeab4292bb755aa0f108de6b68bc12f18d0c87fe757cdd40a9d"
+license = "MIT"
+source = "https://github.com/darkreader/darkreader"
+
+[[extension]]
+id = "dbepggeogbaibhgnhhndojpepiihcmeb"
+name = "Vimium"
+version = "2.4.2"
+sha256 = "3198c26aa719be462dea585050fbed9b8b80628d57ea88a113babf5334c5517c"
+license = "MIT"
+source = "https://github.com/philc/vimium"
