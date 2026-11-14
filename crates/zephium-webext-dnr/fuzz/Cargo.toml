@@ -1,0 +1,30 @@
+[package]
+name = "zephium-webext-dnr-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+zephium-webext-dnr = { path = "..", version = "=0.1.0", default-features = false, features = ["compile"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "rule_json"
+path = "fuzz_targets/rule_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "binary_loader"
+path = "fuzz_targets/binary_loader.rs"
+test = false
+doc = false
+bench = false
