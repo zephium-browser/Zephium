@@ -8,10 +8,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde_json::{json, Value};
-use url::Url;
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_webext::manifest::Manifest;
 use zephium_webext_runtime::alarms::{AlarmEnvironment, AlarmHost, Alarms};
+use zephium_webext_runtime::api::runtime::Request as RuntimeRequest;
+use zephium_webext_runtime::browser::{
+    unsupported, BrowserPort, BrowserRequest, BrowserSnapshot, ExtensionInfo, IncognitoMode,
+};
 use zephium_webext_runtime::context::{ContextKey, ContextKind, ExtensionId, Sender, ViewKind};
 use zephium_webext_runtime::dispatch::{
     encode_for, ApiTable, Dispatcher, Handled, Inbound, Invocation, MethodSpec, RegistrationError,
@@ -34,6 +37,7 @@ use zephium_webext_runtime::ports::{
     MessageService, MessageSettlement, MessageTarget, MessagingHost, OneShotDelivery, PortAction,
     PortService,
 };
+use zephium_webext_runtime::protocol::{self, ProtocolHost, ProtocolRequest, WorkerLifecycle};
 use zephium_webext_runtime::scripting_registry::{ResourceKind, ScriptRegistry, ScriptingHost};
 use zephium_webext_runtime::storage::{AccessLevel, Area, StorageChangeEvent};
 use zephium_webext_runtime::ContextMask;
@@ -46,9 +50,6 @@ use crate::bridge::{
     CloseReason, DeliverError, FrameLifecycle, Outbox, PortTraffic, Ports, Runtime, ViewRef,
 };
 
-/// Listener id the binding's unfiltered events stand for: it reports
-/// interest once per event, not per callback.
-const EVENT_LISTENER: u64 = 1 << 53;
 /// Direct (unqueued) event deliveries take sequence numbers from here, far
 /// from any install queue's, because each context de-duplicates by number.
 const DIRECT_SEQUENCE_BASE: u64 = 1 << 48;
@@ -56,7 +57,7 @@ const DIRECT_SEQUENCE_BASE: u64 = 1 << 48;
 const PARKED_TIMEOUT_NANOS: u64 = 300_000_000_000;
 const MAX_PARKED_PER_INSTALL: usize = 256;
 const MAX_UNHANDLED_NAMES: usize = 256;
-const MAX_UNINSTALL_URL_BYTES: usize = 1023;
+const MAX_INSTALLED_SCRIPTS: usize = 256;
 
 /// GTK-side work the host asks for, in order.
 pub(crate) enum NativeOp {
@@ -101,6 +102,8 @@ pub enum Notice {
     Disabled(ExtensionInstallId),
     /// `runtime.openOptionsPage()`.
     OpenOptionsPage(ExtensionInstallId),
+    /// `runtime.reload()`: the browser reloads the extension.
+    Reload(ExtensionInstallId),
 }
 
 /// How an install becomes active.
@@ -130,6 +133,7 @@ pub(crate) struct Admitted {
     pub state_directory: Option<PathBuf>,
     pub listeners: Option<Vec<u8>>,
     pub alarms: Option<Vec<u8>>,
+    pub imports: Option<Vec<u8>>,
 }
 
 struct Live {
@@ -184,6 +188,8 @@ pub(crate) struct InstallState {
     uninstall_url: Option<String>,
     blockers: Blockers,
     startup_ms: Option<f64>,
+    installed_scripts: Vec<String>,
+    importing: Vec<String>,
 }
 
 impl InstallState {
@@ -231,17 +237,30 @@ enum Work {
     },
     Respond {
         sender: Box<Sender>,
-        token: u64,
+        message: MessageId,
+        listener: ListenerId,
         outcome: ListenerOutcome,
     },
     Lifecycle {
         sender: Box<Sender>,
-        state: String,
-        detail: Value,
+        report: WorkerLifecycle,
     },
     WorkerError {
         sender: Box<Sender>,
+        kind: ExtensionErrorKind,
         detail: Value,
+    },
+    Booted {
+        sender: Box<Sender>,
+    },
+    Imported {
+        sender: Box<Sender>,
+        urls: Vec<String>,
+    },
+    Runtime {
+        responder: Responder,
+        sender: Box<Sender>,
+        request: RuntimeRequest,
     },
     CreateOffscreen {
         responder: Responder,
@@ -252,9 +271,6 @@ enum Work {
     CloseOffscreen {
         responder: Responder,
         sender: Box<Sender>,
-    },
-    OpenOptions {
-        install: ExtensionInstallId,
     },
     PersistAlarms(ExtensionInstallId),
     PersistListeners(ExtensionInstallId),
@@ -270,6 +286,8 @@ pub(crate) struct State {
     work: Vec<Work>,
     now: u64,
     unix_millis: u64,
+    contexts: HashMap<ContextKey, Value>,
+    browser: Option<Box<dyn BrowserPort>>,
 }
 
 struct At(u64);
@@ -330,9 +348,14 @@ impl EventsHost for State {
     ) -> Handled {
         let sender = invocation.sender().clone();
         let result = match request {
-            ListenerRequest::Add { event, id, filter } => self
+            ListenerRequest::Add {
+                event,
+                id,
+                filter,
+                extra,
+            } => self
                 .registry
-                .add(&sender, id, event, filter.as_ref())
+                .add_with_options(&sender, id, event, filter.as_ref(), &extra)
                 .map(|_| Value::Null),
             ListenerRequest::Remove { event, id } => {
                 self.registry.remove(&sender, event, id);
@@ -440,6 +463,165 @@ impl ScriptingHost for State {
     ) -> Result<(), ApiError> {
         self.install(sender)?.scripts = candidate;
         Ok(())
+    }
+}
+
+impl ProtocolHost for State {
+    fn protocol_request(
+        &mut self,
+        request: ProtocolRequest,
+        invocation: Invocation<'_>,
+    ) -> Handled {
+        let sender = Box::new(invocation.sender().clone());
+        match request {
+            ProtocolRequest::Respond {
+                message,
+                listener,
+                outcome,
+            } => self.work.push(Work::Respond {
+                sender,
+                message,
+                listener,
+                outcome,
+            }),
+            // No blocking listeners are wired on this platform yet.
+            ProtocolRequest::EventResult { .. } => {}
+            ProtocolRequest::WorkerError(error) => self.work.push(Work::WorkerError {
+                sender,
+                kind: ExtensionErrorKind::Uncaught,
+                detail: json!({
+                    "message": error.message,
+                    "filename": error.filename,
+                    "lineno": error.line,
+                    "colno": error.column,
+                }),
+            }),
+            ProtocolRequest::WorkerLifecycle(report) => {
+                self.work.push(Work::Lifecycle { sender, report });
+            }
+        }
+        invocation.reply(Ok(Value::Null))
+    }
+}
+
+/// `runtime.getContexts` descriptor of a runtime-owned context.
+fn context_info(sender: &Sender, script: Option<&str>) -> Option<Value> {
+    let kind = match sender.kind() {
+        ContextKind::Background => "BACKGROUND",
+        ContextKind::Popup => "POPUP",
+        ContextKind::Options | ContextKind::ExtensionTab => "TAB",
+        ContextKind::Offscreen => "OFFSCREEN_DOCUMENT",
+        _ => return None,
+    };
+    let background = sender.kind() == ContextKind::Background;
+    let url = match (background, script) {
+        (true, Some(script)) => format!(
+            "chrome-extension://{}/{script}",
+            sender.extension_id().as_str()
+        ),
+        _ => sender.url().as_str().to_owned(),
+    };
+    let key = sender.context_key();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&key, &mut hasher);
+    let mut value = json!({
+        "contextId": format!("{:016X}{:016X}", std::hash::Hasher::finish(&hasher), sender.document().get()),
+        "contextType": kind,
+        "documentUrl": url,
+        "documentOrigin": sender.origin().serialize(),
+        "frameId": if background { -1 } else { 0 },
+        "tabId": -1,
+        "windowId": -1,
+        "incognito": sender.incognito(),
+    });
+    if !background {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "documentId".into(),
+                json!(format!("{:032X}", sender.document().get())),
+            );
+        }
+    }
+    Some(value)
+}
+
+impl BrowserPort for State {
+    fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
+        match &self.browser {
+            Some(browser) => browser.snapshot(sender),
+            None => Err(unsupported()),
+        }
+    }
+
+    fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError> {
+        let install = self
+            .installs
+            .get(&sender.install())
+            .filter(|install| &install.extension_id == sender.extension_id())
+            .ok_or_else(ApiError::context_invalidated)?;
+        let mut info = match &self.browser {
+            Some(browser) => browser.extension_info(sender).unwrap_or_default(),
+            None => ExtensionInfo::default(),
+        };
+        info.manifest = install.manifest.clone();
+        info.incognito_mode = match install.manifest["incognito"].as_str() {
+            Some("split") => IncognitoMode::Split,
+            Some("not_allowed") => IncognitoMode::NotAllowed,
+            _ => IncognitoMode::Spanning,
+        };
+        info.contexts = self
+            .contexts
+            .iter()
+            .filter(|(key, _)| key.install() == sender.install())
+            .map(|(_, value)| value.clone())
+            .collect();
+        Ok(info)
+    }
+
+    fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        if let BrowserRequest::Runtime(request) = request {
+            let sender = Box::new(invocation.sender().clone());
+            return self.defer(invocation, |responder| Work::Runtime {
+                responder,
+                sender,
+                request,
+            });
+        }
+        match &mut self.browser {
+            Some(browser) => browser.request(request, invocation),
+            None => {
+                let name = invocation.name();
+                if let Ok(install) = self.install(invocation.sender()) {
+                    install.record_unhandled(name);
+                }
+                invocation.reply(Err(unsupported()))
+            }
+        }
+    }
+
+    fn frames(
+        &self,
+        sender: &Sender,
+        tab: zephium_core::ids::ItemId,
+    ) -> Result<Vec<zephium_webext_runtime::api::web_navigation::BrowserFrame>, ApiError> {
+        match &self.browser {
+            Some(browser) => browser.frames(sender, tab),
+            None => Err(unsupported()),
+        }
+    }
+
+    fn user_gesture(&self, sender: &Sender) -> bool {
+        self.browser
+            .as_ref()
+            .is_some_and(|browser| browser.user_gesture(sender))
+    }
+
+    fn validate_resource(&self, sender: &Sender, path: &str) -> Result<(), ApiError> {
+        self.validate_script_resource(sender, path, ResourceKind::JavaScript)
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.unix_millis
     }
 }
 
@@ -678,24 +860,6 @@ fn area(name: &str) -> Option<Area> {
     }
 }
 
-fn listener_id(value: &Value) -> Result<ListenerId, ApiError> {
-    match value {
-        Value::Null => ListenerId::new(EVENT_LISTENER).ok_or_else(ApiError::malformed_arguments),
-        value => value
-            .as_u64()
-            .filter(|id| *id < EVENT_LISTENER)
-            .and_then(ListenerId::new)
-            .ok_or_else(ApiError::malformed_arguments),
-    }
-}
-
-fn event_name(value: &Value) -> Result<&str, ApiError> {
-    value
-        .as_str()
-        .filter(|name| ApiName::parse(name).is_some())
-        .ok_or_else(ApiError::malformed_arguments)
-}
-
 fn internal(
     contexts: ContextMask,
     handler: fn(&mut State, Invocation<'_>) -> Handled,
@@ -709,95 +873,52 @@ fn internal(
     })
 }
 
-fn add_listener(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let args = invocation.args();
-    let result = (|| {
-        let event = event_name(args.first().unwrap_or(&Value::Null))?;
-        let id = listener_id(args.get(1).unwrap_or(&Value::Null))?;
-        let filter = args.get(2).filter(|filter| !filter.is_null());
-        let sender = invocation.sender();
-        match state.registry.add(sender, id, event, filter) {
-            Ok(_) => Ok(Value::Null),
-            Err(error) => {
-                if let Ok(install) = state.install(sender) {
-                    install.record_unhandled(event);
-                }
-                Err(error)
-            }
-        }
-    })();
-    invocation.reply(result)
-}
-
-fn remove_listener(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let args = invocation.args();
-    let result = event_name(args.first().unwrap_or(&Value::Null)).and_then(|event| {
-        let id = listener_id(args.get(1).unwrap_or(&Value::Null))?;
-        state.registry.remove(invocation.sender(), event, id);
-        Ok(Value::Null)
-    });
-    invocation.reply(result)
-}
-
-fn respond(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let args = invocation.args();
-    let token = args
-        .first()
-        .and_then(Value::as_str)
-        .and_then(|token| token.parse::<u64>().ok());
-    let outcome = match args.get(1) {
-        None | Some(Value::Null) => Some(ListenerOutcome::NoResponse),
-        Some(Value::Object(object)) => match (object.get("response"), object.get("error")) {
-            (Some(Value::String(text)), None) => serde_json::to_vec(&Value::String(text.clone()))
-                .ok()
-                .map(ListenerOutcome::Response),
-            (Some(Value::Null), None) => Some(ListenerOutcome::Response(b"null".to_vec())),
-            (None, Some(Value::String(error))) => Some(ListenerOutcome::Rejected(ApiError::other(
-                truncate(error, MAX_ERROR_MESSAGE_BYTES),
-            ))),
-            _ => None,
-        },
-        Some(_) => None,
-    };
-    let (Some(token), Some(outcome)) = (token, outcome) else {
-        return invocation.reply(Err(ApiError::malformed_arguments()));
-    };
-    state.work.push(Work::Respond {
-        sender: Box::new(invocation.sender().clone()),
-        token,
-        outcome,
-    });
-    invocation.reply(Ok(Value::Null))
-}
-
-fn event_result(_: &mut State, invocation: Invocation<'_>) -> Handled {
-    invocation.reply(Ok(Value::Null))
-}
-
 fn rules(_: &mut State, invocation: Invocation<'_>) -> Handled {
     invocation.reply(Err(ApiError::other("This event does not support rules.")))
 }
 
-fn worker_lifecycle(state: &mut State, invocation: Invocation<'_>) -> Handled {
+/// `zephium.workerReport [kind, detail]` from the adapter's own worker hooks.
+fn worker_report(state: &mut State, invocation: Invocation<'_>) -> Handled {
     let args = invocation.args();
-    let Some(stage) = args.first().and_then(Value::as_str) else {
-        return invocation.reply(Err(ApiError::malformed_arguments()));
+    let sender = Box::new(invocation.sender().clone());
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .map(|text| truncate(text, MAX_ERROR_MESSAGE_BYTES))
     };
-    state.work.push(Work::Lifecycle {
-        sender: Box::new(invocation.sender().clone()),
-        state: truncate(stage, 32),
-        detail: args.get(1).cloned().unwrap_or(Value::Null),
-    });
-    invocation.reply(Ok(Value::Null))
-}
-
-fn worker_error(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let detail = invocation.args().first().cloned().unwrap_or(Value::Null);
-    state.work.push(Work::WorkerError {
-        sender: Box::new(invocation.sender().clone()),
-        detail,
-    });
-    invocation.reply(Ok(Value::Null))
+    let work = match (args.first().and_then(Value::as_str), args.get(1)) {
+        (Some("booted"), _) => Some(Work::Booted { sender }),
+        (Some(kind @ ("console" | "rejection")), Some(message)) => {
+            text(message).map(|message| Work::WorkerError {
+                sender,
+                kind: if kind == "console" {
+                    ExtensionErrorKind::Console
+                } else {
+                    ExtensionErrorKind::UnhandledRejection
+                },
+                detail: json!({"message": message}),
+            })
+        }
+        (Some("imported"), Some(Value::Array(urls))) if urls.len() <= MAX_INSTALLED_SCRIPTS => {
+            let urls: Option<Vec<String>> = urls
+                .iter()
+                .map(|url| {
+                    url.as_str()
+                        .filter(|url| url.len() <= MAX_ERROR_SOURCE_BYTES)
+                        .map(str::to_owned)
+                })
+                .collect();
+            urls.map(|urls| Work::Imported { sender, urls })
+        }
+        _ => None,
+    };
+    match work {
+        Some(work) => {
+            state.work.push(work);
+            invocation.reply(Ok(Value::Null))
+        }
+        None => invocation.reply(Err(ApiError::malformed_arguments())),
+    }
 }
 
 fn storage_call(state: &mut State, invocation: Invocation<'_>) -> Handled {
@@ -820,58 +941,6 @@ fn storage_call(state: &mut State, invocation: Invocation<'_>) -> Handled {
         args,
         unlimited,
     })
-}
-
-fn platform_info(_: &mut State, invocation: Invocation<'_>) -> Handled {
-    let (arch, nacl) = match std::env::consts::ARCH {
-        "x86_64" => ("x86-64", "x86-64"),
-        "x86" => ("x86-32", "x86-32"),
-        "aarch64" => ("arm64", "arm"),
-        "arm" => ("arm", "arm"),
-        "mips64" => ("mips64", "mips64"),
-        _ => ("x86-64", "x86-64"),
-    };
-    invocation.reply(Ok(json!({"os": "linux", "arch": arch, "nacl_arch": nacl})))
-}
-
-fn set_uninstall_url(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let url = invocation
-        .args()
-        .first()
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let result = (|| {
-        if url.len() > MAX_UNINSTALL_URL_BYTES {
-            return Err(ApiError::other("URL is too long."));
-        }
-        if !url.is_empty()
-            && !Url::parse(url).is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https"))
-        {
-            return Err(ApiError::other("Invalid URL: \"".to_owned() + url + "\"."));
-        }
-        let install = state.install(invocation.sender())?;
-        install.uninstall_url = (!url.is_empty()).then(|| url.to_owned());
-        Ok(Value::Null)
-    })();
-    invocation.reply(result)
-}
-
-fn open_options_page(state: &mut State, invocation: Invocation<'_>) -> Handled {
-    let result = state.install(invocation.sender()).and_then(|install| {
-        let has_options = install.manifest["options_ui"]["page"].is_string()
-            || install.manifest["options_page"].is_string();
-        if has_options {
-            Ok(())
-        } else {
-            Err(ApiError::other("Could not create an options page."))
-        }
-    });
-    if result.is_ok() {
-        state.work.push(Work::OpenOptions {
-            install: invocation.sender().install(),
-        });
-    }
-    invocation.reply(result.map(|()| Value::Null))
 }
 
 fn create_offscreen(state: &mut State, invocation: Invocation<'_>) -> Handled {
@@ -919,31 +988,42 @@ fn has_offscreen(state: &mut State, invocation: Invocation<'_>) -> Handled {
 }
 
 fn table() -> Result<ApiTable<State>, RegistrationError> {
+    use zephium_webext_runtime::api;
     use zephium_webext_runtime::{alarms, events, i18n, ports, scripting_registry};
     let mut table = ApiTable::new();
+    // Storage runs on the executor; everything else is the shared set.
     alarms::register(&mut table)?;
     events::register(&mut table)?;
     ports::register(&mut table)?;
     i18n::register(&mut table)?;
     scripting_registry::register(&mut table)?;
+    protocol::register(&mut table)?;
+    api::tabs::register(&mut table)?;
+    api::windows::register(&mut table)?;
+    api::runtime::register(&mut table)?;
+    api::action::register(&mut table)?;
+    api::commands::register(&mut table)?;
+    api::permissions::register(&mut table)?;
+    api::extension::register(&mut table)?;
+    api::management::register(&mut table)?;
+    api::idle::register(&mut table)?;
+    api::dom::register(&mut table)?;
+    api::font_settings::register(&mut table)?;
+    api::notifications::register(&mut table)?;
+    api::scripting::register(&mut table)?;
+    api::web_navigation::register(&mut table)?;
+    api::history::register(&mut table)?;
+    api::bookmarks::register(&mut table)?;
+    api::sessions::register(&mut table)?;
+    api::top_sites::register(&mut table)?;
+    api::search::register(&mut table)?;
     for name in STORAGE_METHODS {
         table.register_generated(name, storage_call)?;
     }
-    table.register_generated("runtime.getPlatformInfo", platform_info)?;
-    table.register_generated("runtime.setUninstallURL", set_uninstall_url)?;
-    table.register_generated("runtime.openOptionsPage", open_options_page)?;
     table.register_generated("offscreen.createDocument", create_offscreen)?;
     table.register_generated("offscreen.closeDocument", close_offscreen)?;
     table.register_generated("offscreen.hasDocument", has_offscreen)?;
     let contexts = ContextMask::ALL.without(ContextKind::ExternalPage);
-    let background = ContextMask::of(ContextKind::Background);
-    table.register("zephium.addListener", internal(contexts, add_listener))?;
-    table.register(
-        "zephium.removeListener",
-        internal(contexts, remove_listener),
-    )?;
-    table.register("zephium.respond", internal(contexts, respond))?;
-    table.register("zephium.eventResult", internal(contexts, event_result))?;
     for name in [
         "zephium.addRules",
         "zephium.getRules",
@@ -952,10 +1032,9 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
         table.register(name, internal(contexts, rules))?;
     }
     table.register(
-        "zephium.workerLifecycle",
-        internal(background, worker_lifecycle),
+        "zephium.workerReport",
+        internal(ContextMask::of(ContextKind::Background), worker_report),
     )?;
-    table.register("zephium.workerError", internal(background, worker_error))?;
     Ok(table)
 }
 
@@ -1039,6 +1118,8 @@ impl RuntimeHost {
                 work: Vec::new(),
                 now,
                 unix_millis: (config.unix_millis)(),
+                contexts: HashMap::new(),
+                browser: None,
             },
             router: Router {
                 ports: PortService::new(),
@@ -1062,6 +1143,21 @@ impl RuntimeHost {
             scale: config.scale.max(1),
             shutting_down: false,
         })
+    }
+
+    /// The engine's tab, window and browser-data model.
+    pub(crate) fn set_browser(&mut self, browser: Box<dyn BrowserPort>) {
+        self.state.browser = Some(browser);
+    }
+
+    /// Settles a call the engine's browser port deferred.
+    pub(crate) fn settle_call(
+        &mut self,
+        responder: Responder,
+        result: Result<Value, ApiError>,
+        out: &mut Outbox,
+    ) {
+        self.settle(responder, result, out);
     }
 
     pub(crate) fn set_kick(&mut self, kick: Rc<dyn Fn()>) {
@@ -1187,6 +1283,8 @@ impl RuntimeHost {
             uninstall_url: None,
             blockers: Blockers::default(),
             startup_ms: None,
+            installed_scripts: Vec::new(),
+            importing: Vec::new(),
         };
         let fresh_install = matches!(activation, Activation::Installed);
         if !fresh_install {
@@ -1203,9 +1301,20 @@ impl RuntimeHost {
                     AlarmEnvironment::now(&At(now), self.state.unix_millis, state.unpacked);
                 let _ = state.alarms.restore_bytes(bytes, environment);
             }
+            if !matches!(activation, Activation::Updated { .. }) {
+                if let Some(scripts) = admitted
+                    .imports
+                    .as_deref()
+                    .and_then(|bytes| serde_json::from_slice::<Vec<String>>(bytes).ok())
+                {
+                    state.installed_scripts =
+                        scripts.into_iter().take(MAX_INSTALLED_SCRIPTS).collect();
+                }
+            }
         }
         if matches!(activation, Activation::Updated { .. }) {
             self.persist_path(&state, "alarms.json", None);
+            self.persist_path(&state, "imports.json", None);
         }
         self.permissions.insert(install, admitted.permissions);
         self.storage.submit(Job::Open {
@@ -1437,6 +1546,8 @@ impl RuntimeHost {
         });
     }
 
+    /// The worker failed while its process is alive: the machine stops it
+    /// and counts the failure like a crash once it is gone.
     pub(crate) fn background_failed(
         &mut self,
         install: ExtensionInstallId,
@@ -1456,17 +1567,12 @@ impl RuntimeHost {
             Value::Null,
         );
         self.observe(
-            Observation::Crashed {
+            Observation::WorkerFailed {
                 install,
                 generation,
             },
             out,
         );
-        self.op(NativeOp::DiscardBackground {
-            install,
-            generation,
-            crashed: false,
-        });
     }
 
     pub(crate) fn background_stopped(
@@ -1707,6 +1813,7 @@ impl RuntimeHost {
             &script,
             &bootstrap,
             state.fresh,
+            &state.installed_scripts,
             state.unlimited,
         );
         state.live = Some(Live {
@@ -2028,14 +2135,14 @@ impl RuntimeHost {
         install: ExtensionInstallId,
         parked: Parked,
         out: &mut Outbox,
-    ) -> Result<(), Parked> {
+    ) -> Result<(), Box<Parked>> {
         let full = self
             .state
             .installs
             .get(&install)
             .is_none_or(|state| state.parked.len() >= MAX_PARKED_PER_INSTALL);
         if full || self.lifecycle.state(install) == Some(BackgroundState::Disabled) {
-            return Err(parked);
+            return Err(Box::new(parked));
         }
         if let Some(state) = self.state.installs.get_mut(&install) {
             state.parked.push(parked);
@@ -2065,29 +2172,28 @@ impl RuntimeHost {
                 responder,
                 deadline: self.state.now.saturating_add(PARKED_TIMEOUT_NANOS),
             };
-            if let Err(Parked::Send { responder, .. }) = self.park(install, parked, out) {
-                self.settle(responder, Err(no_receiver()), out);
+            if let Err(parked) = self.park(install, parked, out) {
+                if let Parked::Send { responder, .. } = *parked {
+                    self.settle(responder, Err(no_receiver()), out);
+                }
             }
             return;
         }
-        let Some(listener) = ListenerId::new(EVENT_LISTENER) else {
-            return;
-        };
+        let facts = EventFacts::default();
         let listeners: Vec<MessageListener> = self
             .router
             .contexts
             .values()
-            .filter(|context| {
-                context.install() == install
-                    && context.kind().is_extension_page()
-                    && self
-                        .state
-                        .registry
-                        .has_listeners(context, "runtime.onMessage")
-            })
-            .map(|context| MessageListener {
-                sender: context.clone(),
-                listener,
+            .filter(|context| context.install() == install && context.kind().is_extension_page())
+            .flat_map(|context| {
+                self.state
+                    .registry
+                    .listeners(context, "runtime.onMessage", &facts)
+                    .into_iter()
+                    .map(|listener| MessageListener {
+                        sender: context.clone(),
+                        listener,
+                    })
             })
             .collect();
         let clock = At(self.state.now);
@@ -2114,14 +2220,9 @@ impl RuntimeHost {
         let Some(recipient) = self.router.contexts.get(&delivery.recipient).cloned() else {
             return;
         };
-        let Ok(message) = serde_json::from_slice::<Value>(&delivery.payload) else {
+        let Ok(args) = delivery.arguments(sender_json(&delivery.sender)) else {
             return;
         };
-        let args = json!([
-            message,
-            sender_json(&delivery.sender),
-            delivery.message.get().to_string()
-        ]);
         let seq = direct_sequence();
         let Some(frame) = event_frame(recipient.kind(), seq, delivery.event, &args) else {
             return;
@@ -2154,15 +2255,13 @@ impl RuntimeHost {
         let Some((id, responder)) = self.sends.remove(&settlement.message.get()) else {
             return;
         };
+        // Payloads are the binding's JSON text; `null` stands for undefined.
         let result = settlement.result.and_then(|response| match response {
             None => Ok(Value::Null),
-            Some(bytes) => {
-                let mut text = Vec::with_capacity(bytes.len() + 13);
-                text.extend_from_slice(b"{\"response\":");
-                text.extend_from_slice(&bytes);
-                text.push(b'}');
-                serde_json::from_slice(&text).map_err(|_| ApiError::malformed_arguments())
-            }
+            Some(bytes) if bytes == b"null" => Ok(json!({"response": null})),
+            Some(bytes) => String::from_utf8(bytes)
+                .map(|text| json!({"response": text}))
+                .map_err(|_| ApiError::malformed_arguments()),
         });
         self.settle(responder, result, out);
         if let Some(source) = self.router.contexts.get(&settlement.recipient).cloned() {
@@ -2347,19 +2446,14 @@ impl RuntimeHost {
             } => self.connect(sender, &name, responder, out),
             Work::Respond {
                 sender,
-                token,
+                message,
+                listener,
                 outcome,
             } => {
-                let Some(id) = self.sends.get(&token).map(|(id, _)| *id) else {
-                    return;
-                };
-                let Some(listener) = ListenerId::new(EVENT_LISTENER) else {
-                    return;
-                };
                 let clock = At(self.state.now);
                 if let Ok(Some(settlement)) = self.router.messages.observe(
                     &sender,
-                    id,
+                    message,
                     listener,
                     outcome,
                     self.dispatcher.limiter_mut(),
@@ -2368,17 +2462,37 @@ impl RuntimeHost {
                     self.finish_send(settlement, out);
                 }
             }
-            Work::Lifecycle {
+            Work::Lifecycle { sender, report } => self.worker_lifecycle(&sender, report, out),
+            Work::Booted { sender } => {
+                if let Some(live) = self.live_for(&sender) {
+                    live.booted = true;
+                }
+            }
+            Work::Imported { sender, urls } => {
+                let prefix = format!("chrome-extension://{}/", sender.extension_id().as_str());
+                let fresh = self
+                    .state
+                    .installs
+                    .get(&sender.install())
+                    .is_some_and(|state| state.fresh);
+                if fresh && self.live_for(&sender).is_some() {
+                    if let Some(state) = self.state.installs.get_mut(&sender.install()) {
+                        for url in urls {
+                            if url.starts_with(&prefix)
+                                && !state.importing.contains(&url)
+                                && state.importing.len() < MAX_INSTALLED_SCRIPTS
+                            {
+                                state.importing.push(url);
+                            }
+                        }
+                    }
+                }
+            }
+            Work::WorkerError {
                 sender,
-                state,
+                kind,
                 detail,
-            } => self.worker_lifecycle(&sender, &state, &detail, out),
-            Work::WorkerError { sender, detail } => {
-                let kind = match detail["kind"].as_str() {
-                    Some("console") => ExtensionErrorKind::Console,
-                    Some("rejection") => ExtensionErrorKind::UnhandledRejection,
-                    _ => ExtensionErrorKind::Uncaught,
-                };
+            } => {
                 let message = detail["message"].as_str().unwrap_or("").to_owned();
                 let install = sender.install();
                 let booting = self
@@ -2388,31 +2502,50 @@ impl RuntimeHost {
                     .and_then(|state| state.live.as_ref())
                     .is_some_and(|live| !live.booted);
                 if booting && kind == ExtensionErrorKind::Uncaught {
-                    let generation = self.live_generation(install);
-                    self.record_error(
-                        install,
-                        ExtensionErrorKind::Startup,
-                        ContextKind::Background,
-                        message,
-                        detail,
-                    );
-                    if let Some(generation) = generation {
+                    if let Some(generation) = self.live_generation(install) {
+                        self.record_error(
+                            install,
+                            ExtensionErrorKind::Startup,
+                            ContextKind::Background,
+                            message,
+                            detail,
+                        );
                         self.observe(
-                            Observation::Crashed {
+                            Observation::WorkerFailed {
                                 install,
                                 generation,
                             },
                             out,
                         );
-                        self.op(NativeOp::DiscardBackground {
-                            install,
-                            generation,
-                            crashed: false,
-                        });
                     }
                 } else {
                     self.record_error(install, kind, sender.kind(), message, detail);
                 }
+            }
+            Work::Runtime {
+                responder,
+                sender,
+                request,
+            } => {
+                let install = sender.install();
+                let result = match request {
+                    RuntimeRequest::OpenOptionsPage { .. } => {
+                        self.op(NativeOp::Notify(Notice::OpenOptionsPage(install)));
+                        Ok(Value::Null)
+                    }
+                    RuntimeRequest::SetUninstallUrl { url } => {
+                        if let Some(state) = self.state.installs.get_mut(&install) {
+                            state.uninstall_url = (!url.is_empty()).then_some(url);
+                        }
+                        Ok(Value::Null)
+                    }
+                    RuntimeRequest::RequestUpdateCheck => Ok(json!({"status": "no_update"})),
+                    RuntimeRequest::Reload => {
+                        self.op(NativeOp::Notify(Notice::Reload(install)));
+                        Ok(Value::Null)
+                    }
+                };
+                self.settle(responder, result, out);
             }
             Work::CreateOffscreen {
                 responder,
@@ -2457,9 +2590,6 @@ impl RuntimeHost {
                     );
                 }
             }
-            Work::OpenOptions { install } => {
-                self.op(NativeOp::Notify(Notice::OpenOptionsPage(install)))
-            }
             Work::PersistAlarms(install) => self.persist_alarms(install),
             Work::PersistListeners(install) => {
                 let snapshot = self.state.registry.snapshot(install);
@@ -2485,35 +2615,50 @@ impl RuntimeHost {
         }
     }
 
-    fn worker_lifecycle(&mut self, sender: &Sender, stage: &str, detail: &Value, out: &mut Outbox) {
+    fn live_for(&mut self, sender: &Sender) -> Option<&mut Live> {
+        let key = sender.context_key();
+        self.state
+            .installs
+            .get_mut(&sender.install())?
+            .live
+            .as_mut()
+            .filter(|live| {
+                live.sender
+                    .as_ref()
+                    .is_some_and(|own| own.context_key() == key)
+            })
+    }
+
+    fn worker_lifecycle(&mut self, sender: &Sender, report: WorkerLifecycle, out: &mut Outbox) {
         let install = sender.install();
+        if self.live_for(sender).is_none() {
+            return;
+        }
         let Some(generation) = self.live_generation(install) else {
             return;
         };
-        match stage {
-            "booted" => {
-                if let Some(live) = self
-                    .state
-                    .installs
-                    .get_mut(&install)
-                    .and_then(|s| s.live.as_mut())
-                {
-                    live.booted = true;
-                }
-            }
-            "activated" => {
+        match report {
+            WorkerLifecycle::Activated => {
                 let _ = self.state.registry.finish_registration(sender);
                 self.state.work.push(Work::PersistListeners(install));
                 let now = self.state.now;
+                let scale = self.scale as f64;
+                let mut imports = None;
                 if let Some(state) = self.state.installs.get_mut(&install) {
+                    if state.fresh {
+                        state.installed_scripts = std::mem::take(&mut state.importing);
+                        imports = serde_json::to_vec(&state.installed_scripts).ok();
+                    }
                     state.fresh = false;
                     if let Some(live) = state.live.as_mut() {
                         live.activated = true;
                         live.booted = true;
-                        state.startup_ms = Some(
-                            now.saturating_sub(live.started_at) as f64 / 1e6 / self.scale as f64,
-                        );
+                        state.startup_ms =
+                            Some(now.saturating_sub(live.started_at) as f64 / 1e6 / scale);
                     }
+                }
+                if let (Some(bytes), Some(state)) = (imports, self.state.installs.get(&install)) {
+                    self.persist_path(state, "imports.json", Some(bytes));
                 }
                 self.observe(
                     Observation::Started {
@@ -2525,18 +2670,20 @@ impl RuntimeHost {
                 self.release_parked(install, out);
                 self.deliver(install, out);
             }
-            "failed" | "timedOut" => {
-                let message = match detail.as_str() {
+            WorkerLifecycle::Failed(detail) => {
+                let message = match detail.as_deref() {
                     Some("install") => "The service worker's install handler failed.".to_owned(),
                     Some(text) => text.to_owned(),
-                    None if stage == "timedOut" => {
-                        "The service worker did not activate in time.".to_owned()
-                    }
                     None => "The service worker failed to start.".to_owned(),
                 };
                 self.background_failed(install, generation, &message, out);
             }
-            _ => {}
+            WorkerLifecycle::TimedOut => self.background_failed(
+                install,
+                generation,
+                "The service worker did not activate in time.",
+                out,
+            ),
         }
     }
 
@@ -2602,12 +2749,44 @@ impl RuntimeHost {
         self.tickets
             .retain(|_, (_, sender)| &sender.context_key() != context);
         self.router.contexts.remove(context);
+        self.state.contexts.remove(context);
+    }
+
+    /// Counts calls refused as unsupported and listeners for events the
+    /// runtime does not route.
+    fn note_refusal(&mut self, sender: &Sender, called: &str, frame: &[u8]) {
+        let Ok(Envelope::Reply {
+            result: Err(error), ..
+        }) = Envelope::decode(frame, Direction::ToContext, u64::MAX)
+        else {
+            return;
+        };
+        let event = !called.contains('.') || called.split('.').any(|part| part.starts_with("on"));
+        let unsupported = error == unsupported().message()
+            || (event
+                && (error == ApiError::unknown_method().message()
+                    || error.starts_with("This event is not available")
+                    || error.contains("not available in this context")));
+        if unsupported {
+            if let Some(state) = self.state.installs.get_mut(&sender.install()) {
+                state.record_unhandled(called);
+            }
+        }
     }
 
     fn note_sender(&mut self, sender: &Sender) {
         let key = sender.context_key();
         if self.router.contexts.contains_key(&key) {
             return;
+        }
+        let script = self
+            .state
+            .installs
+            .get(&sender.install())
+            .and_then(|state| state.background.as_ref())
+            .map(|script| script.path.clone());
+        if let Some(info) = context_info(sender, script.as_deref()) {
+            self.state.contexts.insert(key.clone(), info);
         }
         self.router.contexts.insert(key, sender.clone());
         if sender.kind() != ContextKind::Background {
@@ -2633,12 +2812,20 @@ impl Runtime for RuntimeHost {
         let _ = now;
         self.note_sender(sender);
         let decoded = Envelope::decode(envelope, Direction::FromContext, u64::MAX);
-        if let Ok(Envelope::Call { name, .. }) = &decoded {
-            if self.dispatcher.table().contexts(name.as_str()).is_none() {
-                let name = name.as_str().to_owned();
+        // What the call names, for the unhandled-API record.
+        let mut called = None;
+        if let Ok(Envelope::Call { name, args, .. }) = &decoded {
+            let name = name.as_str();
+            if self.dispatcher.table().contexts(name).is_none() {
                 if let Some(state) = self.state.installs.get_mut(&sender.install()) {
-                    state.record_unhandled(&name);
+                    state.record_unhandled(name);
                 }
+            } else if name == "zephium.addListener" {
+                called = serde_json::from_slice::<Vec<Value>>(args)
+                    .ok()
+                    .and_then(|args| args.first()?.as_str().map(str::to_owned));
+            } else {
+                called = Some(name.to_owned());
             }
         }
         if sender.kind() == ContextKind::Background {
@@ -2672,6 +2859,9 @@ impl Runtime for RuntimeHost {
                 .receive(&mut self.state, permissions, sender, envelope, real)
             {
                 Inbound::Reply(frame) => {
+                    if let Some(called) = called.as_deref() {
+                        self.note_refusal(sender, called, &frame);
+                    }
                     out.deliver(sender.context_key(), frame);
                     None
                 }

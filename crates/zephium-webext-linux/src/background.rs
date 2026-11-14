@@ -14,9 +14,8 @@ use std::path::Path;
 use serde_json::{json, Value};
 use zephium_webext::manifest::{Background, Manifest};
 use zephium_webext_runtime::context::{ContextKind, ExtensionId};
-use zephium_webext_runtime::js::BUNDLE;
+use zephium_webext_runtime::js::{surface, BUNDLE};
 
-use crate::runtime::surface::{kind_name, surface};
 use crate::scheme::{MemoryResource, SchemeError, WORKER_QUERY};
 
 /// The owner page every background view loads.
@@ -103,6 +102,21 @@ pub fn check_background(
     Ok(None)
 }
 
+/// The binding's name for a context kind.
+pub(crate) fn kind_name(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Background => "background",
+        ContextKind::Popup => "popup",
+        ContextKind::Options => "options",
+        ContextKind::ExtensionTab => "extensionTab",
+        ContextKind::Offscreen => "offscreen",
+        ContextKind::ExtensionFrame => "extensionFrame",
+        ContextKind::ContentScript => "contentScript",
+        ContextKind::UserScript => "userScript",
+        ContextKind::ExternalPage => "externalPage",
+    }
+}
+
 /// Everything one context's binding is told about itself.
 #[derive(Clone, Debug)]
 pub(crate) struct Bootstrap<'a> {
@@ -161,18 +175,21 @@ fn script_url(extension: &ExtensionId, path: &str) -> String {
 }
 
 // Runs in the worker before the binding: reports console.error (which the
-// binding also uses for unchecked lastError and listener exceptions) and
-// unhandled rejections, bounded, then starts the binding and says so.
+// binding also uses for unchecked lastError and listener exceptions),
+// unhandled rejections and, while installing, the classic scripts imported
+// (the set a restarted worker may import again), then starts the binding.
 const WORKER_HOOKS: &str = r#"(function(B,S,D){'use strict';
-const g=globalThis,J=JSON.stringify,St=String,then=Promise.prototype.then,apply=Reflect.apply,isErr=(v)=>v instanceof Error;
+const g=globalThis,J=JSON.stringify,St=String,U=URL,then=Promise.prototype.then,apply=Reflect.apply,isErr=(v)=>v instanceof Error;
 let client=null,reports=0;const early=[];
 const text=(v)=>{let s;try{s=isErr(v)?(v.stack&&St(v.stack).indexOf(St(v.message))!==-1?St(v.stack):St(v.name)+': '+St(v.message)):typeof v==='string'?v:J(v);}catch(e){s='';}if(typeof s!=='string')s=St(s);return s.length>1024?s.slice(0,1024):s;};
-const send=(d)=>{if(reports>=64)return;if(client===null){if(early.length<16)early.push(d);return;}reports++;try{apply(then,client.call('zephium.workerError',J([d]),true),[undefined,()=>{}]);}catch(e){}};
-const c=g.console;if(c&&typeof c.error==='function'){const original=c.error;const error=function error(...a){try{send({kind:'console',message:a.map(text).join(' ')});}catch(e){}return apply(original,this,a);};try{Object.defineProperty(c,'error',{value:error,writable:true,enumerable:true,configurable:true});}catch(e){}}
-g.addEventListener('unhandledrejection',(e)=>send({kind:'rejection',message:'Uncaught (in promise) '+text(e.reason)}));
+const send=(k,d)=>{if(reports>=320)return;if(client===null){if(early.length<16)early.push([k,d]);return;}reports++;try{apply(then,client.call('zephium.workerReport',J([k,d]),true),[undefined,()=>{}]);}catch(e){}};
+const c=g.console;if(c&&typeof c.error==='function'){const original=c.error;const error=function error(...a){try{send('console',a.map(text).join(' '));}catch(e){}return apply(original,this,a);};try{Object.defineProperty(c,'error',{value:error,writable:true,enumerable:true,configurable:true});}catch(e){}}
+g.addEventListener('unhandledrejection',(e)=>send('rejection','Uncaught (in promise) '+text(e.reason)));
+const w=D&&D.worker,ni=g.importScripts;
+if(w&&w.install===true&&w.type!=='module'&&typeof ni==='function'){g.importScripts=function importScripts(...u){const r=apply(ni,this,u);try{send('imported',u.map((x)=>new U(St(x),w.scriptURL).href));}catch(e){}return r;};}
 const context=B('worker',S,D);client=context.client;
-for(const d of early.splice(0))send(d);
-try{apply(then,client.call('zephium.workerLifecycle',J(['booted',null]),true),[undefined,()=>{}]);}catch(e){}
+for(const d of early.splice(0))send(d[0],d[1]);
+send('booted',null);
 })"#;
 
 pub(crate) fn launch(
@@ -180,6 +197,7 @@ pub(crate) fn launch(
     script: &BackgroundScript,
     bootstrap: &Bootstrap<'_>,
     install: bool,
+    installed_scripts: &[String],
     unlimited_storage: bool,
 ) -> Result<Launch, SchemeError> {
     let scope = script_url(extension, &script.path);
@@ -189,6 +207,7 @@ pub(crate) fn launch(
         "type": kind,
         "scriptURL": scope,
         "install": install,
+        "installedScripts": installed_scripts,
         "storage": {"quota": quota, "usage": 0, "persisted": true},
     });
     let boot = bootstrap.to_value(Some(worker));
@@ -298,7 +317,7 @@ mod tests {
                 path: "js/sw.js".into(),
                 module,
             };
-            let launch = launch(&id, &script, &bootstrap, true, false).unwrap();
+            let launch = launch(&id, &script, &bootstrap, true, &[], false).unwrap();
             assert_eq!(launch.script, "/js/sw.js");
             assert_eq!(
                 launch.url,

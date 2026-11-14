@@ -10,7 +10,6 @@
 mod errors;
 pub(crate) mod host;
 mod storage;
-pub(crate) mod surface;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -188,6 +187,9 @@ enum NativeEvent {
         install: ExtensionInstallId,
     },
 }
+
+/// A crashed view awaiting its blank process, and its load handler.
+type DeadView = (webkit2gtk::WebView, Option<glib::SignalHandlerId>);
 
 struct Record {
     extension_id: ExtensionId,
@@ -483,6 +485,29 @@ impl ProfileRuntime {
     /// extension document (the navigation-policy seam).
     pub fn allows_navigation(&self, requester: &Requester, uri: &str) -> bool {
         self.inner.scheme.allows(requester, uri)
+    }
+
+    /// Hands the runtime the engine's tab, window and browser-data model for
+    /// the browser-facing namespaces. Without one they answer "not
+    /// supported" and are counted in [`Self::unhandled_calls`].
+    pub fn set_browser(&self, browser: Box<dyn zephium_webext_runtime::browser::BrowserPort>) {
+        let _ = self
+            .inner
+            .bridge
+            .with_runtime(|host, _| host.set_browser(browser));
+    }
+
+    /// Settles a call the engine's browser port deferred.
+    pub fn settle_call(
+        &self,
+        responder: zephium_webext_runtime::dispatch::Responder,
+        result: Result<serde_json::Value, zephium_webext_runtime::errors::ApiError>,
+    ) {
+        let _ = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.settle_call(responder, result, out));
+        self.inner.run();
     }
 
     /// The bridge, for content-script plans and policy publication.
@@ -943,8 +968,7 @@ impl Inner {
         };
         let view = owned.view;
         self.views.ended(install, &view);
-        let slot: Rc<RefCell<Option<(webkit2gtk::WebView, Option<glib::SignalHandlerId>)>>> =
-            Rc::new(RefCell::new(None));
+        let slot: Rc<RefCell<Option<DeadView>>> = Rc::new(RefCell::new(None));
         let release = {
             let slot = slot.clone();
             move || {
@@ -1052,6 +1076,7 @@ impl Inner {
             generation: spec.generation,
             allowed_in_incognito: spec.allowed_in_incognito,
             externally_connectable: spec.externally_connectable.clone(),
+            unpacked: spec.unpacked,
         });
         if let Err(error) = admitted {
             self.scheme.remove_install(spec.install);
@@ -1086,6 +1111,7 @@ impl Inner {
             extension_id: spec.extension_id,
             listeners: snapshot("listeners.json"),
             alarms: snapshot("alarms.json"),
+            imports: snapshot("imports.json"),
             manifest: spec.manifest,
             root: spec.directory,
             background,

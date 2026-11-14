@@ -82,6 +82,7 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
         state_directory: None,
         listeners: None,
         alarms: None,
+        imports: None,
     }
 }
 
@@ -108,6 +109,7 @@ impl Harness {
                 generation: ExtensionRuntimeGeneration::INITIAL,
                 allowed_in_incognito: false,
                 externally_connectable: None,
+                unpacked: true,
             })
             .unwrap();
         Self {
@@ -206,12 +208,12 @@ impl Harness {
             })
             .expect("a start");
         let (view, sender) = self.sender(ViewKind::Background, "_zephium/background.html");
-        self.call(&sender, "zephium.workerLifecycle", json!(["booted", null]));
-        for event in listeners {
+        self.call(&sender, "zephium.workerReport", json!(["booted", null]));
+        for (index, event) in listeners.iter().enumerate() {
             let out = self.call(
                 &sender,
                 "zephium.addListener",
-                json!([event, null, null, null]),
+                json!([event, index + 1, null, null]),
             );
             assert_eq!(replies(&out), vec![Ok(Value::Null)], "{event}");
         }
@@ -348,7 +350,7 @@ fn idle_termination_then_a_message_wakes_the_background_and_is_answered() {
     let out = harness.call(
         &background,
         "zephium.respond",
-        json!([token, {"response": "{\"ok\":true}"}]),
+        json!([token, args[3][0], {"response": "{\"ok\":true}"}]),
     );
     let answers = replies(&out);
     assert!(
@@ -473,7 +475,7 @@ fn crashes_restart_with_backoff_and_a_crash_loop_disables() {
 }
 
 #[test]
-fn startup_failures_are_errors_and_discard_the_view() {
+fn startup_failures_are_errors_and_stop_the_worker() {
     let mut harness = Harness::new();
     let mut out = Outbox::default();
     harness
@@ -486,17 +488,24 @@ fn startup_failures_are_errors_and_discard_the_view() {
         "zephium.workerError",
         json!([{"message": "SyntaxError: Unexpected token", "filename": "chrome-extension://x/sw.js", "lineno": 3, "colno": 7}]),
     );
-    assert_eq!(harness.state(), Some(BackgroundState::Crashed));
+    assert_eq!(harness.state(), Some(BackgroundState::Terminating));
     let errors = harness.host.errors(harness.install);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].kind, ExtensionErrorKind::Startup);
     assert_eq!(errors[0].line, 3);
     assert_eq!(errors[0].column, 7);
     assert_eq!(errors[0].extension_id, ID);
-    assert!(harness
-        .ops()
-        .iter()
-        .any(|op| matches!(op, NativeOp::DiscardBackground { crashed: false, .. })));
+    let ops = harness.ops();
+    assert_eq!(stops(&ops).len(), 1, "a live failed worker is stopped");
+    let mut out = Outbox::default();
+    harness
+        .host
+        .background_stopped(harness.install, stops(&ops)[0], &mut out);
+    assert_eq!(
+        harness.state(),
+        Some(BackgroundState::Crashed),
+        "and counted like a crash"
+    );
 }
 
 #[test]
@@ -506,8 +515,8 @@ fn worker_reports_after_boot_are_recorded_bounded_and_rate_limited() {
     for index in 0..200 {
         harness.call(
             &background,
-            "zephium.workerError",
-            json!([{"kind": "console", "message": format!("{index}{}", "x".repeat(4096))}]),
+            "zephium.workerReport",
+            json!(["console", format!("{index}{}", "x".repeat(4096))]),
         );
     }
     let errors = harness.host.errors(harness.install);
@@ -528,12 +537,12 @@ fn unimplemented_methods_and_events_are_counted() {
     let out = harness.call(
         &background,
         "zephium.addListener",
-        json!(["commands.onCommand", null, null, null]),
+        json!(["contextMenus.onClicked", 1, null, null]),
     );
     assert!(replies(&out)[0].is_err());
     let unhandled = harness.host.unhandled(harness.install);
     assert_eq!(unhandled.get("tabs.query"), Some(&2));
-    assert_eq!(unhandled.get("commands.onCommand"), Some(&1));
+    assert_eq!(unhandled.get("contextMenus.onClicked"), Some(&1));
 }
 
 #[test]
