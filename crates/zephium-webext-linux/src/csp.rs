@@ -117,17 +117,28 @@ impl ResponsePolicy {
     /// Headers to append, retaining both independent CSP header fields.
     /// `web_accessible` must come from host authorization for this request.
     pub fn headers_for(&self, path: &str, web_accessible: bool) -> Vec<(&'static str, &str)> {
-        let policy = if self.is_sandboxed(path) {
-            &self.sandbox
-        } else {
-            &self.extension
-        };
         // Separate headers intersect; appending text to one policy would not.
-        let mut headers = vec![
-            ("Content-Security-Policy", policy.as_str()),
-            ("Content-Security-Policy", MINIMUM_CSP),
-            ("X-Content-Type-Options", "nosniff"),
-        ];
+        let mut headers = if is_host_generated(path) {
+            // The background owner page is the host's stand-in for Chrome's
+            // service-worker registration: the manifest's page policy (whose
+            // `worker-src` governs page-created workers) does not apply to
+            // it, while the worker script itself is served with that policy.
+            vec![
+                ("Content-Security-Policy", MINIMUM_CSP),
+                ("X-Content-Type-Options", "nosniff"),
+            ]
+        } else {
+            let policy = if self.is_sandboxed(path) {
+                &self.sandbox
+            } else {
+                &self.extension
+            };
+            vec![
+                ("Content-Security-Policy", policy.as_str()),
+                ("Content-Security-Policy", MINIMUM_CSP),
+                ("X-Content-Type-Options", "nosniff"),
+            ]
+        };
         if let Some(embedder) = &self.embedder {
             headers.push(("Cross-Origin-Embedder-Policy", embedder));
         }
@@ -140,6 +151,10 @@ impl ResponsePolicy {
         }
         headers
     }
+}
+
+fn is_host_generated(path: &str) -> bool {
+    path == "_zephium" || path.starts_with("_zephium/")
 }
 
 fn policy_value(
@@ -284,6 +299,25 @@ mod tests {
     }
 
     #[test]
+    fn a_page_worker_policy_cannot_stop_the_background_owner() {
+        let policy = ResponsePolicy::from_manifest(&manifest(json!({
+            "content_security_policy": {"extension_pages": "default-src 'none'; script-src 'self'; worker-src 'none'"}
+        })))
+        .unwrap();
+        assert_eq!(
+            policies(&policy.headers_for("_zephium/background.html", false)),
+            [MINIMUM_CSP]
+        );
+        assert_eq!(
+            policies(&policy.headers_for("background/index.js", false)),
+            [
+                "default-src 'none'; script-src 'self'; worker-src 'none'",
+                MINIMUM_CSP
+            ]
+        );
+    }
+
+    #[test]
     fn defaults_keep_independent_floor_and_nosniff() {
         let policy = ResponsePolicy::from_manifest(&manifest(json!({}))).unwrap();
         let headers = policy.headers_for("popup.html", false);
@@ -359,10 +393,7 @@ mod tests {
             "_zephium/bootstrap/owner.js",
         ] {
             assert!(!policy.is_sandboxed(path), "{path}");
-            assert_eq!(
-                policies(&policy.headers_for(path, false)),
-                [DEFAULT_EXTENSION_CSP, MINIMUM_CSP]
-            );
+            assert_eq!(policies(&policy.headers_for(path, false)), [MINIMUM_CSP]);
         }
         for path in [
             "popup.html",
