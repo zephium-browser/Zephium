@@ -31,3 +31,4 @@ tempfile.workspace = true
 serde_json.workspace = true
 rustix = { version = "=1.1.6", features = ["fs"] }
 zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0" }

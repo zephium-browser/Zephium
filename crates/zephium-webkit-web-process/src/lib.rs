@@ -8,4 +8,4 @@
 mod ffi;
 pub mod state;
 
-pub use zephium_webkit_web_process_protocol::{policy, protocol};
+pub use zephium_webkit_web_process_protocol::{dnr, policy, protocol};

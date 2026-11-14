@@ -140,6 +140,12 @@ unsafe extern "C" {
     pub fn jsc_weak_value_get_value(value: *mut Object) -> *mut Object;
     pub fn soup_message_headers_get_one(headers: *mut Object, name: *const c_char)
         -> *const c_char;
+    pub fn soup_message_headers_remove(headers: *mut Object, name: *const c_char);
+    pub fn soup_message_headers_append(
+        headers: *mut Object,
+        name: *const c_char,
+        value: *const c_char,
+    );
     pub fn soup_message_headers_replace(
         headers: *mut Object,
         name: *const c_char,

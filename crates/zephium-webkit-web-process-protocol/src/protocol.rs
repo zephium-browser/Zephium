@@ -7,7 +7,7 @@ pub use crate::scripts::*;
 use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
 use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";
@@ -27,6 +27,7 @@ pub const MAX_WORLDS: usize = 16;
 pub const MAX_ORIGINS: usize = 64;
 pub const MAX_BOOTSTRAP_BYTES: usize = 256 * 1024;
 pub const MAX_BATCH_EVENTS: usize = 64;
+pub const MAX_REQUEST_EVENTS: usize = 256;
 pub const MAX_FORM_FIELDS: usize = 64;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -105,6 +106,7 @@ pub struct Attach {
     pub external: Vec<ExternalRule>,
     pub extension_origins: Vec<String>,
     pub extension_bootstrap: String,
+    pub tab_id: i32,
     pub observe_requests: bool,
     pub observe_forms: bool,
 }
@@ -121,6 +123,7 @@ impl Default for Attach {
             external: Vec::new(),
             extension_origins: Vec::new(),
             extension_bootstrap: String::new(),
+            tab_id: -1,
             observe_requests: false,
             observe_forms: false,
         }
@@ -228,6 +231,10 @@ pub struct RequestEvent {
     pub decision: String,
     pub matched: bool,
     pub matched_rule_id: Option<u32>,
+    pub matched_rules: Vec<crate::dnr::DnrMatchedRule>,
+    /// Request facts, matching and native mutation, excluding telemetry serialization.
+    /// Zero unless request observation is enabled.
+    pub evaluation_time_ns: u64,
     pub initiator: Option<String>,
 }
 
@@ -252,6 +259,8 @@ pub enum Event {
     Requests {
         generation: u64,
         observations: Vec<RequestEvent>,
+        dropped_observations: u64,
+        dropped_matches: u64,
     },
     Form(FormEvent),
     Injection(InjectionResult),
@@ -346,7 +355,7 @@ impl<'a> Reader<'a> {
         }
     }
     pub(crate) fn header(&mut self, kind: u8) -> Result<(), WireError> {
-        if self.take(4)? != b"ZWP2" {
+        if self.take(4)? != b"ZWP3" {
             return Err(WireError::Version);
         }
         if self.u8()? != kind {
@@ -401,7 +410,7 @@ pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
     pub(crate) fn new(kind: u8) -> Self {
-        let mut bytes = b"ZWP2".to_vec();
+        let mut bytes = b"ZWP3".to_vec();
         bytes.push(kind);
         Self(bytes)
     }
@@ -597,6 +606,7 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
             }
             w.strings(&v.extension_origins, MAX_ORIGINS, MAX_URI_BYTES)?;
             w.string(&v.extension_bootstrap, MAX_BOOTSTRAP_BYTES)?;
+            w.u32(v.tab_id as u32);
             w.boolean(v.observe_requests);
             w.boolean(v.observe_forms);
             if w.0.len() > MAX_ATTACH_BYTES {
@@ -709,6 +719,7 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
                 external,
                 extension_origins: r.strings(MAX_ORIGINS, MAX_URI_BYTES)?,
                 extension_bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
+                tab_id: r.u32()? as i32,
                 observe_requests: r.boolean()?,
                 observe_forms: r.boolean()?,
             })
@@ -823,9 +834,13 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
         Event::Requests {
             generation,
             observations,
+            dropped_observations,
+            dropped_matches,
         } => {
             w.u64(*generation);
-            w.count(observations.len(), MAX_BATCH_EVENTS)?;
+            w.u64(*dropped_observations);
+            w.u64(*dropped_matches);
+            w.count(observations.len(), MAX_REQUEST_EVENTS)?;
             for v in observations {
                 w.string(&v.url, MAX_URI_BYTES)?;
                 w.string(&v.method, 32)?;
@@ -839,6 +854,13 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
                 if let Some(id) = v.matched_rule_id {
                     w.u32(id);
                 }
+                w.count(v.matched_rules.len(), crate::dnr::MAX_DNR_MATCHED_RULES)?;
+                for rule in &v.matched_rules {
+                    w.string(&rule.extension_id, 32)?;
+                    w.string(&rule.ruleset_id, 1024)?;
+                    w.u32(rule.rule_id);
+                }
+                w.u64(v.evaluation_time_ns);
                 w.boolean(v.initiator.is_some());
                 if let Some(initiator) = &v.initiator {
                     w.string(initiator, MAX_URI_BYTES)?;
@@ -895,7 +917,7 @@ pub fn encode_post_bytes_for_install(
 
 pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
     let mut r = Reader::new(bytes, MAX_UI_BYTES)?;
-    if r.take(4)? != b"ZWP2" {
+    if r.take(4)? != b"ZWP3" {
         return Err(WireError::Version);
     }
     let tag = r.u8()?;
@@ -940,7 +962,9 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
             bytes: r.blob(MAX_MESSAGE_BYTES)?.to_vec(),
         }),
         19 => {
-            let n = r.count(MAX_BATCH_EVENTS)?;
+            let dropped_observations = r.u64()?;
+            let dropped_matches = r.u64()?;
+            let n = r.count(MAX_REQUEST_EVENTS)?;
             let mut observations = Vec::new();
             for _ in 0..n {
                 observations.push(RequestEvent {
@@ -953,6 +977,19 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
                     decision: r.string(32)?,
                     matched: r.boolean()?,
                     matched_rule_id: if r.boolean()? { Some(r.u32()?) } else { None },
+                    matched_rules: {
+                        let count = r.count(crate::dnr::MAX_DNR_MATCHED_RULES)?;
+                        let mut rules = Vec::new();
+                        for _ in 0..count {
+                            rules.push(crate::dnr::DnrMatchedRule {
+                                extension_id: r.string(32)?,
+                                ruleset_id: r.string(1024)?,
+                                rule_id: r.u32()?,
+                            });
+                        }
+                        rules
+                    },
+                    evaluation_time_ns: r.u64()?,
                     initiator: if r.boolean()? {
                         Some(r.string(MAX_URI_BYTES)?)
                     } else {
@@ -963,6 +1000,8 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
             Event::Requests {
                 generation,
                 observations,
+                dropped_observations,
+                dropped_matches,
             }
         }
         20 => {
@@ -1075,10 +1114,10 @@ mod tests {
 
     #[test]
     fn hostile_lengths_types_and_utf8_are_refused() {
-        let mut bytes = b"ZWP2\x04".to_vec();
+        let mut bytes = b"ZWP3\x04".to_vec();
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Oversized));
-        let mut bytes = b"ZWP2\x04".to_vec();
+        let mut bytes = b"ZWP3\x04".to_vec();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(255);
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Invalid));
@@ -1165,6 +1204,8 @@ mod tests {
             Event::Attached { generation: 1 },
             Event::Requests {
                 generation: 1,
+                dropped_observations: 2,
+                dropped_matches: 1,
                 observations: vec![RequestEvent {
                     url: "https://example.com/x".into(),
                     method: "GET".into(),
@@ -1175,6 +1216,8 @@ mod tests {
                     decision: "cancel".into(),
                     matched: true,
                     matched_rule_id: Some(7),
+                    matched_rules: Vec::new(),
+                    evaluation_time_ns: 0,
                     initiator: None,
                 }],
             },

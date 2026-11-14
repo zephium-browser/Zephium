@@ -45,9 +45,15 @@ impl Drop for NativeSession {
         let deadline = start + Duration::from_secs(10);
         let mut quiet = None;
         let mut drained = false;
+        let mut busy_iterations = 0u64;
+        let mut renderer_iterations = 0u64;
         while Instant::now() < deadline {
             while gtk::events_pending() && Instant::now() < deadline {
                 gtk::main_iteration_do(false);
+                busy_iterations += 1;
+            }
+            if !web_processes().is_empty() {
+                renderer_iterations += 1;
             }
             if web_processes().is_empty() && !gtk::events_pending() {
                 let since = quiet.get_or_insert_with(Instant::now);
@@ -61,7 +67,7 @@ impl Drop for NativeSession {
             std::thread::sleep(Duration::from_millis(1));
         }
         println!(
-            "WEBEXT native_shutdown drained={drained} elapsed_ms={:.3} remaining={:?}",
+            "WEBEXT native_shutdown drained={drained} elapsed_ms={:.3} remaining={:?} busy_iterations={busy_iterations} renderer_iterations={renderer_iterations}",
             start.elapsed().as_secs_f64() * 1000.0,
             web_processes()
         );
@@ -314,14 +320,16 @@ impl Fixture {
                     .unwrap_or("no-native-header");
                 {
                     let mut records = recorded.lock().unwrap();
-                    assert!(records.len() < 512, "bounded fixture request capture");
+                    assert!(records.len() < 4096, "bounded fixture request capture");
                     records.push(Request {
                         path: path.into(),
                         header: header.into(),
                     });
                 }
                 let (mime, body) = response(path, header, port);
-                let csp = if path.starts_with("/csp-sandbox") {
+                let csp = if path.starts_with("/dnr-csp") {
+                    "Content-Security-Policy: script-src 'none'; report-uri /dnr-resource?probe=csp_report\r\n"
+                } else if path.starts_with("/csp-sandbox") {
                     "Content-Security-Policy: sandbox allow-scripts\r\n"
                 } else {
                     ""
@@ -352,7 +360,71 @@ impl Drop for Fixture {
 }
 
 fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
+    let path = path
+        .strip_prefix("http://")
+        .and_then(|value| value.find('/').map(|at| &value[at..]))
+        .unwrap_or(path);
     let route = path.split('?').next().unwrap_or(path);
+    if route == "/dnr-types" {
+        return ("text/html", include_str!("../dnr-resources.html").into());
+    }
+    if route == "/dnr-csp" {
+        return (
+            "text/html",
+            "<!doctype html><script>globalThis.shouldBeBlocked=true;</script>".into(),
+        );
+    }
+    if route == "/dnr-sw.js" {
+        return ("text/javascript", "self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('message',e=>e.waitUntil(fetch('/dnr-resource?probe=service_worker_fetch').then(()=>e.source.postMessage('sw-fetched'))));".into());
+    }
+    if route == "/dnr-worker.js" {
+        return ("text/javascript", "importScripts('/dnr-script.js?probe=worker_import');fetch('/dnr-resource?probe=worker_fetch').finally(()=>postMessage('done'));".into());
+    }
+    if route == "/dnr-script.js" {
+        return ("text/javascript", "globalThis.dnrScript=true;".into());
+    }
+    if route == "/dnr-module.js" {
+        return (
+            "text/javascript",
+            "import '/dnr-script.js?probe=module_import';".into(),
+        );
+    }
+    if route == "/dnr-style.css" {
+        return (
+            "text/css",
+            "@font-face{font-family:dnr;src:url('/dnr-font.woff?probe=font')}body{font-family:dnr}"
+                .into(),
+        );
+    }
+    if route == "/dnr-image.svg" {
+        return (
+            "image/svg+xml",
+            "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>".into(),
+        );
+    }
+    if route == "/dnr-audio.wav" {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
+        wav.extend_from_slice(b"data\0\0\0\0");
+        return ("audio/wav", String::from_utf8(wav).unwrap());
+    }
+    if route == "/dnr-headers" {
+        return ("text/plain", header.into());
+    }
+    if route == "/dnr-actual" {
+        return ("text/plain", path.into());
+    }
+    if route == "/dnr-frame" {
+        return ("text/html", "<!doctype html><script>fetch('/dnr-resource?probe=frame_fetch').catch(()=>{});</script>".into());
+    }
     let kind = path
         .split("kind=")
         .nth(1)

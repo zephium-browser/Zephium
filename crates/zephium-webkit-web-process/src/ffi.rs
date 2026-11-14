@@ -11,9 +11,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
+use std::rc::{Rc, Weak as RcWeak};
 use std::sync::{Arc, Weak};
 
-use crate::policy::{Decision, PolicySnapshot, RequestInfo, ResourceType, MAX_SNAPSHOT_BYTES};
+use crate::dnr::{DnrFrameAllow, DnrPolicySnapshot, MAX_DNR_SNAPSHOT_BYTES};
+use crate::policy::{Decision, PolicySnapshot, RequestInfo, ResourceType};
 use crate::protocol::{self, Attach, Deliver, Event, FormEvent, RequestEvent, UiMessage};
 use crate::state::State;
 use raw::{Object, Variant};
@@ -42,15 +44,20 @@ struct Runtime {
     injections: BTreeMap<u64, scripts::PendingInjection>,
     next_injection: u64,
     script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
+    policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
 
 struct NativePage {
     pointer: *mut Object,
     frames: BTreeMap<u64, NativeFrame>,
-    policy: Option<PolicySnapshot>,
+    policy: Option<Rc<PublishedPolicy>>,
+    frame_allow: Vec<DnrFrameAllow>,
+    pending_allow: Option<(String, Vec<DnrFrameAllow>)>,
     policy_generation: u64,
     requests: Vec<RequestEvent>,
     request_bytes: usize,
+    requests_dropped: u64,
+    matches_dropped: u64,
     events: VecDeque<Vec<u8>>,
     event_bytes: usize,
     batch_inflight: bool,
@@ -244,6 +251,7 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 injections: BTreeMap::new(),
                 next_injection: 0,
                 script_tables: BTreeMap::new(),
+                policy_maps: BTreeMap::new(),
             });
             true
         });
@@ -282,9 +290,13 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
                     pointer: page,
                     frames: BTreeMap::new(),
                     policy: None,
+                    frame_allow: Vec::new(),
+                    pending_allow: None,
                     policy_generation: 0,
                     requests: Vec::new(),
                     request_bytes: 0,
+                    requests_dropped: 0,
+                    matches_dropped: 0,
                     events: VecDeque::new(),
                     event_bytes: 0,
                     batch_inflight: false,
@@ -598,19 +610,33 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                         }
                     }
                 }
-                if native.events.is_empty() && !native.requests.is_empty() {
+                if native.events.is_empty()
+                    && (!native.requests.is_empty() || native.requests_dropped != 0)
+                {
                     let observations = std::mem::take(&mut native.requests);
+                    let row_count = observations.len() as u64;
+                    let match_count = observations.iter().filter(|row| row.matched).count() as u64;
                     native.request_bytes = 0;
-                    if let Ok(bytes) = protocol::encode_event(&Event::Requests {
+                    let dropped_observations = std::mem::take(&mut native.requests_dropped);
+                    let dropped_matches = std::mem::take(&mut native.matches_dropped);
+                    let bytes = protocol::encode_event(&Event::Requests {
                         generation,
                         observations,
-                    }) {
-                        if native.event_bytes.saturating_add(bytes.len()) <= MAX_PENDING_EVENT_BYTES
-                            && native.events.len() < MAX_PENDING_EVENTS
-                        {
+                        dropped_observations,
+                        dropped_matches,
+                    });
+                    if let Ok(bytes) = bytes {
+                        if bytes.len() <= MAX_PENDING_EVENT_BYTES {
                             native.event_bytes += bytes.len();
                             native.events.push_back(bytes);
+                        } else {
+                            native.requests_dropped =
+                                dropped_observations.saturating_add(row_count);
+                            native.matches_dropped = dropped_matches.saturating_add(match_count);
                         }
+                    } else {
+                        native.requests_dropped = dropped_observations.saturating_add(row_count);
+                        native.matches_dropped = dropped_matches.saturating_add(match_count);
                     }
                 }
                 let next_size = native.events.front().map_or(0, Vec::len);
@@ -744,9 +770,13 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 let native = runtime.pages.get_mut(&id)?;
                 native.scripts = None;
                 native.policy = None;
+                native.frame_allow.clear();
+                native.pending_allow = None;
                 native.policy_generation = 0;
                 native.requests.clear();
                 native.request_bytes = 0;
+                native.requests_dropped = 0;
+                native.matches_dropped = 0;
                 native.events.clear();
                 native.event_bytes = 0;
                 native.batch_inflight = false;
@@ -865,6 +895,8 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                     return false;
                 }
                 page.policy = Some(policy);
+                page.frame_allow.clear();
+                page.pending_allow = None;
                 page.policy_generation = update.policy_generation;
                 true
             })
@@ -909,9 +941,13 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
         }
         native.scripts = None;
         native.policy = None;
+        native.frame_allow.clear();
+        native.pending_allow = None;
         native.policy_generation = 0;
         native.requests.clear();
         native.request_bytes = 0;
+        native.requests_dropped = 0;
+        native.matches_dropped = 0;
         native.events.clear();
         native.event_bytes = 0;
         native.batch_inflight = false;
@@ -993,6 +1029,14 @@ unsafe extern "C" fn window_cleared(
                 .state
                 .set_frame_facts(page_id, frame_id, None, None, true);
             let native = runtime.pages.get_mut(&page_id)?;
+            if is_main {
+                native.frame_allow = native
+                    .pending_allow
+                    .take()
+                    .filter(|(target, _)| target == &uri)
+                    .map(|(_, allow)| allow)
+                    .unwrap_or_default();
+            }
             let table_generation = native.scripts.as_ref().map_or(0, |table| table.generation);
             runtime
                 .state
@@ -1401,14 +1445,69 @@ unsafe extern "C" fn document_loaded(page: *mut Object, _: *mut c_void) {
     });
 }
 
-fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<PolicySnapshot> {
-    map_sealed(
-        message,
-        index,
-        length,
-        MAX_SNAPSHOT_BYTES,
-        PolicySnapshot::decode,
-    )
+enum PolicyData {
+    Exact(PolicySnapshot),
+    Dnr(DnrPolicySnapshot<'static>),
+}
+struct PublishedPolicy {
+    // The dependent descriptors must be dropped before the mapping.
+    data: PolicyData,
+    mapping: MappedBytes,
+}
+struct MappedBytes {
+    pointer: *mut c_void,
+    length: usize,
+    identity: (u64, u64),
+}
+impl Drop for MappedBytes {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.pointer, self.length);
+        }
+    }
+}
+
+fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<Rc<PublishedPolicy>> {
+    let mapping = map_region(message, index, length, MAX_DNR_SNAPSHOT_BYTES)?;
+    if let Some(Some(shared)) = with_runtime(|runtime| {
+        runtime
+            .policy_maps
+            .get(&mapping.identity)
+            .and_then(RcWeak::upgrade)
+    }) {
+        return Some(shared);
+    }
+    let allowed = with_runtime(|runtime| {
+        runtime
+            .policy_maps
+            .retain(|_, policy| policy.strong_count() != 0);
+        let total: usize = runtime
+            .policy_maps
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .map(|policy| policy.mapping.length)
+            .sum();
+        total.saturating_add(length) <= 512 * 1024 * 1024
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return None;
+    }
+    // The read-only mapping is immutable and owned by PublishedPolicy. Only its
+    // private descriptors borrow this lifetime; they never escape that owner.
+    let bytes: &'static [u8] =
+        unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) };
+    let data = if DnrPolicySnapshot::is_dnr(bytes) {
+        PolicyData::Dnr(DnrPolicySnapshot::load(bytes).ok()?)
+    } else {
+        PolicyData::Exact(PolicySnapshot::decode(bytes).ok()?)
+    };
+    let identity = mapping.identity;
+    let shared = Rc::new(PublishedPolicy { data, mapping });
+    with_runtime(|runtime| {
+        runtime.policy_maps.insert(identity, Rc::downgrade(&shared));
+    });
+    Some(shared)
 }
 
 fn map_sealed<T, E>(
@@ -1418,6 +1517,16 @@ fn map_sealed<T, E>(
     maximum: usize,
     decode: impl FnOnce(&[u8]) -> Result<T, E>,
 ) -> Option<T> {
+    let mapping = map_region(message, index, length, maximum)?;
+    decode(unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) }).ok()
+}
+
+fn map_region(
+    message: *mut Object,
+    index: u32,
+    length: usize,
+    maximum: usize,
+) -> Option<MappedBytes> {
     if length == 0 || length > maximum || index > c_int::MAX as u32 {
         return None;
     }
@@ -1468,9 +1577,11 @@ fn map_sealed<T, E>(
         if mapped == libc::MAP_FAILED {
             return None;
         }
-        let policy = decode(std::slice::from_raw_parts(mapped.cast::<u8>(), length)).ok();
-        libc::munmap(mapped, length);
-        policy
+        Some(MappedBytes {
+            pointer: mapped,
+            length,
+            identity: (info.st_dev, info.st_ino),
+        })
     }
 }
 
@@ -1482,15 +1593,16 @@ unsafe extern "C" fn send_request(
 ) -> c_int {
     boundary(|| unsafe {
         let page_id = raw::webkit_web_page_get_id(page);
-        let Some((generation, observe)) = with_runtime(|runtime| {
+        let Some((generation, observe, tab_id)) = with_runtime(|runtime| {
             runtime
                 .state
                 .attachment(page_id)
-                .map(|attach| (attach.generation, attach.observe_requests))
+                .map(|attach| (attach.generation, attach.observe_requests, attach.tab_id))
         })
         .flatten() else {
             return 0;
         };
+        let started = observe.then(std::time::Instant::now);
         let Some(url) = bounded_text(
             raw::webkit_uri_request_get_uri(request),
             protocol::MAX_URI_BYTES,
@@ -1499,40 +1611,121 @@ unsafe extern "C" fn send_request(
         };
         let method = bounded_text(raw::webkit_uri_request_get_http_method(request), 32);
         let headers = raw::webkit_uri_request_get_http_headers(request);
-        let destination = if headers.is_null() {
-            None
-        } else {
-            bounded_text(
-                raw::soup_message_headers_get_one(headers, c"Sec-Fetch-Dest".as_ptr()),
-                64,
-            )
+        let header = |name: &std::ffi::CStr, cap| {
+            if headers.is_null() {
+                None
+            } else {
+                bounded_text(
+                    raw::soup_message_headers_get_one(headers, name.as_ptr()),
+                    cap,
+                )
+            }
         };
-        let resource_type = ResourceType::infer(destination.as_deref());
+        let destination = header(c"Sec-Fetch-Dest", 64);
+        let fetch_mode = header(c"Sec-Fetch-Mode", 64);
+        let content_type = header(c"Content-Type", 128);
+        let mut resource_type = ResourceType::infer(destination.as_deref());
+        // These headers are supplied by WebKit's loader; URL suffixes and Accept
+        // values cannot establish a resource type.
+        if destination.as_deref() == Some("empty") {
+            resource_type = if content_type.as_deref().is_some_and(|value| {
+                value.starts_with("application/csp-report")
+                    || value.starts_with("application/reports+json")
+            }) {
+                ResourceType::CspReport
+            } else if header(c"Ping-To", protocol::MAX_URI_BYTES).is_some()
+                || (fetch_mode.as_deref() == Some("no-cors") && method.as_deref() == Some("POST"))
+            {
+                ResourceType::Ping
+            } else {
+                ResourceType::Fetch
+            };
+        }
+        let claimed_initiator = header(c"Origin", protocol::MAX_URI_BYTES)
+            .or_else(|| header(c"Referer", protocol::MAX_URI_BYTES));
+        // A suppressed referrer remains unknown. Never turn a page-provided
+        // cross-origin URL into host access without a live native document.
+        let initiator = claimed_initiator
+            .as_deref()
+            .and_then(protocol::document_origin)
+            .filter(|origin| {
+                with_runtime(|runtime| {
+                    runtime.pages.get(&page_id).is_some_and(|native| {
+                        native
+                            .frames
+                            .keys()
+                            .filter_map(|id| runtime.state.frame(page_id, *id))
+                            .any(|frame| {
+                                !frame.opaque
+                                    && protocol::document_origin(&frame.uri).as_ref()
+                                        == Some(origin)
+                            })
+                    })
+                })
+                .unwrap_or(false)
+            });
+        let top = with_runtime(|runtime| {
+            let native = runtime.pages.get(&page_id)?;
+            native
+                .frames
+                .keys()
+                .filter_map(|id| runtime.state.frame(page_id, *id))
+                .find(|frame| frame.is_main)
+                .map(|frame| (frame.frame_id, frame.uri.clone()))
+        })
+        .flatten();
         let info = RequestInfo {
             url: url.clone(),
+            tab_id,
             method: method.clone(),
             resource_type,
-            frame_id: None,
-            document_url: None,
-            initiator: None,
+            frame_id: (resource_type == ResourceType::MainFrame)
+                .then(|| top.as_ref().map(|(id, _)| *id))
+                .flatten(),
+            document_url: top.as_ref().map(|(_, url)| url.clone()),
+            initiator: initiator.clone(),
             is_main_frame: resource_type == ResourceType::MainFrame,
         };
         let matched = with_runtime(|runtime| {
-            runtime
-                .pages
-                .get(&page_id)
-                .and_then(|page| page.policy.as_ref())
-                .map(|policy| policy.evaluate(&info))
+            let page = runtime.pages.get_mut(&page_id)?;
+            let policy = page.policy.as_ref()?;
+            match &policy.data {
+                PolicyData::Exact(policy) => {
+                    let matched = policy.evaluate(&info);
+                    Some((matched.rule_id, matched.decision, Vec::new()))
+                }
+                PolicyData::Dnr(policy) => {
+                    let inherited = if info.is_main_frame {
+                        &[][..]
+                    } else {
+                        &page.frame_allow
+                    };
+                    let matched = policy.evaluate(&info, inherited);
+                    if info.is_main_frame {
+                        page.pending_allow = if matches!(
+                            matched.decision,
+                            Decision::Allow | Decision::ModifyRequestHeaders(_)
+                        ) {
+                            Some((info.url.clone(), matched.frame_allow_updates))
+                        } else {
+                            None
+                        };
+                    }
+                    let first = matched.matched_rules.first().map(|rule| rule.rule_id);
+                    Some((first, matched.decision, matched.matched_rules))
+                }
+            }
         })
         .flatten();
-        let (rule_id, decision) = matched
-            .map(|matched| (matched.rule_id, matched.decision))
-            .unwrap_or((None, Decision::Allow));
+        let (rule_id, decision, matched_rules) =
+            matched.unwrap_or((None, Decision::Allow, Vec::new()));
         let label = match &decision {
             Decision::Allow => "allow",
             Decision::Cancel => "cancel",
             Decision::Redirect(_) => "redirect",
-            Decision::SetRequestHeaders(_) => "set-request-headers",
+            Decision::SetRequestHeaders(_) | Decision::ModifyRequestHeaders(_) => {
+                "modify-request-headers"
+            }
         };
         let cancel = match &decision {
             Decision::Cancel => true,
@@ -1561,20 +1754,51 @@ unsafe extern "C" fn send_request(
                 }
                 false
             }
+            Decision::ModifyRequestHeaders(changes) => {
+                if !headers.is_null() {
+                    for change in changes {
+                        let Ok(name) = CString::new(change.header.as_str()) else {
+                            continue;
+                        };
+                        match change.operation {
+                            zephium_webkit_web_process_protocol::dnr::HeaderOperation::Remove => {
+                                raw::soup_message_headers_remove(headers, name.as_ptr());
+                            }
+                            operation => {
+                                if let Some(value) = change
+                                    .value
+                                    .as_deref()
+                                    .and_then(|value| CString::new(value).ok())
+                                {
+                                    if operation == zephium_webkit_web_process_protocol::dnr::HeaderOperation::Append {
+                                raw::soup_message_headers_append(headers, name.as_ptr(), value.as_ptr());
+                            } else { raw::soup_message_headers_replace(headers, name.as_ptr(), value.as_ptr()); }
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
             Decision::Allow => false,
         };
+        let evaluation_time_ns = started.map_or(0, |start| {
+            start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+        });
         if observe || rule_id.is_some() {
             let observation = RequestEvent {
                 url,
                 method: method.unwrap_or_default(),
                 resource_type: format!("{resource_type:?}"),
-                frame_id: 0,
-                document_url: String::new(),
+                frame_id: info.frame_id.unwrap_or(0),
+                document_url: info.document_url.unwrap_or_default(),
                 is_main_frame: info.is_main_frame,
                 decision: label.to_owned(),
                 matched: rule_id.is_some(),
                 matched_rule_id: rule_id,
-                initiator: None,
+                matched_rules,
+                evaluation_time_ns,
+                initiator,
             };
             with_runtime(|runtime| {
                 if runtime
@@ -1587,12 +1811,26 @@ unsafe extern "C" fn send_request(
                 let Some(page) = runtime.pages.get_mut(&page_id) else {
                     return;
                 };
-                let bytes = observation.url.len() + observation.method.len() + 128;
-                if page.requests.len() < protocol::MAX_BATCH_EVENTS
+                let bytes = observation.url.len()
+                    + observation.method.len()
+                    + observation.document_url.len()
+                    + observation.initiator.as_ref().map_or(0, String::len)
+                    + observation
+                        .matched_rules
+                        .iter()
+                        .map(|rule| rule.extension_id.len() + rule.ruleset_id.len() + 16)
+                        .sum::<usize>()
+                    + 128;
+                if page.requests.len() < protocol::MAX_REQUEST_EVENTS
                     && page.request_bytes.saturating_add(bytes) <= MAX_PENDING_EVENT_BYTES
                 {
                     page.request_bytes += bytes;
                     page.requests.push(observation);
+                } else {
+                    page.requests_dropped = page.requests_dropped.saturating_add(1);
+                    page.matches_dropped = page
+                        .matches_dropped
+                        .saturating_add(u64::from(observation.matched));
                 }
             });
         }
@@ -1746,9 +1984,13 @@ fn deactivate_page(id: u64) {
         let native = runtime.pages.get_mut(&id)?;
         native.scripts = None;
         native.policy = None;
+        native.frame_allow.clear();
+        native.pending_allow = None;
         native.policy_generation = 0;
         native.requests.clear();
         native.request_bytes = 0;
+        native.requests_dropped = 0;
+        native.matches_dropped = 0;
         native.events.clear();
         native.event_bytes = 0;
         native.batch_inflight = false;

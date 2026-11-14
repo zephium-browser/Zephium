@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="icon" href="/dnr-image.svg?probe=favicon">
+<link rel="stylesheet" href="/dnr-style.css?probe=stylesheet">
+<link rel="preload" as="script" href="/dnr-script.js?probe=preload">
+<link rel="prefetch" href="/dnr-resource?probe=prefetch">
+<script src="/dnr-script.js?probe=script"></script>
+<script type="module" src="/dnr-module.js?probe=module"></script>
+<img src="/dnr-image.svg?probe=image" alt="fixture">
+<audio preload="auto" src="/dnr-audio.wav?probe=media"></audio>
+<object data="/dnr-resource?probe=object" type="text/html"></object>
+<iframe src="/dnr-frame?probe=sub_frame"></iframe>
+<iframe name="ping-target" src="about:blank"></iframe>
+<iframe src="/dnr-csp?probe=csp_frame"></iframe>
+<a id="ping" target="ping-target" href="/dnr-frame?probe=ping_navigation" ping="/dnr-resource?probe=ping">ping</a>
+<body>Font fixture
+<script>
+globalThis.dnrProbes = {};
+fetch('/dnr-resource?probe=fetch').then(() => dnrProbes.fetch = true);
+const xhr = new XMLHttpRequest();
+xhr.open('GET', '/dnr-resource?probe=xhr');
+xhr.onloadend = () => dnrProbes.xhr = true;
+xhr.send();
+navigator.sendBeacon('/dnr-resource?probe=beacon', 'bounded');
+const worker = new Worker('/dnr-worker.js?probe=worker');
+worker.onmessage = () => { dnrProbes.worker = true; worker.terminate(); };
+const socket = new WebSocket(location.origin.replace('http:', 'ws:') + '/dnr-resource?probe=websocket');
+socket.onerror = () => { dnrProbes.websocket = true; socket.close(); };
+window.addEventListener('load', () => document.getElementById('ping').click());
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', () => dnrProbes.serviceWorker = true);
+  navigator.serviceWorker.register('/dnr-sw.js?probe=service_worker_script')
+    .then(() => navigator.serviceWorker.ready)
+    .then(registration => registration.active.postMessage('fetch'))
+    .catch(error => dnrProbes.serviceWorkerError = String(error));
+} else {
+  dnrProbes.serviceWorkerError = 'unavailable';
+}
+</script>

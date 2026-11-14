@@ -22,6 +22,9 @@ pub enum ResourceType {
     Fetch,
     Worker,
     Other,
+    Object,
+    Ping,
+    CspReport,
 }
 
 impl ResourceType {
@@ -37,6 +40,9 @@ impl ResourceType {
             8 => Ok(Self::Fetch),
             9 => Ok(Self::Worker),
             10 => Ok(Self::Other),
+            11 => Ok(Self::Object),
+            12 => Ok(Self::Ping),
+            13 => Ok(Self::CspReport),
             _ => Err(PolicyError),
         }
     }
@@ -47,6 +53,8 @@ impl ResourceType {
             Some("document") => Self::MainFrame,
             Some("iframe" | "frame") => Self::SubFrame,
             Some("script") => Self::Script,
+            Some("object" | "embed") => Self::Object,
+            Some("report") => Self::CspReport,
             Some("style") => Self::Stylesheet,
             Some("image") => Self::Image,
             Some("font") => Self::Font,
@@ -61,6 +69,7 @@ impl ResourceType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestInfo {
     pub url: String,
+    pub tab_id: i32,
     pub method: Option<String>,
     pub resource_type: ResourceType,
     /// WebKit's page-level hook does not expose the originating frame.
@@ -82,6 +91,7 @@ pub enum Decision {
     Cancel,
     Redirect(String),
     SetRequestHeaders(Vec<Header>),
+    ModifyRequestHeaders(Vec<zephium_webext_dnr::HeaderModification>),
 }
 
 pub trait RequestPolicy {
@@ -137,6 +147,7 @@ impl PolicySnapshot {
                 return Err(PolicyError);
             }
             match &rule.decision {
+                Decision::ModifyRequestHeaders(_) => return Err(PolicyError),
                 Decision::Redirect(url) if !valid_url(url) => return Err(PolicyError),
                 Decision::SetRequestHeaders(headers) => {
                     if headers.is_empty() || headers.len() > MAX_HEADERS {
@@ -200,6 +211,7 @@ impl PolicySnapshot {
             write_text(&mut out, rule.method.as_deref().unwrap_or_default())?;
             out.push(rule.resource_type.map_or(0, |kind| kind as u8));
             match &rule.decision {
+                Decision::ModifyRequestHeaders(_) => return Err(PolicyError),
                 Decision::Allow => out.push(0),
                 Decision::Cancel => out.push(1),
                 Decision::Redirect(url) => {
@@ -357,6 +369,7 @@ mod tests {
     fn request() -> RequestInfo {
         RequestInfo {
             url: "https://fixture.test/a".into(),
+            tab_id: -1,
             method: Some("GET".into()),
             resource_type: ResourceType::Fetch,
             frame_id: None,
