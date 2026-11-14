@@ -42,9 +42,50 @@
     const max = T.messageLimit('background');
     let ownerReceiver = null;
     let port = null;
+    const queue = new I.Map();
+    let head = 0, tail = 0, queuedBytes = 0, timer = null, pumping = false, closed = false;
+    const refused = (bytes) => {
+      const decoded = T.decode(bytes, T.FROM_CONTEXT, max);
+      if (decoded.error !== undefined) return;
+      const frame = decoded.frame;
+      let reply;
+      if (frame.kind === 'call') reply = T.encode({kind:'reply', id:frame.id, ok:false, error:T.ERRORS.invalidated}, T.TO_CONTEXT, max);
+      else if (frame.kind === 'portMessage') reply = T.encode({kind:'portDisconnect', port:frame.port, error:T.ERRORS.invalidated}, T.TO_CONTEXT, max);
+      if (!reply || typeof reply === 'string') return;
+      if (isOwnerCall(bytes)) {
+        if (ownerReceiver) ownerReceiver(reply);
+      } else if (port) {
+        try { I.MessagePortPostMessage(port, I.TypedArrayBuffer(reply)); } catch {}
+      }
+    };
+    const pump = () => {
+      if (pumping || closed) return;
+      pumping = true;
+      while (head < tail) {
+        const entry = I.MapGet(queue, head);
+        let sent = false;
+        try { sent = link.send(entry.bytes); } catch {}
+        if (!sent && I.now() < entry.deadline) {
+          if (timer === null) timer = I.setTimeout(() => { timer = null; pump(); }, 10);
+          break;
+        }
+        I.MapDelete(queue, head++);
+        queuedBytes -= I.TypedArrayLength(entry.bytes);
+        if (!sent) refused(entry.bytes);
+      }
+      pumping = false;
+    };
+    const enqueue = (bytes) => {
+      const size = I.TypedArrayLength(bytes);
+      if (closed || I.MapSize(queue) >= T.LIMITS.outstandingCalls || queuedBytes + size > T.LIMITS.inFlightBytes) return false;
+      I.MapSet(queue, tail++, {bytes: I.TypedArraySlice(bytes), deadline: I.now() + 2000});
+      queuedBytes += size;
+      pump();
+      return true;
+    };
     const ownerLink = {
       __proto__: null,
-      send: (bytes) => link.send(bytes),
+      send: enqueue,
       listen(fn) {
         ownerReceiver = fn;
       },
@@ -99,7 +140,7 @@
       if (length < 6 || length > max) return;
       const bytes = new I.Uint8Array(data);
       if (isOwnerCall(bytes)) return;
-      link.send(bytes);
+      if (!enqueue(bytes)) refused(bytes);
     });
     I.MessagePortStart(port);
     I.addEventListener(worker, 'error', (event) =>
@@ -107,7 +148,16 @@
     );
     I.addEventListener(worker, 'messageerror', () => reportError({ message: 'messageerror' }));
     worker.postMessage(PORT_MARKER, [channel.port2]);
-    return { __proto__: null, worker, client, reportError };
+    const close = () => {
+      closed = true;
+      if (timer !== null) I.clearTimeout(timer);
+      timer = null;
+      I.MapForEach(queue, entry => refused(entry.bytes));
+      I.MapClear(queue);
+      queuedBytes = 0;
+      client.invalidate();
+    };
+    return { __proto__: null, worker, client, reportError, close };
   }
 
 

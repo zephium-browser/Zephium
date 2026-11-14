@@ -234,3 +234,21 @@ test('the port link buffers until attached and drops oversize or foreign data', 
   assert.deepEqual(received, ['ok']);
   port1.close();
 });
+
+test('internal listener traffic preserves application slots without raising the total limit', async () => {
+  const {Z} = createRealm();
+  const host = new FakeHost(Z);
+  host.handlers['zephium.addListener'] = () => host.LATER;
+  host.handlers['tabs.query'] = () => host.LATER;
+  const client = Z.transport.createClient(host.link, {maxMessageBytes:1<<20, handlers:{}});
+  const internal = Array.from({length:300}, (_,i)=>client.call('zephium.addListener', JSON.stringify([i]), true));
+  assert.equal(client.outstanding, 128);
+  const application = Array.from({length:128}, ()=>client.call('tabs.query', '[{}]'));
+  assert.equal(client.outstanding, 256);
+  await assert.rejects(client.call('tabs.query', '[{}]'), e=>e===Z.transport.ERRORS.tooManyPending);
+  let index=0;
+  while (index<host.calls.length) host.reply(host.calls[index++].id, null);
+  await Promise.all([...internal, ...application]);
+  assert.equal(client.outstanding, 0);
+  assert.deepEqual(host.callsTo('zephium.addListener').map(c=>c.args[0]), Array.from({length:300},(_,i)=>i));
+});

@@ -296,6 +296,7 @@ pub(crate) struct BrowserState {
     frames: HashMap<ItemId, BTreeMap<FrameId, Frame>>,
     installs: HashMap<ExtensionInstallId, InstallFacts>,
     actions: HashMap<ExtensionInstallId, ActionStore>,
+    panels: HashMap<ExtensionInstallId, zephium_webext_runtime::api::side_panel::OptionsStore>,
     pending: HashMap<u64, Pending>,
     injections: HashMap<u64, (u64, usize)>,
     outgoing: VecDeque<Outgoing>,
@@ -357,6 +358,10 @@ impl Shared {
         let mut state = self.state.borrow_mut();
         let store = action_defaults(&facts);
         state.actions.insert(install, store);
+        state.panels.insert(
+            install,
+            zephium_webext_runtime::api::side_panel::OptionsStore::new(&facts.manifest),
+        );
         state.installs.insert(install, facts);
         state
             .outgoing
@@ -369,6 +374,7 @@ impl Shared {
         let mut state = self.state.borrow_mut();
         state.installs.remove(&install);
         state.actions.remove(&install);
+        state.panels.remove(&install);
         let ids: Vec<u64> = state
             .pending
             .iter()
@@ -629,6 +635,10 @@ impl Shared {
                 }
             }
             state.tabs.retain(|item| open.contains(item));
+            let live_tabs: std::collections::HashSet<_> = state.tabs.back.keys().copied().collect();
+            for panel in state.panels.values_mut() {
+                panel.retain_tabs(|tab| live_tabs.contains(&tab));
+            }
             state.windows.retain(|window| windows.contains(window));
             state.surface = Some(surface);
         }
@@ -1402,7 +1412,12 @@ impl BrowserState {
             &zephium_webext_runtime::context::InjectedWorld::Isolated,
         );
         let steps: Result<Vec<Step>, ApiError> = match &request {
-            scripting::Request::Execute { source, world, .. } => {
+            scripting::Request::Execute {
+                source,
+                world,
+                inject_immediately,
+                ..
+            } => {
                 let world = match world {
                     ExecutionWorld::Isolated => isolated,
                     ExecutionWorld::Main => String::new(),
@@ -1410,7 +1425,11 @@ impl BrowserState {
                 match source {
                     ScriptSource::Function { source, args } => Ok(vec![Step {
                         world,
-                        kind: InjectionKind::Function,
+                        kind: if *inject_immediately {
+                            InjectionKind::Function
+                        } else {
+                            InjectionKind::FunctionAtIdle
+                        },
                         source: source.clone(),
                         source_url: format!("chrome-extension://{}/", facts.extension_id),
                         args_json: Value::Array(args.clone()).to_string(),
@@ -1421,7 +1440,11 @@ impl BrowserState {
                             let (source, url) = read_package_file(&facts, file)?;
                             Ok(Step {
                                 world: world.clone(),
-                                kind: InjectionKind::Script,
+                                kind: if *inject_immediately {
+                                    InjectionKind::Script
+                                } else {
+                                    InjectionKind::ScriptAtIdle
+                                },
                                 source,
                                 source_url: url,
                                 args_json: "[]".into(),
@@ -1589,6 +1612,44 @@ impl Browser {
 }
 
 impl BrowserPort for Browser {
+    fn context_menu(
+        &mut self,
+        sender: &Sender,
+        request: zephium_webext_runtime::api::context_menus::Request,
+    ) -> Result<Value, ApiError> {
+        let state = self.shared.state.borrow();
+        if state.profile != Some(sender.profile())
+            || state
+                .installs
+                .get(&sender.install())
+                .is_none_or(|facts| facts.extension_id != sender.extension_id().as_str())
+        {
+            return Err(ApiError::context_invalidated());
+        }
+        zephium_webext_runtime::api::context_menus::unavailable(request)
+    }
+
+    fn side_panel(
+        &mut self,
+        sender: &Sender,
+        request: zephium_webext_runtime::api::side_panel::Request,
+    ) -> Result<Value, ApiError> {
+        let mut state = self.shared.state.borrow_mut();
+        if state.profile != Some(sender.profile())
+            || state
+                .installs
+                .get(&sender.install())
+                .is_none_or(|facts| facts.extension_id != sender.extension_id().as_str())
+        {
+            return Err(ApiError::context_invalidated());
+        }
+        state
+            .panels
+            .get_mut(&sender.install())
+            .ok_or_else(ApiError::context_invalidated)?
+            .configure(request)
+    }
+
     fn set_dnr_badge(
         &mut self,
         install: ExtensionInstallId,

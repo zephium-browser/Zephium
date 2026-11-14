@@ -10,7 +10,7 @@ use zephium_webext_runtime::envelope::{
     ApiName, CallId, DecodeError, Direction, Envelope, EventSeq, PortId,
 };
 use zephium_webext_runtime::js::{
-    background_surface, BUNDLE, MATCHER, OWNER_BUNDLE, WORKER_BUNDLE,
+    background_surface, BUNDLE, MATCHER, NATIVE_CONTENT_BUNDLE, OWNER_BUNDLE, WORKER_BUNDLE,
 };
 
 fn js_dir() -> PathBuf {
@@ -139,6 +139,8 @@ fn binding_tests_pass_in_node() {
     std::fs::write(bundles.join("matcher.js"), MATCHER).expect("write matcher");
     std::fs::write(bundles.join("owner.js"), OWNER_BUNDLE).expect("write owner relay");
     std::fs::write(bundles.join("worker.js"), WORKER_BUNDLE).expect("write worker binding");
+    std::fs::write(bundles.join("native-content.js"), NATIVE_CONTENT_BUNDLE)
+        .expect("write native content binding");
     let projected: Vec<_> = [
         serde_json::json!({"manifest_version":3}),
         serde_json::json!({

@@ -785,6 +785,49 @@ pub(crate) fn navigation_url(sender: &Sender, input: &str) -> Result<String, Api
     Ok(url.into())
 }
 
+enum QueryPattern {
+    Content(MatchPattern),
+    Extension(MatchPattern),
+    All,
+}
+
+impl QueryPattern {
+    fn parse(source: &str) -> Result<Self, ApiError> {
+        let invalid = || ApiError::other(format!("Invalid url pattern '{source}'"));
+        if source == "<all_urls>" {
+            return Ok(Self::All);
+        }
+        if let Some(rest) = source.strip_prefix("chrome-extension://") {
+            if source.len() > zephium_core::injection::MAX_MATCH_PATTERN_BYTES {
+                return Err(invalid());
+            }
+            let authority = rest.split('/').next().ok_or_else(invalid)?;
+            if authority.contains(':') && !authority.ends_with(":*") {
+                return Err(invalid());
+            }
+            // Metadata queries may match package tabs; permission matchers stay unchanged.
+            return MatchPattern::parse(&format!("http://{rest}"))
+                .map(Self::Extension)
+                .map_err(|_| invalid());
+        }
+        MatchPattern::parse(source)
+            .map(Self::Content)
+            .map_err(|_| invalid())
+    }
+
+    fn matches_url(&self, url: &Url) -> bool {
+        match self {
+            Self::All => true,
+            Self::Content(pattern) => pattern.matches_url(url),
+            Self::Extension(pattern) => url
+                .as_str()
+                .strip_prefix("chrome-extension://")
+                .and_then(|rest| Url::parse(&format!("http://{rest}")).ok())
+                .is_some_and(|url| pattern.matches_url(&url)),
+        }
+    }
+}
+
 fn query(
     snapshot: &BrowserSnapshot,
     sender: &Sender,
@@ -802,13 +845,11 @@ fn query(
         .map(|value| {
             strings(value)
                 .into_iter()
-                .map(|pattern| {
-                    MatchPattern::parse(pattern)
-                        .map_err(|_| ApiError::other(format!("Invalid url pattern '{pattern}'")))
-                })
+                .map(QueryPattern::parse)
                 .collect::<Result<Vec<_>, _>>()
         })
-        .transpose()?;
+        .transpose()?
+        .filter(|patterns| !patterns.is_empty());
     let current = current_window(snapshot, sender, None).ok();
     let mut result = Vec::new();
     for tab in &snapshot.tabs {
@@ -942,6 +983,53 @@ mod tests {
         browser.add_tab(window, "https://example.com/one", true);
         browser.add_tab(window, "https://other.test/two", false);
         (browser, FakeBrowser::dispatcher(), background_sender())
+    }
+
+    #[test]
+    fn package_tab_queries_preserve_metadata_authority() {
+        let (mut browser, mut dispatcher, sender) = browser();
+        let own = format!(
+            "chrome-extension://{}/app/app.html",
+            sender.extension_id().as_str()
+        );
+        let window = browser.snapshot.tabs[0].window_id;
+        browser.add_tab(window, &own, false);
+        browser.add_tab(
+            window,
+            "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/app/app.html",
+            false,
+        );
+        let none = permissions(&[], &[]);
+        for pattern in [
+            json!(own),
+            json!("chrome-extension://*/app/*"),
+            json!("<all_urls>"),
+            json!(["https://*/*", "chrome-extension://*/app/*"]),
+        ] {
+            let result = browser
+                .call(
+                    &mut dispatcher,
+                    &sender,
+                    &none,
+                    "tabs.query",
+                    json!([{"url":pattern}]),
+                )
+                .unwrap();
+            assert_eq!(result.as_array().unwrap().len(), 1);
+            assert_eq!(result[0]["url"], own);
+        }
+        let result = browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &none,
+                "tabs.query",
+                json!([{"url":[]}]),
+            )
+            .unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 4);
+        assert!(result[0].get("url").is_none());
+        assert!(result[3].get("url").is_none());
     }
 
     #[test]
@@ -1666,5 +1754,57 @@ mod tests {
                 prop_assert_eq!(browser.snapshot.tabs.iter().filter(|tab|tab.active).count(),1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod query_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn package_query_patterns_do_not_widen_content_matching() {
+        let source = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/*?mode=1";
+        let pattern = QueryPattern::parse(source).unwrap();
+        assert!(MatchPattern::parse(source).is_err());
+        for (url, expected) in [
+            (
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/page.html?mode=1",
+                true,
+            ),
+            (
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/page.htmlXmode=1",
+                false,
+            ),
+            (
+                "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/app/page.html?mode=1",
+                false,
+            ),
+            (
+                "https://abcdefghijklmnopabcdefghijklmnop/app/page.html?mode=1",
+                false,
+            ),
+        ] {
+            assert_eq!(pattern.matches_url(&Url::parse(url).unwrap()), expected);
+        }
+        let extension =
+            Url::parse("chrome-extension://abcdefghijklmnopabcdefghijklmnop/app/page.html")
+                .unwrap();
+        assert!(QueryPattern::parse("<all_urls>")
+            .unwrap()
+            .matches_url(&extension));
+        assert!(!QueryPattern::parse("*://*/*")
+            .unwrap()
+            .matches_url(&extension));
+        for source in [
+            "chrome-extension://id:123/*",
+            "chrome-extension://a*b/*",
+            "chrome-extension://id",
+            "chrome-extension://id/\n",
+        ] {
+            assert!(QueryPattern::parse(source).is_err(), "{source}");
+        }
+        assert!(
+            QueryPattern::parse(&format!("chrome-extension://id/{}", "a".repeat(2048))).is_err()
+        );
     }
 }

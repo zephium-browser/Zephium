@@ -947,8 +947,8 @@ impl<R: Runtime + 'static> Shared<R> {
                 };
                 core.attach_settled(id, generation, outcome);
             }
-            Outgoing::Deliver { context } => {
-                core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied));
+            Outgoing::Deliver { context, frame } => {
+                core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied), frame);
             }
             Outgoing::Policy { policy_generation } => {
                 core.policy_settled(policy_generation, reply == Ok(DeliveryStatus::Delivered))

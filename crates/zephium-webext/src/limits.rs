@@ -31,6 +31,7 @@ use Uses::{Key, Permission};
 /// verified; unverified features stay silent rather than guess.
 const GAPS: &[(&[Uses], &str, u8)] = &[
     (
+        // Linux stores options; presentation, action-click opening and layout are unavailable.
         &[Permission("sidePanel"), Key("side_panel")],
         "Can't show its side panel",
         ALL,
@@ -170,11 +171,17 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
+        &[Permission("tabs")],
+        "Can't open its own pages in browser tabs",
+        LIN,
+    ),
+    (
         &[Permission("webRequestAuthProvider")],
         "Can't answer websites' sign-in prompts",
         LIN,
     ),
     (
+        // Linux accepts listeners and clears the empty registry; creation is refused.
         &[Permission("contextMenus"), Permission("menus")],
         "Can't add items to the right-click menu",
         LIN,
@@ -274,6 +281,17 @@ mod tests {
             "host_permissions": ["<all_urls>"],
             "background": {"service_worker": "sw.js"}
         });
+        assert!(assess(raw.clone(), Platform::Macos).is_empty());
+        assert!(assess(raw, Platform::Windows).is_empty());
+    }
+
+    #[test]
+    fn own_page_tab_limitation_is_linux_only() {
+        let raw = json!({"manifest_version":3,"permissions":["tabs"]});
+        assert_eq!(
+            assess(raw.clone(), Platform::Linux),
+            ["Can't open its own pages in browser tabs"]
+        );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
     }
@@ -383,6 +401,7 @@ mod tests {
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
+                "Can't open its own pages in browser tabs",
                 "Can't show notifications",
             ]
         );

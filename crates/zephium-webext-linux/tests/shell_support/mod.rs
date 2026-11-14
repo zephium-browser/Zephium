@@ -115,6 +115,15 @@ pub struct Host {
 impl Host {
     pub fn open(&self, url: &str, active: bool) -> ItemId {
         let view = webkit2gtk::WebView::with_context(&self.context);
+        if let Some(extension) = std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTIC_EXTENSION")
+            .or_else(|| std::env::var_os("ZEPHIUM_CONFORMANCE_ID"))
+        {
+            zephium_webext_linux::diagnostics::observe_view(
+                &view,
+                &extension.to_string_lossy(),
+                "ContentScript",
+            );
+        }
         let id = {
             let mut shell = self.shell.borrow_mut();
             shell.next += 1;
@@ -206,6 +215,18 @@ impl Host {
         let applied = Settlement::Applied(ExtensionBrowserRequestResult::Complete);
         let missing = Settlement::Rejected(ExtensionBrowserRequestRejection::InvalidScope);
         match action {
+            Action::OpenExtensionPage => {
+                if let Ok(extension) = std::env::var("ZEPHIUM_WEBEXT_DIAGNOSTIC_EXTENSION") {
+                    zephium_webext_linux::diagnostics::record(
+                        &extension,
+                        "host",
+                        serde_json::json!({
+                            "kind":"shell-refusal", "operation":"OpenExtensionPage", "reason":"Unsupported"
+                        }),
+                    );
+                }
+                Settlement::Rejected(ExtensionBrowserRequestRejection::Unsupported)
+            }
             Action::CreateTab { url, active, .. } => {
                 let id = self.open(url.as_deref().unwrap_or("about:blank"), active);
                 Settlement::Applied(ExtensionBrowserRequestResult::CreatedTab(id))

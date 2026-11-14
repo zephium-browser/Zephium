@@ -26,6 +26,8 @@ pub struct FakeBrowser {
     pub gesture: bool,
     pub resources: BTreeSet<String>,
     pub time_ms: u64,
+    pub panels:
+        BTreeMap<zephium_core::ids::ExtensionInstallId, crate::api::side_panel::OptionsStore>,
     pub frames: Vec<crate::api::web_navigation::BrowserFrame>,
     pub action: crate::api::action::ActionStore,
     pub languages: BTreeMap<i32, String>,
@@ -59,6 +61,7 @@ impl FakeBrowser {
             gesture: false,
             resources: BTreeSet::new(),
             time_ms: 1,
+            panels: BTreeMap::new(),
             frames: Vec::new(),
             action: Default::default(),
             languages: BTreeMap::new(),
@@ -1278,6 +1281,25 @@ impl FakeBrowser {
 }
 
 impl BrowserPort for FakeBrowser {
+    fn context_menu(
+        &mut self,
+        _sender: &Sender,
+        request: crate::api::context_menus::Request,
+    ) -> Result<Value, ApiError> {
+        crate::api::context_menus::unavailable(request)
+    }
+
+    fn side_panel(
+        &mut self,
+        sender: &Sender,
+        request: crate::api::side_panel::Request,
+    ) -> Result<Value, ApiError> {
+        self.panels
+            .entry(sender.install())
+            .or_insert_with(|| crate::api::side_panel::OptionsStore::new(&self.info.manifest))
+            .configure(request)
+    }
+
     fn set_dnr_badge(
         &mut self,
         _: zephium_core::ids::ExtensionInstallId,

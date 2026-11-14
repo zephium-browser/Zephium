@@ -60,6 +60,14 @@ pub const BUNDLE: &str = concat!(
     "default:throw new TypeError('Unknown binding entry');}})"
 );
 
+/// Native-matched isolated content bindings without worker, owner or matcher code.
+pub const NATIVE_CONTENT_BUNDLE: &str = concat!(
+    "(function zephiumNativeContent(entry,surface,bootstrap){'use strict';",
+    core_modules!(),
+    "if(entry!=='native-content'||!bootstrap||!['contentScript','userScript'].includes(bootstrap.contextKind))throw new TypeError('Invalid native content context');",
+    "return Z.api.page(surface,bootstrap);})"
+);
+
 /// The hidden owner's relay alone; it creates no extension API or schema.
 pub const OWNER_BUNDLE: &str = concat!(
     "(function zephiumWorkerOwner(bootstrap){'use strict';const Z={__proto__:null};Z.I=(",
@@ -104,6 +112,14 @@ pub fn surface() -> &'static str {
 /// Optional permissions stay in the projection so an existing worker can gain
 /// and lose them through the binding's normal permission refresh.
 pub fn background_surface(manifest: &zephium_webext::manifest::Manifest) -> String {
+    context_surface(manifest, "background")
+}
+
+/// Generated metadata projected for a context; authorization remains in the dispatcher.
+pub fn context_surface(
+    manifest: &zephium_webext::manifest::Manifest,
+    context_kind: &str,
+) -> String {
     use std::sync::OnceLock;
 
     use serde_json::{json, Map, Value};
@@ -119,7 +135,7 @@ pub fn background_surface(manifest: &zephium_webext::manifest::Manifest) -> Stri
     let available = |node: &Value| {
         node.get("contexts")
             .and_then(Value::as_array)
-            .is_none_or(|kinds| kinds.iter().any(|kind| kind == "background"))
+            .is_none_or(|kinds| kinds.iter().any(|kind| kind == context_kind))
             && node
                 .get("permissions")
                 .and_then(Value::as_array)

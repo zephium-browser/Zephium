@@ -99,6 +99,8 @@ pub enum InjectionKind {
     Function = 1,
     InsertCss = 2,
     RemoveCss = 3,
+    ScriptAtIdle = 4,
+    FunctionAtIdle = 5,
 }
 
 impl InjectionKind {
@@ -108,6 +110,8 @@ impl InjectionKind {
             1 => Ok(Self::Function),
             2 => Ok(Self::InsertCss),
             3 => Ok(Self::RemoveCss),
+            4 => Ok(Self::ScriptAtIdle),
+            5 => Ok(Self::FunctionAtIdle),
             _ => Err(WireError::Invalid),
         }
     }
@@ -695,6 +699,8 @@ mod tests {
                 InjectionKind::Function,
                 InjectionKind::InsertCss,
                 InjectionKind::RemoveCss,
+                InjectionKind::ScriptAtIdle,
+                InjectionKind::FunctionAtIdle,
             ] {
                 let mut value = request();
                 value.target = target;

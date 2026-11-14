@@ -4,6 +4,8 @@
 //! or unref. JSC contexts/values with full transfer are released in scope order.
 //! Every C entry aborts on panic, including destroy and completion callbacks.
 
+#[cfg(feature = "native-tests")]
+mod diagnostics;
 mod raw;
 mod scripts;
 
@@ -43,6 +45,7 @@ struct Runtime {
     event_inflight_count: usize,
     injections: BTreeMap<u64, scripts::PendingInjection>,
     next_injection: u64,
+    idle_injections: usize,
     script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
     policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
@@ -252,6 +255,7 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 event_inflight_count: 0,
                 injections: BTreeMap::new(),
                 next_injection: 0,
+                idle_injections: 0,
                 script_tables: BTreeMap::new(),
                 policy_maps: BTreeMap::new(),
             });
@@ -1268,17 +1272,19 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
             let pointer = native.pointer;
             let frame_pointer = native.frames.get(&binding.frame)?.pointer;
             let now_ms = (raw::g_get_monotonic_time().max(0) as u64) / 1000;
-            let post_id = runtime
-                .state
-                .reserve_post(
-                    binding.page,
-                    binding.frame,
-                    binding.document_seq,
-                    &binding.world,
-                    length,
-                    now_ms,
-                )
-                .ok()?;
+            let reserved = runtime.state.reserve_post(
+                binding.page,
+                binding.frame,
+                binding.document_seq,
+                &binding.world,
+                length,
+                now_ms,
+            );
+            #[cfg(feature = "native-tests")]
+            if let Err(error) = &reserved {
+                diagnostics::post_refused(binding.page, binding.frame, &binding.world, error);
+            }
+            let post_id = reserved.ok()?;
             Some((post_id, generation, frame, pointer, frame_pointer))
         })
         .flatten();

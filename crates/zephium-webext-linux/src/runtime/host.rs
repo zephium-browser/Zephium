@@ -728,6 +728,30 @@ fn context_info(sender: &Sender, script: Option<&str>) -> Option<Value> {
 }
 
 impl BrowserPort for State {
+    fn context_menu(
+        &mut self,
+        sender: &Sender,
+        request: zephium_webext_runtime::api::context_menus::Request,
+    ) -> Result<Value, ApiError> {
+        self.install(sender)?;
+        self.browser
+            .as_mut()
+            .ok_or_else(unsupported)?
+            .context_menu(sender, request)
+    }
+
+    fn side_panel(
+        &mut self,
+        sender: &Sender,
+        request: zephium_webext_runtime::api::side_panel::Request,
+    ) -> Result<Value, ApiError> {
+        self.install(sender)?;
+        self.browser
+            .as_mut()
+            .ok_or_else(unsupported)?
+            .side_panel(sender, request)
+    }
+
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
         match &self.browser {
             Some(browser) => browser.snapshot(sender),
@@ -1266,6 +1290,8 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::runtime::register(&mut table)?;
     api::action::register(&mut table)?;
     api::commands::register(&mut table)?;
+    api::context_menus::register(&mut table)?;
+    api::side_panel::register(&mut table)?;
     api::permissions::register(&mut table)?;
     api::extension::register(&mut table)?;
     api::management::register(&mut table)?;
@@ -2392,6 +2418,13 @@ impl RuntimeHost {
 
     // ---- queries ---------------------------------------------------------
 
+    #[cfg(feature = "native-tests")]
+    fn diagnostic(&self, install: ExtensionInstallId, context: &str, event: Value) {
+        if let Some(state) = self.state.installs.get(&install) {
+            crate::diagnostics::record(state.extension_id.as_str(), context, event);
+        }
+    }
+
     pub(crate) fn errors(&self, install: ExtensionInstallId) -> Vec<ExtensionError> {
         self.state
             .installs
@@ -2443,6 +2476,18 @@ impl RuntimeHost {
     // ---- the lifecycle machine ------------------------------------------
 
     fn observe(&mut self, observation: Observation, out: &mut Outbox) {
+        #[cfg(feature = "native-tests")]
+        if let Observation::Started {
+            install,
+            generation,
+        } = &observation
+        {
+            self.diagnostic(
+                *install,
+                "Background",
+                json!({"kind":"background-started", "generation":generation}),
+            );
+        }
         let clock = At(self.state.now);
         let Ok(commands) = self.lifecycle.observe(observation, &clock) else {
             return;
@@ -2456,8 +2501,13 @@ impl RuntimeHost {
                 Command::Start {
                     install,
                     generation,
-                    reason: _,
-                } => self.start(install, generation, out),
+                    reason,
+                } => {
+                    #[cfg(feature = "native-tests")]
+                    self.diagnostic(install, "Background", json!({"kind":"background-wake", "generation":generation, "reason":format!("{reason:?}")}));
+                    let _ = reason;
+                    self.start(install, generation, out);
+                }
                 Command::Deliver { install, .. } => self.deliver(install, out),
                 Command::CancelWork {
                     install,
@@ -2823,6 +2873,12 @@ impl RuntimeHost {
             line: number("lineno"),
             column: number("colno"),
         };
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::record(
+            state.extension_id.as_str(),
+            &format!("{context:?}"),
+            json!({"kind":"runtime-error", "errorKind":format!("{kind:?}"), "message":crate::diagnostics::redact(&message), "source":crate::diagnostics::redact(&error.source), "line":error.line, "column":error.column}),
+        );
         if state.errors.push(error.clone(), now) {
             self.op(NativeOp::Notify(Notice::Error(error)));
         }
@@ -2943,6 +2999,8 @@ impl RuntimeHost {
     }
 
     fn deliver_message(&mut self, delivery: OneShotDelivery, out: &mut Outbox) {
+        #[cfg(feature = "native-tests")]
+        self.diagnostic(delivery.recipient.install(), "message", json!({"kind":"message-delivery","message":delivery.message.get(),"listeners":delivery.listeners.iter().map(|id|id.get()).collect::<Vec<_>>(),"recipient":format!("{:?}",delivery.recipient)}));
         let Some(recipient) = self.router.contexts.get(&delivery.recipient).cloned() else {
             return;
         };
@@ -2977,6 +3035,8 @@ impl RuntimeHost {
     }
 
     fn finish_send(&mut self, settlement: MessageSettlement, out: &mut Outbox) {
+        #[cfg(feature = "native-tests")]
+        self.diagnostic(settlement.recipient.install(), "message", json!({"kind":"message-settled","message":settlement.message.get(),"success":settlement.result.is_ok(),"responseBytes":settlement.result.as_ref().ok().and_then(|response|response.as_ref().map(|bytes|bytes.len())),"recipient":format!("{:?}",settlement.recipient)}));
         self.awaiting.remove(&settlement.message.get());
         let Some((id, responder)) = self.sends.remove(&settlement.message.get()) else {
             return;
@@ -3211,6 +3271,17 @@ impl RuntimeHost {
                 listener,
                 outcome,
             } => {
+                #[cfg(feature = "native-tests")]
+                if !matches!(outcome, ListenerOutcome::NoResponse) {
+                    let kind = match &outcome {
+                        ListenerOutcome::NoResponse => "none",
+                        ListenerOutcome::AsyncCallback => "callback",
+                        ListenerOutcome::Promise => "promise",
+                        ListenerOutcome::Response(_) => "response",
+                        ListenerOutcome::Rejected(_) => "rejected",
+                    };
+                    self.diagnostic(sender.install(), "message", json!({"kind":"listener-outcome","message":message.get(),"listener":listener.get(),"outcome":kind}));
+                }
                 let clock = At(self.state.now);
                 if let Ok(Some(settlement)) = self.router.messages.observe(
                     &sender,
@@ -3450,6 +3521,12 @@ impl RuntimeHost {
     }
 
     fn worker_lifecycle(&mut self, sender: &Sender, report: WorkerLifecycle, out: &mut Outbox) {
+        #[cfg(feature = "native-tests")]
+        self.diagnostic(
+            sender.install(),
+            "Background",
+            json!({"kind":"worker-lifecycle", "report":crate::diagnostics::redact(&format!("{report:?}"))}),
+        );
         let install = sender.install();
         if self.live_for(sender).is_none() {
             return;
@@ -3767,11 +3844,48 @@ impl Runtime for RuntimeHost {
         let _ = now;
         self.note_sender(sender);
         let decoded = Envelope::decode(envelope, Direction::FromContext, u64::MAX);
+        #[cfg(feature = "native-tests")]
+        if let Ok(Envelope::Call { id, name, args }) = &decoded {
+            if name.as_str() == "zephium.diagnostic" && crate::diagnostics::enabled() {
+                if let Err(error) = self.state.install(sender) {
+                    if let Some(reply) = frame(
+                        sender.kind(),
+                        &Envelope::Reply {
+                            id: *id,
+                            result: Err(error.message()),
+                        },
+                    ) {
+                        out.deliver(sender.context_key(), reply);
+                    }
+                    return;
+                }
+                let event = crate::diagnostics::decode(args)
+                    .unwrap_or_else(|| json!({"kind":"invalid-diagnostic"}));
+                self.diagnostic(sender.install(), &format!("{:?}", sender.kind()),
+                    json!({"kind":"javascript", "sender":format!("{:?}", sender.context_key()), "detail":event}));
+                if let Some(reply) = frame(
+                    sender.kind(),
+                    &Envelope::Reply {
+                        id: *id,
+                        result: Ok(b"null"),
+                    },
+                ) {
+                    out.deliver(sender.context_key(), reply);
+                }
+                return;
+            }
+        }
+
         // What the call names, for the unhandled-API record.
         let mut called = None;
         if let Ok(Envelope::Call { name, args, .. }) = &decoded {
             let name = name.as_str();
             if self.dispatcher.table().contexts(name).is_none() {
+                #[cfg(feature = "native-tests")]
+                {
+                    let (namespace, method) = name.rsplit_once('.').unwrap_or((name, ""));
+                    self.diagnostic(sender.install(), &format!("{:?}", sender.kind()), json!({"kind":"unknown-method", "namespace":namespace, "method":method, "argumentShape":crate::diagnostics::argument_shape(args)}));
+                }
                 if let Some(state) = self.state.installs.get_mut(&sender.install()) {
                     state.record_unhandled(name);
                 }
@@ -3808,44 +3922,65 @@ impl Runtime for RuntimeHost {
             return;
         };
         let real = self.state.now;
-        let traffic =
-            match self
-                .dispatcher
-                .receive(&mut self.state, permissions, sender, envelope, real)
-            {
-                Inbound::Reply(frame) => {
-                    if let Some(called) = called.as_deref() {
-                        self.note_refusal(sender, called, &frame);
+        let traffic = match self.dispatcher.receive(
+            &mut self.state,
+            permissions,
+            sender,
+            envelope,
+            real,
+        ) {
+            Inbound::Reply(frame) => {
+                #[cfg(feature = "native-tests")]
+                if let (
+                    Ok(Envelope::Call { name, args, .. }),
+                    Ok(Envelope::Reply {
+                        result: Err(error), ..
+                    }),
+                ) = (
+                    &decoded,
+                    Envelope::decode(&frame, Direction::ToContext, u64::MAX),
+                ) {
+                    if error == unsupported().message()
+                        || error == ApiError::unknown_method().message()
+                        || error.contains("not available")
+                    {
+                        let called = called.as_deref().unwrap_or(name.as_str());
+                        let (namespace, method) = called.rsplit_once('.').unwrap_or((called, ""));
+                        self.diagnostic(sender.install(), &format!("{:?}", sender.kind()), json!({"kind":"dispatcher-refusal", "namespace":namespace, "method":method, "argumentShape":crate::diagnostics::argument_shape(args), "message":error}));
                     }
+                }
+                if let Some(called) = called.as_deref() {
+                    self.note_refusal(sender, called, &frame);
+                }
+                out.deliver(sender.context_key(), frame);
+                None
+            }
+            Inbound::Pending | Inbound::Refused(_) => None,
+            Inbound::PortRefused { port, error } => {
+                if let Some(frame) = frame(
+                    sender.kind(),
+                    &Envelope::PortDisconnect {
+                        port,
+                        error: Some(error.message()),
+                    },
+                ) {
                     out.deliver(sender.context_key(), frame);
-                    None
                 }
-                Inbound::Pending | Inbound::Refused(_) => None,
-                Inbound::PortRefused { port, error } => {
-                    if let Some(frame) = frame(
-                        sender.kind(),
-                        &Envelope::PortDisconnect {
-                            port,
-                            error: Some(error.message()),
-                        },
-                    ) {
-                        out.deliver(sender.context_key(), frame);
-                    }
-                    None
-                }
-                Inbound::PortMessage {
-                    port,
-                    payload,
-                    reservation,
-                } => Some(PortTraffic::Message {
-                    sender,
-                    port,
-                    payload,
-                    reservation,
-                }),
-                Inbound::PortDisconnect { port } => Some(PortTraffic::Disconnect { sender, port }),
-                Inbound::EventAck { seq } => Some(PortTraffic::EventAck { sender, seq }),
-            };
+                None
+            }
+            Inbound::PortMessage {
+                port,
+                payload,
+                reservation,
+            } => Some(PortTraffic::Message {
+                sender,
+                port,
+                payload,
+                reservation,
+            }),
+            Inbound::PortDisconnect { port } => Some(PortTraffic::Disconnect { sender, port }),
+            Inbound::EventAck { seq } => Some(PortTraffic::EventAck { sender, seq }),
+        };
         if let Some(traffic) = traffic {
             self.router.traffic(&mut self.dispatcher, traffic, out);
         }
@@ -3960,6 +4095,8 @@ impl Runtime for RuntimeHost {
     }
 
     fn undeliverable(&mut self, context: &ContextKey, error: DeliverError) {
+        #[cfg(feature = "native-tests")]
+        self.diagnostic(context.install(), "transport", json!({"kind":"delivery-failed","context":format!("{context:?}"),"error":format!("{error:?}")}));
         let _ = (context, error);
     }
 }

@@ -15,3 +15,6 @@ pub mod package;
 pub mod runtime;
 pub mod scheme;
 pub mod views;
+
+#[cfg(feature = "native-tests")]
+pub mod diagnostics;

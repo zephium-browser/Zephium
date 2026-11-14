@@ -1173,6 +1173,14 @@ impl Inner {
             .own_plan(install)
             .ok_or_else(|| "The extension is not running.".to_owned())?;
         let view = create_view(&self.context, false, None);
+        #[cfg(feature = "native-tests")]
+        if let Some(record) = self.records.borrow().get(&install) {
+            crate::diagnostics::observe_view(
+                &view,
+                record.extension_id.as_str(),
+                "BackgroundOwner",
+            );
+        }
         self.allow_cors(install, &view);
         self.views.owned.borrow_mut().insert(
             (install, ViewKindKey::Background),
@@ -1532,6 +1540,8 @@ impl Inner {
             .ok_or(ViewError::UnknownInstall)?;
         let plan = self.own_plan(install).ok_or(ViewError::UnknownInstall)?;
         let view = create_view(&self.context, false, Some(&script));
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::observe_view(&view, extension.as_str(), &format!("{context:?}"));
         self.allow_cors(install, &view);
         let serial = self.next_page.get();
         self.next_page.set(serial + 1);

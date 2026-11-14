@@ -46,8 +46,8 @@ pub struct OneShotDelivery {
     pub message: MessageId,
     /// Exact destination document.
     pub recipient: ContextKey,
-    /// Callback to invoke.
-    pub listener: ListenerId,
+    /// Exact callbacks to invoke in this recipient, in registration order.
+    pub listeners: Vec<ListenerId>,
     /// Authenticated `MessageSender` facts.
     pub sender: Sender,
     /// Opaque JSON serialization from the binding.
@@ -66,7 +66,10 @@ impl OneShotDelivery {
             text,
             sender,
             self.message.get().to_string(),
-            [self.listener.get()]
+            self.listeners
+                .iter()
+                .map(|listener| listener.get())
+                .collect::<Vec<_>>()
         ]))
     }
 }
@@ -232,17 +235,24 @@ impl MessageService {
         self.next = next;
         let id = MessageId(next);
         let payload: Arc<[u8]> = Arc::from(payload);
-        let deliveries = listeners
-            .iter()
-            .map(|listener| OneShotDelivery {
-                message: id,
-                recipient: listener.sender.context_key(),
-                listener: listener.listener,
-                sender: source.clone(),
-                payload: payload.clone(),
-                event: route.event(source, false),
-            })
-            .collect();
+        let mut deliveries: Vec<OneShotDelivery> = Vec::new();
+        let mut destinations = HashMap::new();
+        for listener in &listeners {
+            let key = listener.sender.context_key();
+            let index = *destinations.entry(key.clone()).or_insert_with(|| {
+                let index = deliveries.len();
+                deliveries.push(OneShotDelivery {
+                    message: id,
+                    recipient: key,
+                    listeners: Vec::new(),
+                    sender: source.clone(),
+                    payload: payload.clone(),
+                    event: route.event(source, false),
+                });
+                index
+            });
+            deliveries[index].listeners.push(listener.listener);
+        }
         self.requests.insert(
             id,
             Request {

@@ -1115,3 +1115,62 @@ fn removal_waits_for_network_io_and_storage_erasure_before_reactivation() {
     }
     assert!(!state_path.exists());
 }
+
+#[cfg(feature = "native-tests")]
+#[test]
+fn diagnostic_calls_do_not_extend_worker_lifetime_and_unknown_calls_keep_only_shapes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = crate::diagnostics::begin(directory.path(), ID).unwrap();
+    let mut harness = Harness::new();
+    let (background, generation, out) = harness.running(&["runtime.onInstalled"]);
+    let (seq, ..) = events(&out)[0].clone();
+    harness.ack(&background, seq);
+    let unknown = harness.call(
+        &background,
+        "runtime.diagnosticUnknown",
+        json!([{"password":"secret"}]),
+    );
+    assert!(replies(&unknown)[0].is_err());
+    harness.call(
+        &background,
+        "zephium.addListener",
+        json!(["contextMenus.onClicked", 1, null, null]),
+    );
+    harness.advance(IDLE_TIMEOUT_NANOS - 1);
+    let report = harness.call(
+        &background,
+        "zephium.diagnostic",
+        json!([{"kind":"context-ready"}]),
+    );
+    assert_eq!(replies(&report), vec![Ok(Value::Null)]);
+    harness.advance(1);
+    harness.tick();
+    assert_eq!(stops(&harness.ops()), vec![generation]);
+    let evidence = std::fs::read_to_string(path).unwrap();
+    assert!(evidence.contains("unknown-method") && evidence.contains("argumentShape"));
+    assert!(!evidence.contains("secret") && !evidence.contains("password"));
+    assert!(
+        evidence.contains("dispatcher-refusal")
+            && evidence.contains("contextMenus")
+            && evidence.contains("onClicked")
+    );
+    harness.host.state.profile = ProfileId::from(99);
+    let refused = harness.call(
+        &background,
+        "zephium.diagnostic",
+        json!([{"kind":"foreign-profile"}]),
+    );
+    assert!(replies(&refused)[0].is_err());
+    crate::diagnostics::end(ID);
+}
+
+#[test]
+fn linux_dispatch_includes_menu_and_panel_apis() {
+    let mut shared = ApiTable::<State>::new();
+    zephium_webext_runtime::api::context_menus::register(&mut shared).unwrap();
+    zephium_webext_runtime::api::side_panel::register(&mut shared).unwrap();
+    let linux = table().unwrap();
+    for name in shared.names() {
+        assert_eq!(linux.contexts(name), shared.contexts(name), "{name}");
+    }
+}

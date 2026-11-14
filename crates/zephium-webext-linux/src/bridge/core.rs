@@ -83,12 +83,23 @@ pub(crate) enum AttachOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Outgoing {
-    Attach { generation: u64 },
+    Attach {
+        generation: u64,
+    },
     Detach,
-    Deliver { context: ContextKey },
-    Policy { policy_generation: u64 },
-    Scripts { table_generation: u64 },
-    Inject { request_id: u64 },
+    Deliver {
+        context: ContextKey,
+        frame: DeliveryFrame,
+    },
+    Policy {
+        policy_generation: u64,
+    },
+    Scripts {
+        table_generation: u64,
+    },
+    Inject {
+        request_id: u64,
+    },
 }
 
 pub(crate) enum Effect {
@@ -212,6 +223,12 @@ impl View {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeliveryFrame {
+    bytes: Vec<u8>,
+    retries: u8,
+}
+
 struct Target {
     view: u64,
     module_frame: u64,
@@ -222,7 +239,8 @@ struct Target {
     kind: ContextKind,
     frame: FrameId,
     document: DocumentGeneration,
-    queue: VecDeque<Vec<u8>>,
+    queue: VecDeque<DeliveryFrame>,
+    retry_waiting: bool,
     queued_bytes: usize,
     inflight: usize,
 }
@@ -319,7 +337,9 @@ impl Core {
     }
 
     pub fn has_buffered(&self) -> bool {
-        !self.injections.is_empty() || self.views.values().any(|view| !view.buffer.is_empty())
+        !self.injections.is_empty()
+            || self.views.values().any(|view| !view.buffer.is_empty())
+            || self.contexts.values().any(|target| target.retry_waiting)
     }
 
     pub fn phase(&self, view: u64) -> Option<Phase> {
@@ -822,6 +842,16 @@ impl Core {
                         zephium_webkit_web_process_protocol::protocol::FrameEvent::Evaluated(evaluation) => {
                             let accepted = self.record_evaluation(id, evaluation);
                             self.stats.frame_records_refused += u64::from(!accepted);
+                            #[cfg(feature = "native-tests")]
+                            if let Some(extension) = u128::from_str_radix(&evaluation.install_id, 16).ok()
+                                .and_then(|install| self.extensions.get(&ExtensionInstallId::from(install))) {
+                                crate::diagnostics::record(extension.as_str(), "ContentScript", serde_json::json!({
+                                    "kind":"content-evaluation", "accepted":accepted, "success":evaluation.success,
+                                    "script":evaluation.script_id, "fileIndex":evaluation.file_index,
+                                    "frame":evaluation.frame_id, "document":evaluation.document_seq,
+                                    "tableGeneration":evaluation.table_generation, "world":evaluation.world
+                                }));
+                            }
                         }
                         zephium_webkit_web_process_protocol::protocol::FrameEvent::ExternalPage { install_id, frame_id, document_seq } => {
                             let valid = self.views.get(&id).is_some_and(|view| matches!(view.role, Role::Tab(_)) && view.frames.get(*frame_id).is_some_and(|frame|
@@ -1034,6 +1064,7 @@ impl Core {
             frame,
             document,
             queue: VecDeque::new(),
+            retry_waiting: false,
             queued_bytes: 0,
             inflight: 0,
         };
@@ -1094,12 +1125,20 @@ impl Core {
                 zephium_webkit_web_process_protocol::protocol::InjectionStatus::TimedOut,
             );
         }
+        for target in self.contexts.values_mut() {
+            target.retry_waiting = false;
+        }
         for id in self.views() {
             self.reassess(id, now_ms);
+            self.flush(id);
         }
     }
 
     fn refuse(&mut self, reply: ReplyToken, refusal: Refusal) {
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::transport(
+            serde_json::json!({"kind":"bridge-refusal","reason":format!("{refusal:?}")}),
+        );
         *self.stats.refused.entry(refusal).or_default() += 1;
         self.effects.push(Effect::Reply(reply));
     }
@@ -1417,6 +1456,7 @@ impl Core {
         self.queued_bytes = self.queued_bytes.saturating_sub(target.queued_bytes);
         if let Some(view) = self.views.get_mut(&target.view) {
             view.contexts.remove(key);
+            view.inflight = view.inflight.saturating_sub(target.inflight);
         }
         self.effects.push(Effect::Closed {
             context: key.clone(),
@@ -1451,6 +1491,8 @@ impl Core {
             return Err(DeliverError::Stale);
         };
         if target.queue.len() >= MAX_QUEUED_FRAMES_PER_CONTEXT
+            || target.queue.len() + target.inflight
+                >= MAX_QUEUED_FRAMES_PER_CONTEXT + MAX_INFLIGHT_PER_CONTEXT
             || target.queued_bytes.saturating_add(frame.len()) > MAX_QUEUED_BYTES_PER_CONTEXT
             || self.queued_bytes.saturating_add(frame.len()) > MAX_QUEUED_BYTES_PER_PROFILE
         {
@@ -1458,7 +1500,10 @@ impl Core {
         }
         target.queued_bytes += frame.len();
         self.queued_bytes += frame.len();
-        target.queue.push_back(frame);
+        target.queue.push_back(DeliveryFrame {
+            bytes: frame,
+            retries: 0,
+        });
         self.flush(id);
         Ok(())
     }
@@ -1479,14 +1524,12 @@ impl Core {
                 let Some(target) = self.contexts.get_mut(&key) else {
                     break;
                 };
-                if target.inflight >= MAX_INFLIGHT_PER_CONTEXT {
+                if target.retry_waiting || target.inflight >= MAX_INFLIGHT_PER_CONTEXT {
                     break;
                 }
                 let Some(frame) = target.queue.pop_front() else {
                     break;
                 };
-                target.queued_bytes -= frame.len();
-                self.queued_bytes = self.queued_bytes.saturating_sub(frame.len());
                 let message = UiMessage::Deliver(Deliver {
                     token: self.token.clone(),
                     generation: target.generation,
@@ -1494,7 +1537,7 @@ impl Core {
                     document_seq: target.document_seq,
                     world: target.world.clone(),
                     external_install: target.external_install.clone(),
-                    bytes: frame,
+                    bytes: frame.bytes.clone(),
                 });
                 let effect = match encode_ui(&message) {
                     Ok(bytes) => Effect::Send {
@@ -1503,11 +1546,14 @@ impl Core {
                         bytes,
                         outgoing: Outgoing::Deliver {
                             context: key.clone(),
+                            frame,
                         },
                         policy: None,
                         scripts: None,
                     },
                     Err(_) => {
+                        target.queued_bytes -= frame.bytes.len();
+                        self.queued_bytes = self.queued_bytes.saturating_sub(frame.bytes.len());
                         self.effects.push(Effect::Undeliverable {
                             context: key.clone(),
                             error: DeliverError::TooLarge,
@@ -1530,16 +1576,38 @@ impl Core {
         id: u64,
         key: &ContextKey,
         status: zephium_webkit_web_process_protocol::protocol::DeliveryStatus,
+        mut frame: DeliveryFrame,
     ) {
+        let Some(target) = self
+            .contexts
+            .get_mut(key)
+            .filter(|target| target.view == id)
+        else {
+            return;
+        };
         if let Some(view) = self.views.get_mut(&id) {
             view.inflight = view.inflight.saturating_sub(1);
         }
-        if let Some(target) = self.contexts.get_mut(key) {
-            if target.view == id {
-                target.inflight = target.inflight.saturating_sub(1);
-            }
+        target.inflight = target.inflight.saturating_sub(1);
+        if status == zephium_webkit_web_process_protocol::protocol::DeliveryStatus::RateLimited
+            && frame.retries < 8
+        {
+            frame.retries += 1;
+            #[cfg(feature = "native-tests")]
+            crate::diagnostics::transport(
+                serde_json::json!({"kind":"bridge-delivery-retry","attempt":frame.retries,"context":format!("{key:?}")}),
+            );
+            target.queue.push_front(frame);
+            target.retry_waiting = true;
+            return;
         }
+        target.queued_bytes -= frame.bytes.len();
+        self.queued_bytes = self.queued_bytes.saturating_sub(frame.bytes.len());
         if status != zephium_webkit_web_process_protocol::protocol::DeliveryStatus::Delivered {
+            #[cfg(feature = "native-tests")]
+            crate::diagnostics::transport(
+                serde_json::json!({"kind":"bridge-delivery-refused","status":format!("{status:?}"),"context":format!("{key:?}")}),
+            );
             self.stats.delivery_refused += 1;
             self.effects.push(Effect::Undeliverable {
                 context: key.clone(),

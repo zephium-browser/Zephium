@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { FakeHost, bootstrap, createRealm, generatedSurface, modulesSource, ownerModulesSource, plain, sources, surface, workerModulesSource } from './test/harness.mjs';
+import { FakeHost, bootstrap, createRealm, generatedSurface, modulesSource, nativeContentModulesSource, ownerModulesSource, plain, sources, surface, workerModulesSource } from './test/harness.mjs';
 
 // What `src/js.rs` concatenates; the Rust test hands over its own copies.
 const assembled = {
@@ -17,6 +17,11 @@ const assembled = {
     "case'worker':return Z.workerScope.worker(surface,bootstrap);" +
     "case'owner':return Z.ownerRelay.owner(bootstrap);" +
     "default:throw new TypeError('Unknown binding entry');}})",
+  nativeContent:
+    "(function zephiumNativeContent(entry,surface,bootstrap){'use strict';" +
+    nativeContentModulesSource() +
+    "if(entry!=='native-content'||!bootstrap||!['contentScript','userScript'].includes(bootstrap.contextKind))throw new TypeError('Invalid native content context');" +
+    'return Z.api.page(surface,bootstrap);})',
   matcher:
     "(function zephiumMatcher(data){'use strict';const Z={__proto__:null};Z.I=(" +
     sources.intrinsics +
@@ -38,6 +43,7 @@ const rust = directory
       bundle: readFileSync(join(directory, 'bundle.js'), 'utf8'),
       matcher: readFileSync(join(directory, 'matcher.js'), 'utf8'),
       owner: readFileSync(join(directory, 'owner.js'), 'utf8'),
+      nativeContent: readFileSync(join(directory, 'native-content.js'), 'utf8'),
       worker: readFileSync(join(directory, 'worker.js'), 'utf8'),
     }
   : null;
@@ -77,10 +83,11 @@ test(
     assert.equal(rust.matcher, assembled.matcher);
     assert.equal(rust.owner, assembled.owner);
     assert.equal(rust.worker, assembled.worker);
+    assert.equal(rust.nativeContent, assembled.nativeContent);
   },
 );
 
-function nativeRealm(globals = {}) {
+function nativeRealm(globals = {}, source = bundles.bundle) {
   const realm = createRealm(globals);
   const host = new FakeHost(realm.Z, 'popup');
   const global = realm.run('globalThis');
@@ -89,7 +96,7 @@ function nativeRealm(globals = {}) {
     host.deliver = receiver;
     return true;
   };
-  const entry = realm.run(bundles.bundle);
+  const entry = realm.run(source);
   return { ...realm, host, entry, global };
 }
 
@@ -179,7 +186,7 @@ test('the content entry boots a guard and the matcher entry decides alone', () =
 });
 
 test('native content creates the API before separately evaluated strict files', () => {
-  const { entry, run } = nativeRealm();
+  const { entry, run } = nativeRealm({}, bundles.nativeContent);
   entry('native-content', surface, bootstrap({ contextKind: 'contentScript' }));
   assert.equal(run('typeof chrome.runtime.sendMessage'), 'function');
   assert.equal(run('typeof __zephiumPost'), 'undefined');
@@ -187,6 +194,6 @@ test('native content creates the API before separately evaluated strict files', 
   assert.equal(run('"use strict"; sharedNativeLexical + 1'), 42);
   assert.throws(() => run('"use strict"; undeclaredNativeValue = 1'), /not defined/);
   for (const contextKind of ['popup', 'background', 'externalPage']) {
-    assert.throws(() => nativeRealm().entry('native-content', surface, bootstrap({ contextKind })), /Invalid native content context/);
+    assert.throws(() => nativeRealm({}, bundles.nativeContent).entry('native-content', surface, bootstrap({ contextKind })), /Invalid native content context/);
   }
 });

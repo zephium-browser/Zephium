@@ -62,6 +62,10 @@ impl ResponsePolicy {
             "content_security_policy.extension_pages",
         )?;
         validate_extension(&extension)?;
+        let extension = allow_package_connections(&extension);
+        if extension.len() > MAX_POLICY_BYTES {
+            return Err(PolicyError::ResourceLimit);
+        }
         let sandbox = policy_value(
             csp.and_then(|value| value.get("sandbox")),
             DEFAULT_SANDBOX_CSP,
@@ -151,6 +155,52 @@ impl ResponsePolicy {
         }
         headers
     }
+}
+
+// Chromium exempts extension-scheme connections from CSP. Grant only this
+// package origin here; retain network sources and the independent script floor.
+fn allow_package_connections(policy: &str) -> String {
+    let directives: Vec<_> = policy
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .collect();
+    let sources = directives.iter().find_map(|directive| {
+        let mut words = directive.split_ascii_whitespace();
+        words
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("connect-src"))
+            .then(|| words.collect::<Vec<_>>())
+    });
+    let sources = sources.or_else(|| {
+        directives.iter().find_map(|directive| {
+            let mut words = directive.split_ascii_whitespace();
+            words
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case("default-src"))
+                .then(|| words.collect::<Vec<_>>())
+        })
+    });
+    let Some(mut sources) = sources else {
+        return policy.to_owned();
+    };
+    sources.retain(|source| *source != "'none'");
+    if !sources.contains(&"'self'") {
+        sources.push("'self'");
+    }
+    let mut result = format!("connect-src {};", sources.join(" "));
+    for directive in directives {
+        if !directive
+            .split_ascii_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("connect-src"))
+        {
+            result.push(' ');
+            result.push_str(directive);
+            result.push(';');
+        }
+    }
+    result
 }
 
 fn is_host_generated(path: &str) -> bool {
@@ -311,7 +361,7 @@ mod tests {
         assert_eq!(
             policies(&policy.headers_for("background/index.js", false)),
             [
-                "default-src 'none'; script-src 'self'; worker-src 'none'",
+                "connect-src 'self'; default-src 'none'; script-src 'self'; worker-src 'none';",
                 MINIMUM_CSP
             ]
         );
@@ -332,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_policy_is_not_rewritten_or_merged_with_floor() {
+    fn package_connection_exception_preserves_other_directives_and_separate_floor() {
         let supplied = "default-src https:; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; img-src data: https:";
         let policy = ResponsePolicy::from_manifest(&manifest(json!({
             "content_security_policy": {"extension_pages": supplied}
@@ -340,7 +390,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             policies(&policy.headers_for("worker.js", false)),
-            [supplied, MINIMUM_CSP]
+            ["connect-src https: 'self'; default-src https:; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; img-src data: https:;", MINIMUM_CSP]
         );
     }
 
@@ -622,5 +672,26 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod package_connection_tests {
+    #[test]
+    fn package_exception_preserves_remote_and_executable_policy() {
+        let adapt = super::allow_package_connections;
+        assert_eq!(
+            adapt("script-src 'self'; connect-src https://api.example"),
+            "connect-src https://api.example 'self'; script-src 'self';"
+        );
+        assert_eq!(
+            adapt("default-src 'none'; script-src 'self'"),
+            "connect-src 'self'; default-src 'none'; script-src 'self';"
+        );
+        assert_eq!(
+            adapt("connect-src 'none'; connect-src *"),
+            "connect-src 'self';"
+        );
+        assert_eq!(adapt("script-src 'self'"), "script-src 'self'");
     }
 }

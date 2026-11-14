@@ -479,3 +479,67 @@ test('worker diagnostics obey host UTF8 byte limits, including startup failures'
   channel.port1.close();
   channel.port2.close();
 });
+
+test('owner relay retries refused submissions and settles every call once', async () => {
+  const {Z} = createRealm();
+  const host = new FakeHost(Z, 'background');
+  host.handlers['zephium.addListener'] = () => null;
+  host.handlers['zephium.workerError'] = () => null;
+  let capacity = 8, refused = 0, refill;
+  const link = {listen: host.link.listen, send(bytes) {
+    if (!capacity) {
+      refused++;
+      if (!refill) refill = setTimeout(() => { capacity = 8; refill = null; }, 1);
+      return false;
+    }
+    capacity--;
+    return host.link.send(bytes);
+  }};
+  const channel = new MessageChannel();
+  const worker = new EventTarget();
+  worker.postMessage = () => {};
+  const owner = Z.ownerRelay.owner({workerURL: SCRIPT_URL}, {link, createWorker:()=>worker, createChannel:()=>channel});
+  const workerLink = Z.transport.portLink(Z.transport.messageLimit('background'));
+  workerLink.attach(channel.port2);
+  const client = Z.transport.createClient(workerLink, {maxMessageBytes: Z.transport.messageLimit('background'), handlers:{}});
+  try {
+    const calls = Array.from({length:512}, (_, i) => client.call('zephium.addListener', JSON.stringify(['runtime.onMessage', i]), true));
+    owner.reportError({message:'bounded probe'});
+    await Promise.all(calls);
+    assert(refused > 0);
+    assert.equal(client.outstanding, 0);
+    const received = host.callsTo('zephium.addListener');
+    assert.equal(received.length, 512);
+    assert.equal(new Set(received.map(c=>c.id)).size, 512);
+    assert.deepEqual(received.map(c=>c.args[1]), Array.from({length:512}, (_, i)=>i));
+    assert.equal(host.callsTo('zephium.workerError').length, 1);
+  } finally {
+    owner.close(); channel.port1.close(); channel.port2.close(); clearTimeout(refill);
+  }
+});
+
+test('owner relay permanent refusal and queue overflow reject instead of hanging', async () => {
+  let now = 0;
+  const {Z} = createRealm({performance:{now:()=>now}, setTimeout:fn=>setTimeout(()=>{now+=1000;fn();}, 0)});
+  const channel = new MessageChannel();
+  const worker = new EventTarget();
+  worker.postMessage = () => {};
+  const owner = Z.ownerRelay.owner({workerURL:SCRIPT_URL}, {
+    link:{send:()=>false, listen(){}}, createWorker:()=>worker, createChannel:()=>channel,
+  });
+  const replies = [];
+  channel.port2.onmessage = event => replies.push(Z.transport.decode(new Uint8Array(event.data), Z.transport.TO_CONTEXT, 1<<20).frame);
+  try {
+    for (let id=1; id<=300; id++) {
+      const bytes=Z.transport.encode({kind:'call',id,name:'tabs.query',args:new TextEncoder().encode('[{}]')}, Z.transport.FROM_CONTEXT, 1<<20);
+      channel.port2.postMessage(bytes.buffer);
+    }
+    const deadline = Date.now()+3000;
+    while (replies.length<300 && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve, 5));
+    assert.equal(replies.length, 300);
+    assert.equal(new Set(replies.map(r=>r.id)).size, 300);
+    assert(replies.every(r=>r.kind==='reply' && !r.ok && r.error===Z.transport.ERRORS.invalidated));
+  } finally {
+    owner.close(); channel.port1.close(); channel.port2.close();
+  }
+});

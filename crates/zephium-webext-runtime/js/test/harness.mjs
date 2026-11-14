@@ -38,6 +38,7 @@ export const modulesSource = (modules = MODULES) =>
   }).join('');
 
 export const workerModulesSource = () => modulesSource(MODULES.filter(([key]) => !['content', 'ownerRelay'].includes(key)));
+export const nativeContentModulesSource = () => modulesSource(MODULES.filter(([key]) => !['content', 'ownerRelay', 'workerScope'].includes(key)));
 export const ownerModulesSource = () => modulesSource(MODULES.filter(([key]) => ['I', 'transport', 'ownerRelay'].includes(key)));
 
 export function createRealm(extra = {}) {

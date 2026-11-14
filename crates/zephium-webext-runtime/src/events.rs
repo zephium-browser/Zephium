@@ -981,6 +981,7 @@ event_catalog!(
     "bookmarks.onMoved",
     "bookmarks.onRemoved",
     "commands.onCommand",
+    "contextMenus.onClicked",
     "history.onVisitRemoved",
     "history.onVisited",
     "idle.onStateChanged",

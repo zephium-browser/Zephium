@@ -1,13 +1,14 @@
 #!/bin/sh
-# Fetch pinned open-source CRXs into the XDG cache for local smoke tests. Never commit packages.
-# Usage: fetch-pinned.sh [--extract] [--print-path <id>]
+# Fetch pinned public CRXs into the XDG cache for local smoke tests. Never commit packages.
+# Usage: fetch-pinned.sh [--extract] [--print-path <id>] [--pin-missing]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/zephium/webext-pinned"
-extract=0 only=
+extract=0 pin_missing=0 only=
 while [ $# -gt 0 ]; do
   case $1 in
     --extract) extract=1 ;;
+    --pin-missing) pin_missing=1 ;;
     --print-path) shift; only=${1:?id required} ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -25,7 +26,23 @@ def payload(b):
 cmd, a = sys.argv[1], sys.argv[2:]
 if cmd == "list":
     for e in tomllib.load(open(a[0], "rb"))["extension"]:
-        print(e["id"], e["version"], e["sha256"])
+        print(e["id"], e["version"] or "UNRESOLVED", e["sha256"] or "UNRESOLVED")
+elif cmd == "pin":
+    path, identity, version, digest = a
+    assert version and all(c in "0123456789." for c in version)
+    assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+    text = open(path).read()
+    sections = text.split("[[extension]]")
+    for index, section in enumerate(sections[1:], 1):
+        row = tomllib.loads("[[extension]]" + section)["extension"][0]
+        if row["id"] == identity:
+            assert row["version"] == "" and row["sha256"] == "", "only unresolved pins may be recorded"
+            quote = chr(34)
+            sections[index] = section.replace("version = " + quote + quote, "version = " + quote + version + quote, 1).replace("sha256 = " + quote + quote, "sha256 = " + quote + digest + quote, 1)
+            break
+    else: raise ValueError("unknown extension")
+    with open(path + ".tmp", "w") as output: output.write("[[extension]]".join(sections))
+    os.replace(path + ".tmp", path)
 elif cmd == "sha":
     print(hashlib.sha256(open(a[0], "rb").read()).hexdigest())
 elif cmd == "version":
@@ -41,8 +58,19 @@ elif cmd == "extract":
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$cache"
-py list "$here/pinned-crx.toml" | while read -r id ver sha; do
+py list "$here/pinned-crx.toml" > "$tmp/pins"
+while read -r id ver sha; do
   [ -z "$only" ] || [ "$only" = "$id" ] || continue
+  if [ "$ver" = UNRESOLVED ] || [ "$sha" = UNRESOLVED ]; then
+    [ "$pin_missing" = 1 ] || { echo "unresolved pin for $id; use --pin-missing on a networked host and review the resulting pin diff" >&2; exit 1; }
+    curl --fail --silent --show-error --location --max-time 120 --proto =https -o "$tmp/$id.crx" \
+      "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=152.0.0.0&acceptformat=crx2,crx3&x=id%3D$id%26uc"
+    ver=$(py version "$tmp/$id.crx")
+    sha=$(py sha "$tmp/$id.crx")
+    py pin "$here/pinned-crx.toml" "$id" "$ver" "$sha"
+    mv "$tmp/$id.crx" "$cache/$id-$ver.crx"
+    echo "recorded $id $ver $sha; review scripts/webext/pinned-crx.toml" >&2
+  fi
   crx="$cache/$id-$ver.crx"
   if [ ! -f "$crx" ] || [ "$(py sha "$crx")" != "$sha" ]; then
     curl --fail --silent --show-error --location --max-time 120 --proto =https -o "$tmp/$id.crx" \
@@ -58,4 +86,4 @@ py list "$here/pinned-crx.toml" | while read -r id ver sha; do
   fi
   echo "$crx"
   [ "$extract" != 1 ] || echo "$cache/$id-$ver"
-done
+done < "$tmp/pins"

@@ -91,7 +91,24 @@ impl Fixture {
                 if path.contains("ubol-") {
                     collected.lock().unwrap().push(json!({"hit": path.clone()}));
                 }
-                let body = if let Some(query) = path.strip_prefix("/report?") {
+                if path == "/delayed.js" {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let body = "globalThis.fixtureParsed=true;";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    continue;
+                }
+                let body = if path == "/delayed-form" {
+                    let user_agent = text.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("user-agent")
+                            .then(|| value.trim())
+                    });
+                    collected
+                        .lock()
+                        .unwrap()
+                        .push(json!({"requestUserAgent":user_agent}));
+                    "<!doctype html><html><head><script src='/delayed.js'></script></head><body><form><input autocomplete='username'></form></body></html>".into()
+                } else if let Some(query) = path.strip_prefix("/report?") {
                     let decoded = url::form_urlencoded::parse(format!("q={query}").as_bytes())
                         .next()
                         .map(|(_, value)| value.into_owned())
@@ -100,6 +117,8 @@ impl Fixture {
                         collected.lock().unwrap().push(value);
                     }
                     String::new()
+                } else if path.starts_with("/password-form") {
+                    "<!doctype html><title>Password manager fixture</title><form action='/submitted' method='get'><label>Username<input name='username' autocomplete='username'></label><label>Password<input name='password' type='password' autocomplete='current-password'></label><button type='submit'>Sign in</button></form>".into()
                 } else if path.starts_with("/clicked") {
                     collected.lock().unwrap().push(json!({"where": "clicked"}));
                     "<!doctype html><title>clicked</title><p>clicked".to_owned()
@@ -615,4 +634,622 @@ fn ubol() {
     host.close(tab);
     let mut drain = host.runtime.retire();
     assert!(drain.run(Duration::from_secs(10)));
+}
+
+fn password_package(id: &str) -> PathBuf {
+    let output = std::process::Command::new("python3")
+        .args(["-I", "-c", r#"
+import hashlib, io, json, os, pathlib, sys, tomllib, zipfile
+pin = next(e for e in tomllib.load(open(sys.argv[1], 'rb'))['extension'] if e['id'] == sys.argv[2])
+assert pin['version'] and pin['sha256'], 'unresolved package pin: run fetch-pinned.sh --pin-missing --extract'
+root = pathlib.Path(os.environ['ZEPHIUM_WEBEXT_PINNED_DIR']) / (pin['id'] + '-' + pin['version'])
+data = root.with_name(root.name + '.crx').read_bytes()
+assert hashlib.sha256(data).hexdigest() == pin['sha256'], 'CRX digest mismatch'
+assert data[:4] == b'Cr24' and int.from_bytes(data[4:8], 'little') == 3, 'expected CRX3'
+archive = zipfile.ZipFile(io.BytesIO(data[12 + int.from_bytes(data[8:12], 'little'):]))
+for name in archive.namelist():
+    assert not name.startswith(('/', '\\')) and '..' not in name.replace('\\', '/').split('/'), 'unsafe package path'
+    if not name.endswith('/'):
+        file = root / name
+        assert not file.is_symlink() and root.resolve() in file.resolve().parents, 'unsafe extracted path'
+        assert file.read_bytes() == archive.read(name), 'extracted file differs from pin: ' + name
+assert json.loads((root / 'manifest.json').read_text())['version'] == pin['version']
+print(root)
+"#])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/webext/pinned-crx.toml"))
+        .arg(id)
+        .output()
+        .expect("python3 pin verification");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+struct MappedPage(gtk::Window);
+
+impl MappedPage {
+    fn new(view: &webkit2gtk::WebView) -> Self {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(480, 640);
+        window.add(view);
+        window.show_all();
+        window.present();
+        Self(window)
+    }
+}
+
+impl Drop for MappedPage {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.child() {
+            self.0.remove(&child);
+        }
+        self.0.close();
+    }
+}
+
+struct DiagnosticDump(PathBuf);
+
+impl Drop for DiagnosticDump {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Ok(text) = std::fs::read_to_string(&self.0) {
+                let lines: Vec<_> = text.lines().collect();
+                eprintln!(
+                    "diagnostics: {} (last 128 records)\n{}",
+                    self.0.display(),
+                    lines[lines.len().saturating_sub(128)..].join("\n")
+                );
+            }
+        }
+    }
+}
+
+fn diagnostic_rows(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn password_manager(id: &str, name: &str, signal: &str) {
+    use zephium_webext_linux::diagnostics;
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("set evidence directory"),
+    );
+    let diagnostic =
+        DiagnosticDump(diagnostics::begin(&evidence, id).expect("fresh diagnostic file"));
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"popup-signal", "extensionName":name, "signal":signal}),
+    );
+    let directory = password_package(id);
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    let spec = spec(&directory, id, 1);
+    let options_declared = spec.manifest.options_page().is_some();
+    let fixture_url = url::Url::parse(&fixture.url("/password-form")).unwrap();
+    let origin = zephium_webext_runtime::pattern::DocumentOrigin::of_url(&fixture_url);
+    let registry = zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
+        &spec.manifest,
+        |_, _| Ok(()),
+    )
+    .expect("manifest script registry");
+    let expected_content: Vec<(String, usize)> = registry
+        .injection_plan(
+            &zephium_webext_runtime::pattern::FrameDocument {
+                url: &fixture_url,
+                origin: &origin,
+                creator_url: None,
+            },
+            true,
+            false,
+            true,
+        )
+        .into_iter()
+        .flat_map(|entry| {
+            (0..entry.script.js.len())
+                .map(|index| (entry.script.id.clone(), index))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    diagnostics::record(
+        id,
+        "ContentScript",
+        json!({"kind":"expected-content", "files":expected_content}),
+    );
+    let mut failures = Vec::new();
+    match host.runtime.install_admitted(spec) {
+        Err(error) => failures.push(format!("install: {error}")),
+        Ok(()) => {
+            let tab = host.open(&fixture.url("/password-form"), true);
+            pump(&mut host, Duration::from_secs(5));
+            match host.runtime.invoke_action(install, tab) {
+                Ok(zephium_webext_linux::runtime::ActionActivation::Click) => {
+                    diagnostics::record(
+                        id,
+                        "host",
+                        json!({"kind":"action-invoked","activation":"click"}),
+                    );
+                    pump(&mut host, Duration::from_secs(15));
+                    let views: Vec<_> = host
+                        .shell
+                        .borrow()
+                        .tabs
+                        .values()
+                        .filter(|tab| {
+                            tab.url.as_ref().is_some_and(|url| {
+                                url.scheme() == "chrome-extension" && url.host_str() == Some(id)
+                            })
+                        })
+                        .map(|tab| tab.view.clone())
+                        .collect();
+                    for view in views {
+                        let _mapped = MappedPage::new(&view);
+                        pump(&mut host, Duration::from_secs(5));
+                        let state = evaluate(&view, "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),path:location.pathname,controls:[...document.querySelectorAll('button,[role=button],a[href]')].filter(e=>e.getClientRects().length && !e.disabled).slice(0,24).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,120))});");
+                        diagnostics::record(
+                            id,
+                            "ExtensionTab",
+                            json!({"kind":"action-tab-state","state":state,"interactive":evaluate(&view, signal) == "true"}),
+                        );
+                    }
+                }
+                Ok(zephium_webext_linux::runtime::ActionActivation::Popup(path)) => {
+                    diagnostics::record(
+                        id,
+                        "host",
+                        json!({"kind":"action-invoked","activation":"popup","path":path}),
+                    );
+                }
+                Err(error) => failures.push(format!("action: {error}")),
+            }
+            host.shell.borrow_mut().active = Some(tab);
+            host.publish();
+            match host.runtime.open_page(install, PageKind::Popup, None) {
+                Err(error) => failures.push(format!("popup: {error:?}")),
+                Ok(popup) => {
+                    let _mapped = MappedPage::new(popup.view());
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"view-mapped","mapped":popup.view().is_mapped()}),
+                    );
+                    let deadline = Instant::now() + Duration::from_secs(45);
+                    let mut ready = false;
+                    while Instant::now() < deadline {
+                        pump(&mut host, Duration::from_millis(200));
+                        let result = evaluate(popup.view(), signal);
+                        if result.starts_with("error:") {
+                            failures.push(format!("popup signal: {result}"));
+                            break;
+                        }
+                        if result == "true" {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"popup-result", "interactive":ready}),
+                    );
+                    let controls = evaluate(
+                        popup.view(),
+                        r#"return JSON.stringify([...document.querySelectorAll('button,[role="button"]')].filter(e=>e.getClientRects().length && !e.disabled).slice(0,24).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,120)));"#,
+                    );
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"visible-controls", "labels":controls}),
+                    );
+                    if !ready {
+                        let state = evaluate(popup.view(), "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),children:document.body?.children.length,html:document.body?.innerHTML.slice(0,4096),visibility:document.visibilityState,path:location.pathname});");
+                        diagnostics::record(
+                            id,
+                            "Popup",
+                            json!({"kind":"popup-state","state":state}),
+                        );
+                        failures
+                            .push("popup did not reach its signed-out interactive screen".into());
+                    }
+                    pump(&mut host, Duration::from_secs(2));
+                }
+            }
+            if options_declared {
+                match host.runtime.open_page(install, PageKind::Options, None) {
+                    Err(error) => failures.push(format!("options: {error:?}")),
+                    Ok(options) => {
+                        let _mapped = MappedPage::new(options.view());
+                        let deadline = Instant::now() + Duration::from_secs(15);
+                        let mut ready = false;
+                        while Instant::now() < deadline {
+                            pump(&mut host, Duration::from_millis(200));
+                            if evaluate(options.view(), "return document.readyState === 'complete' && !!document.body && document.body.children.length > 0;") == "true" {
+                                ready = true;
+                                break;
+                            }
+                        }
+                        diagnostics::record(
+                            id,
+                            "Options",
+                            json!({"kind":"options-result", "loaded":ready}),
+                        );
+                        if !ready {
+                            failures.push("declared options page did not load".into());
+                        }
+                    }
+                }
+            } else {
+                diagnostics::record(id, "Options", json!({"kind":"options-not-declared"}));
+            }
+            host.close(tab);
+        }
+    }
+    for error in host.runtime.errors(install) {
+        failures.push(format!("runtime {:?} in {:?}", error.kind, error.context));
+    }
+    let rows = diagnostic_rows(&diagnostic.0);
+    if !rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started")
+    {
+        failures.push("background never reached started".into());
+    }
+    if !rows.iter().any(|row| {
+        row["event"]["kind"] == "content-evaluation"
+            && row["event"]["accepted"] == true
+            && row["event"]["success"] == true
+            && row["event"]["fileIndex"]
+                .as_u64()
+                .is_some_and(|index| index < u64::from(u16::MAX))
+    }) {
+        failures.push("no content-script file successfully evaluated on the localhost form".into());
+    }
+    for (script, index) in &expected_content {
+        if !rows.iter().any(|row| {
+            row["event"]["kind"] == "content-evaluation"
+                && row["event"]["accepted"] == true
+                && row["event"]["success"] == true
+                && row["event"]["script"] == *script
+                && row["event"]["fileIndex"].as_u64() == Some(*index as u64)
+        }) {
+            failures.push(format!(
+                "matching content script {script} file {index} did not evaluate"
+            ));
+        }
+    }
+    for row in &rows {
+        let event = &row["event"];
+        let kind = if event["kind"] == "javascript" {
+            event["detail"]["kind"].as_str()
+        } else {
+            event["kind"].as_str()
+        };
+        if matches!(
+            kind,
+            Some(
+                "dispatcher-refusal"
+                    | "delivery-failed"
+                    | "bridge-refusal"
+                    | "bridge-delivery-refused"
+                    | "unknown-method"
+                    | "invalid-diagnostic"
+                    | "uncaught"
+                    | "unhandled-rejection"
+                    | "console-error"
+                    | "api-refusal"
+                    | "csp"
+                    | "resource-error"
+                    | "resource-failed"
+                    | "resource-http-error"
+                    | "load-failed"
+                    | "fetch-failed"
+                    | "fetch-http-error"
+                    | "capture-truncated"
+                    | "context-truncated"
+                    | "record-too-large"
+            )
+        ) || (kind == Some("content-evaluation") && event["success"] == false)
+        {
+            failures.push(format!(
+                "diagnostic {} ({})",
+                kind.unwrap_or("unknown"),
+                row["context"]
+            ));
+        }
+    }
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"acceptance", "failures":failures}),
+    );
+    let tabs = host.shell.borrow().order.clone();
+    for tab in tabs {
+        host.close(tab);
+    }
+    let mut drain = host.runtime.retire();
+    let drained = drain.run(Duration::from_secs(10));
+    assert!(drained, "runtime teardown did not drain");
+    assert!(
+        failures.is_empty(),
+        "{name}: {}\ndiagnostics: {}",
+        failures.join("; "),
+        diagnostic.0.display()
+    );
+}
+
+// Signals require visible, enabled signed-out controls, not a spinner/root or error link.
+const VISIBLE_CONTROLS: &str = r#"
+const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && !e.disabled;
+const buttons = [...document.querySelectorAll('button,[role="button"],a[href]')].filter(visible);
+const labels = buttons.map(e => (e.getAttribute('aria-label') || e.textContent || '').trim());
+const text = document.body?.innerText || '';
+if (/something went wrong|browser (?:is )?not supported|webassembly.*(?:failed|unavailable)|unexpected error/i.test(text)) return false;
+"#;
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn bitwarden() {
+    password_manager("nngceckbapebfimnlniiiahkandclblb", "Bitwarden", &format!("{VISIBLE_CONTROLS} return (visible(document.querySelector('autofill-default-password-manager-prompt #default-password-manager-prompt_button_continue')) && visible(document.querySelector('autofill-default-password-manager-prompt #default-password-manager-prompt_button_skip-for-now'))) || (visible(document.querySelector('[data-testid=login-email-input]')) && visible(document.querySelector('[data-testid=login-continue-button]'))) || (/bitwarden/i.test(text) && labels.some(s => /^(get started|log in|unlock)$/i.test(s)));"));
+}
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn onepassword() {
+    password_manager("aeblfdkhhhdcdjpifhhbdiojplfjncoa", "1Password", &format!("{VISIBLE_CONTROLS} return (/1password/i.test(text) && labels.some(s => /^(sign in|sign in to 1password|add an account|create an account|unlock 1password|get started)$/i.test(s))) || (visible(document.querySelector('h1')) && /^Welcome to 1Password!?$/.test(document.querySelector('h1').textContent.trim()) && labels.includes('Continue'));"));
+}
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn proton_pass() {
+    password_manager("ghmbeldphafepmbegfdlkpapadhbakde", "Proton Pass", &format!("{VISIBLE_CONTROLS} return visible(document.querySelector('.app-root .pass-lobby--heading')) && labels.includes('Sign in with Proton') && labels.includes('Create a Proton account');"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn diagnostic_capture() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("evidence directory"),
+    );
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Diagnostic fixture","version":"1.0",
+        "permissions":["bookmarks"], "host_permissions":["http://127.0.0.1/*"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "options_ui":{"page":"options.html"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
+    }).to_string()).unwrap();
+    let probe = "console.warn('diagnostic warning');void chrome.diagnosticMissing;void browser.runtime.diagnosticMissing;setTimeout(()=>{Promise.reject(new Error('diagnostic rejection'));},10);setTimeout(()=>{throw new Error('diagnostic async exception');},20);";
+    for file in ["worker.js", "page.js"] {
+        std::fs::write(
+            package.path().join(file),
+            format!("{probe}chrome.runtime.getPackageDirectoryEntry(()=>{{void chrome.runtime.lastError;}});"),
+        ).unwrap();
+    }
+    std::fs::write(
+        package.path().join("content.js"),
+        format!("{probe}\nthrow new Error('diagnostic content exception');"),
+    )
+    .unwrap();
+    for file in ["popup.html", "options.html"] {
+        std::fs::write(package.path().join(file), "<!doctype html><title>Diagnostic</title><script src='page.js'></script><script>void 0;</script><img src='missing.png'><button>Ready</button>").unwrap();
+    }
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    let tab = host.open(&fixture.url("/password-form"), true);
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    let options = host
+        .runtime
+        .open_page(install, PageKind::Options, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(5));
+    let rows = diagnostic_rows(&diagnostic.0);
+    drop(popup);
+    drop(options);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    for context in ["Background", "Popup", "Options", "ContentScript"] {
+        for kind in [
+            "context-ready",
+            "undefined-api",
+            "console-warn",
+            "unhandled-rejection",
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row["context"] == context && row["event"]["detail"]["kind"] == kind),
+                "missing {context} {kind}"
+            );
+        }
+    }
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-wake"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "api-refusal"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "csp"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "uncaught"
+            && row["event"]["detail"]["stack"]
+                .as_str()
+                .is_some_and(|stack| stack.contains("page.js"))));
+    assert!(rows.iter().any(
+        |row| row["event"]["kind"] == "content-evaluation" && row["event"]["success"] == false
+    ));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "resource-failed"
+            || row["event"]["kind"] == "resource-http-error"
+            || row["event"]["detail"]["kind"] == "resource-error"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn runtime_compatibility() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("evidence directory"),
+    );
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Runtime compatibility fixture","version":"1.0",
+        "permissions":["scripting","sidePanel","contextMenus","nativeMessaging"], "host_permissions":["http://127.0.0.1/*"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "content_security_policy":{"extension_pages":"script-src 'self'; object-src 'self'; connect-src 'none'"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
+    }).to_string()).unwrap();
+    std::fs::write(package.path().join("build.info"), "package-only").unwrap();
+    std::fs::write(package.path().join("worker.js"), r#"
+const packageReady = fetch(chrome.runtime.getURL('build.info')).then(r=>r.text());
+chrome.contextMenus.onClicked.addListener(()=>{});
+const configurationReady = Promise.all([chrome.contextMenus.removeAll(), chrome.sidePanel.setOptions({enabled:false})]);
+const nativeReady = chrome.runtime.sendNativeMessage('org.example.absent', {}).then(()=> 'unexpected success', e=>e.message);
+const portReady = new Promise(resolve=>{ const port=chrome.runtime.connectNative('org.example.absent'); port.onDisconnect.addListener(()=>resolve(chrome.runtime.lastError?.message)); });
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  (async()=>{
+    const target={tabId:sender.tab.id,frameIds:[sender.frameId]};
+    const immediate=await chrome.scripting.executeScript({target,injectImmediately:true,func:()=>document.readyState});
+    const idle=await chrome.scripting.executeScript({target,func:()=>document.readyState});
+    const main=await chrome.scripting.executeScript({target,world:'MAIN',func:()=>({
+      userAgent:navigator.userAgent,chrome:typeof globalThis.chrome,browser:typeof globalThis.browser,
+      nativePost:typeof globalThis.__zephiumPost,nativeReceiver:typeof globalThis.__zephiumRegisterReceiver
+    })});
+    await configurationReady;
+    respond({main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
+      panel:await chrome.sidePanel.getOptions({}),native:await nativeReady,port:await portReady});
+  })().catch(e=>respond({error:String(e)}));
+  return true;
+});
+"#).unwrap();
+    std::fs::write(package.path().join("content.js"), r#"
+chrome.runtime.sendMessage({probe:true}, result=>{
+ document.documentElement.dataset.compatibility=JSON.stringify({...result,contentUA:navigator.userAgent});
+});
+"#).unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><button>Ready</button>",
+    )
+    .unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    let tab = host.open(&fixture.url("/delayed-form"), true);
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut result = Value::Null;
+    while Instant::now() < deadline {
+        pump(&mut host, Duration::from_millis(100));
+        if let Ok(value) = serde_json::from_str::<Value>(&evaluate(
+            &view,
+            "return document.documentElement.dataset.compatibility || 'null';",
+        )) {
+            if !value.is_null() {
+                result = value;
+                break;
+            }
+        }
+    }
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    let popup_ua = evaluate(popup.view(), "return navigator.userAgent;");
+    let main_ua = evaluate(&view, "return navigator.userAgent;");
+    let remote = evaluate(
+        popup.view(),
+        &format!(
+            "try{{await fetch('{}');return 'allowed'}}catch(e){{return 'blocked'}}",
+            fixture.url("/password-form")
+        ),
+    );
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"compatibility-result","result":result,"popupUA":popup_ua,"mainUA":main_ua,"remoteFetch":remote}),
+    );
+    drop(popup);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    assert_eq!(result["package"], "package-only");
+    assert_eq!(result["panel"]["enabled"], false);
+    for key in ["native", "port"] {
+        assert_eq!(result[key], "Specified native messaging host not found.");
+    }
+    assert_eq!(result["immediate"], "loading");
+    assert!(
+        matches!(result["idle"].as_str(), Some("interactive" | "complete")),
+        "{result}"
+    );
+    for key in ["workerUA", "contentUA"] {
+        assert!(
+            result[key]
+                .as_str()
+                .is_some_and(|ua| ua.contains(" Chrome/") && ua.contains("AppleWebKit")),
+            "{result}"
+        );
+    }
+    assert!(popup_ua.contains(" Chrome/"));
+    assert!(!main_ua.contains("ZephiumWebExtensions/"));
+    assert_eq!(result["main"]["userAgent"], main_ua);
+    for key in ["chrome", "browser", "nativePost", "nativeReceiver"] {
+        assert_eq!(result["main"][key], "undefined", "{key}");
+    }
+    let requests = fixture.take();
+    assert!(requests
+        .iter()
+        .any(|row| row["requestUserAgent"] == main_ua));
+    for row in diagnostic_rows(&diagnostic.0) {
+        let detail = &row["event"]["detail"];
+        if detail["kind"] == "compatibility-identity" {
+            for key in ["appVersion", "vendor", "platform", "userAgentData"] {
+                assert_eq!(detail["before"][key], detail["after"][key], "{row}");
+            }
+        }
+    }
+    assert_eq!(remote, "blocked");
+    assert!(diagnostic_rows(&diagnostic.0)
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started"));
 }

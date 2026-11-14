@@ -87,6 +87,10 @@ fn conformance_host() {
     let _session = support::init();
     let extension_dir = PathBuf::from(std::env::var("ZEPHIUM_CONFORMANCE_EXTENSION").unwrap());
     let extension = std::env::var("ZEPHIUM_CONFORMANCE_ID").unwrap();
+    if let Some(directory) = std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR") {
+        zephium_webext_linux::diagnostics::begin(&PathBuf::from(directory), &extension)
+            .expect("fresh diagnostic file");
+    }
     let module = ModuleDirectory::new();
     let state = tempfile::tempdir().unwrap();
     let context = webkit2gtk::WebContext::new_ephemeral();

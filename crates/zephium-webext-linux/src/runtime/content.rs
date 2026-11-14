@@ -59,12 +59,20 @@ fn read(root: &std::path::Path, extension: &str, path: &str) -> Result<ScriptFil
     })
 }
 
-fn bootstrap(install: &ContentInstall) -> Result<String, String> {
+fn bootstrap(data: &serde_json::Value) -> Result<String, String> {
+    #[cfg(feature = "native-tests")]
+    let bundle =
+        crate::diagnostics::bundle(zephium_webext_runtime::js::NATIVE_CONTENT_BUNDLE, false);
+    #[cfg(not(feature = "native-tests"))]
+    let bundle = zephium_webext_runtime::js::NATIVE_CONTENT_BUNDLE;
     let source = format!(
         "(function(){{'use strict';({})('native-content',{},{});}})();",
-        zephium_webext_runtime::js::BUNDLE,
-        zephium_webext_runtime::js::surface(),
-        install.bootstrap
+        bundle,
+        zephium_webext_runtime::js::context_surface(
+            &zephium_webext::manifest::Manifest::from_value(data["manifest"].clone()),
+            "contentScript",
+        ),
+        data
     );
     if source.len() > MAX_BOOTSTRAP_BYTES || source.contains('\0') {
         return Err("its content-script bootstrap exceeds the module limit".into());
@@ -125,7 +133,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
             SiteAccess::OnClick => Some(Vec::new()),
         };
         let isolated = world_name(install.install, &InjectedWorld::Isolated);
-        let content_bootstrap = match bootstrap(install) {
+        let content_bootstrap = match bootstrap(&install.bootstrap) {
             Ok(source) => source,
             Err(problem) => {
                 problems.push((install.install, problem));
@@ -230,5 +238,32 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
         grants,
         styles,
         problems,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn large_translation_catalog_fits_without_dropping_messages_or_raising_limits() {
+        let messages: serde_json::Map<String, serde_json::Value> = (0..2500)
+            .map(|i| {
+                (
+                    format!("message{i}"),
+                    serde_json::json!("A translated message with a positional $1"),
+                )
+            })
+            .collect();
+        let data = serde_json::json!({"contextKind":"contentScript", "manifest":{"manifest_version":3,"permissions":["storage"]}, "messages":messages});
+        #[cfg(feature = "native-tests")]
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::begin(directory.path(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let source = super::bootstrap(&data).unwrap();
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::end("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(source.len() <= zephium_webkit_web_process_protocol::protocol::MAX_BOOTSTRAP_BYTES);
+        assert!(source.contains("message2499"));
+        assert!(!source.contains("function workerScope"));
+        assert!(!source.contains("sidePanel"));
     }
 }
