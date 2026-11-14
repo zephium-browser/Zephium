@@ -404,6 +404,49 @@ impl Shared {
         }
     }
 
+    /// The Chrome tab id and current frame record of `document`, for a
+    /// `webNavigation` observation.
+    pub(crate) fn navigation_frame(
+        &self,
+        tab: ItemId,
+        frame: FrameId,
+        document: DocumentGeneration,
+    ) -> Option<(i32, BrowserFrame)> {
+        let state = self.state.borrow();
+        let tab_id = state.tabs.get(tab)?;
+        let found = state
+            .browser_frames(tab)
+            .into_iter()
+            .find(|found| found.frame == frame && found.document == document)?;
+        Some((tab_id, found))
+    }
+
+    /// Whether a tab's frame already holds a recorded document.
+    pub(crate) fn navigation_frame_exists(&self, tab: ItemId, frame: FrameId) -> bool {
+        self.state
+            .borrow()
+            .frames
+            .get(&tab)
+            .is_some_and(|frames| frames.contains_key(&frame))
+    }
+
+    /// A same-document navigation of a tab's main frame: records `url` and
+    /// returns the main document when the address changed.
+    pub(crate) fn main_url_changed(
+        &self,
+        view: BridgeViewId,
+        url: Url,
+    ) -> Option<(ItemId, DocumentGeneration, Url)> {
+        let mut state = self.state.borrow_mut();
+        let tab = *state.views.get(&view)?;
+        let main = state.frames.get_mut(&tab)?.get_mut(&FrameId::MAIN)?;
+        if main.opaque || main.url == url || main.url.origin() != url.origin() {
+            return None;
+        }
+        let previous = std::mem::replace(&mut main.url, url);
+        Some((tab, main.document, previous))
+    }
+
     /// Hosts of the non-opaque extension documents live in a tab view's frames.
     pub(crate) fn framed_extensions(&self, view: BridgeViewId) -> Vec<String> {
         let state = self.state.borrow();

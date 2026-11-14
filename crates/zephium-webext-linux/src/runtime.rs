@@ -241,6 +241,7 @@ struct TabEntry {
     scripts: Vec<webkit2gtk::UserScript>,
     styles: Vec<webkit2gtk::UserStyleSheet>,
     loads: Option<glib::SignalHandlerId>,
+    uris: Option<glib::SignalHandlerId>,
 }
 
 /// One profile's extension runtime. GTK thread only; clones share it.
@@ -1560,6 +1561,23 @@ impl Inner {
                 _ => {}
             }
         });
+        // An address change outside a load is a same-document navigation.
+        let weak = Rc::downgrade(self);
+        let uris = view.connect_uri_notify(move |view| {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            if view.is_loading() {
+                return;
+            }
+            let Some(url) = view.uri().and_then(|uri| url::Url::parse(&uri).ok()) else {
+                return;
+            };
+            let _ = inner
+                .bridge
+                .with_runtime(|host, out| host.same_document(id, url, out));
+            inner.run();
+        });
         self.tabs.borrow_mut().insert(
             id,
             TabEntry {
@@ -1567,6 +1585,7 @@ impl Inner {
                 scripts: Vec::new(),
                 styles: Vec::new(),
                 loads: Some(loads),
+                uris: Some(uris),
             },
         );
         self.browser.tab_view(id, Some(tab));
@@ -1580,6 +1599,9 @@ impl Inner {
             if let (Some(webview), Some(loads)) = (entry.view.upgrade(), entry.loads.take()) {
                 webview.disconnect(loads);
                 webview.set_cors_allowlist(&[]);
+            }
+            if let (Some(webview), Some(uris)) = (entry.view.upgrade(), entry.uris.take()) {
+                webview.disconnect(uris);
             }
             if let Some(manager) = entry
                 .view

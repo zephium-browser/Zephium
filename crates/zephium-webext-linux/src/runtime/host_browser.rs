@@ -7,11 +7,12 @@ use serde_json::{json, Value};
 use zephium_core::extensions::ExtensionBrowserSurface;
 use zephium_core::ids::{ExtensionInstallId, ItemId};
 use zephium_webext_runtime::api::action::Activation as ActionActivation;
+use zephium_webext_runtime::api::web_navigation::{self, NavigationEvent, NavigationObservation};
 use zephium_webext_runtime::api::{permissions as permissions_api, tabs};
 use zephium_webext_runtime::context::{ContextKind, DocumentGeneration, FrameId, Sender};
 use zephium_webext_runtime::dispatch::Responder;
 use zephium_webext_runtime::errors::ApiError;
-use zephium_webext_runtime::events::EventFacts;
+use zephium_webext_runtime::events::{EventFacts, EventImportance};
 use zephium_webext_runtime::lifecycle::StartReason;
 use zephium_webext_runtime::pattern::ContentScriptMatcher;
 use zephium_webext_runtime::permissions::SiteAccess;
@@ -189,6 +190,123 @@ impl RuntimeHost {
                 self.emit(install, name, &args, StartReason::Event, out);
             }
         }
+        self.settle_blockers(out);
+    }
+
+    /// `webNavigation` events for one frame document, in order. Each live
+    /// listening context gets them shaped and checked for its own install;
+    /// a stopped background is not woken for them.
+    pub(crate) fn navigation(
+        &mut self,
+        tab: ItemId,
+        frame: FrameId,
+        document: DocumentGeneration,
+        events: &[(NavigationEvent, Option<&str>, &[&str])],
+        out: &mut Outbox,
+    ) {
+        let Some((tab_id, record)) = self.browser.navigation_frame(tab, frame, document) else {
+            return;
+        };
+        let port = crate::runtime::browser::Browser::new(self.browser.clone());
+        let time_stamp = (self.unix_millis)() as f64;
+        let installs: Vec<ExtensionInstallId> = self.state.installs.keys().copied().collect();
+        for &(event, transition, qualifiers) in events {
+            let observation = NavigationObservation {
+                tab_id,
+                frame: record.clone(),
+                event,
+                time_stamp,
+                transition_type: transition.map(str::to_owned),
+                transition_qualifiers: qualifiers.iter().map(|q| (*q).to_owned()).collect(),
+                error: None,
+            };
+            let name = event.name();
+            let facts = web_navigation::event_facts(&observation.frame, tab_id);
+            for &install in &installs {
+                let Some(permissions) = self
+                    .permissions
+                    .get(&install)
+                    .filter(|permissions| permissions.has_api("webNavigation"))
+                    .cloned()
+                else {
+                    continue;
+                };
+                if self
+                    .state
+                    .registry
+                    .targets(install, name, &facts)
+                    .is_empty()
+                {
+                    continue;
+                }
+                for key in self.state.registry.targets(install, name, &facts) {
+                    let Some(sender) = self.router.contexts.get(&key).cloned() else {
+                        continue;
+                    };
+                    let Ok(mut args) =
+                        web_navigation::observation(&port, &sender, &permissions, &observation)
+                    else {
+                        continue;
+                    };
+                    let listeners: Vec<u64> = self
+                        .state
+                        .registry
+                        .listeners(&sender, name, &facts)
+                        .iter()
+                        .map(|id| id.get())
+                        .collect();
+                    if let Some(args) = args.as_array_mut() {
+                        args.push(json!(listeners));
+                    }
+                    if sender.kind() == ContextKind::Background {
+                        if self.enqueue(install, name, &args, EventImportance::Droppable) {
+                            self.observe(
+                                super::Observation::Wake {
+                                    install,
+                                    reason: StartReason::Event,
+                                },
+                                out,
+                            );
+                        }
+                    } else if let Some(frame) =
+                        super::event_frame(sender.kind(), super::direct_sequence(), name, &args)
+                    {
+                        out.deliver(key, frame);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The main frame of a tab view changed its address without a new
+    /// document: history API or fragment navigation.
+    pub(crate) fn same_document(
+        &mut self,
+        view: crate::bridge::BridgeViewId,
+        url: url::Url,
+        out: &mut Outbox,
+    ) {
+        self.tick_clock();
+        let Some((tab, document, previous)) = self.browser.main_url_changed(view, url.clone())
+        else {
+            return;
+        };
+        let without = |mut url: url::Url| {
+            url.set_fragment(None);
+            url
+        };
+        let event = if without(previous) == without(url) {
+            NavigationEvent::ReferenceFragmentUpdated
+        } else {
+            NavigationEvent::HistoryStateUpdated
+        };
+        self.navigation(
+            tab,
+            FrameId::MAIN,
+            document,
+            &[(event, Some("link"), &[])],
+            out,
+        );
         self.settle_blockers(out);
     }
 

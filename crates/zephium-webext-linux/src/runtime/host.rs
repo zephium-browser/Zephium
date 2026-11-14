@@ -12,6 +12,7 @@ use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_webext::manifest::Manifest;
 use zephium_webext_runtime::alarms::{AlarmEnvironment, AlarmHost, Alarms};
 use zephium_webext_runtime::api::runtime::Request as RuntimeRequest;
+use zephium_webext_runtime::api::web_navigation::NavigationEvent;
 use zephium_webext_runtime::browser::{
     unsupported, BrowserPort, BrowserRequest, BrowserSnapshot, ExtensionInfo, IncognitoMode,
 };
@@ -3368,8 +3369,51 @@ impl Runtime for RuntimeHost {
         }
     }
 
-    fn frame_lifecycle(&mut self, event: &FrameLifecycle, _: &mut Outbox) {
+    fn frame_lifecycle(&mut self, event: &FrameLifecycle, out: &mut Outbox) {
+        let renavigated = matches!(event, FrameLifecycle::DocumentCreated { owner: ViewRef::Tab(tab), frame, .. }
+            if !frame.is_main() && self.browser.navigation_frame_exists(*tab, *frame));
         self.browser.frame_event(event);
+        match *event {
+            FrameLifecycle::DocumentCreated {
+                owner: ViewRef::Tab(tab),
+                frame,
+                document,
+                ..
+            } => {
+                let transition = if frame.is_main() {
+                    "link"
+                } else if renavigated {
+                    "manual_subframe"
+                } else {
+                    "auto_subframe"
+                };
+                self.navigation(
+                    tab,
+                    frame,
+                    document,
+                    &[
+                        (NavigationEvent::BeforeNavigate, None, &[]),
+                        (NavigationEvent::Committed, Some(transition), &[]),
+                    ],
+                    out,
+                );
+            }
+            FrameLifecycle::DocumentProgress {
+                owner: ViewRef::Tab(tab),
+                frame,
+                document,
+                completed,
+                ..
+            } => {
+                let event = if completed {
+                    NavigationEvent::Completed
+                } else {
+                    NavigationEvent::DomContentLoaded
+                };
+                self.navigation(tab, frame, document, &[(event, None, &[])], out);
+            }
+            _ => {}
+        }
         if let FrameLifecycle::MainDocumentChanged { tab, document } = event {
             for permissions in self.permissions.values_mut() {
                 let _ = permissions.main_document_changed(*tab, *document);
