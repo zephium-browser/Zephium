@@ -169,6 +169,7 @@ jobs:
           done
       - run: cargo xtask check-security-fork-locks
       - run: cargo xtask check-agentic-probe-boundary
+      - run: cargo xtask webext-api --check
       - run: cargo deny --locked check
 
   linux:

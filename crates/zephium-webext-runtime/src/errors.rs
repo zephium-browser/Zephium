@@ -40,7 +40,7 @@ pub struct ApiError {
 }
 
 const ACCESS_DENIED: &str = "Access to extension API denied.";
-const MESSAGE_TOO_LARGE: &str = "Message length exceeded maximum allowed length.";
+const MESSAGE_TOO_LARGE: &str = "Message exceeded maximum allowed size of 64MiB.";
 const CONTEXT_INVALIDATED: &str = "Extension context invalidated.";
 const CANNOT_ACCESS_PAGE: &str = "Cannot access contents of the page. Extension manifest must request permission to access the respective host.";
 const CANNOT_SCRIPT_GALLERY: &str = "The extensions gallery cannot be scripted.";
@@ -96,13 +96,18 @@ impl ApiError {
         Self::invalid_arguments(name, signature, NO_MATCHING_SIGNATURE)
     }
 
-    /// The arguments were not a well-formed bounded JSON array. Chrome
-    /// rejects these before any signature is known, so the text names none.
+    /// ChromeSetting's refusal when a setting-specific value does not validate.
+    pub const fn invalid_invocation() -> Self {
+        Self::fixed(ApiErrorKind::InvalidArguments, "Invalid invocation")
+    }
+
+    /// Zephium's malformed transport refusal, using Chrome's denial text.
     pub const fn malformed_arguments() -> Self {
         Self::fixed(ApiErrorKind::InvalidArguments, ACCESS_DENIED)
     }
 
-    /// Chrome's messaging error for an oversize message or reply.
+    /// Chrome's messaging error text. Zephium's transport limits are lower
+    /// than the Chromium ceiling named in this compatibility message.
     pub const fn message_too_large() -> Self {
         Self::fixed(ApiErrorKind::MessageTooLarge, MESSAGE_TOO_LARGE)
     }
@@ -219,7 +224,7 @@ mod tests {
         );
         assert_eq!(
             ApiError::message_too_large().message(),
-            "Message length exceeded maximum allowed length."
+            "Message exceeded maximum allowed size of 64MiB."
         );
     }
 

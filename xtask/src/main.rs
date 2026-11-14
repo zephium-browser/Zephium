@@ -16,6 +16,7 @@ mod page_assist_boundary;
 mod page_reader_boundary;
 mod password_manager_qa;
 mod updater_sign;
+mod webext_api;
 mod webext_suite;
 mod work_composition_boundary;
 mod work_persistence_boundary;
@@ -47,6 +48,12 @@ static CI_RESOURCE_PROFILE: AtomicBool = AtomicBool::new(false);
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     match arguments.first().map(String::as_str) {
+        Some("webext-api") => {
+            if let Err(error) = webext_api::run(&arguments[1..]) {
+                eprintln!("extension API generation failed: {error}");
+                exit(1);
+            }
+        }
         Some("ci") => {
             CI_RESOURCE_PROFILE.store(true, Ordering::Release);
             ci();
@@ -139,7 +146,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-release-assets <directory> <tag> <owner/repo>|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-api [--check]|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-engine-floors [--strict]|check-release-engine-security|check-release-assets <directory> <tag> <owner/repo>|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
             );
             exit(2);
         }
@@ -675,6 +682,10 @@ fn check_release_engine_security() {
 
 fn ci() {
     share_workspace_target_dir();
+    if let Err(error) = webext_api::run(&["--check".to_owned()]) {
+        eprintln!("extension API generation failed: {error}");
+        exit(1);
+    }
     check_agentic_probe_boundary();
     check_agent_model_catalog_boundary();
     check_page_assist_boundary();
