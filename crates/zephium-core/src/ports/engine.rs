@@ -69,6 +69,8 @@ pub struct WebExtensionLoad {
 pub struct WebExtensionLoaded {
     pub name: String,
     pub version: String,
+    #[cfg(target_os = "windows")]
+    pub options: Option<Box<url::Url>>,
 }
 
 /// Which engine data partition a view lives in. Every persistent profile gets
