@@ -397,6 +397,25 @@ impl Shared {
             .map(|(view, _)| *view)
     }
 
+    /// `MessageSender.tab` for a sender in `tab`: the tab as Chrome shows
+    /// it to the extension whose content script or page is in it.
+    pub(crate) fn sender_tab(&self, tab: ItemId) -> Option<Value> {
+        let state = self.state.borrow();
+        let snapshot = state.snapshot().ok()?;
+        let id = state.tabs.get(tab)?;
+        let tab = snapshot.tab(id).ok()?;
+        Some(json!({
+            "id": tab.id, "index": tab.index, "windowId": tab.window_id,
+            "active": tab.active, "highlighted": tab.highlighted, "selected": tab.active,
+            "pinned": tab.tab.pinned(), "audible": tab.tab.audible(),
+            "mutedInfo": {"muted": tab.tab.muted()}, "discarded": tab.tab.discarded(),
+            "autoDiscardable": tab.auto_discardable, "frozen": false, "incognito": tab.incognito,
+            "groupId": -1, "splitViewId": -1,
+            "status": if tab.tab.loading() { "loading" } else { "complete" },
+            "url": tab.committed_url().unwrap_or(""), "title": tab.tab.title(),
+        }))
+    }
+
     /// The Chrome tab id of a shell tab, when it was published.
     pub(crate) fn tab_id(&self, tab: ItemId) -> Option<i32> {
         self.state.borrow().tabs.get(tab)

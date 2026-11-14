@@ -692,6 +692,7 @@ pub(crate) struct Router {
     contexts: HashMap<ContextKey, Sender>,
     acks: Vec<(Sender, EventSeq)>,
     now: u64,
+    browser: Rc<linux_browser::Shared>,
 }
 
 fn frame(kind: ContextKind, envelope: &Envelope<'_>) -> Option<Vec<u8>> {
@@ -712,7 +713,11 @@ impl Router {
                     let Some(kind) = self.contexts.get(&recipient).map(Sender::kind) else {
                         continue;
                     };
-                    let args = json!([port.get().to_string(), name, sender_json(&sender)]);
+                    let args = json!([
+                        port.get().to_string(),
+                        name,
+                        sender_json(&sender, &self.browser)
+                    ]);
                     if let Some(frame) = event_frame(kind, direct_sequence(), event, &args) {
                         out.deliver(recipient, frame);
                     }
@@ -836,7 +841,7 @@ fn event_frame(kind: ContextKind, seq: u64, name: &str, args: &Value) -> Option<
     )
 }
 
-fn sender_json(sender: &Sender) -> Value {
+fn sender_json(sender: &Sender, browser: &linux_browser::Shared) -> Value {
     let mut value = json!({
         "id": sender.extension_id().as_str(),
         "url": sender.url().as_str(),
@@ -844,6 +849,17 @@ fn sender_json(sender: &Sender) -> Value {
     });
     if let (Some(frame), Some(object)) = (sender.frame(), value.as_object_mut()) {
         object.insert("frameId".into(), json!(frame.get()));
+        object.insert(
+            "documentId".into(),
+            json!(format!("{:032X}", sender.document().get())),
+        );
+        object.insert("documentLifecycle".into(), json!("active"));
+    }
+    if let (Some(tab), Some(object)) = (
+        sender.tab().and_then(|tab| browser.sender_tab(tab)),
+        value.as_object_mut(),
+    ) {
+        object.insert("tab".into(), tab);
     }
     value
 }
@@ -1191,6 +1207,7 @@ impl RuntimeHost {
                 contexts: HashMap::new(),
                 acks: Vec::new(),
                 now,
+                browser: browser.clone(),
             },
             permissions: HashMap::new(),
             lifecycle: Lifecycle::new(config.profile),
@@ -2202,11 +2219,15 @@ impl RuntimeHost {
             return false;
         }
         let ready = state.live.as_ref().is_some_and(|live| live.activated);
+        // A background already starting has not registered its listeners
+        // yet: wait for it, as Chrome waits for a starting service worker.
+        let starting = self.lifecycle.state(install) == Some(BackgroundState::Starting);
         !ready
-            && self
-                .state
-                .registry
-                .should_wake(install, event, &EventFacts::default())
+            && (starting
+                || self
+                    .state
+                    .registry
+                    .should_wake(install, event, &EventFacts::default()))
     }
 
     fn park(
@@ -2299,7 +2320,7 @@ impl RuntimeHost {
         let Some(recipient) = self.router.contexts.get(&delivery.recipient).cloned() else {
             return;
         };
-        let Ok(args) = delivery.arguments(sender_json(&delivery.sender)) else {
+        let Ok(args) = delivery.arguments(sender_json(&delivery.sender, &self.browser)) else {
             return;
         };
         let seq = direct_sequence();
