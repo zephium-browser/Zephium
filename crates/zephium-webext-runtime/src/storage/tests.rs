@@ -128,6 +128,117 @@ fn bytes_in_use_obeys_empty_missing_and_duplicate_keys() {
 }
 
 #[test]
+fn session_bytes_match_chromium_allocation_accounting_and_selectors() {
+    let mut store = memory();
+    set(
+        &mut store,
+        Area::Session,
+        json!({"ascii":"a","unicode":"λ😀","object":{"count":3},"empty":""}),
+    )
+    .unwrap();
+    assert_eq!(store.get_bytes_in_use(Area::Session, None).unwrap(), 64);
+    for (keys, expected) in [
+        (vec![], 0),
+        (vec!["unicode"], 0),
+        (vec!["ascii", "object", "missing"], 64),
+        (vec!["object", "object"], 128),
+        (vec!["missing"], 0),
+    ] {
+        assert_eq!(
+            store
+                .get_bytes_in_use(
+                    Area::Session,
+                    Some(&keys.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+                )
+                .unwrap(),
+            expected,
+        );
+    }
+    store
+        .mutate(
+            Area::Session,
+            &Mutation::Remove(vec!["unicode".into()]),
+            false,
+            0,
+        )
+        .unwrap();
+    assert_eq!(store.get_bytes_in_use(Area::Session, None).unwrap(), 64);
+    set(&mut store, Area::Session, json!({"object":null})).unwrap();
+    assert_eq!(store.get_bytes_in_use(Area::Session, None).unwrap(), 0);
+}
+
+#[test]
+fn session_estimate_counts_long_strings_keys_and_nested_containers() {
+    use super::quota::area_item_bytes;
+    assert_eq!(
+        area_item_bytes(Area::Session, "key", &json!("x".repeat(22))),
+        0
+    );
+    assert_eq!(
+        area_item_bytes(Area::Session, "key", &json!("x".repeat(23))),
+        32
+    );
+    assert_eq!(
+        area_item_bytes(Area::Session, &"x".repeat(32), &Value::Null),
+        48
+    );
+    assert_eq!(area_item_bytes(Area::Session, "key", &json!([])), 0);
+    assert_eq!(area_item_bytes(Area::Session, "key", &json!({})), 0);
+    assert_eq!(
+        area_item_bytes(Area::Session, "key", &json!([0, false, null])),
+        96
+    );
+    assert_eq!(
+        area_item_bytes(Area::Session, "key", &json!({"a":[{"n":1}]})),
+        160
+    );
+}
+
+#[test]
+fn session_quota_uses_allocation_estimate_rejects_boundary_and_is_atomic() {
+    let items = properties(json!({"existing":{"count":3}}));
+    let mutation = Mutation::Set(properties(json!({"existing":null,"new":[0,1]})));
+    assert_eq!(
+        super::quota::prepare(&items, &mutation, Area::Session, 64),
+        Err(StorageError::SessionQuotaExceeded),
+    );
+    assert!(super::quota::prepare(&items, &mutation, Area::Session, 65).is_ok());
+    assert_eq!(
+        StorageError::SessionQuotaExceeded.to_string(),
+        "Session storage quota bytes exceeded. Values were not stored.",
+    );
+    let mut store = memory();
+    set(&mut store, Area::Session, Value::Object(items.clone())).unwrap();
+    assert_eq!(
+        set(
+            &mut store,
+            Area::Session,
+            json!({"existing":null,"large":"x".repeat(STORAGE_SESSION_QUOTA_BYTES as usize)}),
+        ),
+        Err(StorageError::SessionQuotaExceeded),
+    );
+    assert_eq!(store.get(Area::Session, &GetKeys::All).unwrap(), items);
+}
+
+#[test]
+fn zero_allocation_session_values_retain_the_runtime_serialized_ceiling() {
+    let items = properties(json!({"first":"x".repeat(22),"second":"x".repeat(22)}));
+    let mutation = Mutation::Set(properties(json!({"third":"x".repeat(22)})));
+    assert_eq!(
+        items
+            .iter()
+            .map(|(key, value)| super::quota::area_item_bytes(Area::Session, key, value))
+            .sum::<u64>(),
+        0,
+    );
+    assert_eq!(
+        super::quota::prepare(&items, &mutation, Area::Session, 80),
+        Err(StorageError::SessionQuotaExceeded),
+    );
+    assert!(super::quota::prepare(&items, &mutation, Area::Session, 88).is_ok());
+}
+
+#[test]
 fn each_area_is_isolated_and_managed_is_empty_and_read_only() {
     let mut store = memory();
     for (area, value) in [(Area::Local, 1), (Area::Sync, 2), (Area::Session, 3)] {
@@ -218,7 +329,7 @@ fn unlimited_storage_raises_local_only_and_preserves_runtime_ceiling() {
     store.mutate(Area::Local, &mutation, true, 0).unwrap();
     assert!(matches!(
         store.mutate(Area::Session, &mutation, true, 0),
-        Err(StorageError::QuotaExceeded(_))
+        Err(StorageError::SessionQuotaExceeded)
     ));
     assert!(matches!(
         store.mutate(Area::Sync, &mutation, true, 0),

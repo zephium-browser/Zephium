@@ -10,7 +10,12 @@ const SCRIPT_URL = `chrome-extension://${EXTENSION_ID}/background.js`;
 function workerRealm(workerConfig = {}, options = {}) {
   const realm = createRealm();
   const self = realm.run(`(() => {
-    class WorkerGlobalScope extends EventTarget {}
+    class WorkerGlobalScope extends EventTarget {
+      importScripts(...urls) {
+        if (urls.some((url) => url === this.failImport)) throw new DOMException('Import failed', 'NetworkError');
+        this.imported.push(...urls);
+      }
+    }
     class DedicatedWorkerGlobalScope extends WorkerGlobalScope {
       postMessage() {}
       close() {}
@@ -20,7 +25,6 @@ function workerRealm(workerConfig = {}, options = {}) {
     class WorkerNavigator {}
     const self = new DedicatedWorkerGlobalScope();
     Object.assign(self, { WorkerGlobalScope, DedicatedWorkerGlobalScope, WorkerLocation, navigator: new WorkerNavigator(), imported: [] });
-    self.importScripts = (...urls) => self.imported.push(...urls);
     self.self = self;
     return self;
   })()`);
@@ -85,7 +89,10 @@ test('install then activate run once the script finished, with waitUntil and han
   assert.deepEqual(order, ['script done']);
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(order, ['script done', 'oninstall:true', 'install listener', 'install settled', 'activate']);
-  assert.deepEqual(plain(self.imported), ['chunk-1.js', 'chunk-2.js']);
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/chunk-1.js`,
+    `chrome-extension://${EXTENSION_ID}/chunk-2.js`,
+  ]);
   assert.deepEqual(lifecycle(host), [['activated', null]]);
   assert.equal(typeof self.onfetch, 'object');
 });
@@ -135,12 +142,152 @@ test('a failing install or a startup error is reported to the host', async () =>
   assert.deepEqual(lifecycle(broken.host), [['failed', 'Uncaught SyntaxError']]);
 });
 
-test("module workers refuse importScripts with Chrome's message", () => {
+test('activation failure retains queued events and reports failure', async () => {
+  const { chrome, host, inWorker } = workerRealm();
+  let called = 0;
+  chrome.runtime.onInstalled.addListener(() => called++);
+  host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  inWorker('self.addEventListener("activate", (event) => event.waitUntil(Promise.reject(new Error("no"))))');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lifecycle(host), [['failed', 'activate']]);
+  assert.equal(called, 0);
+  assert.deepEqual(host.acks, []);
+});
+
+test('event release waits for host acceptance of worker activation', async () => {
+  const { chrome, host } = workerRealm({ install: false });
+  host.handlers['zephium.workerLifecycle'] = () => host.LATER;
+  let called = 0;
+  chrome.runtime.onStartup.addListener(() => called++);
+  host.event('runtime.onStartup', []);
+  await flush();
+  assert.equal(called, 0);
+  const call = host.callsTo('zephium.workerLifecycle')[0];
+  host.reply(call.id, null);
+  await flush();
+  assert.equal(called, 1);
+});
+
+test('clients.openWindow without tabs authority rejects with InvalidAccessError', async () => {
+  const { chrome, inWorker } = workerRealm();
+  delete chrome.tabs.create;
+  await assert.rejects(inWorker('clients.openWindow("https://example.com/")'), {
+    name: 'InvalidAccessError',
+    message: 'Not allowed to open a window.',
+  });
+});
+
+test('classic workers reuse installation imports and refuse fresh imports after installation', async () => {
+  const { inWorker, self, host } = workerRealm();
+  inWorker('importScripts("initial.js")');
+  inWorker(`self.addEventListener('install', (event) => {
+    event.waitUntil(new Promise((resolve) => setTimeout(() => {
+      importScripts('during-install.js');
+      resolve();
+    }, 0)));
+  })`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(lifecycle(host), [['activated', null]]);
+  inWorker('importScripts("./initial.js#again", "during-install.js")');
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/initial.js`,
+    `chrome-extension://${EXTENSION_ID}/during-install.js`,
+    `chrome-extension://${EXTENSION_ID}/initial.js`,
+    `chrome-extension://${EXTENSION_ID}/during-install.js`,
+  ]);
+  assert.throws(() => inWorker('importScripts("late-import.js")'), {
+    name: 'NetworkError',
+    message: `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://${EXTENSION_ID}/late-import.js' failed to load.`,
+  });
+  assert.equal(self.imported.length, 4, 'refused imports never reach the native loader');
+});
+
+test('classic imports close before activate handlers run', async () => {
+  const { inWorker, self } = workerRealm();
+  inWorker(`self.addEventListener('activate', () => {
+    try { importScripts('new.js'); } catch (error) { self.activationImportError = error.name; }
+  })`);
+  await flush();
+  assert.equal(self.activationImportError, 'NetworkError');
+  assert.deepEqual(plain(self.imported), []);
+});
+
+test('restarted classic workers only load imports from the installed graph', async () => {
+  const { inWorker, self } = workerRealm({ install: false, installedScripts: ['installed.js'] });
+  inWorker('importScripts("./installed.js")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  await flush();
+  inWorker('importScripts("installed.js#again")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+  ]);
+
+  const missing = workerRealm({ install: false });
+  assert.throws(() => missing.inWorker('importScripts("unrecorded.js")'), { name: 'NetworkError' });
+  missing.inWorker('importScripts("background.js")');
+  assert.deepEqual(plain(missing.self.imported), [SCRIPT_URL]);
+});
+
+test('classic prototype imports and deletion of the global wrapper retain installation checks', async () => {
+  const { inWorker, self } = workerRealm();
+  inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "installed.js")');
+  await flush();
+  assert.throws(
+    () => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "fresh.js")'),
+    { name: 'NetworkError' },
+  );
+  assert.equal(inWorker('delete self.importScripts'), true);
+  inWorker('importScripts("installed.js")');
+  assert.throws(() => inWorker('importScripts("fresh.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+    `chrome-extension://${EXTENSION_ID}/installed.js`,
+  ]);
+});
+
+test('failed installation imports do not authorize later native loads', async () => {
+  const { inWorker, self } = workerRealm();
+  self.failImport = `chrome-extension://${EXTENSION_ID}/failed.js`;
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  await flush();
+  self.failImport = undefined;
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), []);
+});
+
+test('successful imports before a later failure remain installed and inputs convert before loading', async () => {
+  const { inWorker, self } = workerRealm();
+  self.failImport = `chrome-extension://${EXTENSION_ID}/failed.js`;
+  assert.throws(() => inWorker('importScripts("loaded.js", "failed.js")'), { name: 'NetworkError' });
+  self.converted = [];
+  inWorker(`importScripts({ toString() { self.converted.push(self.imported.length); return 'converted.js'; } },
+    { toString() { self.converted.push(self.imported.length); return 'last.js'; } })`);
+  assert.deepEqual(plain(self.converted), [1, 1]);
+  await flush();
+  self.failImport = undefined;
+  inWorker('importScripts("loaded.js")');
+  assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
+  assert.deepEqual(plain(self.imported), [
+    `chrome-extension://${EXTENSION_ID}/loaded.js`,
+    `chrome-extension://${EXTENSION_ID}/converted.js`,
+    `chrome-extension://${EXTENSION_ID}/last.js`,
+    `chrome-extension://${EXTENSION_ID}/loaded.js`,
+  ]);
+});
+
+test("module workers refuse importScripts before and after installation with Chrome's message", async () => {
   const { inWorker } = workerRealm({ type: 'module' });
-  assert.throws(() => inWorker('importScripts("x.js")'), {
+  const error = {
     name: 'TypeError',
     message: "Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts().",
-  });
+  };
+  assert.throws(() => inWorker('importScripts("x.js")'), error);
+  assert.throws(() => inWorker('importScripts()'), error);
+  await flush();
+  assert.throws(() => inWorker('importScripts("late-import.js")'), error);
+  assert.throws(() => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "x.js")'), error);
 });
 
 test("navigator.storage is shimmed with the host's figures; clients are inert", async () => {
@@ -242,4 +389,37 @@ test('the owner relays frames both ways, keeps its own replies and reports worke
   assert.equal(toWorker.length, 1, "the owner's own reply stays with the owner");
   channel.port1.close();
   workerPort.close();
+});
+
+test('worker diagnostics obey host UTF8 byte limits, including startup failures', async () => {
+  const startup = workerRealm();
+  startup.self.dispatchEvent(Object.assign(new Event('error'), { message: '🌍'.repeat(2000) }));
+  await flush();
+  assert.deepEqual(lifecycle(startup.host), [['failed', '🌍'.repeat(256)]]);
+
+  const realm = createRealm();
+  const host = new FakeHost(realm.Z, 'background');
+  host.handlers['zephium.workerError'] = ([detail]) => {
+    assert.ok(Buffer.byteLength(detail.message) <= 1024);
+    assert.ok(Buffer.byteLength(detail.filename) <= 2048);
+    assert.equal(detail.lineno, 0);
+    assert.equal(detail.colno, 0);
+    return null;
+  };
+  const channel = new MessageChannel();
+  const worker = new EventTarget();
+  worker.postMessage = () => {};
+  const owner = realm.Z.workerScope.owner({ workerURL: SCRIPT_URL }, {
+    link: host.link,
+    createWorker: () => worker,
+    createChannel: () => channel,
+  });
+  owner.reportError({ message: '漢'.repeat(2048), filename: '🌍'.repeat(2048), lineno: -1, colno: 0x100000000 });
+  const [detail] = host.callsTo('zephium.workerError')[0].args;
+  assert.equal(detail.message, '漢'.repeat(341));
+  assert.equal(detail.filename, '🌍'.repeat(512));
+  owner.reportError({ message: String.fromCharCode(0xd800) });
+  assert.equal(host.callsTo('zephium.workerError')[1].args[0].message, '�');
+  channel.port1.close();
+  channel.port2.close();
 });

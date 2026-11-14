@@ -1,0 +1,16 @@
+{
+  "id": "action-tab-state",
+  "title": "Action tab overrides reset to global defaults on navigation",
+  "apis": [
+    "action.setTitle",
+    "action.getTitle",
+    "action.setBadgeText",
+    "action.getBadgeText",
+    "action.setBadgeBackgroundColor",
+    "action.getBadgeBackgroundColor",
+    "action.enable",
+    "action.disable",
+    "action.isEnabled"
+  ],
+  "permissions": []
+}

@@ -1,0 +1,133 @@
+{
+  "caseId": "runtime-sender-frames",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "message.sender",
+      "value": {
+        "sender": {
+          "documentId": "<document:1>",
+          "frameId": "<frame:1>",
+          "id": "<extension>",
+          "origin": "<origin:a>",
+          "tab": {
+            "id": "<tab:1>",
+            "incognito": false,
+            "index": 2,
+            "url": "<origin:a>/frames.html",
+            "windowId": "<window:1>"
+          },
+          "url": "about:blank"
+        },
+        "source": {
+          "origin": "null",
+          "top": false,
+          "url": "about:blank"
+        }
+      }
+    },
+    {
+      "label": "message.sender",
+      "value": {
+        "sender": {
+          "documentId": "<document:2>",
+          "frameId": "<frame:2>",
+          "id": "<extension>",
+          "origin": "<origin:a>",
+          "tab": {
+            "id": "<tab:1>",
+            "incognito": false,
+            "index": 2,
+            "url": "<origin:a>/frames.html",
+            "windowId": "<window:1>"
+          },
+          "url": "about:srcdoc"
+        },
+        "source": {
+          "origin": "null",
+          "top": false,
+          "url": "about:srcdoc"
+        }
+      }
+    },
+    {
+      "label": "message.sender",
+      "value": {
+        "sender": {
+          "documentId": "<document:3>",
+          "frameId": "<frame:3>",
+          "id": "<extension>",
+          "origin": "<origin:a>",
+          "tab": {
+            "id": "<tab:1>",
+            "incognito": false,
+            "index": 2,
+            "url": "<origin:a>/frames.html",
+            "windowId": "<window:1>"
+          },
+          "url": "<origin:a>/frame.html?kind=same"
+        },
+        "source": {
+          "origin": "<origin:a>",
+          "top": false,
+          "url": "<origin:a>/frame.html?kind=same"
+        }
+      }
+    },
+    {
+      "label": "message.sender",
+      "value": {
+        "sender": {
+          "documentId": "<document:4>",
+          "frameId": 0,
+          "id": "<extension>",
+          "origin": "<origin:a>",
+          "tab": {
+            "id": "<tab:1>",
+            "incognito": false,
+            "index": 2,
+            "url": "<origin:a>/frames.html",
+            "windowId": "<window:1>"
+          },
+          "url": "<origin:a>/frames.html"
+        },
+        "source": {
+          "origin": "<origin:a>",
+          "top": true,
+          "url": "<origin:a>/frames.html"
+        }
+      }
+    },
+    {
+      "label": "message.sender",
+      "value": {
+        "sender": {
+          "documentId": "<document:5>",
+          "frameId": "<frame:4>",
+          "id": "<extension>",
+          "origin": "<origin:b>",
+          "tab": {
+            "id": "<tab:1>",
+            "incognito": false,
+            "index": 2,
+            "url": "<origin:a>/frames.html",
+            "windowId": "<window:1>"
+          },
+          "url": "<origin:b>/frame.html?kind=cross"
+        },
+        "source": {
+          "origin": "<origin:b>",
+          "top": false,
+          "url": "<origin:b>/frame.html?kind=cross"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

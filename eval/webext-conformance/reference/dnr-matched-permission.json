@@ -1,0 +1,52 @@
+{
+  "caseId": "dnr-matched-permission",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "get matched rules without feedback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get matched rules without feedback:error",
+      "value": {
+        "lastError": null,
+        "message": "The extension must have the declarativeNetRequestFeedback permission or have activeTab granted for the specified tab ID in order to call this function."
+      }
+    },
+    {
+      "label": "get matched rules callback without feedback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get matched rules callback without feedback:callback",
+      "value": {
+        "args": [],
+        "lastError": "The extension must have the declarativeNetRequestFeedback permission or have activeTab granted for the specified tab ID in order to call this function.",
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "get matched rules callback without feedback:after",
+      "value": {
+        "lastError": "The extension must have the declarativeNetRequestFeedback permission or have activeTab granted for the specified tab ID in order to call this function."
+      }
+    },
+    {
+      "label": "get matched rules callback without feedback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

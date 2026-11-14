@@ -13,8 +13,8 @@ const SENDER = {
 
 function responder(host) {
   const responses = [];
-  host.handlers['zephium.respond'] = ([token, response]) => {
-    responses.push([token, response]);
+  host.handlers['zephium.respond'] = ([token, listener, response]) => {
+    responses.push([token, listener, response]);
     return null;
   };
   return responses;
@@ -101,7 +101,7 @@ test('messages serialize as Chrome does: JSON semantics, refusals thrown at the 
   assert.throws(() => chrome.runtime.sendMessage(), /No matching signature/);
   assert.throws(() => chrome.runtime.sendMessage('a', 'b', {}, {}), /No matching signature/);
   assert.throws(() => chrome.runtime.sendMessage('x'.repeat(8 * 1024 * 1024)), {
-    message: 'Message length exceeded maximum allowed length.',
+    message: 'Message exceeded maximum allowed size of 64MiB.',
   });
   assert.equal(host.callsTo('runtime.sendMessage').length, 1);
 });
@@ -129,11 +129,11 @@ test('onMessage: synchronous sendResponse, the first answer wins', () => {
     seen.push(['second', sender === seen[0][2]]);
     sendResponse({ ok: 2 });
   });
-  const seq = host.event('runtime.onMessage', ['{"q":"x"}', SENDER, '17']);
+  const seq = host.event('runtime.onMessage', ['{"q":"x"}', SENDER, '17', [1, 2]]);
   assert.deepEqual(plain(seen[0][1]), { q: 'x' });
   assert.deepEqual(plain(seen[0][2]), SENDER);
   assert.deepEqual(seen[1], ['second', true]);
-  assert.deepEqual(responses, [['17', { response: '{"ok":1}' }]]);
+  assert.deepEqual(responses, [['17', 1, { response: '{"ok":1}' }], ['17', 2, { response: '{"ok":2}' }]]);
   assert.deepEqual(host.acks, [seq]);
 });
 
@@ -146,13 +146,13 @@ test('onMessage: returning true keeps the channel open for a later sendResponse'
     return true;
   });
   chrome.runtime.onMessage.addListener(() => undefined);
-  host.event('runtime.onMessage', ['1', SENDER, '9']);
+  host.event('runtime.onMessage', ['1', SENDER, '9', [1, 2]]);
   await flush();
-  assert.deepEqual(responses, []);
+  assert.deepEqual(responses, [['9', 1, { async: 'callback' }], ['9', 2, null]]);
   later('late');
   later('ignored');
   await flush();
-  assert.deepEqual(responses, [['9', { response: '"late"' }]]);
+  assert.deepEqual(responses, [['9', 1, { async: 'callback' }], ['9', 2, null], ['9', 1, { response: '"late"' }]]);
 });
 
 test('onMessage: a returned promise answers with its value or its error', async () => {
@@ -161,13 +161,27 @@ test('onMessage: a returned promise answers with its value or its error', async 
   chrome.runtime.onMessage.addListener((message) =>
     message === 'fail' ? Promise.reject(new Error('nope')) : Promise.resolve({ got: message }),
   );
-  host.event('runtime.onMessage', ['"a"', SENDER, '1']);
-  host.event('runtime.onMessage', ['"fail"', SENDER, '2']);
+  host.event('runtime.onMessage', ['"a"', SENDER, '1', [1]]);
+  host.event('runtime.onMessage', ['"fail"', SENDER, '2', [1]]);
   await flush();
   assert.deepEqual(responses, [
-    ['1', { response: '{"got":"a"}' }],
-    ['2', { error: 'nope' }],
+    ['1', 1, { async: 'promise' }],
+    ['2', 1, { async: 'promise' }],
+    ['1', 1, { response: '{"got":"a"}' }],
+    ['2', 1, { error: 'nope' }],
   ]);
+});
+
+test('onMessage consumes a returned rejection after synchronous sendResponse already won', async () => {
+  const { chrome, host } = extensionContext('background');
+  const responses = responder(host);
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    sendResponse('first');
+    return Promise.reject(new Error('ignored after response'));
+  });
+  host.event('runtime.onMessage', ['1', SENDER, '3', [1]]);
+  await flush();
+  assert.deepEqual(responses, [['3', 1, { response: '"first"' }]]);
 });
 
 test('onMessage: no listener answering closes the channel without a response', async () => {
@@ -179,19 +193,19 @@ test('onMessage: no listener answering closes the channel without a response', a
     return 'not true';
   };
   chrome.runtime.onMessage.addListener(listener);
-  host.event('runtime.onMessage', ['1', SENDER, '3']);
+  host.event('runtime.onMessage', ['1', SENDER, '3', [1]]);
   late('too late');
   chrome.runtime.onMessage.removeListener(listener);
-  host.event('runtime.onMessage', ['1', SENDER, '4']);
-  host.event('runtime.onMessageExternal', ['1', SENDER, '5']);
+  host.event('runtime.onMessage', ['1', SENDER, '4', [1]]);
+  host.event('runtime.onMessageExternal', ['1', SENDER, '5', [1]]);
   chrome.runtime.onMessage.addListener(listener);
-  host.event('runtime.onMessage', ['not json', SENDER, '6']);
+  host.event('runtime.onMessage', ['not json', SENDER, '6', [2]]);
   await flush();
   assert.deepEqual(responses, [
-    ['3', null],
-    ['4', null],
-    ['5', null],
-    ['6', null],
+    ['3', 1, null],
+    ['4', 1, null],
+    ['5', 1, null],
+    ['6', 2, null],
   ]);
 });
 
@@ -202,12 +216,12 @@ test('sendResponse() with nothing answers undefined; unserializable responses th
     if (message === 'bad') sendResponse(() => 1);
     else sendResponse();
   });
-  host.event('runtime.onMessage', ['"ok"', SENDER, '1']);
-  host.event('runtime.onMessage', ['"bad"', SENDER, '2']);
+  host.event('runtime.onMessage', ['"ok"', SENDER, '1', [1]]);
+  host.event('runtime.onMessage', ['"bad"', SENDER, '2', [1]]);
   await flush();
   assert.deepEqual(responses, [
-    ['1', { response: null }],
-    ['2', null],
+    ['1', 1, { response: null }],
+    ['2', 1, null],
   ]);
   assert.match(logs.error[0], /Error in event handler: Error: Could not serialize message\./);
 });

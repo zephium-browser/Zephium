@@ -43,6 +43,12 @@ pub enum FrameLifecycle {
         owner: ViewRef,
         /// Chrome's frame id.
         frame: FrameId,
+        /// Parent frame, when verified against this view's table.
+        parent: Option<FrameId>,
+        /// Whether native facts report a sandboxed or opaque document.
+        opaque: bool,
+        /// Verified related-document URL, when available.
+        creator: Option<Url>,
         /// The host generation of the new document.
         document: DocumentGeneration,
         /// The document URL.
@@ -119,11 +125,32 @@ pub enum DeliverError {
     TooLarge,
     /// The context's queue is full; retry after it drains or drop.
     Backpressure,
-    /// The module refused it: a stale document, no registered receiver or
-    /// the renderer-side budget. Its boolean answer does not say which.
+    /// The transport failed or returned an invalid answer.
     Refused,
+    /// The native document has no registered receiver.
+    NoReceiver,
+    /// The module denied the target.
+    Denied,
+    /// The receiver threw an exception.
+    EvaluationFailed,
+    /// The native delivery budget was exhausted.
+    RateLimited,
     /// The bridge is shutting down.
     Closed,
+}
+
+impl From<zephium_webkit_web_process_protocol::protocol::DeliveryStatus> for DeliverError {
+    fn from(status: zephium_webkit_web_process_protocol::protocol::DeliveryStatus) -> Self {
+        use zephium_webkit_web_process_protocol::protocol::DeliveryStatus;
+        match status {
+            DeliveryStatus::Delivered => Self::Refused,
+            DeliveryStatus::StaleTarget => Self::Stale,
+            DeliveryStatus::Denied => Self::Denied,
+            DeliveryStatus::NoReceiver => Self::NoReceiver,
+            DeliveryStatus::EvaluationFailed => Self::EvaluationFailed,
+            DeliveryStatus::RateLimited => Self::RateLimited,
+        }
+    }
 }
 
 /// Frames the runtime wants delivered, collected while it runs.
@@ -159,6 +186,15 @@ pub trait Runtime {
     /// A delivery the bridge could not complete.
     fn undeliverable(&mut self, context: &ContextKey, error: DeliverError) {
         let _ = (context, error);
+    }
+
+    /// A native execution result checked against the host's pending request.
+    fn injection_result(
+        &mut self,
+        view: BridgeViewId,
+        result: &zephium_webkit_web_process_protocol::protocol::InjectionResult,
+    ) {
+        let _ = (view, result);
     }
 
     /// Request observations from a view attached with `observe_requests`.

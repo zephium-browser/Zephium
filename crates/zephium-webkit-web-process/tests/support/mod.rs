@@ -321,8 +321,13 @@ impl Fixture {
                     });
                 }
                 let (mime, body) = response(path, header, port);
+                let csp = if path.starts_with("/csp-sandbox") {
+                    "Content-Security-Policy: sandbox allow-scripts\r\n"
+                } else {
+                    ""
+                };
                 let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\n{csp}Content-Type: {mime}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(head.as_bytes());
@@ -372,7 +377,13 @@ fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
             "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>".into(),
         );
     }
+    let inline = "<script>document.documentElement.dataset.main=String(globalThis.mainOverride);document.documentElement.dataset.hidden=String(typeof nativeSend==='undefined');document.dispatchEvent(new Event('DOMContentLoaded',{bubbles:true}));window.dispatchEvent(new Event('load'));document.documentElement.dataset.earlyEnd=String(document.documentElement.dataset.nativeEnd==='yes');window.addEventListener('DOMContentLoaded',e=>e.stopImmediatePropagation(),true);window.addEventListener('load',e=>e.stopImmediatePropagation(),true);</script>";
     match route {
+        "/facts" => ("text/html", format!("<!doctype html><iframe src='/frame?ordinary'></iframe><iframe src='http://localhost:{port}/frame?cross-facts'></iframe><iframe sandbox='allow-scripts' src='/frame?sandbox'></iframe><iframe src='/csp-sandbox'></iframe><iframe src='data:text/html,opaque'></iframe>")),
+        "/content-frames" => ("text/html", format!(
+            "<!doctype html>{inline}<iframe src='/content-frame?same'></iframe><iframe src='http://localhost:{port}/content-frame?cross'></iframe><iframe id='blank' src='about:blank'></iframe><iframe srcdoc=\"{inline}\"></iframe><iframe src='/excluded'></iframe><script>const blankDocument=document.getElementById('blank').contentDocument;const firstInline=blankDocument.createElement('script');firstInline.textContent=\"globalThis.blankInlineSawMain=globalThis.mainOverride==='native'\";blankDocument.documentElement.append(firstInline);</script>"
+        )),
+        "/content-frame" | "/excluded" => ("text/html", format!("<!doctype html>{inline}<p>content fixture</p>")),
         "/frames" => ("text/html", format!(
             "<!doctype html><iframe id='same' src='/frame?same'></iframe><iframe id='cross' src='http://localhost:{port}/frame?cross'></iframe>"
         )),

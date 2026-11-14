@@ -1,40 +1,43 @@
 // Builds `chrome` (and `browser`, the same object) for one extension context
 // from the surface data and the context's bootstrap blob. Every async method
-// takes a trailing callback (with `runtime.lastError` set during it) or
+// takes a trailing callback (`runtime.lastError` survives its microtasks) or
 // returns a promise; synchronous members are served from the bootstrap.
 //
 // Surface (`surface.generated.js`, one JSON value):
 //   { version: 1, namespaces: { "<dotted name>": Namespace } }
-//   Namespace { contexts?: Kind[], permissions?: string[] (any one suffices),
+//   Namespace { contexts?: Kind[], permissions?: string[] (any one suffices), manifest?: string[],
 //               functions?: { name: Function }, events?: { name: Event },
 //               properties?: { name: JSON constant or enum } }
 //   Function  { parameters?: Param[] (no callback), returns?: "async" | "sync",
-//               callback?: false, promise?: false, result?: false,
-//               signature?: string, contexts?, permissions? }
+//               callback?: boolean, callbackRequired?: true, promise?: false, result?: false,
+//               optionalResult?: true,
+//               signature?: string, setting?: ValueSchema, contexts?, permissions? }
+//   ValueSchema { type, optional?, enum?, properties?, items? } for ChromeSetting.set
 //   Param     { name, type: Type | Type[], optional?: true, serializeFunctions?: string[] }
 //   Type      string integer number boolean object array function binary any
-//   Event     { contexts?, permissions?, filter?: "url" | "request", blocking?: true, rules?: true }
+//   Event     { contexts?, permissions?, filter?: "url" | "request" | "window", blocking?: true, rules?: true }
 //   Kind      background popup options extensionTab offscreen extensionFrame
 //             contentScript userScript externalPage
 // Omitted `contexts` means every kind. "sync" functions exist only where the
-// binding implements them (LOCAL below).
+// binding implements them (LOCAL below). A sync return with callback:true is
+// mixed mode and requires a custom implementation; it is currently omitted.
 //
 // Bootstrap: { extensionId, scheme, contextKind, manifest (as getManifest
-// returns it), messages ({ lowercase name: text, placeholders applied }),
+// returns it), messages (resolved Chrome message catalog, or flattened strings),
 // uiLanguage, incognito, permissions (granted API permissions), worker? }.
 //
 // Host protocol beyond plain `namespace.method` calls (arguments are the
 // parameters in order, null for an omitted optional one; u64 ids are decimal
-// strings): `zephium.addListener [event, listenerId|null, filter|null,
-// extraInfoSpec|null]` and `zephium.removeListener [event, listenerId|null]`
-// (per listener for filtered events, else on the first add and last
-// remove); filtered events carry the matched listener ids as a last
+// strings): `zephium.addListener [event, listenerId, filter|null,
+// extraInfoSpec|null]` and `zephium.removeListener [event, listenerId]`
+// report each listener; filtered events carry the matched listener ids as a last
 // argument; `zephium.eventResult [seq, listenerId, value]` for blocking
 // listeners; `runtime.sendMessage [id|null, messageJson, options|null]`,
 // `tabs.sendMessage [tabId, messageJson, options|null]` and
 // `runtime.sendNativeMessage [app, messageJson]` reply null (no response) or
 // `{response: json|null}`; message events carry `[messageJson, sender,
-// token]`, answered by `zephium.respond [token, {response}|{error}|null]`;
+// messageId, listenerIds]`, answered by
+// `zephium.respond [messageId, listenerId, {response}|{error}|{async:'callback'|'promise'}|null]`;
 // `runtime.connect`, `tabs.connect` and `runtime.connectNative` reply with the
 // port id, and connect events carry `[portId, name, sender]`; the host sends
 // `zephium.onInvalidated [message|null]` and
@@ -98,6 +101,29 @@
     }
   }
   const typeLabel = (type) => (I.isArray(type) ? `[${I.ArrayJoin(type, '|')}]` : type || 'any');
+
+  function matchesSetting(spec, value, depth) {
+    if (depth >= 32) return false;
+    if (value === undefined || value === null) return own(spec, 'optional') === true;
+    if (!typeMatches(own(spec, 'type'), value)) return false;
+    const choices = own(spec, 'enum');
+    if (I.isArray(choices) && !contains(choices, value)) return false;
+    const properties = own(spec, 'properties');
+    if (properties !== undefined) {
+      const names = I.keys(value);
+      for (let i = 0; i < names.length; i++) if (!I.hasOwn(properties, names[i])) return false;
+      const expected = I.keys(properties);
+      for (let i = 0; i < expected.length; i++) {
+        const name = expected[i];
+        if (!matchesSetting(properties[name], own(value, name), depth + 1)) return false;
+      }
+    }
+    const items = own(spec, 'items');
+    if (items !== undefined) {
+      for (let i = 0; i < value.length; i++) if (!matchesSetting(items, value[i], depth + 1)) return false;
+    }
+    return true;
+  }
 
   function signatureOf(params, async) {
     const parts = [];
@@ -174,7 +200,7 @@
       let value = values[i];
       const names = params[i] ? params[i].serializeFunctions : null;
       if (names !== null && value !== null && typeof value === 'object' && !I.isArray(value)) {
-        const copy = {};
+        const copy = { __proto__: null };
         const keys = I.keys(value);
         for (let k = 0; k < keys.length; k++) copy[keys[k]] = value[keys[k]];
         for (let n = 0; n < names.length; n++) {
@@ -199,12 +225,12 @@
 
   // Chrome's base::ReplaceStringPlaceholders: `$1`-`$9` substitute, `$$`
   // runs keep all but one `$`, any other `$x` is dropped.
-  function substitute(message, substitutions) {
+  function substitute(message, substitutions, placeholders, escapeLt) {
     let out = '';
     for (let i = 0; i < message.length; i++) {
       const c = message[i];
       if (c !== '$') {
-        out += c;
+        out += c === '<' && escapeLt ? '&lt;' : c;
         continue;
       }
       if (i + 1 >= message.length) break;
@@ -218,6 +244,18 @@
         continue;
       }
       const code = I.StringCharCodeAt(message, i);
+      if (placeholders !== undefined && (code < 0x31 || code > 0x39)) {
+        const end = I.StringIndexOf(message, '$', i);
+        if (end !== -1) {
+          const name = I.StringToLowerCase(I.StringSlice(message, i, end));
+          const content = own(own(placeholders, name), 'content');
+          if (typeof content === 'string') {
+            out += substitute(content, substitutions, undefined, escapeLt);
+            i = end;
+            continue;
+          }
+        }
+      }
       if (code < 0x31 || code > 0x39) continue;
       const index = code - 0x31;
       if (index < substitutions.length) out += substitutions[index];
@@ -232,6 +270,7 @@
     const extensionId = I.String(own(bootstrap, 'extensionId'));
     const scheme = typeof own(bootstrap, 'scheme') === 'string' ? bootstrap.scheme : 'chrome-extension';
     const manifestText = I.JSONStringify(own(bootstrap, 'manifest') || {});
+    const manifest = I.JSONParse(manifestText);
     const messages = own(bootstrap, 'messages') || {};
     const uiLanguage = typeof own(bootstrap, 'uiLanguage') === 'string' ? bootstrap.uiLanguage : 'en-US';
     const incognito = own(bootstrap, 'incognito') === true;
@@ -285,6 +324,10 @@
     };
     const available = (node) => {
       const contexts = own(node, 'contexts');
+      const features = own(node, 'manifest');
+      if (I.isArray(features)) {
+        for (let i = 0; i < features.length; i++) if (!I.hasOwn(manifest, features[i]) || manifest[features[i]] === null) return false;
+      }
       return (contexts === undefined || contains(contexts, kind)) && permitted(own(node, 'permissions'));
     };
 
@@ -317,7 +360,9 @@
 
     function getMessage(values) {
       const name = I.StringToLowerCase(I.String(values[0]));
-      let message = own(messages, name);
+      const entry = own(messages, name);
+      let message = typeof entry === 'string' ? entry : own(entry, 'message');
+      const placeholders = own(entry, 'placeholders');
       if (typeof message !== 'string') message = predefined()[name];
       if (typeof message !== 'string') return '';
       const raw = values[1];
@@ -328,12 +373,7 @@
       } else if (raw !== null && raw !== undefined) {
         substitutions = [I.String(raw)];
       }
-      if (own(values[2], 'escapeLt') === true) {
-        let escaped = '';
-        for (let i = 0; i < message.length; i++) escaped += message[i] === '<' ? '&lt;' : message[i];
-        message = escaped;
-      }
-      return substitute(message, substitutions);
+      return substitute(message, substitutions, placeholders, own(values[2], 'escapeLt') === true);
     }
 
     const checkConnectInfo = (name, signature, info) => {
@@ -356,7 +396,7 @@
         throw E.invocation(
           name,
           signature,
-          `Error at parameter 'element': Invalid type: expected HTMLElement, found ${typeName(element)}.`,
+          "Error at parameter 'element': Value must be an instance of HTMLElement.",
         );
       }
       return I.ElementShadowRoot ? I.ElementShadowRoot(element) : null;
@@ -454,12 +494,15 @@
 
     function settle(promise, callback, spec) {
       const withResult = own(spec, 'result') !== false;
+      const optionalResult = own(spec, 'optionalResult') === true;
+      const resultValue = (value) => optionalResult && value === null ? undefined : value;
       if (callback !== null) {
         I.PromiseThen(
           promise,
           (value) => {
             if (value === P.NO_RESPONSE) return E.invokeCallback(lastError, callback, [], P.PORT_CLOSED);
-            return E.invokeCallback(lastError, callback, withResult ? [value] : [], null);
+            const args = withResult && !(optionalResult && value === null) ? [value] : [];
+            return E.invokeCallback(lastError, callback, args, null);
           },
           (failure) => E.invokeCallback(lastError, callback, [], E.messageOf(failure)),
         );
@@ -472,7 +515,7 @@
       return new I.Promise((resolve, reject) => {
         I.PromiseThen(
           promise,
-          (value) => resolve(value === P.NO_RESPONSE || !withResult ? undefined : value),
+          (value) => resolve(value === P.NO_RESPONSE || !withResult ? undefined : resultValue(value)),
           (failure) => reject(new I.Error(E.messageOf(failure))),
         );
       });
@@ -480,23 +523,35 @@
 
     function makeFunction(fullName, spec) {
       const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
+      if (returns === 'sync' && own(spec, 'callback') === true) return undefined;
       const local = LOCAL[fullName];
       if (returns === 'sync' && local === undefined) return undefined;
       const params = normalizeParams(own(spec, 'parameters'));
       const async = returns === 'async';
       const takesCallback = async && own(spec, 'callback') !== false;
+      const displayName = I.StringStartsWith(fullName, 'storage.')
+        ? `storage.${I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1)}`
+        : I.StringStartsWith(fullName, 'privacy.')
+          ? `types.ChromeSetting.${I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1)}`
+          : fullName;
       const signature =
         typeof own(spec, 'signature') === 'string' ? spec.signature : signatureOf(params, takesCallback);
       const parsed = takesCallback ? I.ArraySlice(params) : params;
-      if (takesCallback) I.ArrayPush(parsed, CALLBACK);
+      if (takesCallback)
+        I.ArrayPush(parsed, own(spec, 'callbackRequired') === true
+          ? { __proto__: null, name: 'callback', type: 'function', optional: false }
+          : CALLBACK);
       const usesMassage = fullName === 'runtime.sendMessage';
       const member = I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1);
       const fn = {
         [member](...args) {
           ensureValid();
+          const setting = own(spec, 'setting');
+          if (setting !== undefined && args.length > 0 && !matchesSetting(setting, args[0], 0))
+            throw new I.TypeError('Invalid invocation');
           const values = usesMassage
-            ? massaged(fullName, signature, args)
-            : resolveArguments(fullName, signature, parsed, args);
+            ? massaged(displayName, signature, args)
+            : resolveArguments(displayName, signature, parsed, args);
           if (!async) return local(values, fullName, signature);
           const callback = takesCallback ? values[values.length - 1] : null;
           const callValues = takesCallback ? I.ArraySlice(values, 0, values.length - 1) : values;
@@ -508,7 +563,7 @@
             try {
               text = I.JSONStringify(prepare(callValues, params));
             } catch {
-              throw E.invocation(fullName, signature, 'Could not serialize arguments.');
+              throw E.invocation(displayName, signature, 'Value is unserializable.');
             }
             promise = client.call(fullName, text, false);
           }

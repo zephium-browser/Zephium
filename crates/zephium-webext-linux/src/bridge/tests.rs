@@ -18,7 +18,8 @@ use zephium_webext_runtime::permissions::{
     Gate, InstallPermissions, PermissionDeclaration, PermissionRequest, SiteAccess,
 };
 use zephium_webkit_web_process_protocol::protocol::{
-    decode_ui, Event, FrameEvent, FrameInfo, Post, UiMessage, DELIVER_MESSAGE,
+    decode_ui, DeliveryStatus, Evaluation, Event, FrameEvent, FrameInfo, MatchRule, Post,
+    UiMessage, DELIVER_MESSAGE,
 };
 
 use super::buffer::{BUFFER_TIMEOUT_MS, MAX_BUFFERED_POSTS_PER_VIEW};
@@ -61,7 +62,10 @@ fn tab_plan(origins: &[&str]) -> AttachPlan {
         worlds: vec![WorldGrant {
             install: install(),
             world: InjectedWorld::Isolated,
-            origins: origins.iter().map(|origin| (*origin).to_owned()).collect(),
+            matches: origins
+                .iter()
+                .map(|origin| MatchRule::for_origin(origin).expect("match rule"))
+                .collect(),
             bootstrap: Arc::from("void 0"),
         }],
         extension_pages: vec![ExtensionPages {
@@ -153,7 +157,26 @@ impl Harness {
         self.core.take_effects()
     }
 
-    fn frames(&mut self, id: u64, generation: u64, events: Vec<FrameEvent>) -> Vec<Effect> {
+    fn frames(&mut self, id: u64, generation: u64, mut events: Vec<FrameEvent>) -> Vec<Effect> {
+        let evaluated: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                FrameEvent::Created(info) | FrameEvent::Committed(info) => {
+                    Some(FrameEvent::Evaluated(Evaluation {
+                        install_id: format!("{:032x}", 10),
+                        script_id: String::new(),
+                        world: world(),
+                        frame_id: info.frame_id,
+                        document_seq: info.document_seq,
+                        table_generation: 0,
+                        file_index: u16::MAX,
+                        success: true,
+                    }))
+                }
+                _ => None,
+            })
+            .collect();
+        events.extend(evaluated);
         self.event(id, Event::Frames { generation, events })
     }
 
@@ -185,11 +208,13 @@ fn info(frame_id: u64, document_seq: u64, uri: &str, is_main: bool) -> FrameInfo
         document_seq,
         uri: uri.into(),
         is_main,
+        ..FrameInfo::default()
     }
 }
 
 fn post(generation: u64, frame_id: u64, document_seq: u64, world: &str, uri: &str) -> Post {
     Post {
+        external_install: None,
         generation,
         post_id: 1,
         frame_id,
@@ -640,12 +665,13 @@ fn deliveries_target_the_bound_frame_and_are_bounded() {
         Err(DeliverError::Backpressure)
     );
     h.core.take_effects();
-    h.core.delivery_settled(id, &key, false);
+    h.core
+        .delivery_settled(id, &key, DeliveryStatus::NoReceiver);
     let effects = h.core.take_effects();
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Undeliverable {
-            error: DeliverError::Refused,
+            error: DeliverError::NoReceiver,
             ..
         }
     )));
@@ -893,4 +919,312 @@ fn the_dispatcher_enforces_the_authoritative_rate_limit_on_bridge_posts() {
         decode(&replies[RATE_BURST as usize]).is_err(),
         "burst exhausted"
     );
+}
+
+#[test]
+fn bootstrap_posts_wait_for_verified_success_and_forged_evaluations_grant_nothing() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Created(info(1, 1, "https://a.test/", true))],
+        },
+    );
+    assert!(senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).is_empty());
+    assert_eq!(h.core.stats().buffered, 1);
+    let evaluation = Evaluation {
+        install_id: format!("{:032x}", 10),
+        script_id: String::new(),
+        world: world(),
+        frame_id: 1,
+        document_seq: 1,
+        table_generation: 0,
+        file_index: u16::MAX,
+        success: true,
+    };
+    for forged in [
+        Evaluation {
+            install_id: format!("{:032x}", 11),
+            ..evaluation.clone()
+        },
+        Evaluation {
+            table_generation: 7,
+            script_id: "unknown".into(),
+            file_index: 0,
+            ..evaluation.clone()
+        },
+        Evaluation {
+            document_seq: 2,
+            ..evaluation.clone()
+        },
+        Evaluation {
+            world: world_name(other_install(), &InjectedWorld::Isolated),
+            ..evaluation.clone()
+        },
+        Evaluation {
+            success: false,
+            ..evaluation.clone()
+        },
+    ] {
+        assert!(senders(&h.event(
+            id,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Evaluated(forged)]
+            }
+        ))
+        .is_empty());
+    }
+    let effects = h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Evaluated(evaluation)],
+        },
+    );
+    assert_eq!(senders(&effects).len(), 1);
+    assert_eq!(h.core.stats().frame_records_refused, 4);
+}
+
+#[test]
+fn immediate_structural_widening_keeps_the_live_context_and_generation() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    let sender = senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+        .pop()
+        .expect("sender");
+    h.core
+        .update_plan(id, &tab_plan(&[SITE, "https://b.test"]), true)
+        .expect("widen");
+    let effects = h.core.take_effects();
+    assert!(closed(&effects).is_empty());
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next }, .. } if *next == generation)));
+    h.core
+        .attach_settled(id, generation, AttachOutcome::Accepted);
+    assert_eq!(h.core.context_view(&sender.context_key()), Some(id));
+    assert_eq!(
+        senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).len(),
+        1
+    );
+}
+
+#[test]
+fn external_claims_require_both_the_marker_and_exact_host_match_path() {
+    use zephium_webext_runtime::context::ExternallyConnectable;
+    use zephium_webext_runtime::pattern::ContentScriptMatcher;
+    use zephium_webkit_web_process_protocol::protocol::ExternalRule;
+    let mut h = Harness::new();
+    let mut admitted = admission(install(), EXTENSION);
+    admitted.generation = ExtensionRuntimeGeneration::INITIAL
+        .next()
+        .expect("generation");
+    admitted.externally_connectable =
+        Some(ExternallyConnectable::parse(&["https://a.test/allowed/*"]).expect("external"));
+    h.core.admit(admitted).expect("admit external");
+    let plan = AttachPlan {
+        external: vec![ExternalRule {
+            install_id: format!("{:032x}", 10),
+            matches: vec![MatchRule {
+                matcher: ContentScriptMatcher::new(
+                    &["https://a.test/allowed/*"],
+                    &[],
+                    &[],
+                    &[],
+                    Default::default(),
+                )
+                .expect("matcher"),
+                all_frames: true,
+                file_access: false,
+            }],
+            bootstrap: "void 0".into(),
+        }],
+        ..Default::default()
+    };
+    let (id, generation) = h.tab(5, &plan);
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Created(info(
+                1,
+                1,
+                "https://a.test/allowed/page",
+                true,
+            ))],
+        },
+    );
+    let mut claim = post(generation, 1, 1, "", "https://a.test/allowed/page");
+    claim.external_install = Some(format!("{:032x}", 10));
+    assert!(senders(&h.post(id, claim.clone())).is_empty());
+    assert_eq!(h.core.stats().buffered, 1);
+    let waiting = h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::ExternalPage {
+                install_id: format!("{:032x}", 10),
+                frame_id: 1,
+                document_seq: 1,
+            }],
+        },
+    );
+    assert_eq!(
+        senders(&waiting).len(),
+        1,
+        "first external post settles after its native marker"
+    );
+    let external_senders = senders(&h.post(id, claim));
+    assert_eq!(external_senders.len(), 1);
+    assert_eq!(external_senders[0].kind(), ContextKind::ExternalPage);
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![
+                FrameEvent::Created(info(1, 2, "https://a.test/elsewhere", true)),
+                FrameEvent::ExternalPage {
+                    install_id: format!("{:032x}", 10),
+                    frame_id: 1,
+                    document_seq: 2,
+                },
+            ],
+        },
+    );
+    let mut claim = post(generation, 1, 2, "", "https://a.test/elsewhere");
+    claim.external_install = Some(format!("{:032x}", 10));
+    assert!(senders(&h.post(id, claim)).is_empty());
+}
+
+fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protocol::ScriptTable {
+    use zephium_webkit_web_process_protocol::protocol::{
+        RunAt, ScriptEntry, ScriptFile, ScriptTable,
+    };
+    ScriptTable {
+        generation,
+        entries: vec![ScriptEntry {
+            install_id: format!("{:032x}", 10),
+            script_id: "manifest-0".into(),
+            world: world(),
+            run_at: RunAt::DocumentStart,
+            rule: MatchRule::for_origin(SITE).expect("rule"),
+            files: vec![ScriptFile {
+                source: "void 0".into(),
+                url: format!("chrome-extension://{EXTENSION}/content.js"),
+            }],
+            css: Vec::new(),
+            bootstrap: String::new(),
+        }],
+    }
+}
+
+#[test]
+fn document_snapshot_claims_are_checked_against_sent_history_without_ack_races() {
+    use super::scripts::{ScriptTableError, SealedScripts};
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(7)).expect("seal")))
+        .expect("publish");
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(8)).expect("seal")))
+        .expect("publish");
+    h.core.take_effects();
+    // A document pinned 7 before publication 8, and its Created arrives after
+    // the newer ACK. Its exact sent snapshot remains admissible.
+    h.core.scripts_settled(id, 8, true);
+    let mut facts = info(1, 1, "https://a.test/", true);
+    facts.table_generation = 7;
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Created(facts.clone())],
+        },
+    );
+    let evaluation = Evaluation {
+        install_id: format!("{:032x}", 10),
+        script_id: "manifest-0".into(),
+        world: world(),
+        frame_id: 1,
+        document_seq: 1,
+        table_generation: 7,
+        file_index: 0,
+        success: true,
+    };
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Evaluated(evaluation)],
+        },
+    );
+    assert_eq!(
+        senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).len(),
+        1
+    );
+    facts.document_seq = 2;
+    facts.table_generation = 99;
+    h.event(
+        id,
+        Event::Frames {
+            generation,
+            events: vec![FrameEvent::Created(facts)],
+        },
+    );
+    assert_eq!(h.core.stats().frame_records_refused, 1);
+    let mut foreign = script_table(9);
+    foreign.entries[0].files[0].url = format!("chrome-extension://{OTHER}/content.js");
+    assert!(matches!(
+        h.core
+            .publish_scripts(Rc::new(SealedScripts::new(foreign).expect("seal"))),
+        Err(ScriptTableError::InvalidOwner)
+    ));
+}
+
+#[test]
+fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
+    use zephium_webkit_web_process_protocol::protocol::{
+        InjectRequest, InjectionKind, InjectionTarget,
+    };
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    let request = InjectRequest {
+        install_id: String::new(),
+        token: String::new(),
+        generation: 0,
+        request_id: 0,
+        target: InjectionTarget::Frame {
+            frame_id: 1,
+            document_seq: 1,
+        },
+        world: world(),
+        kind: InjectionKind::Function,
+        source: "() => Promise.resolve(7)".into(),
+        source_url: format!("chrome-extension://{EXTENSION}/execute.js"),
+        args_json: "[]".into(),
+        timeout_ms: 10,
+    };
+    let id_request = h
+        .core
+        .inject(id, install(), request.clone(), h.now)
+        .expect("inject");
+    assert!(h
+        .core
+        .inject(id, other_install(), request.clone(), h.now)
+        .is_err());
+    let mut stale = request.clone();
+    stale.target = InjectionTarget::Frame {
+        frame_id: 1,
+        document_seq: 2,
+    };
+    assert!(h.core.inject(id, install(), stale, h.now).is_err());
+    h.core.tick(1010);
+    let results = h.core.take_effects();
+    assert!(results.iter().any(|effect| matches!(effect, Effect::Injection { result, .. } if result.request_id == id_request && result.status == zephium_webkit_web_process_protocol::protocol::InjectionStatus::TimedOut)));
+    assert!(h.core.inject(id, install(), request, 1011).is_ok());
 }

@@ -99,6 +99,8 @@ pub struct StorageChangeEvent {
 pub enum StorageError {
     /// A total, item, or item-count quota was exceeded.
     QuotaExceeded(&'static str),
+    /// The session area's estimated allocation reached its byte limit.
+    SessionQuotaExceeded,
     /// A sync write-rate quota was exceeded.
     WriteRateExceeded(&'static str),
     /// Enterprise policy cannot be modified by extensions.
@@ -119,6 +121,9 @@ impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::QuotaExceeded(resource) => write!(formatter, "{resource} quota exceeded"),
+            Self::SessionQuotaExceeded => {
+                formatter.write_str("Session storage quota bytes exceeded. Values were not stored.")
+            }
             Self::WriteRateExceeded(resource) => {
                 write!(formatter, "This request exceeds the {resource} quota.")
             }
@@ -300,11 +305,15 @@ impl Storage {
         match keys {
             None => Ok(stored
                 .iter()
-                .map(|(key, value)| item_bytes(key, value))
+                .map(|(key, value)| quota::area_item_bytes(area, key, value))
                 .sum()),
             Some(keys) => Ok(keys
                 .iter()
-                .filter_map(|key| stored.get(key).map(|value| item_bytes(key, value)))
+                .filter_map(|key| {
+                    stored
+                        .get(key)
+                        .map(|value| quota::area_item_bytes(area, key, value))
+                })
                 .sum()),
         }
     }

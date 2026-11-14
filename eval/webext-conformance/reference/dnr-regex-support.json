@@ -1,0 +1,109 @@
+{
+  "caseId": "dnr-regex-support",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "valid regex:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "valid regex:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "isSupported": true
+        }
+      }
+    },
+    {
+      "label": "invalid regex:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invalid regex:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "isSupported": false,
+          "reason": "syntaxError"
+        }
+      }
+    },
+    {
+      "label": "backreference regex:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "backreference regex:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "isSupported": false,
+          "reason": "syntaxError"
+        }
+      }
+    },
+    {
+      "label": "capture required:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "capture required:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "isSupported": true
+        }
+      }
+    },
+    {
+      "label": "regex callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "regex callback:callback",
+      "value": {
+        "args": [
+          {
+            "isSupported": true
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "regex callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "regex callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

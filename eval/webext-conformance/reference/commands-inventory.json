@@ -1,0 +1,77 @@
+{
+  "caseId": "commands-inventory",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "commands promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "commands promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "description": "",
+            "name": "_execute_action",
+            "shortcut": "Alt+Shift+Y"
+          },
+          {
+            "description": "Conformance named command",
+            "name": "named-command",
+            "shortcut": "Alt+Shift+J"
+          }
+        ]
+      }
+    },
+    {
+      "label": "commands callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "commands callback:callback",
+      "value": {
+        "args": [
+          [
+            {
+              "description": "",
+              "name": "_execute_action",
+              "shortcut": "Alt+Shift+Y"
+            },
+            {
+              "description": "Conformance named command",
+              "name": "named-command",
+              "shortcut": "Alt+Shift+J"
+            }
+          ]
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "commands callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "commands callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

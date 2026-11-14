@@ -1,0 +1,121 @@
+{
+  "caseId": "dnr-block-allow",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "unblocked control:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unblocked control:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "status": 200,
+          "text": "fixture resource"
+        }
+      }
+    },
+    {
+      "label": "install block:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "install block:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "blocked fetch:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "blocked fetch:error",
+      "value": {
+        "lastError": null,
+        "message": "Failed to fetch"
+      }
+    },
+    {
+      "label": "install higher priority allow:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "install higher priority allow:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "allowed fetch:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "allowed fetch:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "status": 200,
+          "text": "fixture resource"
+        }
+      }
+    },
+    {
+      "label": "remove allow:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove allow:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "blocked again:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "blocked again:error",
+      "value": {
+        "lastError": null,
+        "message": "Failed to fetch"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

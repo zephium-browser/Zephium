@@ -1,0 +1,6 @@
+{
+  "manifest_version": 3,
+  "name": "Alarm event ordering",
+  "version": "1.0",
+  "permissions": ["alarms"]
+}

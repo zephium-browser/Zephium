@@ -14,8 +14,9 @@ use webkit2gtk::{
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext_linux::bridge::{
-    world_name, AttachPlan, BridgeConfig, CloseReason, ExtensionPages, FrameLifecycle, Outbox,
-    ProfileBridge, Refusal, Runtime, Transport, WorldGrant, BUFFER_TIMEOUT_MS,
+    world_name, AttachPlan, BridgeConfig, BridgeViewId, CloseReason, ExtensionPages,
+    FrameLifecycle, Outbox, ProfileBridge, Refusal, Runtime, Transport, WorldGrant,
+    BUFFER_TIMEOUT_MS,
 };
 use zephium_webext_runtime::context::{
     ContextKey, ContextKind, ExtensionId, ExtensionScheme, FrameId, InjectedWorld,
@@ -23,7 +24,11 @@ use zephium_webext_runtime::context::{
 };
 use zephium_webkit_web_process_protocol::{
     policy::{Decision, PolicySnapshot, Rule},
-    protocol::{decode_event, encode_event, Event, Post, EVENT_MESSAGE},
+    protocol::{
+        decode_event, encode_event, Event, InjectRequest, InjectionKind, InjectionResult,
+        InjectionStatus, InjectionTarget, MatchRule, Post, RunAt, ScriptEntry, ScriptFile,
+        ScriptTable, EVENT_MESSAGE,
+    },
 };
 
 const EXTENSION: &str = "abcdefghijklmnopabcdefghijklmnop";
@@ -55,6 +60,7 @@ struct Record {
     received: Vec<(Sender, Value)>,
     closed: Vec<(ContextKey, CloseReason)>,
     lifecycle: Vec<FrameLifecycle>,
+    injections: Vec<(BridgeViewId, InjectionResult)>,
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +76,12 @@ impl Runtime for TestRuntime {
 
     fn context_closed(&mut self, context: &ContextKey, reason: CloseReason, _: &mut Outbox) {
         self.0.borrow_mut().closed.push((context.clone(), reason));
+    }
+
+    fn injection_result(&mut self, view: BridgeViewId, result: &InjectionResult) {
+        let mut record = self.0.borrow_mut();
+        assert!(record.injections.len() < 64, "bounded execution capture");
+        record.injections.push((view, result.clone()));
     }
 
     fn frame_lifecycle(&mut self, event: &FrameLifecycle, _: &mut Outbox) {
@@ -164,7 +176,12 @@ fn tab_plan(fixture: &Fixture) -> AttachPlan {
         worlds: vec![WorldGrant {
             install: install(),
             world: InjectedWorld::Isolated,
-            origins: vec![fixture.origin.clone(), fixture.cross_origin.clone()],
+            matches: [fixture.origin.as_str(), fixture.cross_origin.as_str()]
+                .into_iter()
+                .map(|origin| {
+                    zephium_webext_linux::bridge::MatchRule::for_origin(origin).expect("match rule")
+                })
+                .collect(),
             bootstrap: Arc::from(GLUE),
         }],
         apply_policy: true,
@@ -231,6 +248,20 @@ fn native_bridge() {
         .attach_tab(tab, &page, &tab_plan(&fixture))
         .expect("attach");
 
+    pump_until(|| bridge.transport(view) == Some(Transport::Module));
+    let table = ScriptTable { generation: 1, entries: vec![ScriptEntry {
+        install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
+        run_at: RunAt::DocumentStart, rule: MatchRule { matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
+            &["<all_urls>"], &[], &[], &[], Default::default()).expect("matcher"), all_frames: true, file_access: false },
+        files: vec![ScriptFile { source: "globalThis.__nativeBridgeScriptCount = (globalThis.__nativeBridgeScriptCount || 0) + 1; globalThis.__bridgeSend({phase:'native-script', href:location.href, value:73});".into(), url: format!("chrome-extension://{EXTENSION}/native-content.js") }],
+        css: Vec::new(), bootstrap: String::new(),
+    }] };
+    assert_eq!(
+        bridge.publish_scripts(table).expect("publish native table"),
+        1
+    );
+    pump_for(Duration::from_millis(100));
+
     // Posts from an isolated world in top, same-origin and cross-origin frames.
     load(&page, &format!("{}/frames", fixture.origin));
     pump_until(|| runtime.hellos(Some(tab)).len() == 3);
@@ -249,6 +280,123 @@ fn native_bridge() {
         .iter()
         .any(|(sender, _)| sender.url().as_str().starts_with(&fixture.cross_origin)));
     println!("WEBEXT bridge_frames senders=3 distinct_frames=3 cross_origin=true");
+
+    pump_until(|| {
+        runtime
+            .0
+            .borrow()
+            .received
+            .iter()
+            .filter(|(sender, value)| {
+                sender.tab() == Some(tab) && value["phase"] == "native-script"
+            })
+            .count()
+            == 3
+    });
+    assert_eq!(bridge.stats().scripts_refused, 0);
+    assert_eq!(bridge.stats().frame_records_refused, 0);
+    assert_eq!(
+        evaluate(
+            &page,
+            "return typeof globalThis.__nativeBridgeScriptCount;",
+            None
+        ),
+        "undefined"
+    );
+    let subframe = hellos
+        .iter()
+        .find(|(sender, _)| sender.url().as_str().starts_with(&fixture.cross_origin))
+        .expect("cross-origin target")
+        .0
+        .clone();
+    let target = bridge
+        .frame_target(view, subframe.frame().expect("frame"), subframe.document())
+        .expect("host target");
+    let request = InjectRequest { install_id: String::new(), token: String::new(), generation: 0, request_id: 0, target,
+        world: world_name(install(), &InjectedWorld::Isolated), kind: InjectionKind::Function,
+        source: "async (left, right) => { await Promise.resolve(); return {sum:left+right, href:location.href, count:globalThis.__nativeBridgeScriptCount}; }".into(),
+        source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
+    };
+    let request_id = bridge
+        .inject(view, install(), request.clone())
+        .expect("native inject");
+    pump_until(|| {
+        runtime
+            .0
+            .borrow()
+            .injections
+            .iter()
+            .any(|(_, result)| result.request_id == request_id)
+    });
+    let result = runtime
+        .0
+        .borrow()
+        .injections
+        .iter()
+        .find(|(_, result)| result.request_id == request_id)
+        .cloned()
+        .expect("execution result");
+    assert_eq!(result.0, view);
+    assert_eq!(result.1.status, InjectionStatus::Success);
+    let InjectionTarget::Frame {
+        frame_id,
+        document_seq,
+    } = target
+    else {
+        panic!("exact target");
+    };
+    assert_eq!(
+        (
+            result.1.frame_id,
+            result.1.document_seq,
+            result.1.world.as_str()
+        ),
+        (frame_id, document_seq, request.world.as_str())
+    );
+    let value: Value = serde_json::from_str(&result.1.result_json).expect("bounded JSON result");
+    assert_eq!(value["sum"], 42);
+    assert_eq!(value["count"], 1);
+    assert_eq!(value["href"], subframe.url().as_str());
+    let all = bridge
+        .inject(
+            view,
+            install(),
+            InjectRequest {
+                target: InjectionTarget::AllFrames,
+                ..request
+            },
+        )
+        .expect("all frames");
+    pump_until(|| {
+        runtime
+            .0
+            .borrow()
+            .injections
+            .iter()
+            .filter(|(_, result)| result.request_id == all)
+            .count()
+            == 3
+    });
+    let all_results = runtime
+        .0
+        .borrow()
+        .injections
+        .iter()
+        .filter(|(_, result)| result.request_id == all)
+        .map(|(_, result)| result.clone())
+        .collect::<Vec<_>>();
+    assert!(all_results
+        .iter()
+        .all(|result| result.status == InjectionStatus::Success));
+    assert_eq!(
+        all_results
+            .iter()
+            .map(|result| result.frame_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3
+    );
+    println!("WEBEXT bridge_native_script_table documents=3 isolated=true execute_subframe_promise=42 all_frames=3");
 
     // Replies reach exactly the bound frame and world.
     for (index, (sender, _)) in hellos.iter().enumerate() {

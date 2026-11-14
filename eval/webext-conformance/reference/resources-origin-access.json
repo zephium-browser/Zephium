@@ -1,0 +1,91 @@
+{
+  "caseId": "resources-origin-access",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "resource URL",
+      "value": "chrome-extension://<extension>/public.txt"
+    },
+    {
+      "label": "resource from permitted origin:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "resource from permitted origin:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "ok": true,
+              "status": 200,
+              "text": "public extension resource\n"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "resource from denied origin:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "resource from denied origin:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:2>",
+            "frameId": 0,
+            "result": {
+              "error": {
+                "message": "Failed to fetch",
+                "name": "TypeError"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "private resource from permitted origin:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "private resource from permitted origin:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "error": {
+                "message": "Failed to fetch",
+                "name": "TypeError"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

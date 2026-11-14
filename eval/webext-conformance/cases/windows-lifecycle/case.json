@@ -1,0 +1,13 @@
+{
+  "id": "windows-lifecycle",
+  "title": "Window creation population update and removal",
+  "apis": [
+    "windows.create",
+    "windows.get",
+    "windows.getCurrent",
+    "windows.update",
+    "windows.remove",
+    "windows.onRemoved"
+  ],
+  "permissions": []
+}

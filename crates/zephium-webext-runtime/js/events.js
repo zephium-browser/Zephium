@@ -11,63 +11,59 @@
   const HELD_LIMIT = 4096;
   const states = new I.WeakMap();
 
-  const brand = (event, method) => {
+  const brand = (event) => {
     const state =
       event !== null && (typeof event === 'object' || typeof event === 'function')
         ? I.WeakMapGet(states, event)
         : undefined;
     if (state === undefined)
-      throw new I.TypeError(`Illegal invocation: ${method} called on an object that is not an event`);
+      throw new I.TypeError('Illegal invocation: Function must be called on an object of type Event');
     return state;
   };
 
   const isPlainObject = (value) => value !== null && typeof value === 'object' && !I.isArray(value);
-  const isStringArray = (value) => {
-    if (!I.isArray(value)) return false;
-    for (let i = 0; i < value.length; i++) if (typeof value[i] !== 'string') return false;
-    return true;
+  const typeName = (value) => {
+    if (value === null) return 'null';
+    if (I.isArray(value)) return 'array';
+    if (typeof value === 'number' && I.isInteger(value)) return 'integer';
+    return typeof value;
   };
 
-  // Chrome rejects malformed filters when the listener is added.
-  function checkFilter(state, filter, extra) {
-    const name = state.name;
-    if (state.filter === 'url') {
-      if (filter === undefined || filter === null) return null;
-      if (!isPlainObject(filter) || !I.isArray(filter.url)) {
-        throw E.invocation(
-          `${name}.addListener`,
-          'function callback, optional object filters',
-          "Error at parameter 'filters': Error at property 'url': Invalid type: expected array, found " +
-            (filter && filter.url === undefined ? 'undefined.' : 'object.'),
-        );
+  function checkFilter(state, filter, extra, supplied) {
+    if (state.filter === 'url' || state.filter === 'window') {
+      if (!supplied) return null;
+      if (!isPlainObject(filter)) throw new I.TypeError('Invalid invocation');
+      if (filter.url !== undefined && !I.isArray(filter.url))
+        throw new I.TypeError('filters.url should be an array.');
+      if (filter.serviceType !== undefined && typeof filter.serviceType !== 'string')
+        throw new I.TypeError('filters.serviceType should be a string.');
+      if (extra !== undefined) throw new I.TypeError('This event does not support options');
+      return filter;
+    }
+    if (state.filter === 'request') {
+      const signature = 'webRequest.RequestFilter filter, optional array extraInfoSpec';
+      const fail = (detail) => { throw E.invocation(state.name, signature, detail); };
+      if (filter === undefined || filter === null) fail('No matching signature.');
+      if (!isPlainObject(filter))
+        fail(`Error at parameter 'filter': Invalid type: expected object, found ${typeName(filter)}.`);
+      if (filter.urls === undefined)
+        fail("Error at parameter 'filter': Missing required property 'urls'.");
+      if (!I.isArray(filter.urls))
+        fail(`Error at parameter 'filter': Error at property 'urls': Invalid type: expected array, found ${typeName(filter.urls)}.`);
+      for (let i = 0; i < filter.urls.length; i++) {
+        if (typeof filter.urls[i] !== 'string')
+          fail(`Error at parameter 'filter': Error at property 'urls': Error at index ${i}: Invalid type: expected string, found ${typeName(filter.urls[i])}.`);
       }
-      for (let i = 0; i < filter.url.length; i++) {
-        if (!isPlainObject(filter.url[i])) {
-          throw E.invocation(
-            `${name}.addListener`,
-            'function callback, optional object filters',
-            `Error at parameter 'filters': Error at property 'url': Error at index ${i}: Invalid type: expected events.UrlFilter, found ${typeof filter.url[i]}.`,
-          );
+      if (extra !== undefined && extra !== null) {
+        if (!I.isArray(extra)) fail('No matching signature.');
+        for (let i = 0; i < extra.length; i++) {
+          if (typeof extra[i] !== 'string')
+            fail(`Error at parameter 'extraInfoSpec': Error at index ${i}: Invalid type: expected string, found ${typeName(extra[i])}.`);
         }
       }
       return filter;
     }
-    if (state.filter === 'request') {
-      const signature = 'function callback, object filter, optional array extraInfoSpec';
-      if (!isPlainObject(filter)) throw E.invocation(`${name}.addListener`, signature, 'No matching signature.');
-      if (!isStringArray(filter.urls)) {
-        throw E.invocation(
-          `${name}.addListener`,
-          signature,
-          "Error at parameter 'filter': Error at property 'urls': Invalid type: expected array, found " +
-            (filter.urls === undefined ? 'undefined.' : typeof filter.urls + '.'),
-        );
-      }
-      if (extra !== undefined && extra !== null && !isStringArray(extra)) {
-        throw E.invocation(`${name}.addListener`, signature, 'No matching signature.');
-      }
-      return filter;
-    }
+    if (supplied) throw new I.TypeError('This event does not support filters');
     return null;
   }
 
@@ -75,12 +71,10 @@
   const method = (name, fn) =>
     I.defineProperty(prototype, name, { value: fn, configurable: true, writable: true, enumerable: false });
   method('addListener', function addListener(listener, filter, extra) {
-    const state = brand(this, 'addListener');
-    if (typeof listener !== 'function') {
-      throw E.invocation(`${state.name}.addListener`, 'function callback', 'No matching signature.');
-    }
+    const state = brand(this);
+    if (typeof listener !== 'function') return;
     if (I.MapHas(state.listeners, listener)) return;
-    const checked = checkFilter(state, filter, extra);
+    const checked = checkFilter(state, filter, extra, arguments.length > 1);
     const record = {
       __proto__: null,
       id: state.hub ? state.hub.nextListenerId() : 0,
@@ -91,17 +85,17 @@
     if (state.hub) state.hub.listenerAdded(state, record);
   });
   method('removeListener', function removeListener(listener) {
-    const state = brand(this, 'removeListener');
+    const state = brand(this);
     const record = I.MapGet(state.listeners, listener);
     if (record === undefined) return;
     I.MapDelete(state.listeners, listener);
     if (state.hub) state.hub.listenerRemoved(state, record);
   });
   method('hasListener', function hasListener(listener) {
-    return I.MapHas(brand(this, 'hasListener').listeners, listener);
+    return I.MapHas(brand(this).listeners, listener);
   });
   method('hasListeners', function hasListeners() {
-    return I.MapSize(brand(this, 'hasListeners').listeners) > 0;
+    return I.MapSize(brand(this).listeners) > 0;
   });
 
   const rulesUnsupported = function () {
@@ -115,7 +109,7 @@
       name,
       event,
       hub,
-      filter: spec && (spec.filter === 'url' || spec.filter === 'request') ? spec.filter : null,
+      filter: spec && (spec.filter === 'url' || spec.filter === 'request' || spec.filter === 'window') ? spec.filter : null,
       blocking: !!(spec && spec.blocking === true),
       listeners: new I.Map(),
     };
@@ -193,15 +187,10 @@
       __proto__: null,
       nextListenerId: () => ++nextId,
       listenerAdded(state, record) {
-        if (state.filter !== null) {
-          report('zephium.addListener', [state.name, record.id, record.filter, record.extra]);
-        } else if (I.MapSize(state.listeners) === 1) {
-          report('zephium.addListener', [state.name, null, null, null]);
-        }
+        report('zephium.addListener', [state.name, record.id, record.filter, record.extra]);
       },
       listenerRemoved(state, record) {
-        if (state.filter !== null) report('zephium.removeListener', [state.name, record.id]);
-        else if (I.MapSize(state.listeners) === 0) report('zephium.removeListener', [state.name, null]);
+        report('zephium.removeListener', [state.name, record.id]);
       },
       rules(state, verb, args) {
         let callback;
@@ -234,6 +223,9 @@
       },
       stateOf(event) {
         return I.WeakMapGet(states, event);
+      },
+      messageListeners(event) {
+        return snapshot(I.WeakMapGet(states, event));
       },
       // While held, deliveries queue (bounded) instead of dispatching.
       hold() {

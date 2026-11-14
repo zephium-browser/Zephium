@@ -350,6 +350,8 @@ pub struct InstallAdmission {
     pub extension_id: ExtensionId,
     /// The runtime generation being started.
     pub generation: ExtensionRuntimeGeneration,
+    /// Development installation timing, from the browser's install record.
+    pub unpacked: bool,
     /// Whether the person allowed it in incognito.
     pub allowed_in_incognito: bool,
     /// Its `externally_connectable` pages, if it declared any.
@@ -517,6 +519,7 @@ pub struct Sender {
     install: ExtensionInstallId,
     extension_id: ExtensionId,
     generation: ExtensionRuntimeGeneration,
+    unpacked: bool,
     placement: Placement,
     url: Url,
     origin: DocumentOrigin,
@@ -552,6 +555,11 @@ impl Sender {
     /// The runtime generation the context was bound under.
     pub fn generation(&self) -> ExtensionRuntimeGeneration {
         self.generation
+    }
+
+    /// Whether the browser admitted this install as unpacked development code.
+    pub fn unpacked(&self) -> bool {
+        self.unpacked
     }
 
     /// The extension scheme of this profile.
@@ -631,6 +639,7 @@ impl Sender {
 struct InstallEntry {
     extension_id: ExtensionId,
     generation: ExtensionRuntimeGeneration,
+    unpacked: bool,
     externally_connectable: Option<ExternallyConnectable>,
 }
 
@@ -709,6 +718,7 @@ impl Authority {
             InstallEntry {
                 extension_id: admission.extension_id,
                 generation: admission.generation,
+                unpacked: admission.unpacked,
                 externally_connectable: admission.externally_connectable,
             },
         );
@@ -1005,6 +1015,7 @@ impl Authority {
             install,
             extension_id: entry.extension_id.clone(),
             generation: entry.generation,
+            unpacked: entry.unpacked,
             placement,
             url: document.url.clone(),
             origin: document.origin.clone(),
@@ -1049,6 +1060,7 @@ pub(crate) mod tests {
             install,
             extension_id: ExtensionId::parse(id).expect("id"),
             generation: generation(value),
+            unpacked: false,
             allowed_in_incognito: false,
             externally_connectable: None,
         }
@@ -1101,6 +1113,24 @@ pub(crate) mod tests {
 
     fn extension_url(path: &str) -> String {
         format!("chrome-extension://{EXTENSION}/{path}")
+    }
+
+    #[test]
+    fn development_timing_is_bound_to_the_admitted_install_generation() {
+        let mut authority = authority();
+        let page = committed(&extension_url("bg.html"), 1);
+        let view = authority
+            .open_view(install(), ViewKind::Background)
+            .unwrap();
+        assert!(!authority.bind_view(&view, &page).unwrap().unpacked());
+        let mut replacement = admission(install(), EXTENSION, 2);
+        replacement.unpacked = true;
+        authority.admit(replacement).unwrap();
+        assert_eq!(authority.bind_view(&view, &page), Err(BindError::Stale));
+        let view = authority
+            .open_view(install(), ViewKind::Background)
+            .unwrap();
+        assert!(authority.bind_view(&view, &page).unwrap().unpacked());
     }
 
     #[test]

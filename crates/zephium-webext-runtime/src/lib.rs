@@ -15,6 +15,7 @@
 
 pub mod alarms;
 pub mod api;
+pub mod browser;
 pub mod context;
 pub mod dispatch;
 pub mod envelope;
@@ -27,6 +28,7 @@ pub mod limits;
 pub mod pattern;
 pub mod permissions;
 pub mod ports;
+pub mod protocol;
 pub mod schema;
 pub mod scripting_registry;
 pub mod storage;

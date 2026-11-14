@@ -58,6 +58,7 @@ pub enum Refusal {
 pub(crate) enum Pending {
     Frame,
     Host,
+    Injection,
 }
 
 impl Pending {
@@ -65,6 +66,7 @@ impl Pending {
         match self {
             Self::Frame => Refusal::UnknownFrame,
             Self::Host => Refusal::HostMismatch,
+            Self::Injection => Refusal::NotInjected,
         }
     }
 }
@@ -72,6 +74,10 @@ impl Pending {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AttributedWorld {
     Page,
+    External {
+        install: ExtensionInstallId,
+    },
+
     Script {
         install: ExtensionInstallId,
         world: InjectedWorld,
@@ -140,20 +146,43 @@ pub(crate) fn assess<'a>(context: &ClaimContext<'a>, post: &Post) -> Verdict<'a>
     let Ok(url) = Url::parse(&post.uri) else {
         return Verdict::Refused(Refusal::InvalidUri);
     };
-    let Some(origin) = frame.document.origin.as_deref() else {
-        return Verdict::Refused(Refusal::NotAdmitted);
+    let origin = frame.document.origin.as_deref();
+    let uri_consistent = match origin {
+        Some(origin) => document_origin(url.as_str()).as_deref() == Some(origin),
+        None => url == frame.document.url,
     };
-    if document_origin(url.as_str()).as_deref() != Some(origin) {
+    if !uri_consistent {
         return Verdict::Refused(Refusal::CrossOriginUri);
     }
-    let (world, document_origin_value) = if page_world {
+    let (world, document_origin_value) = if let Some(install_id) = &post.external_install {
+        if !page_world
+            || context.owned
+            || !attached.admits_external(install_id, &frame.document.facts)
+            || !context
+                .plan
+                .admits_external(install_id, &frame.document.facts)
+        {
+            return Verdict::Refused(Refusal::NotAdmitted);
+        }
+        let Some(install) = parse_install(install_id) else {
+            return Verdict::Refused(Refusal::NotAdmitted);
+        };
+        if !frame.document.external.contains(install_id) {
+            return Verdict::Wait(Pending::Injection);
+        }
+        (
+            AttributedWorld::External { install },
+            frame.document.security_origin.clone(),
+        )
+    } else if page_world {
         let (Some(_), Some(pages)) = (
-            attached.admits_page(origin),
-            context.plan.admits_page(origin),
+            origin.and_then(|origin| attached.admits_page(origin)),
+            origin.and_then(|origin| context.plan.admits_page(origin)),
         ) else {
             return Verdict::Refused(Refusal::NotAdmitted);
         };
-        let sandboxed = pages.sandboxed.contains(url.path());
+        let sandboxed =
+            frame.document.security_origin.is_opaque() || pages.sandboxed.contains(url.path());
         let value = if sandboxed {
             DocumentOrigin::opaque(Some(&url))
         } else {
@@ -162,8 +191,10 @@ pub(crate) fn assess<'a>(context: &ClaimContext<'a>, post: &Post) -> Verdict<'a>
         (AttributedWorld::Page, value)
     } else {
         let (Some(_), Some(grant)) = (
-            attached.admits_world(&post.world, origin),
-            context.plan.admits_world(&post.world, origin),
+            attached.admits_world(&post.world, &frame.document.facts),
+            context
+                .plan
+                .admits_world(&post.world, &frame.document.facts),
         ) else {
             return Verdict::Refused(Refusal::NotAdmitted);
         };
@@ -172,7 +203,7 @@ pub(crate) fn assess<'a>(context: &ClaimContext<'a>, post: &Post) -> Verdict<'a>
                 install: grant.install,
                 world: grant.world.clone(),
             },
-            DocumentOrigin::of_url(&url),
+            frame.document.security_origin.clone(),
         )
     };
     if frame.main {
@@ -180,7 +211,7 @@ pub(crate) fn assess<'a>(context: &ClaimContext<'a>, post: &Post) -> Verdict<'a>
             .host_main
             .and_then(|committed| document_origin(committed.as_str()));
         match host {
-            Some(host) if host == origin => {}
+            Some(host) if Some(host.as_str()) == origin => {}
             Some(_) => return Verdict::Wait(Pending::Host),
             None if context.owned => return Verdict::Wait(Pending::Host),
             None => {}
@@ -192,4 +223,11 @@ pub(crate) fn assess<'a>(context: &ClaimContext<'a>, post: &Post) -> Verdict<'a>
         url,
         origin: document_origin_value,
     })
+}
+
+fn parse_install(value: &str) -> Option<ExtensionInstallId> {
+    (value.len() == 32)
+        .then(|| u128::from_str_radix(value, 16).ok())
+        .flatten()
+        .map(ExtensionInstallId::from)
 }

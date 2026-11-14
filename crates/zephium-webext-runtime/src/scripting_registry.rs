@@ -100,6 +100,8 @@ struct Entry {
 pub struct Injection<'a> {
     /// Bundle metadata; static identifiers use a reserved underscore prefix.
     pub script: &'a RegisteredScript,
+    /// The complete compiled declaration, retaining static globs and related-frame options.
+    pub matcher: &'a ContentScriptMatcher,
 }
 
 /// One install's registry. Clone to stage a mutation before durable publication.
@@ -157,7 +159,10 @@ impl ScriptRegistry {
         let mut candidate = self.clone();
         for script in scripts {
             if candidate.dynamic.contains_key(&script.id) {
-                return Err(ApiError::other("Duplicate script ID."));
+                return Err(ApiError::other(format!(
+                    "Duplicate script ID '{}'",
+                    script.id
+                )));
             }
             let entry = prepare(script, &mut check)?;
             candidate.dynamic.insert(entry.script.id.clone(), entry);
@@ -187,12 +192,9 @@ impl ScriptRegistry {
                 .and_then(Value::as_str)
                 .ok_or_else(ApiError::malformed_arguments)?;
             if !seen.insert(id) {
-                return Err(ApiError::other("Duplicate script ID."));
+                return Err(ApiError::other(format!("Duplicate script ID '{id}'")));
             }
-            let old = self
-                .dynamic
-                .get(id)
-                .ok_or_else(|| ApiError::other("No registered script with this ID."))?;
+            let old = self.dynamic.get(id).ok_or_else(|| missing_script(id))?;
             let mut merged =
                 serde_json::to_value(&old.script).map_err(|_| ApiError::malformed_arguments())?;
             let object = merged
@@ -215,8 +217,8 @@ impl ScriptRegistry {
             if ids.len() > MAX_REGISTERED_SCRIPTS {
                 return Err(ApiError::too_many_pending());
             }
-            if ids.iter().any(|id| !self.dynamic.contains_key(id)) {
-                return Err(ApiError::other("No registered script with this ID."));
+            if let Some(id) = ids.iter().find(|id| !self.dynamic.contains_key(*id)) {
+                return Err(missing_script(id));
             }
             for id in ids {
                 self.dynamic.remove(id);
@@ -261,6 +263,19 @@ impl ScriptRegistry {
         Ok(())
     }
 
+    /// All compiled declarations in static manifest order, then dynamic ID order.
+    /// Adapters may publish these for future documents only after applying host
+    /// permissions and view admission; this iterator itself grants no authority.
+    pub fn declarations(&self) -> impl Iterator<Item = Injection<'_>> {
+        self.static_scripts
+            .iter()
+            .chain(self.dynamic.values())
+            .map(|entry| Injection {
+                script: &entry.script,
+                matcher: &entry.matcher,
+            })
+    }
+
     /// Produces a plan only after the adapter verifies current host/site access.
     /// `authorized` must include ordinary-tab ownership and current generation;
     /// Work views, interface views and revoked hosts must pass false.
@@ -283,6 +298,7 @@ impl ScriptRegistry {
             })
             .map(|entry| Injection {
                 script: &entry.script,
+                matcher: &entry.matcher,
             })
             .collect()
     }
@@ -302,6 +318,15 @@ impl ScriptRegistry {
         }
         Ok(())
     }
+}
+
+fn missing_script(id: &str) -> ApiError {
+    if id.len() > 256 {
+        return ApiError::malformed_arguments();
+    }
+    ApiError::other(format!(
+        "Script with ID '{id}' does not exist or is not fully registered"
+    ))
 }
 
 fn matcher(script: &ContentScript) -> Result<ContentScriptMatcher, ApiError> {
@@ -470,10 +495,25 @@ pub fn register<S: ScriptingHost + 'static>(
                         candidate.unregister(filter(args)?.as_deref())?
                     }
                     _ => {
-                        return serde_json::to_value(
+                        let mut scripts = serde_json::to_value(
                             candidate.get_registered(filter(args)?.as_deref()),
                         )
-                        .map_err(|_| ApiError::malformed_arguments())
+                        .map_err(|_| ApiError::malformed_arguments())?;
+                        for script in scripts.as_array_mut().into_iter().flatten() {
+                            let object = script
+                                .as_object_mut()
+                                .ok_or_else(ApiError::malformed_arguments)?;
+                            for name in ["css", "excludeMatches", "js"] {
+                                if object
+                                    .get(name)
+                                    .and_then(Value::as_array)
+                                    .is_some_and(Vec::is_empty)
+                                {
+                                    object.remove(name);
+                                }
+                            }
+                        }
+                        return Ok(scripts);
                     }
                 }
                 host.commit_script_registry(sender, candidate)?;
@@ -572,6 +612,23 @@ mod tests {
             json!({"content_scripts":[{"matches":["https://example.com/*"],"include_globs":["*/news/*"],"exclude_globs":["*private*"],"js":["x.js"],"css":["x.css"],"all_frames":true,"match_about_blank":true}]}),
         );
         let registry = ScriptRegistry::from_manifest(&manifest, accept).unwrap();
+        let declarations: Vec<_> = registry.declarations().collect();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(
+            declarations[0].matcher.include_globs()[0].as_str(),
+            "*/news/*"
+        );
+        assert_eq!(
+            declarations[0].matcher.exclude_globs()[0].as_str(),
+            "*private*"
+        );
+        assert!(
+            declarations[0]
+                .matcher
+                .match_set()
+                .options()
+                .match_about_blank
+        );
         let creator = Url::parse("https://example.com/news/story").unwrap();
         let origin = DocumentOrigin::of_url(&creator);
         let url = Url::parse("about:blank").unwrap();

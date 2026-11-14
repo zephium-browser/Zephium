@@ -36,13 +36,13 @@ impl PostBuffer {
 
     /// Holds `entry` if both this view and the profile (`profile_bytes`
     /// held elsewhere) stay within bounds; otherwise hands it back.
-    pub fn push(&mut self, entry: Buffered, profile_bytes: usize) -> Result<(), Buffered> {
+    pub fn push(&mut self, entry: Buffered, profile_bytes: usize) -> Result<(), Box<Buffered>> {
         let size = entry.post.bytes.len();
         if self.entries.len() >= MAX_BUFFERED_POSTS_PER_VIEW
             || self.bytes.saturating_add(size) > MAX_BUFFERED_BYTES_PER_VIEW
             || profile_bytes.saturating_add(size) > MAX_BUFFERED_BYTES_PER_PROFILE
         {
-            return Err(entry);
+            return Err(Box::new(entry));
         }
         self.bytes += size;
         self.entries.push_back(entry);
@@ -63,6 +63,7 @@ mod tests {
     fn entry(size: usize) -> Buffered {
         Buffered {
             post: Post {
+                external_install: None,
                 generation: 1,
                 post_id: 1,
                 frame_id: 1,

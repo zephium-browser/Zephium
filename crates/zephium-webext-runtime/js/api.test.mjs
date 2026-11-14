@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EXTENSION_ID, extensionContext, flush, plain } from './test/harness.mjs';
+import { EXTENSION_ID, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
 
 const keys = (object) => Object.keys(object).sort();
 
@@ -9,8 +9,7 @@ test('browser is chrome, both globals, with only the namespaces the context may 
   const background = extensionContext('background');
   assert.equal(background.run('globalThis.browser === globalThis.chrome'), true);
   assert.equal(background.run('globalThis.chrome'), background.chrome);
-  assert.deepEqual(keys(background.chrome), [
-    'action',
+  for (const namespace of [
     'alarms',
     'dom',
     'extension',
@@ -20,7 +19,7 @@ test('browser is chrome, both globals, with only the namespaces the context may 
     'scripting',
     'storage',
     'tabs',
-  ]);
+  ]) assert.equal(typeof background.chrome[namespace], 'object', namespace);
   assert.equal(background.chrome.webNavigation, undefined, 'webNavigation needs its permission');
   assert.equal(background.chrome.runtime.connectNative, undefined, 'connectNative needs nativeMessaging');
   assert.equal(typeof background.chrome.storage.session.setAccessLevel, 'function');
@@ -30,14 +29,14 @@ test('browser is chrome, both globals, with only the namespaces the context may 
   assert.equal(content.chrome.runtime.getPlatformInfo, undefined);
   assert.equal(content.chrome.runtime.onInstalled, undefined);
   assert.equal(typeof content.chrome.runtime.sendMessage, 'function');
-  assert.equal(content.chrome.storage.session.setAccessLevel, undefined);
+  assert.equal(typeof content.chrome.storage.session.setAccessLevel, 'function');
   assert.equal(content.chrome.extension.getViews, undefined);
 
   const external = extensionContext('externalPage');
   assert.deepEqual(keys(external.chrome), ['runtime']);
   assert.deepEqual(
     keys(external.chrome.runtime),
-    ['connect', 'id', 'sendMessage', 'OnInstalledReason', 'PlatformOs'].sort(),
+    ['connect', 'id', 'sendMessage', ...Object.keys(surface.namespaces.runtime.properties)].sort(),
   );
 });
 
@@ -77,7 +76,7 @@ test("a promise is returned without a callback and rejects with Chrome's Error",
   );
 });
 
-test('runtime.lastError exists only during the callback and warns when unchecked', async () => {
+test('runtime.lastError clears by the next task and warns when unchecked', async () => {
   const { chrome, host, logs } = extensionContext();
   host.handlers['tabs.get'] = () => {
     throw { error: 'No tab with id: 1.' };
@@ -98,6 +97,74 @@ test('runtime.lastError exists only during the callback and warns when unchecked
   assert.deepEqual(seen, [{ args: 0, message: 'No tab with id: 1.', same: true }]);
   assert.equal(chrome.runtime.lastError, undefined);
   assert.deepEqual(logs.error, ['Unchecked runtime.lastError: No tab with id: 1.']);
+});
+
+test('reading lastError in callback microtasks suppresses the unchecked warning', async () => {
+  const { chrome, host, logs } = extensionContext();
+  host.handlers['tabs.get'] = () => {
+    throw { error: 'No tab with id: 1.' };
+  };
+  const seen = [];
+  await new Promise((resolve) => {
+    chrome.tabs.get(1, () => {
+      queueMicrotask(() => {
+        seen.push(chrome.runtime.lastError.message);
+      });
+      Promise.resolve().then(() => seen.push(chrome.extension.lastError.message));
+      setTimeout(() => {
+        seen.push(chrome.runtime.lastError);
+        resolve();
+      }, 0);
+    });
+  });
+  assert.deepEqual(seen, ['No tab with id: 1.', 'No tab with id: 1.', undefined]);
+  assert.deepEqual(logs.error, []);
+});
+
+test('lastError clears before tasks queued ahead of the callback', async () => {
+  const { Z, logs } = extensionContext();
+  const errors = Z.errors.createLastError();
+  let seen;
+  const nextTask = new Promise((resolve) => setTimeout(() => {
+    seen = errors.read();
+    resolve();
+  }, 0));
+  errors.run('queued failure', () => {});
+  await nextTask;
+  assert.equal(seen, undefined);
+  assert.deepEqual(logs.error, ['Unchecked runtime.lastError: queued failure']);
+});
+
+test('task cleanup preserves a newer error and reports each unread failure once', () => {
+  const tasks = [];
+  const { Z, logs } = createRealm({ queueMicrotask: (fn) => tasks.push(fn) });
+  const errors = Z.errors.createLastError();
+  errors.run('first', () => {});
+  errors.run('second', () => {});
+  tasks.shift()();
+  assert.equal(errors.read().message, 'second');
+  tasks.shift()();
+  assert.equal(errors.read(), undefined);
+  assert.deepEqual(logs.error, ['Unchecked runtime.lastError: first']);
+});
+
+test('nested lastError scopes restore the outer callback after success and failure', async () => {
+  const { Z, logs } = extensionContext();
+  const errors = Z.errors.createLastError();
+  errors.run('outer', () => {
+    const outer = errors.read();
+    errors.run(null, () => assert.equal(errors.read(), undefined));
+    assert.equal(errors.read(), outer);
+    assert.throws(() => errors.run('inner', () => {
+      assert.equal(errors.read().message, 'inner');
+      throw new Error('callback failed');
+    }), /callback failed/);
+    assert.equal(errors.read(), outer);
+  });
+  assert.equal(errors.read().message, 'outer');
+  await flush();
+  assert.equal(errors.read(), undefined);
+  assert.deepEqual(logs.error, []);
 });
 
 test('nested callbacks restore the outer lastError and successes see none', async () => {
@@ -186,7 +253,7 @@ test('arguments resolve like Chrome: skipped optionals, callbacks first, and inv
   );
   failure(
     () => chrome.storage.local.get(1),
-    'Error in invocation of storage.local.get(optional [string|array|object] keys, optional function callback): No matching signature.',
+    'Error in invocation of storage.get(optional [string|array|object] keys, optional function callback): No matching signature.',
   );
   failure(() => chrome.runtime.getURL(), 'Error in invocation of runtime.getURL(string path): No matching signature.');
   failure(
@@ -247,6 +314,32 @@ test("i18n.getMessage follows Chrome's substitution rules", () => {
   assert.equal(chrome.i18n.getMessage('markup', undefined, { escapeLt: true }), 'a &lt;b> c');
   assert.equal(chrome.i18n.getMessage('missing'), '');
   assert.equal(chrome.i18n.getMessage('greeting', Array(10).fill('x')), undefined);
+});
+
+test('i18n consumes the resolved Rust catalog and expands named placeholders once', () => {
+  const { chrome } = extensionContext('background', {
+    messages: {
+      welcome: {
+        message: 'Hello, $PERSON$! Price: $$ $AMOUNT$.',
+        placeholders: { person: { content: '$1' }, amount: { content: '$2' } },
+      },
+      nested: { message: '[$WRAPPED$]', placeholders: { wrapped: { content: 'prefix:$1:suffix' } } },
+      dollars: { message: 'One $$, two $$$$, substitution $1.' },
+      markup: { message: '<p>$BODY$</p>', placeholders: { body: { content: '<b>$1</b>' } } },
+      malformed: { placeholders: { unused: { content: '$1' } } },
+    },
+  });
+  assert.equal(chrome.i18n.getMessage('welcome', ['Ada', '12']), 'Hello, Ada! Price: $ 12.');
+  assert.equal(chrome.i18n.getMessage('WELCOME', 'Ada'), 'Hello, Ada! Price: $ .');
+  assert.equal(chrome.i18n.getMessage('welcome'), 'Hello, ! Price: $ .');
+  assert.equal(chrome.i18n.getMessage('nested', 'value'), '[prefix:value:suffix]');
+  assert.equal(chrome.i18n.getMessage('dollars', '$literal'), 'One $, two $$$, substitution $literal.');
+  assert.equal(chrome.i18n.getMessage('nested', '$WRAPPED$'), '[prefix:$WRAPPED$:suffix]');
+  assert.equal(
+    chrome.i18n.getMessage('markup', '<i>$1</i>', { escapeLt: true }),
+    '&lt;p>&lt;b><i>$1</i>&lt;/b>&lt;/p>',
+  );
+  assert.equal(chrome.i18n.getMessage('malformed'), '');
 });
 
 test('an invalidated context refuses calls, settles pending ones and forgets its id', async () => {

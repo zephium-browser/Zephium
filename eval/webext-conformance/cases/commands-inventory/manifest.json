@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "permissions": [],
+  "action": {
+    "default_title": "Action title"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+Y"
+      }
+    },
+    "named-command": {
+      "description": "Conformance named command",
+      "suggested_key": {
+        "default": "Alt+Shift+J"
+      }
+    }
+  }
+}

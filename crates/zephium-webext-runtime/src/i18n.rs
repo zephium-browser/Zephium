@@ -317,9 +317,10 @@ fn expand(
     while let Some(start) = rest.find('$') {
         literal(&mut out, &rest[..start], escape_lt)?;
         let after = &rest[start + 1..];
-        if let Some(tail) = after.strip_prefix('$') {
-            append(&mut out, "$")?;
-            rest = tail;
+        if after.starts_with('$') {
+            let dollars = after.bytes().take_while(|byte| *byte == b'$').count();
+            append(&mut out, &after[..dollars])?;
+            rest = &after[dollars..];
         } else if after.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             let digits = after.bytes().take_while(u8::is_ascii_digit).count();
             let position = after[..digits]
@@ -514,6 +515,22 @@ mod tests {
             "&lt;b><i>&lt;/b>"
         );
     }
+    #[test]
+    fn dollar_runs_preserve_all_but_the_escape_prefix() {
+        assert_eq!(
+            expand(
+                "One $$, two $$$$, substitution $1.",
+                None,
+                &["$literal".into()],
+                false
+            )
+            .unwrap(),
+            "One $, two $$$, substitution $literal."
+        );
+        assert_eq!(expand("$$$", None, &[], false).unwrap(), "$$");
+        assert_eq!(expand("$$$$$", None, &[], false).unwrap(), "$$$$");
+    }
+
     #[test]
     fn corrupt_catalogs_and_expansion_bombs_are_refused() {
         assert!(parse_message(&json!({"message":"$missing$"})).is_err());

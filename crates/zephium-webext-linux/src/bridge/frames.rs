@@ -2,10 +2,11 @@
 //! the module's frame records. Every record is a renderer claim; the table
 //! only gives later claims something to be consistent with.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use url::Url;
 use zephium_webext_runtime::context::{DocumentGeneration, FrameId};
+use zephium_webext_runtime::pattern::DocumentOrigin;
 use zephium_webkit_web_process_protocol::protocol::{document_origin, FrameEvent, FrameInfo};
 
 /// Frames one view may have, the module's own per-page limit.
@@ -15,10 +16,14 @@ const MAX_RETIRED_FRAME_IDS: usize = 128;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Document {
     pub seq: u64,
+    pub external: BTreeSet<String>,
     pub generation: DocumentGeneration,
     pub url: Url,
     /// The exact origin string grants are matched against, if any.
     pub origin: Option<String>,
+    pub facts: FrameInfo,
+    pub security_origin: DocumentOrigin,
+    pub creator: Option<Url>,
     commits: u8,
 }
 
@@ -36,6 +41,9 @@ pub(crate) enum FrameChange {
         module_frame: u64,
         frame: FrameId,
         main: bool,
+        parent: Option<FrameId>,
+        opaque: bool,
+        creator: Option<Url>,
         document: DocumentGeneration,
         url: Url,
     },
@@ -54,6 +62,7 @@ pub(crate) enum FrameChange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameRefusal {
     InvalidUrl,
+    InconsistentFacts,
     StaleDocument,
     Capacity,
     Exhausted,
@@ -69,6 +78,23 @@ pub(crate) struct FrameTable {
 impl FrameTable {
     pub fn get(&self, module_frame: u64) -> Option<&Frame> {
         self.frames.get(&module_frame)
+    }
+
+    pub fn record_external(&mut self, module_frame: u64, install: String) {
+        if let Some(frame) = self.frames.get_mut(&module_frame) {
+            frame.document.external.insert(install);
+        }
+    }
+
+    pub fn by_chrome(&self, chrome: FrameId) -> Option<(u64, &Frame)> {
+        self.frames
+            .iter()
+            .find(|(_, frame)| frame.chrome == chrome)
+            .map(|(id, frame)| (*id, frame))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &Frame)> {
+        self.frames.iter().map(|(id, frame)| (*id, frame))
     }
 
     #[cfg(test)]
@@ -87,6 +113,9 @@ impl FrameTable {
             FrameEvent::Created(info) => self.create(info, mint, changes),
             FrameEvent::Committed(info) => match self.frames.get_mut(&info.frame_id) {
                 Some(frame) if frame.document.seq == info.document_seq => {
+                    if frame.document.facts != *info {
+                        return Err(FrameRefusal::InconsistentFacts);
+                    }
                     frame.document.commits = frame.document.commits.saturating_add(1);
                     if frame.document.commits == 2 {
                         changes.push(FrameChange::Loaded {
@@ -111,6 +140,7 @@ impl FrameTable {
                 }
                 Ok(())
             }
+            FrameEvent::Evaluated(_) | FrameEvent::ExternalPage { .. } => Ok(()),
             FrameEvent::Reset => {
                 self.clear(changes);
                 Ok(())
@@ -133,6 +163,60 @@ impl FrameTable {
         changes: &mut Vec<FrameChange>,
     ) -> Result<(), FrameRefusal> {
         let url = Url::parse(&info.uri).map_err(|_| FrameRefusal::InvalidUrl)?;
+        let parent = match info.parent_frame_id {
+            Some(id) if !info.is_main && id != info.frame_id => Some(
+                self.frames
+                    .get(&id)
+                    .ok_or(FrameRefusal::InconsistentFacts)?,
+            ),
+            Some(_) => return Err(FrameRefusal::InconsistentFacts),
+            None => None,
+        };
+        let mut ancestor = info.parent_frame_id;
+        let mut remaining = MAX_FRAMES_PER_VIEW;
+        while let Some(id) = ancestor {
+            if id == info.frame_id || remaining == 0 {
+                return Err(FrameRefusal::InconsistentFacts);
+            }
+            remaining -= 1;
+            ancestor = self
+                .frames
+                .get(&id)
+                .and_then(|frame| frame.document.facts.parent_frame_id);
+        }
+        let creator = match &info.creator_uri {
+            Some(uri) => {
+                let creator = Url::parse(uri).map_err(|_| FrameRefusal::InvalidUrl)?;
+                let known = parent.and_then(|parent| {
+                    if parent.document.url.scheme() == "about" {
+                        parent.document.creator.as_ref()
+                    } else {
+                        Some(&parent.document.url)
+                    }
+                });
+                if known != Some(&creator)
+                    || !parent
+                        .is_some_and(|parent| parent.document.security_origin.is_tuple_of(&creator))
+                {
+                    return Err(FrameRefusal::InconsistentFacts);
+                }
+                Some(creator)
+            }
+            None => None,
+        };
+        if url.scheme() == "data" && !info.opaque {
+            return Err(FrameRefusal::InconsistentFacts);
+        }
+        let security_origin = if info.opaque {
+            DocumentOrigin::opaque(creator.as_ref())
+        } else if url.scheme() == "about" {
+            creator
+                .as_ref()
+                .map_or_else(|| DocumentOrigin::of_url(&url), DocumentOrigin::of_url)
+        } else {
+            DocumentOrigin::of_url(&url)
+        };
+        let parent = parent.map(|parent| parent.chrome);
         if let Some(existing) = self.frames.get(&info.frame_id) {
             if info.document_seq <= existing.document.seq || existing.main != info.is_main {
                 return Err(FrameRefusal::StaleDocument);
@@ -175,9 +259,13 @@ impl FrameTable {
                 main: info.is_main,
                 document: Document {
                     seq: info.document_seq,
+                    external: BTreeSet::new(),
                     generation,
                     origin: document_origin(url.as_str()),
                     url: url.clone(),
+                    facts: info.clone(),
+                    security_origin,
+                    creator: creator.clone(),
                     commits: 1,
                 },
             },
@@ -186,6 +274,9 @@ impl FrameTable {
             module_frame: info.frame_id,
             frame: chrome,
             main: info.is_main,
+            parent,
+            opaque: info.opaque,
+            creator: creator.clone(),
             document: generation,
             url,
         });
@@ -220,6 +311,7 @@ mod tests {
             document_seq,
             uri: uri.into(),
             is_main,
+            ..FrameInfo::default()
         }
     }
 
@@ -421,5 +513,74 @@ mod tests {
             ),
             Err(FrameRefusal::Exhausted)
         );
+    }
+    #[test]
+    fn parent_creator_and_duplicate_commit_metadata_are_consistency_claims() {
+        let mut table = FrameTable::default();
+        let mut minter = Minter(0);
+        apply(
+            &mut table,
+            &mut minter,
+            FrameEvent::Created(info(1, 1, "https://a.test/page", true)),
+        )
+        .0
+        .expect("parent");
+        let mut child = info(2, 2, "about:blank", false);
+        child.parent_frame_id = Some(1);
+        child.creator_uri = Some("https://a.test/page".into());
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Created(child.clone())).0,
+            Ok(())
+        );
+        let mut forged = child.clone();
+        forged.creator_uri = Some("https://victim.test/".into());
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Committed(forged)).0,
+            Err(FrameRefusal::InconsistentFacts)
+        );
+        let mut forged = child.clone();
+        forged.opaque = true;
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Committed(forged)).0,
+            Err(FrameRefusal::InconsistentFacts)
+        );
+        let mut forged = child.clone();
+        forged.document_seq = 3;
+        forged.parent_frame_id = Some(999);
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Created(forged)).0,
+            Err(FrameRefusal::InconsistentFacts)
+        );
+        let mut forged = info(3, 3, "data:text/html,hello", false);
+        forged.parent_frame_id = Some(1);
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Created(forged)).0,
+            Err(FrameRefusal::InconsistentFacts)
+        );
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Committed(child)).0,
+            Ok(())
+        );
+    }
+    #[test]
+    fn an_opaque_parent_cannot_authenticate_a_tuple_creator_for_its_child() {
+        let mut table = FrameTable::default();
+        let mut minter = Minter(0);
+        let mut parent = info(1, 1, "https://a.test/page", true);
+        parent.opaque = true;
+        assert_eq!(
+            apply(&mut table, &mut minter, FrameEvent::Created(parent)).0,
+            Ok(())
+        );
+        let mut child = info(2, 2, "about:blank", false);
+        child.parent_frame_id = Some(1);
+        child.creator_uri = Some("https://a.test/page".into());
+        for opaque in [false, true] {
+            child.opaque = opaque;
+            assert_eq!(
+                apply(&mut table, &mut minter, FrameEvent::Created(child.clone())).0,
+                Err(FrameRefusal::InconsistentFacts)
+            );
+        }
     }
 }

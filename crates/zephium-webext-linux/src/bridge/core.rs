@@ -2,7 +2,7 @@
 //! claim checks, sender binding, context routing and delivery queues. The
 //! GTK host feeds it facts and executes the [`Effect`]s it produces.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use url::Url;
@@ -25,6 +25,7 @@ use super::frames::{FrameChange, FrameTable};
 use super::plan::{AttachPlan, PlanError, ResolvedPlan};
 use super::policy::SealedPolicy;
 use super::runtime::{BridgeViewId, CloseReason, DeliverError, FrameLifecycle, ViewRef};
+use super::scripts::{ScriptTableError, SealedScripts};
 use super::ReplyToken;
 
 /// Views one profile bridge tracks.
@@ -67,6 +68,8 @@ pub struct BridgeStats {
     pub delivery_refused: u64,
     /// Policy snapshots the module refused.
     pub policy_refused: u64,
+    /// Script snapshots the module refused.
+    pub scripts_refused: u64,
 }
 
 /// How an attachment request ended.
@@ -86,6 +89,8 @@ pub(crate) enum Outgoing {
     Detach,
     Deliver { context: ContextKey },
     Policy { policy_generation: u64 },
+    Scripts { table_generation: u64 },
+    Inject { request_id: u64 },
 }
 
 pub(crate) enum Effect {
@@ -95,6 +100,7 @@ pub(crate) enum Effect {
         bytes: Vec<u8>,
         outgoing: Outgoing,
         policy: Option<Rc<SealedPolicy>>,
+        scripts: Option<Rc<SealedScripts>>,
     },
     Reply(ReplyToken),
     Receive {
@@ -106,6 +112,10 @@ pub(crate) enum Effect {
         reason: CloseReason,
     },
     Lifecycle(FrameLifecycle),
+    Injection {
+        view: u64,
+        result: zephium_webkit_web_process_protocol::protocol::InjectionResult,
+    },
     Undeliverable {
         context: ContextKey,
         error: DeliverError,
@@ -186,6 +196,7 @@ struct View {
     fallback_document: Option<DocumentGeneration>,
     contexts: HashSet<ContextKey>,
     inflight: usize,
+    sent_tables: BTreeSet<u64>,
 }
 
 impl View {
@@ -209,6 +220,7 @@ struct Target {
     view: u64,
     module_frame: u64,
     world: String,
+    external_install: Option<String>,
     document_seq: u64,
     generation: u64,
     kind: ContextKind,
@@ -237,6 +249,11 @@ pub(crate) struct Core {
     next_document: u64,
     policy: Option<(u64, Rc<SealedPolicy>)>,
     next_policy: u64,
+    scripts: BTreeMap<u64, Rc<SealedScripts>>,
+    current_scripts: u64,
+    next_request: u64,
+    injections: HashMap<u64, Execution>,
+    injection_bytes: usize,
     buffered_bytes: usize,
     queued_bytes: usize,
     stats: BridgeStats,
@@ -278,6 +295,11 @@ impl Core {
             next_document: 0,
             policy: None,
             next_policy: 0,
+            scripts: BTreeMap::new(),
+            current_scripts: 0,
+            next_request: 0,
+            injections: HashMap::new(),
+            injection_bytes: 0,
             buffered_bytes: 0,
             queued_bytes: 0,
             stats: BridgeStats::default(),
@@ -299,7 +321,7 @@ impl Core {
     }
 
     pub fn has_buffered(&self) -> bool {
-        self.views.values().any(|view| !view.buffer.is_empty())
+        !self.injections.is_empty() || self.views.values().any(|view| !view.buffer.is_empty())
     }
 
     pub fn phase(&self, view: u64) -> Option<Phase> {
@@ -340,6 +362,18 @@ impl Core {
     }
 
     fn close_install(&mut self, install: ExtensionInstallId) {
+        let requests: Vec<u64> = self
+            .injections
+            .iter()
+            .filter(|(_, pending)| pending.install == install)
+            .map(|(request, _)| *request)
+            .collect();
+        for request in requests {
+            self.fail_injection(
+                request,
+                zephium_webkit_web_process_protocol::protocol::InjectionStatus::StaleTarget,
+            );
+        }
         let keys: Vec<ContextKey> = self
             .contexts
             .keys()
@@ -434,6 +468,7 @@ impl Core {
                 fallback_document: None,
                 contexts: HashSet::new(),
                 inflight: 0,
+                sent_tables: BTreeSet::new(),
             },
         );
         self.attach_now(id);
@@ -480,29 +515,74 @@ impl Core {
             self.close_context(&key, CloseReason::Revoked);
         }
         if immediately && !unchanged {
-            self.attach_now(id);
+            let widening = self.views.get(&id).is_some_and(|view| {
+                view.attached_plan()
+                    .is_some_and(|old| view.plan.widens(old))
+            });
+            if widening {
+                self.attach_widening(id);
+            } else {
+                self.attach_now(id);
+            }
         }
         Ok(())
     }
 
     fn still_granted(view: &View, target: &Target) -> bool {
-        let origin = if target.generation == FALLBACK_GENERATION {
-            view.host_main
+        if target.generation == FALLBACK_GENERATION {
+            return view
+                .host_main
                 .as_ref()
                 .and_then(|url| document_origin(url.as_str()))
-        } else {
-            view.frames
-                .get(target.module_frame)
-                .and_then(|frame| frame.document.origin.clone())
-        };
-        let Some(origin) = origin else {
+                .is_some_and(|origin| view.plan.admits_page(&origin).is_some());
+        }
+        let Some(frame) = view
+            .frames
+            .get(target.module_frame)
+            .filter(|frame| frame.document.seq == target.document_seq)
+        else {
             return false;
         };
-        if target.world.is_empty() {
-            view.plan.admits_page(&origin).is_some()
+        if let Some(install) = &target.external_install {
+            view.plan.admits_external(install, &frame.document.facts)
+        } else if target.world.is_empty() {
+            frame
+                .document
+                .origin
+                .as_ref()
+                .is_some_and(|origin| view.plan.admits_page(origin).is_some())
         } else {
-            view.plan.admits_world(&target.world, &origin).is_some()
+            view.plan
+                .admits_world(&target.world, &frame.document.facts)
+                .is_some()
         }
+    }
+
+    fn attach_widening(&mut self, id: u64) {
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
+        };
+        let Some(generation) = view.generation() else {
+            self.attach_now(id);
+            return;
+        };
+        let attach = view
+            .plan
+            .attach(&self.token, generation, view.role.page_role());
+        let Ok(bytes) = encode_ui(&UiMessage::Attach(attach)) else {
+            return;
+        };
+        view.attached = Some((generation, view.plan.clone()));
+        view.phase = Phase::InFlight(generation);
+        view.reattach_on_navigation = false;
+        self.effects.push(Effect::Send {
+            view: id,
+            name: ATTACH_MESSAGE,
+            bytes,
+            outgoing: Outgoing::Attach { generation },
+            policy: None,
+            scripts: None,
+        });
     }
 
     pub fn detach(&mut self, id: u64) {
@@ -520,6 +600,7 @@ impl Core {
                     bytes,
                     outgoing: Outgoing::Detach,
                     policy: None,
+                    scripts: None,
                 });
             }
         }
@@ -579,6 +660,7 @@ impl Core {
             bytes,
             outgoing: Outgoing::Attach { generation },
             policy: None,
+            scripts: None,
         });
     }
 
@@ -593,6 +675,7 @@ impl Core {
             AttachOutcome::Accepted => {
                 view.phase = Phase::Live(generation);
                 let apply = view.plan.apply_policy;
+                self.send_scripts(id);
                 if apply {
                     if let Some((policy_generation, policy)) = self.policy.clone() {
                         self.send_policy(id, policy_generation, policy);
@@ -617,6 +700,9 @@ impl Core {
                                     view: BridgeViewId(id),
                                     owner,
                                     frame: FrameId::MAIN,
+                                    parent: None,
+                                    opaque: false,
+                                    creator: None,
                                     document,
                                     url,
                                 }));
@@ -627,11 +713,17 @@ impl Core {
             }
             AttachOutcome::Refused | AttachOutcome::Unhandled => {
                 self.stats.attach_refused += 1;
-                view.phase = Phase::Refused(generation);
+                self.reset_view(id, CloseReason::Reattached);
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.phase = Phase::Refused(generation);
+                }
             }
             AttachOutcome::Failed => {
                 self.stats.attach_failed += 1;
-                view.phase = Phase::Pending;
+                self.reset_view(id, CloseReason::Reattached);
+                if let Some(view) = self.views.get_mut(&id) {
+                    view.phase = Phase::Pending;
+                }
             }
         }
     }
@@ -674,6 +766,9 @@ impl Core {
                         view: BridgeViewId(id),
                         owner,
                         frame: FrameId::MAIN,
+                        parent: None,
+                        opaque: false,
+                        creator: None,
                         document,
                         url,
                     }));
@@ -704,11 +799,25 @@ impl Core {
     /// Closes every context and frame of a view and answers its waiting
     /// posts.
     fn reset_view(&mut self, id: u64, reason: CloseReason) {
+        let requests: Vec<u64> = self
+            .injections
+            .iter()
+            .filter(|(_, pending)| pending.view == id)
+            .map(|(request, _)| *request)
+            .collect();
+        for request in requests {
+            self.fail_injection(
+                request,
+                zephium_webkit_web_process_protocol::protocol::InjectionStatus::StaleTarget,
+            );
+        }
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
         let mut changes = Vec::new();
         view.frames.clear(&mut changes);
+        view.sent_tables
+            .retain(|generation| *generation == self.current_scripts);
         view.fallback_document = None;
         let buffered = view.buffer.take();
         let had_state = !changes.is_empty() || !view.contexts.is_empty() || !buffered.is_empty();
@@ -753,6 +862,9 @@ impl Core {
                 let mut refused = 0;
                 if let Some(view) = self.views.get_mut(&id) {
                     for event in &events {
+                        if let zephium_webkit_web_process_protocol::protocol::FrameEvent::Created(info) | zephium_webkit_web_process_protocol::protocol::FrameEvent::Committed(info) = event {
+                            if info.table_generation != 0 && (!view.sent_tables.contains(&info.table_generation) || !self.scripts.contains_key(&info.table_generation)) { refused += 1; continue; }
+                        }
                         let next = &mut self.next_document;
                         let mut mint = || {
                             *next = next.checked_add(1)?;
@@ -765,6 +877,22 @@ impl Core {
                 }
                 self.stats.frame_records_refused += refused;
                 self.apply_changes(id, changes, CloseReason::DocumentGone);
+                for event in &events {
+                    match event {
+                        zephium_webkit_web_process_protocol::protocol::FrameEvent::Evaluated(evaluation) => {
+                            let accepted = self.record_evaluation(id, evaluation);
+                            self.stats.frame_records_refused += u64::from(!accepted);
+                        }
+                        zephium_webkit_web_process_protocol::protocol::FrameEvent::ExternalPage { install_id, frame_id, document_seq } => {
+                            let valid = self.views.get(&id).is_some_and(|view| matches!(view.role, Role::Tab(_)) && view.frames.get(*frame_id).is_some_and(|frame|
+                                frame.document.seq == *document_seq && view.plan.admits_external(install_id, &frame.document.facts)
+                                    && view.attached_plan().is_some_and(|plan| plan.admits_external(install_id, &frame.document.facts))));
+                            if valid { if let Some(view) = self.views.get_mut(&id) { view.frames.record_external(*frame_id, install_id.clone()); } }
+                            else { self.stats.frame_records_refused += 1; }
+                        }
+                        _ => {}
+                    }
+                }
                 self.reassess(id, now_ms);
             }
             Event::Requests {
@@ -783,6 +911,9 @@ impl Core {
                 }
             }
             Event::Form(form) if Some(form.generation) == current => self.form(id, form),
+            Event::Injection(result) if Some(result.generation) == current => {
+                self.injection_result(id, result, now_ms)
+            }
             _ => self.stats.stale_events += 1,
         }
         self.effects.push(Effect::Reply(reply));
@@ -898,34 +1029,53 @@ impl Core {
         };
         let bound = match (&view.role, attributed.world) {
             (Role::Tab(tab), world) => {
-                let claimed = match world {
-                    AttributedWorld::Page => ClaimedWorld::Page,
-                    AttributedWorld::Script {
-                        install,
-                        world: InjectedWorld::Isolated,
-                    } => ClaimedWorld::Isolated(install),
-                    AttributedWorld::Script {
-                        install,
-                        world: InjectedWorld::UserScript(world),
-                    } => ClaimedWorld::UserScript { install, world },
-                };
-                self.authority.bind_tab(
-                    &TabDocument {
-                        tab: *tab,
-                        frame,
-                        committed,
-                    },
-                    &claimed,
-                )
+                if let AttributedWorld::External { install } = world {
+                    let Some(extension) = self.extensions.get(&install) else {
+                        return Admission::Refused(Refusal::Unbound);
+                    };
+                    self.authority.bind_external_page(
+                        &TabDocument {
+                            tab: *tab,
+                            frame,
+                            committed,
+                        },
+                        extension,
+                    )
+                } else {
+                    let claimed = match world {
+                        AttributedWorld::Page => ClaimedWorld::Page,
+                        AttributedWorld::External { .. } => {
+                            return Admission::Refused(Refusal::Unbound)
+                        }
+                        AttributedWorld::Script {
+                            install,
+                            world: InjectedWorld::Isolated,
+                        } => ClaimedWorld::Isolated(install),
+                        AttributedWorld::Script {
+                            install,
+                            world: InjectedWorld::UserScript(world),
+                        } => ClaimedWorld::UserScript { install, world },
+                    };
+                    self.authority.bind_tab(
+                        &TabDocument {
+                            tab: *tab,
+                            frame,
+                            committed,
+                        },
+                        &claimed,
+                    )
+                }
             }
             (Role::Owned(owned), AttributedWorld::Page) => {
                 self.authority.bind_view(owned, &committed)
             }
-            (Role::Owned(_), AttributedWorld::Script { .. }) => Err(BindError::NoExtensionContext),
+            (Role::Owned(_), AttributedWorld::Script { .. } | AttributedWorld::External { .. }) => {
+                Err(BindError::NoExtensionContext)
+            }
         };
         let sender = match bound {
             Ok(sender) => sender,
-            Err(BindError::NotInjected) => return Admission::Refused(Refusal::NotInjected),
+            Err(BindError::NotInjected) => return Admission::Wait(Pending::Injection),
             Err(_) => return Admission::Refused(Refusal::Unbound),
         };
         let cap = message_limit(sender.kind()).min(view.role.message_cap());
@@ -936,6 +1086,7 @@ impl Core {
             view: id,
             module_frame: post.frame_id,
             world: post.world.clone(),
+            external_install: post.external_install.clone(),
             document_seq: post.document_seq,
             generation,
             kind: sender.kind(),
@@ -954,6 +1105,7 @@ impl Core {
                 let same = existing.view == target.view
                     && existing.module_frame == target.module_frame
                     && existing.world == target.world
+                    && existing.external_install == target.external_install
                     && existing.document_seq == target.document_seq
                     && existing.generation == target.generation;
                 if !same {
@@ -1006,6 +1158,7 @@ impl Core {
             view: id,
             module_frame: 0,
             world: String::new(),
+            external_install: None,
             document_seq: 0,
             generation: FALLBACK_GENERATION,
             kind: sender.kind(),
@@ -1039,6 +1192,18 @@ impl Core {
     }
 
     pub fn tick(&mut self, now_ms: u64) {
+        let expired: Vec<u64> = self
+            .injections
+            .iter()
+            .filter(|(_, pending)| now_ms >= pending.deadline)
+            .map(|(id, _)| *id)
+            .collect();
+        for request in expired {
+            self.fail_injection(
+                request,
+                zephium_webkit_web_process_protocol::protocol::InjectionStatus::TimedOut,
+            );
+        }
         for id in self.views() {
             self.reassess(id, now_ms);
         }
@@ -1068,19 +1233,24 @@ impl Core {
                 FrameChange::Created {
                     frame,
                     main,
+                    parent,
+                    opaque,
+                    creator,
                     document,
                     url,
                     ..
                 } => {
                     if let Some(tab) = tab {
                         self.authority.document_committed(tab, frame, document);
-                        self.record_injections(id, tab, frame, document, &url);
                     }
                     self.effects
                         .push(Effect::Lifecycle(FrameLifecycle::DocumentCreated {
                             view: BridgeViewId(id),
                             owner,
                             frame,
+                            parent,
+                            opaque,
+                            creator,
                             document,
                             url,
                         }));
@@ -1102,8 +1272,21 @@ impl Core {
                         }));
                 }
                 FrameChange::Removed {
-                    frame, document, ..
+                    module_frame,
+                    frame,
+                    document,
                 } => {
+                    let requests: Vec<u64> = self
+                        .injections
+                        .iter()
+                        .filter(|(_, pending)| {
+                            pending.view == id && pending.targets.contains_key(&module_frame)
+                        })
+                        .map(|(request, _)| *request)
+                        .collect();
+                    for request in requests {
+                        self.fail_injection_target(request, module_frame, zephium_webkit_web_process_protocol::protocol::InjectionStatus::StaleTarget);
+                    }
                     if let Some(tab) = tab {
                         self.authority.frame_removed(tab, frame);
                     }
@@ -1137,39 +1320,194 @@ impl Core {
         }
     }
 
-    /// Records the worlds the module installed the bridge in for this
-    /// document: those both the attached plan and the host's current plan
-    /// admit for its origin.
-    fn record_injections(
+    fn record_evaluation(
         &mut self,
         id: u64,
-        tab: ItemId,
-        frame: FrameId,
-        document: DocumentGeneration,
-        url: &Url,
-    ) {
-        let Some(origin) = document_origin(url.as_str()) else {
-            return;
-        };
+        evaluation: &zephium_webkit_web_process_protocol::protocol::Evaluation,
+    ) -> bool {
+        if !evaluation.success {
+            return true;
+        }
         let Some(view) = self.views.get(&id) else {
-            return;
+            return false;
+        };
+        let Role::Tab(tab) = view.role else {
+            return false;
+        };
+        let Some(frame) = view
+            .frames
+            .get(evaluation.frame_id)
+            .filter(|frame| frame.document.seq == evaluation.document_seq)
+        else {
+            return false;
         };
         let Some(attached) = view.attached_plan() else {
+            return false;
+        };
+        if evaluation.world.is_empty() {
+            let allowed = |plan: &ResolvedPlan| {
+                plan.worlds.iter().any(|(name, grant)| {
+                    install_hex(grant.install) == evaluation.install_id
+                        && plan.admits_world(name, &frame.document.facts).is_some()
+                })
+            };
+            return allowed(&view.plan)
+                && allowed(attached)
+                && frame.document.facts.table_generation == evaluation.table_generation
+                && self
+                    .scripts
+                    .get(&evaluation.table_generation)
+                    .is_some_and(|table| {
+                        table.table.entries.iter().any(|entry| {
+                            entry.install_id == evaluation.install_id
+                                && entry.script_id == evaluation.script_id
+                                && entry.world.is_empty()
+                                && entry.rule.matches(&frame.document.facts)
+                                && usize::from(evaluation.file_index) < entry.files.len()
+                        })
+                    });
+        }
+        let (Some(grant), Some(_)) = (
+            view.plan
+                .admits_world(&evaluation.world, &frame.document.facts),
+            attached.admits_world(&evaluation.world, &frame.document.facts),
+        ) else {
+            return false;
+        };
+        if install_hex(grant.install) != evaluation.install_id {
+            return false;
+        }
+        let valid = if evaluation.table_generation == 0 {
+            evaluation.script_id.is_empty()
+                && evaluation.file_index == u16::MAX
+                && !grant.bootstrap.is_empty()
+        } else {
+            frame.document.facts.table_generation == evaluation.table_generation
+                && self
+                    .scripts
+                    .get(&evaluation.table_generation)
+                    .is_some_and(|table| {
+                        table.table.entries.iter().any(|entry| {
+                            entry.install_id == evaluation.install_id
+                                && entry.script_id == evaluation.script_id
+                                && entry.world == evaluation.world
+                                && entry.rule.matches(&frame.document.facts)
+                                && if evaluation.file_index == u16::MAX {
+                                    !entry.bootstrap.is_empty()
+                                } else {
+                                    usize::from(evaluation.file_index) < entry.files.len()
+                                }
+                        })
+                    })
+        };
+        if !valid {
+            return false;
+        }
+        self.authority
+            .record_injection(
+                tab,
+                frame.chrome,
+                frame.document.generation,
+                grant.install,
+                grant.world.clone(),
+            )
+            .is_ok()
+    }
+
+    pub fn publish_scripts(&mut self, table: Rc<SealedScripts>) -> Result<u64, ScriptTableError> {
+        for entry in &table.table.entries {
+            let install = u128::from_str_radix(&entry.install_id, 16)
+                .ok()
+                .map(ExtensionInstallId::from)
+                .ok_or(ScriptTableError::InvalidOwner)?;
+            let extension = self
+                .extensions
+                .get(&install)
+                .ok_or(ScriptTableError::InvalidOwner)?;
+            if entry.files.iter().chain(&entry.css).any(|file| {
+                !Url::parse(&file.url).is_ok_and(|url| url.host_str() == Some(extension.as_str()))
+            }) {
+                return Err(ScriptTableError::InvalidOwner);
+            }
+        }
+        let generation = table.table.generation;
+        if generation <= self.current_scripts {
+            return Err(ScriptTableError::Generation);
+        }
+        let live: HashSet<u64> = self
+            .views
+            .values()
+            .flat_map(|view| view.sent_tables.iter().copied())
+            .collect();
+        self.scripts
+            .retain(|generation, _| live.contains(generation));
+        if self.scripts.len() >= 16
+            || self
+                .scripts
+                .values()
+                .map(|table| u64::from(table.len()))
+                .sum::<u64>()
+                + u64::from(table.len())
+                > 64 * 1024 * 1024
+        {
+            return Err(ScriptTableError::Generation);
+        }
+        self.scripts.insert(generation, table);
+        self.current_scripts = generation;
+        for id in self.views() {
+            self.send_scripts(id);
+        }
+        Ok(generation)
+    }
+
+    fn send_scripts(&mut self, id: u64) {
+        let Some(view) = self
+            .views
+            .get(&id)
+            .filter(|view| matches!(view.phase, Phase::Live(_)))
+        else {
             return;
         };
-        let grants: Vec<(ExtensionInstallId, InjectedWorld)> = attached
-            .worlds
-            .iter()
-            .filter(|(name, world)| {
-                world.origins.contains(&origin) && view.plan.admits_world(name, &origin).is_some()
-            })
-            .map(|(_, world)| (world.install, world.world.clone()))
-            .collect();
-        for (install, world) in grants {
-            // A retired install's grant stays in a stale plan; it binds nothing.
-            let _ = self
-                .authority
-                .record_injection(tab, frame, document, install, world);
+        let Some(generation) = view.generation() else {
+            return;
+        };
+        let Some(table) = self.scripts.get(&self.current_scripts).cloned() else {
+            return;
+        };
+        let message = zephium_webkit_web_process_protocol::protocol::UiMessage::Scripts(
+            zephium_webkit_web_process_protocol::protocol::ScriptUpdate {
+                token: self.token.clone(),
+                generation,
+                table_generation: table.table.generation,
+                fd_index: 0,
+                length: table.len(),
+            },
+        );
+        if let Ok(bytes) = encode_ui(&message) {
+            if let Some(view) = self.views.get_mut(&id) {
+                view.sent_tables.insert(table.table.generation);
+            }
+            self.effects.push(Effect::Send {
+                view: id,
+                name: zephium_webkit_web_process_protocol::protocol::SCRIPTS_MESSAGE,
+                bytes,
+                outgoing: Outgoing::Scripts {
+                    table_generation: table.table.generation,
+                },
+                policy: None,
+                scripts: Some(table),
+            });
+        }
+    }
+
+    pub fn scripts_settled(&mut self, id: u64, table_generation: u64, accepted: bool) {
+        if !accepted
+            && self
+                .views
+                .get(&id)
+                .is_some_and(|view| view.sent_tables.contains(&table_generation))
+        {
+            self.stats.scripts_refused += 1;
         }
     }
 
@@ -1267,6 +1605,7 @@ impl Core {
                         frame_id: target.module_frame,
                         document_seq: target.document_seq,
                         world: target.world.clone(),
+                        external_install: target.external_install.clone(),
                         bytes: frame,
                     });
                     match encode_ui(&message) {
@@ -1278,6 +1617,7 @@ impl Core {
                                 context: key.clone(),
                             },
                             policy: None,
+                            scripts: None,
                         },
                         Err(_) => {
                             self.effects.push(Effect::Undeliverable {
@@ -1298,7 +1638,12 @@ impl Core {
         }
     }
 
-    pub fn delivery_settled(&mut self, id: u64, key: &ContextKey, accepted: bool) {
+    pub fn delivery_settled(
+        &mut self,
+        id: u64,
+        key: &ContextKey,
+        status: zephium_webkit_web_process_protocol::protocol::DeliveryStatus,
+    ) {
         if let Some(view) = self.views.get_mut(&id) {
             view.inflight = view.inflight.saturating_sub(1);
         }
@@ -1307,11 +1652,11 @@ impl Core {
                 target.inflight = target.inflight.saturating_sub(1);
             }
         }
-        if !accepted {
+        if status != zephium_webkit_web_process_protocol::protocol::DeliveryStatus::Delivered {
             self.stats.delivery_refused += 1;
             self.effects.push(Effect::Undeliverable {
                 context: key.clone(),
-                error: DeliverError::Refused,
+                error: DeliverError::from(status),
             });
         }
         self.flush(id);
@@ -1353,6 +1698,7 @@ impl Core {
                 bytes,
                 outgoing: Outgoing::Policy { policy_generation },
                 policy: Some(policy),
+                scripts: None,
             });
         }
     }
@@ -1360,6 +1706,321 @@ impl Core {
     pub fn policy_settled(&mut self, accepted: bool) {
         if !accepted {
             self.stats.policy_refused += 1;
+        }
+    }
+}
+
+fn install_hex(install: ExtensionInstallId) -> String {
+    install
+        .bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+struct Execution {
+    view: u64,
+    generation: u64,
+    install: ExtensionInstallId,
+    world: String,
+    targets: BTreeMap<u64, u64>,
+    bytes: usize,
+    deadline: u64,
+}
+
+/// Why a host-authored injection could not enter the native transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InjectionError {
+    /// The view or document is stale.
+    Stale,
+    /// Current host grants do not admit every target.
+    Denied,
+    /// Too many outstanding native injections.
+    Backpressure,
+    /// Source, arguments or timing exceed protocol bounds.
+    Invalid,
+}
+
+impl Core {
+    pub fn frame_target(
+        &self,
+        id: u64,
+        frame: FrameId,
+        document: DocumentGeneration,
+    ) -> Option<zephium_webkit_web_process_protocol::protocol::InjectionTarget> {
+        let (frame_id, facts) = self.views.get(&id)?.frames.by_chrome(frame)?;
+        (facts.document.generation == document).then_some(
+            zephium_webkit_web_process_protocol::protocol::InjectionTarget::Frame {
+                frame_id,
+                document_seq: facts.document.seq,
+            },
+        )
+    }
+
+    pub fn inject(
+        &mut self,
+        id: u64,
+        install: ExtensionInstallId,
+        mut request: zephium_webkit_web_process_protocol::protocol::InjectRequest,
+        now_ms: u64,
+    ) -> Result<u64, InjectionError> {
+        use zephium_webkit_web_process_protocol::protocol::{InjectionTarget, INJECT_MESSAGE};
+        if self.closed {
+            return Err(InjectionError::Stale);
+        }
+        if self.injections.len() >= 256 {
+            return Err(InjectionError::Backpressure);
+        }
+        let view = self.views.get(&id).ok_or(InjectionError::Stale)?;
+        if !matches!(view.role, Role::Tab(_)) || !self.extensions.contains_key(&install) {
+            return Err(InjectionError::Denied);
+        }
+        let Phase::Live(generation) = view.phase else {
+            return Err(InjectionError::Stale);
+        };
+        let attached = view.attached_plan().ok_or(InjectionError::Stale)?;
+        let targets: BTreeMap<u64, u64> = match request.target {
+            InjectionTarget::Frame {
+                frame_id,
+                document_seq,
+            } => {
+                let frame = view
+                    .frames
+                    .get(frame_id)
+                    .filter(|frame| frame.document.seq == document_seq)
+                    .ok_or(InjectionError::Stale)?;
+                [(frame_id, frame.document.seq)].into_iter().collect()
+            }
+            InjectionTarget::AllFrames => view
+                .frames
+                .iter()
+                .map(|(id, frame)| (id, frame.document.seq))
+                .collect(),
+        };
+        if targets.is_empty() {
+            return Err(InjectionError::Stale);
+        }
+        for frame_id in targets.keys() {
+            let frame = view.frames.get(*frame_id).ok_or(InjectionError::Stale)?;
+            let admitted = |plan: &ResolvedPlan| {
+                if request.world.is_empty() {
+                    plan.worlds.iter().any(|(name, grant)| {
+                        grant.install == install
+                            && plan.admits_world(name, &frame.document.facts).is_some()
+                    })
+                } else {
+                    plan.admits_world(&request.world, &frame.document.facts)
+                        .is_some_and(|grant| grant.install == install)
+                }
+            };
+            if !admitted(&view.plan) || !admitted(attached) {
+                return Err(InjectionError::Denied);
+            }
+        }
+        self.next_request = self
+            .next_request
+            .checked_add(1)
+            .ok_or(InjectionError::Backpressure)?;
+        let request_id = self.next_request;
+        request.token = self.token.clone();
+        request.generation = generation;
+        request.request_id = request_id;
+        request.install_id = install_hex(install);
+        let (&frame_id, &document_seq) = targets.first_key_value().ok_or(InjectionError::Stale)?;
+        request.target = InjectionTarget::Frame {
+            frame_id,
+            document_seq,
+        };
+        let first =
+            encode_ui(&UiMessage::Inject(request.clone())).map_err(|_| InjectionError::Invalid)?;
+        let bytes = first
+            .len()
+            .checked_mul(targets.len())
+            .ok_or(InjectionError::Backpressure)?;
+        if bytes > 16 * 1024 * 1024 || self.injection_bytes.saturating_add(bytes) > 64 * 1024 * 1024
+        {
+            return Err(InjectionError::Backpressure);
+        }
+        let mut encoded = Vec::with_capacity(targets.len());
+        encoded.push(first);
+        for (&frame_id, &document_seq) in targets.iter().skip(1) {
+            request.target = InjectionTarget::Frame {
+                frame_id,
+                document_seq,
+            };
+            encoded.push(
+                encode_ui(&UiMessage::Inject(request.clone()))
+                    .map_err(|_| InjectionError::Invalid)?,
+            );
+        }
+        self.injection_bytes += bytes;
+        self.injections.insert(
+            request_id,
+            Execution {
+                view: id,
+                generation,
+                install,
+                world: request.world.clone(),
+                targets,
+                bytes,
+                deadline: now_ms
+                    .saturating_add(u64::from(request.timeout_ms))
+                    .saturating_add(1000),
+            },
+        );
+        for bytes in encoded {
+            self.effects.push(Effect::Send {
+                view: id,
+                name: INJECT_MESSAGE,
+                bytes,
+                outgoing: Outgoing::Inject { request_id },
+                policy: None,
+                scripts: None,
+            });
+        }
+        Ok(request_id)
+    }
+
+    fn injection_result(
+        &mut self,
+        id: u64,
+        mut result: zephium_webkit_web_process_protocol::protocol::InjectionResult,
+        now_ms: u64,
+    ) {
+        use zephium_webkit_web_process_protocol::protocol::InjectionStatus;
+        let Some(pending) = self.injections.get_mut(&result.request_id) else {
+            self.stats.stale_events += 1;
+            return;
+        };
+        if pending.view != id
+            || pending.generation != result.generation
+            || pending.world != result.world
+            || pending.targets.get(&result.frame_id) != Some(&result.document_seq)
+        {
+            self.stats.stale_events += 1;
+            return;
+        }
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some(frame) = view
+            .frames
+            .get(result.frame_id)
+            .filter(|frame| frame.document.seq == result.document_seq)
+        else {
+            self.stats.stale_events += 1;
+            return;
+        };
+        if result.status == InjectionStatus::Success {
+            let admitted = |plan: &ResolvedPlan| {
+                if result.world.is_empty() {
+                    plan.worlds.iter().any(|(name, grant)| {
+                        grant.install == pending.install
+                            && plan.admits_world(name, &frame.document.facts).is_some()
+                    })
+                } else {
+                    plan.admits_world(&result.world, &frame.document.facts)
+                        .is_some_and(|grant| grant.install == pending.install)
+                }
+            };
+            if !admitted(&view.plan) || !view.attached_plan().is_some_and(admitted) {
+                result.status = InjectionStatus::Denied;
+                result.result_json = "null".into();
+            }
+        }
+        if result.status == InjectionStatus::Success && !result.world.is_empty() {
+            let Some(grant) = view
+                .plan
+                .admits_world(&result.world, &frame.document.facts)
+                .filter(|grant| grant.install == pending.install)
+            else {
+                self.stats.stale_events += 1;
+                return;
+            };
+            let Role::Tab(tab) = view.role else {
+                return;
+            };
+            let _ = self.authority.record_injection(
+                tab,
+                frame.chrome,
+                frame.document.generation,
+                grant.install,
+                grant.world.clone(),
+            );
+        }
+        pending.targets.remove(&result.frame_id);
+        let complete = pending.targets.is_empty();
+        if complete {
+            if let Some(pending) = self.injections.remove(&result.request_id) {
+                self.injection_bytes = self.injection_bytes.saturating_sub(pending.bytes);
+            }
+        }
+        self.effects.push(Effect::Injection { view: id, result });
+        self.reassess(id, now_ms);
+    }
+
+    pub fn injection_transport_settled(&mut self, request_id: u64, accepted: bool) {
+        if !accepted {
+            self.fail_injection(
+                request_id,
+                zephium_webkit_web_process_protocol::protocol::InjectionStatus::Denied,
+            );
+        }
+    }
+
+    fn fail_injection_target(
+        &mut self,
+        request_id: u64,
+        frame_id: u64,
+        status: zephium_webkit_web_process_protocol::protocol::InjectionStatus,
+    ) {
+        let Some(pending) = self.injections.get_mut(&request_id) else {
+            return;
+        };
+        let Some(document_seq) = pending.targets.remove(&frame_id) else {
+            return;
+        };
+        self.effects.push(Effect::Injection {
+            view: pending.view,
+            result: zephium_webkit_web_process_protocol::protocol::InjectionResult {
+                generation: pending.generation,
+                request_id,
+                frame_id,
+                document_seq,
+                world: pending.world.clone(),
+                status,
+                result_json: "null".into(),
+            },
+        });
+        if pending.targets.is_empty() {
+            if let Some(pending) = self.injections.remove(&request_id) {
+                self.injection_bytes = self.injection_bytes.saturating_sub(pending.bytes);
+            }
+        }
+    }
+
+    fn fail_injection(
+        &mut self,
+        request_id: u64,
+        status: zephium_webkit_web_process_protocol::protocol::InjectionStatus,
+    ) {
+        let Some(pending) = self.injections.remove(&request_id) else {
+            return;
+        };
+        self.injection_bytes = self.injection_bytes.saturating_sub(pending.bytes);
+        for (frame_id, document_seq) in pending.targets {
+            self.effects.push(Effect::Injection {
+                view: pending.view,
+                result: zephium_webkit_web_process_protocol::protocol::InjectionResult {
+                    generation: pending.generation,
+                    request_id,
+                    frame_id,
+                    document_seq,
+                    world: pending.world.clone(),
+                    status,
+                    result_json: "null".into(),
+                },
+            });
         }
     }
 }

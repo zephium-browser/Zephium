@@ -1,6 +1,8 @@
 #![cfg(all(target_os = "linux", feature = "native-tests"))]
 #![forbid(unsafe_code)]
 
+#[path = "native/content.rs"]
+mod content;
 mod support;
 
 use gio::prelude::UnixFDListExtManual;
@@ -85,9 +87,14 @@ fn native_web_process_module() {
         Some(&wrong_type),
         None
     )));
-    let mut wrong_version = attach.clone();
-    wrong_version.protocol_version = PROTOCOL_VERSION + 1;
-    assert!(!send(&page, &UiMessage::Attach(wrong_version), None));
+    let mut wrong_version = encode_ui(&UiMessage::Attach(attach.clone())).unwrap();
+    wrong_version[5..9].copy_from_slice(&(PROTOCOL_VERSION - 1).to_le_bytes());
+    assert!(!accepted(send_raw(
+        &page,
+        ATTACH_MESSAGE,
+        Some(&wrong_version.to_variant()),
+        None
+    )));
     let mut wrong_token = attach.clone();
     wrong_token.token = "other-process-token".into();
     assert!(!send(&page, &UiMessage::Attach(wrong_token), None));
@@ -165,6 +172,11 @@ fn native_web_process_module() {
     assert_repeated_lifecycle(&page, &fixture, &events);
     assert_inflight_lifecycle(&page, &fixture, &held_replies);
     assert_extension_owned_default_world(&module, &fixture);
+    content::run(&module, &fixture);
+    content::timing(&module, &fixture);
+    content::external(&module, &fixture);
+    content::view_grants(&module, &fixture);
+    content::frame_facts(&module, &fixture);
     page.stop_loading();
     println!("WEBEXT native_module inert=true hostile_posts=true frame_roundtrip=true stale_drop=true request_policy=true");
 }
@@ -306,7 +318,11 @@ fn attach(fixture: &Fixture) -> Attach {
         },
         worlds: vec![WorldRule {
             name: WORLD.into(),
-            origins: vec![fixture.origin.clone(), fixture.cross_origin.clone()],
+            install_id: "00000000000000000000000000000001".into(),
+            matches: vec![
+                protocol_rule(&fixture.origin),
+                protocol_rule(&fixture.cross_origin),
+            ],
             bootstrap: BOOTSTRAP.into(),
         }],
         observe_requests: true,
@@ -314,11 +330,15 @@ fn attach(fixture: &Fixture) -> Attach {
     }
 }
 
+fn protocol_rule(origin: &str) -> zephium_webkit_web_process::protocol::MatchRule {
+    zephium_webkit_web_process::protocol::MatchRule::for_origin(origin).unwrap()
+}
+
 fn accepted(reply: Result<webkit2gtk::UserMessage, glib::Error>) -> bool {
     reply
         .ok()
         .and_then(|reply| reply.parameters())
-        .and_then(|parameters| parameters.get::<bool>())
+        .and_then(|parameters| parameters.get::<bool>().or_else(|| parameters.get::<Vec<u8>>().and_then(|bytes| zephium_webkit_web_process_protocol::scripts::decode_delivery_result(&bytes).ok()).map(|status| status == zephium_webkit_web_process_protocol::scripts::DeliveryStatus::Delivered)))
         .unwrap_or(false)
 }
 
@@ -432,6 +452,7 @@ fn assert_hostile_posts(page: &webkit2gtk::WebView, events: &Rc<RefCell<Vec<Even
 
 fn delivery(post: &Post, bytes: Vec<u8>) -> Deliver {
     Deliver {
+        external_install: None,
         token: TOKEN.into(),
         generation: GENERATION,
         frame_id: post.frame_id,

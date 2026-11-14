@@ -1,0 +1,73 @@
+{
+  "caseId": "permissions-request-gesture",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "user activation",
+      "value": {
+        "hasBeenActive": false,
+        "isActive": false
+      }
+    },
+    {
+      "label": "request alarms without gesture:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "request alarms without gesture:error",
+      "value": {
+        "lastError": null,
+        "message": "This function must be called during a user gesture"
+      }
+    },
+    {
+      "label": "request optional origin callback without gesture:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "request optional origin callback without gesture:callback",
+      "value": {
+        "args": [],
+        "lastError": "This function must be called during a user gesture",
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "request optional origin callback without gesture:after",
+      "value": {
+        "lastError": "This function must be called during a user gesture"
+      }
+    },
+    {
+      "label": "request optional origin callback without gesture:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "permissions remain absent:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "permissions remain absent:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

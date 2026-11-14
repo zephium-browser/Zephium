@@ -1,0 +1,4 @@
+html {
+  --webext-probe: manifest;
+  color: rgb(12, 34, 56);
+}

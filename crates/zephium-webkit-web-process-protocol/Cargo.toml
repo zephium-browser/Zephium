@@ -6,4 +6,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
+zephium-webext-matcher = { path = "../zephium-webext-matcher", version = "=0.1.0" }
 url.workspace = true
+serde_json.workspace = true

@@ -5,11 +5,13 @@
 //! Every C entry aborts on panic, including destroy and completion callbacks.
 
 mod raw;
+mod scripts;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
+use std::sync::{Arc, Weak};
 
 use crate::policy::{Decision, PolicySnapshot, RequestInfo, ResourceType, MAX_SNAPSHOT_BYTES};
 use crate::protocol::{self, Attach, Deliver, Event, FormEvent, RequestEvent, UiMessage};
@@ -20,7 +22,9 @@ const MAX_NATIVE_PAGES: usize = 256;
 const MAX_NATIVE_WORLDS: usize = 256;
 const MAX_PENDING_EVENTS: usize = 64;
 const MAX_PENDING_EVENT_BYTES: usize = 1024 * 1024;
+const MAX_PROCESS_SCRIPT_BYTES: usize = 64 * 1024 * 1024;
 const FORM_WORLD: &str = "zephium-web-process-form-v1";
+const FACT_WORLD: &str = "zephium-web-process-facts-v2";
 const UINT8_ARRAY: c_int = 5;
 const G_TYPE_BOOLEAN: usize = 5 << 2;
 
@@ -35,6 +39,9 @@ struct Runtime {
     timer_active: bool,
     event_inflight_bytes: usize,
     event_inflight_count: usize,
+    injections: BTreeMap<u64, scripts::PendingInjection>,
+    next_injection: u64,
+    script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
 }
 
 struct NativePage {
@@ -48,15 +55,17 @@ struct NativePage {
     event_bytes: usize,
     batch_inflight: bool,
     form_connected: bool,
+    scripts: Option<Arc<protocol::ScriptTable>>,
 }
 
 struct NativeFrame {
     pointer: *mut Object,
-    document_identity: *mut Object,
     weak_data: *mut (u64, u64),
-    default_seen: bool,
     installed: BTreeSet<String>,
     receivers: BTreeMap<String, *mut Object>,
+    scripts: Option<Arc<protocol::ScriptTable>>,
+    phases: [bool; 3],
+    bootstrapped: BTreeMap<String, bool>,
 }
 
 #[derive(Clone)]
@@ -64,8 +73,8 @@ struct Binding {
     page: u64,
     frame: u64,
     document_seq: u64,
-    generation: u64,
     world: String,
+    external_install: Option<String>,
 }
 
 struct Completion {
@@ -73,6 +82,7 @@ struct Completion {
     generation: u64,
     post_id: Option<u64>,
     event_bytes: usize,
+    batch: bool,
 }
 
 struct PanicGuard;
@@ -231,6 +241,9 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 timer_active: false,
                 event_inflight_bytes: 0,
                 event_inflight_count: 0,
+                injections: BTreeMap::new(),
+                next_injection: 0,
+                script_tables: BTreeMap::new(),
             });
             true
         });
@@ -276,6 +289,7 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
                     event_bytes: 0,
                     batch_inflight: false,
                     form_connected: false,
+                    scripts: None,
                 },
             );
             true
@@ -358,7 +372,7 @@ fn ensure_world(name: &str) -> Option<*mut Object> {
     with_runtime(|runtime| {
         runtime.worlds.insert(name.to_owned(), world);
     });
-    if name != FORM_WORLD {
+    if name != FORM_WORLD && name != FACT_WORLD {
         connect(
             world,
             c"window-object-cleared",
@@ -402,6 +416,88 @@ fn start_timer() {
             raw::g_timeout_add_full(0, 250, Some(flush_events), ptr::null_mut(), None);
         }
     }
+}
+
+fn flush_frame_events(id: u64) -> bool {
+    loop {
+        let next = with_runtime(|runtime| {
+            if runtime.event_inflight_count >= 128
+                || runtime.event_inflight_bytes >= 15 * 1024 * 1024
+            {
+                return Err(());
+            }
+            let generation = runtime.state.attachment(id).ok_or(())?.generation;
+            let events = runtime.state.drain_frame_events(id);
+            if events.is_empty() {
+                return Ok(None);
+            }
+            let bytes =
+                protocol::encode_event(&Event::Frames { generation, events }).map_err(|_| ())?;
+            let native = runtime.pages.get(&id).ok_or(())?;
+            runtime.event_inflight_count += 1;
+            runtime.event_inflight_bytes += bytes.len();
+            Ok(Some((native.pointer, generation, bytes)))
+        });
+        let Some(Ok(next)) = next else {
+            return false;
+        };
+        let Some((pointer, generation, bytes)) = next else {
+            return true;
+        };
+        let Some(page) = Owned::borrowed(pointer) else {
+            return false;
+        };
+        let event_bytes = bytes.len();
+        send_bytes(
+            &page,
+            bytes,
+            Completion {
+                page: id,
+                generation,
+                post_id: None,
+                event_bytes,
+                batch: false,
+            },
+        );
+    }
+}
+
+fn send_event_immediately(id: u64, event: Event) -> bool {
+    let Ok(bytes) = protocol::encode_event(&event) else {
+        return false;
+    };
+    let next = with_runtime(|runtime| {
+        if runtime.event_inflight_count >= 128
+            || runtime.event_inflight_bytes.saturating_add(bytes.len()) > 16 * 1024 * 1024
+        {
+            return None;
+        }
+        let generation = runtime.state.attachment(id)?.generation;
+        let pointer = runtime.pages.get(&id)?.pointer;
+        runtime.event_inflight_count += 1;
+        runtime.event_inflight_bytes += bytes.len();
+        Some((pointer, generation))
+    })
+    .flatten();
+    let Some((pointer, generation)) = next else {
+        return false;
+    };
+    let Some(page) = Owned::borrowed(pointer) else {
+        return false;
+    };
+    let event_bytes = bytes.len();
+    send_bytes(
+        &page,
+        bytes,
+        Completion {
+            page: id,
+            generation,
+            post_id: None,
+            event_bytes,
+            batch: false,
+        },
+    );
+    true
 }
 
 fn send_bytes(page: &Owned, bytes: Vec<u8>, completion: Completion) {
@@ -452,10 +548,11 @@ unsafe extern "C" fn message_finished(page: *mut Object, result: *mut Object, da
             }
             if let Some(post) = completion.post_id {
                 runtime.state.settle_post(post);
-            } else if runtime
-                .state
-                .attachment(completion.page)
-                .is_some_and(|attach| attach.generation == completion.generation)
+            } else if completion.batch
+                && runtime
+                    .state
+                    .attachment(completion.page)
+                    .is_some_and(|attach| attach.generation == completion.generation)
             {
                 if let Some(page) = runtime.pages.get_mut(&completion.page) {
                     page.batch_inflight = false;
@@ -549,6 +646,7 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                         generation,
                         post_id: None,
                         event_bytes,
+                        batch: true,
                     },
                 );
             }
@@ -571,12 +669,16 @@ unsafe extern "C" fn receive_message(
             protocol::DELIVER_MESSAGE,
             protocol::DETACH_MESSAGE,
             protocol::POLICY_MESSAGE,
+            protocol::SCRIPTS_MESSAGE,
+            protocol::INJECT_MESSAGE,
         ]
         .contains(&name.as_str())
         {
             return 0;
         }
         let parameters = raw::webkit_user_message_get_parameters(message);
+        let mut delivery_status =
+            (name == protocol::DELIVER_MESSAGE).then_some(protocol::DeliveryStatus::Denied);
         let accepted = if parameters.is_null()
             || raw::g_variant_is_of_type(parameters, c"ay".as_ptr()) == 0
             || raw::g_variant_get_size(parameters) > protocol::MAX_UI_BYTES
@@ -594,18 +696,36 @@ unsafe extern "C" fn receive_message(
             };
             bytes
                 .and_then(|bytes| protocol::decode_ui(&name, bytes).ok())
-                .is_some_and(|input| handle_message(page, message, input))
+                .is_some_and(|input| {
+                    if let UiMessage::Deliver(deliver) = input {
+                        let status = deliver_to_frame(raw::webkit_web_page_get_id(page), &deliver);
+                        delivery_status = Some(status);
+                        status == protocol::DeliveryStatus::Delivered
+                    } else {
+                        handle_message(page, message, input)
+                    }
+                })
         };
         if !accepted && name == protocol::ATTACH_MESSAGE {
             deactivate_page(raw::webkit_web_page_get_id(page));
         }
         if let Ok(name) = CString::new(name) {
+            let parameters = if let Some(status) = delivery_status {
+                let bytes = Box::new(protocol::encode_delivery_result(status).unwrap_or_default());
+                raw::g_variant_new_from_data(
+                    c"ay".as_ptr(),
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    1,
+                    Some(bytes_destroyed),
+                    Box::into_raw(bytes).cast(),
+                )
+            } else {
+                raw::g_variant_new_boolean(c_int::from(accepted))
+            };
             raw::webkit_user_message_send_reply(
                 message,
-                raw::webkit_user_message_new(
-                    name.as_ptr(),
-                    raw::g_variant_new_boolean(c_int::from(accepted)),
-                ),
+                raw::webkit_user_message_new(name.as_ptr(), parameters),
             );
         }
         1
@@ -622,6 +742,7 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                     return None;
                 }
                 let native = runtime.pages.get_mut(&id)?;
+                native.scripts = None;
                 native.policy = None;
                 native.policy_generation = 0;
                 native.requests.clear();
@@ -639,7 +760,80 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 false
             }
         }
-        UiMessage::Deliver(deliver) => deliver_to_frame(id, &deliver),
+        UiMessage::Deliver(deliver) => {
+            deliver_to_frame(id, &deliver) == protocol::DeliveryStatus::Delivered
+        }
+        UiMessage::Inject(request) => scripts::inject(id, request),
+        UiMessage::Scripts(update) => {
+            if !with_runtime(|runtime| {
+                runtime
+                    .state
+                    .validate_message(id, &update.token, update.generation)
+                    && runtime.pages.get(&id).is_some_and(|page| {
+                        page.scripts
+                            .as_ref()
+                            .is_none_or(|table| update.table_generation > table.generation)
+                    })
+            })
+            .unwrap_or(false)
+            {
+                return false;
+            }
+            let Some(table) = map_sealed(
+                message,
+                update.fd_index,
+                update.length as usize,
+                protocol::MAX_SCRIPT_TABLE_BYTES,
+                protocol::ScriptTable::decode,
+            ) else {
+                return false;
+            };
+            if table.generation != update.table_generation {
+                return false;
+            }
+            with_runtime(|runtime| {
+                if !runtime
+                    .state
+                    .validate_message(id, &update.token, update.generation)
+                {
+                    return false;
+                }
+                runtime
+                    .script_tables
+                    .retain(|_, (table, _)| table.strong_count() != 0);
+                let shared =
+                    if let Some((existing, _)) = runtime.script_tables.get(&table.generation) {
+                        let Some(existing) = existing.upgrade() else {
+                            return false;
+                        };
+                        if *existing != table {
+                            return false;
+                        }
+                        existing
+                    } else {
+                        let bytes = runtime
+                            .script_tables
+                            .values()
+                            .map(|(_, bytes)| bytes)
+                            .sum::<usize>();
+                        if bytes.saturating_add(update.length as usize) > MAX_PROCESS_SCRIPT_BYTES {
+                            return false;
+                        }
+                        let table = Arc::new(table);
+                        runtime.script_tables.insert(
+                            table.generation,
+                            (Arc::downgrade(&table), update.length as usize),
+                        );
+                        table
+                    };
+                let Some(page) = runtime.pages.get_mut(&id) else {
+                    return false;
+                };
+                page.scripts = Some(shared);
+                true
+            })
+            .unwrap_or(false)
+        }
         UiMessage::Policy(update) => {
             if !with_runtime(|runtime| {
                 runtime
@@ -697,6 +891,7 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
             .len()
             .saturating_add(missing)
             .saturating_add(usize::from(observe_forms))
+            .saturating_add(usize::from(!runtime.worlds.contains_key(FACT_WORLD)))
             <= MAX_NATIVE_WORLDS
     })
     .unwrap_or(false);
@@ -704,8 +899,15 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
         return false;
     }
     let removed = with_runtime(|runtime| {
+        let preserve = runtime.state.attachment(id).is_some_and(|old| {
+            old.generation == attach.generation && crate::state::attachment_widens(old, &attach)
+        });
         runtime.state.attach(id, attach).ok()?;
         let native = runtime.pages.get_mut(&id)?;
+        if preserve {
+            return Some(BTreeMap::new());
+        }
+        native.scripts = None;
         native.policy = None;
         native.policy_generation = 0;
         native.requests.clear();
@@ -755,18 +957,25 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
         }
     }
     queue_event(id, Event::Attached { generation });
+    if ensure_world(FACT_WORLD).is_none() {
+        return false;
+    }
+    flush_frame_events(id);
     start_timer();
     true
 }
 
 unsafe extern "C" fn window_cleared(
-    world: *mut Object,
+    _: *mut Object,
     page: *mut Object,
     frame: *mut Object,
     data: *mut c_void,
 ) {
     boundary(|| unsafe {
         let name = &*data.cast::<String>();
+        if !name.is_empty() {
+            return;
+        }
         let page_id = raw::webkit_web_page_get_id(page);
         let frame_id = raw::webkit_frame_get_id(frame);
         let Some(uri) = bounded_text(raw::webkit_frame_get_uri(frame), protocol::MAX_URI_BYTES)
@@ -774,136 +983,105 @@ unsafe extern "C" fn window_cleared(
             return;
         };
         let is_main = raw::webkit_frame_is_main_frame(frame) != 0;
-        let identity = raw::webkit_frame_get_javascript_global_context(frame);
         let update = with_runtime(|runtime| {
-            let attach = runtime.state.attachment(page_id)?;
-            let generation = attach.generation;
-            let native = runtime.pages.get_mut(&page_id)?;
-            let prior = native.frames.get(&frame_id);
-            let new_frame = prior.is_none_or(|old| old.pointer != frame);
-            let new_document = new_frame
-                || prior.is_some_and(|old| {
-                    old.document_identity != identity || (name.is_empty() && old.default_seen)
-                });
-            let retired = if new_document {
-                runtime
-                    .state
-                    .clear_document(page_id, frame_id, &uri, is_main)
-                    .ok()?;
-                let retired = if is_main {
-                    std::mem::take(&mut native.frames)
-                } else {
-                    native
-                        .frames
-                        .remove(&frame_id)
-                        .map(|old| BTreeMap::from([(frame_id, old)]))
-                        .unwrap_or_default()
-                };
-                native.frames.insert(
-                    frame_id,
-                    NativeFrame {
-                        pointer: frame,
-                        document_identity: identity,
-                        weak_data: Box::into_raw(Box::new((page_id, frame_id))),
-                        default_seen: name.is_empty(),
-                        installed: BTreeSet::new(),
-                        receivers: BTreeMap::new(),
-                    },
-                );
-                retired
-            } else {
-                if name.is_empty() {
-                    native.frames.get_mut(&frame_id)?.default_seen = true;
-                }
-                BTreeMap::new()
-            };
-            let info = runtime.state.frame(page_id, frame_id)?.clone();
-            if new_document {
-                runtime.state.commit_frame(page_id, frame_id);
-            }
-            let allowed = runtime
+            let generation = runtime.state.attachment(page_id)?.generation;
+            runtime
                 .state
-                .worlds_for_frame(page_id, frame_id)
-                .contains(name);
-            let bootstrap = if name.is_empty() {
-                runtime
-                    .state
-                    .attachment(page_id)?
-                    .extension_bootstrap
-                    .clone()
+                .clear_document(page_id, frame_id, &uri, is_main)
+                .ok()?;
+            runtime
+                .state
+                .set_frame_facts(page_id, frame_id, None, None, true);
+            let native = runtime.pages.get_mut(&page_id)?;
+            let table_generation = native.scripts.as_ref().map_or(0, |table| table.generation);
+            runtime
+                .state
+                .set_frame_script_table(page_id, frame_id, table_generation);
+            let retired = if is_main {
+                std::mem::take(&mut native.frames)
             } else {
-                runtime
-                    .state
-                    .attachment(page_id)?
-                    .worlds
-                    .iter()
-                    .find(|rule| rule.name == *name)
-                    .map(|rule| rule.bootstrap.clone())
+                native
+                    .frames
+                    .remove(&frame_id)
+                    .map(|old| BTreeMap::from([(frame_id, old)]))
                     .unwrap_or_default()
             };
-            let install = allowed
-                && native
-                    .frames
-                    .get_mut(&frame_id)?
-                    .installed
-                    .insert(name.clone());
-            Some((
-                if new_document {
-                    Some(native.frames.get(&frame_id)?.weak_data)
-                } else {
-                    None
+            let watcher = Box::into_raw(Box::new((page_id, frame_id)));
+            native.frames.insert(
+                frame_id,
+                NativeFrame {
+                    pointer: frame,
+                    weak_data: watcher,
+                    installed: BTreeSet::new(),
+                    receivers: BTreeMap::new(),
+                    scripts: native.scripts.clone(),
+                    phases: [false; 3],
+                    bootstrapped: BTreeMap::new(),
                 },
+            );
+            Some((
+                watcher,
                 retired,
-                info.document_seq,
                 generation,
-                install,
-                bootstrap,
+                runtime.state.frame(page_id, frame_id)?.document_seq,
             ))
         })
         .flatten();
-        let Some((watcher, retired, document_seq, generation, install, bootstrap)) = update else {
+        let Some((watcher, retired, generation, document_seq)) = update else {
             return;
         };
         release_frames(retired);
-        if let Some(watcher) = watcher {
-            raw::g_object_weak_ref(frame, Some(frame_destroyed), watcher.cast());
+        raw::g_object_weak_ref(frame, Some(frame_destroyed), watcher.cast());
+        scripts::collect_facts(page_id, frame_id);
+        with_runtime(|runtime| {
+            runtime.state.commit_frame(page_id, frame_id);
+        });
+        flush_frame_events(page_id);
+        scripts::install_lifecycle(page_id, frame_id, document_seq);
+        let worlds = with_runtime(|runtime| runtime.state.worlds_for_frame(page_id, frame_id))
+            .unwrap_or_default();
+        for world in worlds {
+            let bootstrap = with_runtime(|runtime| {
+                let attach = runtime.state.attachment(page_id)?;
+                if world.is_empty() {
+                    let info = runtime.state.frame(page_id, frame_id)?;
+                    if protocol::document_origin(&info.uri)
+                        .is_some_and(|origin| attach.extension_origins.contains(&origin))
+                    {
+                        Some((String::new(), attach.extension_bootstrap.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    attach
+                        .worlds
+                        .iter()
+                        .find(|rule| rule.name == world)
+                        .map(|rule| (rule.install_id.clone(), rule.bootstrap.clone()))
+                }
+            })
+            .flatten();
+            if let Some((install, bootstrap)) = bootstrap {
+                scripts::install_bridge(
+                    Binding {
+                        page: page_id,
+                        frame: frame_id,
+                        document_seq,
+                        world,
+                        external_install: None,
+                    },
+                    &install,
+                    &bootstrap,
+                );
+            }
         }
-        if !install {
-            return;
-        }
-        let Some(context) = Owned::full(raw::webkit_frame_get_js_context_for_script_world(
-            frame, world,
-        )) else {
-            return;
-        };
-        let binding = Binding {
-            page: page_id,
-            frame: frame_id,
+        scripts::run_scripts(
+            page_id,
+            frame_id,
             document_seq,
-            generation,
-            world: name.clone(),
-        };
-        install_function(
-            &context,
-            protocol::POST_FUNCTION,
-            post_bytes as *const (),
-            binding.clone(),
+            protocol::RunAt::DocumentStart,
         );
-        install_function(
-            &context,
-            protocol::REGISTER_FUNCTION,
-            register_receiver as *const (),
-            binding,
-        );
-        if !bootstrap.is_empty() {
-            let result = Owned::full(raw::jsc_context_evaluate(
-                context.0,
-                bootstrap.as_ptr().cast(),
-                bootstrap.len() as isize,
-            ));
-            drop(result);
-            raw::jsc_context_clear_exception(context.0);
-        }
+        scripts::install_external(page_id, frame_id, document_seq, generation);
     });
 }
 
@@ -937,19 +1115,38 @@ unsafe extern "C" fn binding_destroyed(data: *mut c_void) {
 }
 
 fn binding_valid(runtime: &Runtime, binding: &Binding) -> bool {
-    runtime
-        .state
-        .attachment(binding.page)
-        .is_some_and(|attach| attach.generation == binding.generation)
+    runtime.state.attachment(binding.page).is_some()
         && runtime
             .state
             .frame(binding.page, binding.frame)
             .is_some_and(|frame| frame.document_seq == binding.document_seq)
+        && binding.external_install.as_ref().is_none_or(|install| {
+            runtime
+                .state
+                .attachment(binding.page)
+                .is_some_and(|attach| {
+                    runtime
+                        .state
+                        .frame(binding.page, binding.frame)
+                        .is_some_and(|frame| {
+                            binding.world.is_empty()
+                                && attach
+                                    .external
+                                    .iter()
+                                    .any(|rule| rule.install_id == *install && rule.admits(frame))
+                        })
+                })
+        })
         && runtime
             .pages
             .get(&binding.page)
             .and_then(|page| page.frames.get(&binding.frame))
-            .is_some_and(|frame| frame.installed.contains(&binding.world))
+            .is_some_and(|frame| {
+                frame.installed.contains(&scripts::receiver_key(
+                    &binding.world,
+                    binding.external_install.as_deref(),
+                ))
+            })
 }
 
 unsafe extern "C" fn register_receiver(value: *mut Object, data: *mut c_void) -> c_int {
@@ -976,7 +1173,10 @@ unsafe extern "C" fn register_receiver(value: *mut Object, data: *mut c_void) ->
             else {
                 return Err(());
             };
-            Ok(frame.receivers.insert(binding.world.clone(), receiver))
+            Ok(frame.receivers.insert(
+                scripts::receiver_key(&binding.world, binding.external_install.as_deref()),
+                receiver,
+            ))
         });
         match old {
             Some(Ok(old)) => {
@@ -1066,12 +1266,22 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
         } else {
             std::slice::from_raw_parts(bytes.cast::<u8>(), length)
         };
-        let encoded =
-            protocol::encode_post_bytes(generation, post_id, &frame, &binding.world, payload);
+        let encoded = protocol::encode_post_bytes_for_install(
+            generation,
+            post_id,
+            &frame,
+            &binding.world,
+            payload,
+            binding.external_install.as_deref(),
+        );
         let Ok(encoded) = encoded else {
             with_runtime(|runtime| runtime.state.settle_post(post_id));
             return 0;
         };
+        if !flush_frame_events(binding.page) {
+            with_runtime(|runtime| runtime.state.settle_post(post_id));
+            return 0;
+        }
         send_bytes(
             &page,
             encoded,
@@ -1080,6 +1290,7 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
                 generation,
                 post_id: Some(post_id),
                 event_bytes: 0,
+                batch: false,
             },
         );
         1
@@ -1092,14 +1303,18 @@ impl Drop for DeliveryReservation {
         with_runtime(|runtime| runtime.state.settle_post(self.0));
     }
 }
-fn deliver_to_frame(page: u64, deliver: &Deliver) -> bool {
+fn deliver_to_frame(page: u64, deliver: &Deliver) -> protocol::DeliveryStatus {
     let reservation = with_runtime(|runtime| {
         let now_ms = unsafe { raw::g_get_monotonic_time().max(0) as u64 } / 1000;
-        runtime.state.reserve_delivery(page, deliver, now_ms).ok()
-    })
-    .flatten();
-    let Some(reservation) = reservation else {
-        return false;
+        runtime.state.reserve_delivery(page, deliver, now_ms)
+    });
+    let reservation = match reservation {
+        Some(Ok(reservation)) => reservation,
+        Some(Err(
+            crate::state::StateError::RateLimited | crate::state::StateError::InflightLimited,
+        )) => return protocol::DeliveryStatus::RateLimited,
+        Some(Err(crate::state::StateError::WrongWorld)) => return protocol::DeliveryStatus::Denied,
+        _ => return protocol::DeliveryStatus::StaleTarget,
     };
     let _reservation = DeliveryReservation(reservation);
     let target = with_runtime(|runtime| {
@@ -1110,46 +1325,49 @@ fn deliver_to_frame(page: u64, deliver: &Deliver) -> bool {
         Some((
             native.pointer,
             *runtime.worlds.get(&deliver.world)?,
-            *native.receivers.get(&deliver.world)?,
+            *native.receivers.get(&scripts::receiver_key(
+                &deliver.world,
+                deliver.external_install.as_deref(),
+            ))?,
         ))
     })
     .flatten();
     let Some((frame, world, receiver)) = target else {
-        return false;
+        return protocol::DeliveryStatus::NoReceiver;
     };
     // No native call between reading the weak registry and pinning its objects.
     let Some(frame) = Owned::borrowed(frame) else {
-        return false;
+        return protocol::DeliveryStatus::NoReceiver;
     };
     let Some(receiver) = Owned::borrowed(receiver) else {
-        return false;
+        return protocol::DeliveryStatus::NoReceiver;
     };
     unsafe {
         let Some(context) = Owned::full(raw::webkit_frame_get_js_context_for_script_world(
             frame.0, world,
         )) else {
-            return false;
+            return protocol::DeliveryStatus::NoReceiver;
         };
         let Some(receiver_value) = Owned::full(raw::jsc_weak_value_get_value(receiver.0)) else {
-            return false;
+            return protocol::DeliveryStatus::NoReceiver;
         };
         let Some(array) = Owned::full(raw::jsc_value_new_typed_array(
             context.0,
             UINT8_ARRAY,
             deliver.bytes.len(),
         )) else {
-            return false;
+            return protocol::DeliveryStatus::NoReceiver;
         };
         if !deliver.bytes.is_empty() {
             let mut actual = 0;
             let pointer = raw::jsc_value_typed_array_get_data(array.0, &mut actual);
             if pointer.is_null() || actual != deliver.bytes.len() {
-                return false;
+                return protocol::DeliveryStatus::NoReceiver;
             }
             ptr::copy_nonoverlapping(deliver.bytes.as_ptr(), pointer.cast::<u8>(), actual);
         }
         if !with_runtime(|runtime| runtime.state.valid_target(page, deliver)).unwrap_or(false) {
-            return false;
+            return protocol::DeliveryStatus::NoReceiver;
         }
         let mut argument = array.0;
         let result = Owned::full(raw::jsc_value_function_callv(
@@ -1160,7 +1378,11 @@ fn deliver_to_frame(page: u64, deliver: &Deliver) -> bool {
         let accepted = raw::jsc_context_get_exception(context.0).is_null();
         drop(result);
         raw::jsc_context_clear_exception(context.0);
-        accepted
+        if accepted {
+            protocol::DeliveryStatus::Delivered
+        } else {
+            protocol::DeliveryStatus::EvaluationFailed
+        }
     }
 }
 
@@ -1180,7 +1402,23 @@ unsafe extern "C" fn document_loaded(page: *mut Object, _: *mut c_void) {
 }
 
 fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<PolicySnapshot> {
-    if length == 0 || length > MAX_SNAPSHOT_BYTES || index > c_int::MAX as u32 {
+    map_sealed(
+        message,
+        index,
+        length,
+        MAX_SNAPSHOT_BYTES,
+        PolicySnapshot::decode,
+    )
+}
+
+fn map_sealed<T, E>(
+    message: *mut Object,
+    index: u32,
+    length: usize,
+    maximum: usize,
+    decode: impl FnOnce(&[u8]) -> Result<T, E>,
+) -> Option<T> {
+    if length == 0 || length > maximum || index > c_int::MAX as u32 {
         return None;
     }
     unsafe {
@@ -1230,8 +1468,7 @@ fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<PolicyS
         if mapped == libc::MAP_FAILED {
             return None;
         }
-        let policy =
-            PolicySnapshot::decode(std::slice::from_raw_parts(mapped.cast::<u8>(), length)).ok();
+        let policy = decode(std::slice::from_raw_parts(mapped.cast::<u8>(), length)).ok();
         libc::munmap(mapped, length);
         policy
     }
@@ -1507,6 +1744,7 @@ fn deactivate_page(id: u64) {
     let frames = with_runtime(|runtime| {
         runtime.state.remove_page(id);
         let native = runtime.pages.get_mut(&id)?;
+        native.scripts = None;
         native.policy = None;
         native.policy_generation = 0;
         native.requests.clear();

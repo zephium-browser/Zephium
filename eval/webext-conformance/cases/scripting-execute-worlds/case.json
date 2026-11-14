@@ -1,0 +1,6 @@
+{
+  "id": "scripting-execute-worlds",
+  "title": "MAIN and ISOLATED worlds share the DOM but separate JavaScript globals",
+  "apis": ["scripting.executeScript"],
+  "permissions": ["scripting"]
+}
