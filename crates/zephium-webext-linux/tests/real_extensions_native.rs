@@ -3,7 +3,8 @@
 
 //! Pinned public extensions on the WebKitGTK runtime: Dark Reader darkens
 //! every frame of a light page and its popup toggles the site; Vimium's link
-//! hints follow a link in a cross-origin frame and its vomnibar opens.
+//! hints follow a link in a cross-origin frame and its vomnibar opens;
+//! uBlock Origin Lite's default rulesets block a tracker host and its popup opens.
 //! Packages come from `scripts/webext/fetch-pinned.sh --extract`; point
 //! `ZEPHIUM_WEBEXT_PINNED_DIR` at the cache directory.
 
@@ -25,7 +26,7 @@ use gtk::prelude::*;
 use serde_json::{json, Value};
 use shell::{emit, Engine, Host, Shell, INSTALL, PROFILE};
 use support::{pump_for, pump_until, ModuleDirectory};
-use webkit2gtk::{WebContextExt, WebViewExt};
+use webkit2gtk::{WebContextExt, WebViewExt, WebsiteDataManagerExt};
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext::manifest::Manifest;
@@ -41,6 +42,7 @@ use zephium_webext_runtime::permissions::{
 
 const DARK_READER: (&str, &str) = ("eimadpbcbfnmbkopoojfekhnkhdbieeh", "4.9.135");
 const VIMIUM: (&str, &str) = ("dbepggeogbaibhgnhhndojpepiihcmeb", "2.4.2");
+const UBOL: (&str, &str) = ("ddkjiahejlhfcafbddmgiahcphecmpfh", "2026.1110.1816");
 
 struct Fixture {
     port: u16,
@@ -85,6 +87,10 @@ impl Fixture {
                     .unwrap_or("/")
                     .to_owned();
                 let light = "style=\"background:#ffffff;color:#000000\"";
+                // Requests for tracker hosts arrive here through the test proxy.
+                if path.contains("ubol-") {
+                    collected.lock().unwrap().push(json!({"hit": path.clone()}));
+                }
                 let body = if let Some(query) = path.strip_prefix("/report?") {
                     let decoded = url::form_urlencoded::parse(format!("q={query}").as_bytes())
                         .next()
@@ -521,4 +527,92 @@ fn vimium() {
         visible.contains("vimium-ui-component-visible"),
         "the vomnibar opened"
     );
+}
+
+#[test]
+#[ignore = "pinned packages and sandboxed native WebKitGTK; see the module documentation"]
+fn ubol() {
+    let Some(directory) = package(UBOL) else {
+        panic!("set ZEPHIUM_WEBEXT_PINNED_DIR after scripts/webext/fetch-pinned.sh --extract");
+    };
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let id = UBOL.0;
+    let context = context();
+    // Tracker hosts resolve to the local fixture; loopback stays direct.
+    let mut proxy =
+        webkit2gtk::NetworkProxySettings::new(Some(&fixture.url("")), &["127.0.0.1", "localhost"]);
+    context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    let (mut host, _engine) = host(context, &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime.set_install_order(install, 1).expect("order");
+    host.runtime
+        .install_admitted(spec(&directory, id, 1))
+        .expect("install");
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(60)
+        && host
+            .runtime
+            .network_status(install)
+            .is_none_or(|status| status.loading || status.active_rule_count == 0)
+    {
+        pump(&mut host, Duration::from_millis(100));
+    }
+    let status = host.runtime.network_status(install).expect("status");
+    println!(
+        "WEBEXT ubol rules={} unsupported={} error={:?}",
+        status.active_rule_count, status.unsupported_rule_count, status.error
+    );
+    assert!(status.active_rule_count > 0, "default rulesets loaded");
+    let tab = host.open(&fixture.url("/page"), true);
+    pump(&mut host, Duration::from_secs(2));
+    fixture.take();
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    let probe = |url: &str| {
+        format!("try{{await fetch('{url}',{{mode:'no-cors',cache:'no-store'}});return 'loaded'}}catch(e){{return 'blocked'}}")
+    };
+    let tracker = evaluate(
+        &view,
+        &probe("http://doubleclick.net/dnr-resource?ubol-block"),
+    );
+    let control = evaluate(&view, &probe(&fixture.url("/ubol-control")));
+    pump(&mut host, Duration::from_millis(300));
+    let hits = fixture.take();
+    println!("WEBEXT ubol tracker={tracker} control={control} hits={hits:?}");
+    assert_eq!(tracker, "blocked", "default rules block the tracker");
+    assert_eq!(control, "loaded", "the control request passes");
+    assert!(
+        !hits
+            .iter()
+            .any(|hit| hit["hit"].as_str().unwrap_or("").contains("ubol-block")),
+        "the blocked request never reached the network: {hits:?}"
+    );
+
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .expect("popup");
+    let started = Instant::now();
+    let mut text = String::new();
+    while started.elapsed() < Duration::from_secs(15) {
+        pump(&mut host, Duration::from_millis(200));
+        text = evaluate(
+            popup.view(),
+            "return (document.body && document.body.innerText || '').length;",
+        );
+        if text.parse::<u64>().unwrap_or(0) > 10 {
+            break;
+        }
+    }
+    println!("WEBEXT ubol popup_text_length={text}");
+    assert!(text.parse::<u64>().unwrap_or(0) > 10, "popup rendered");
+    drop(popup);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
 }

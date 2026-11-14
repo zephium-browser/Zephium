@@ -13,3 +13,11 @@ version = "2.4.2"
 sha256 = "3198c26aa719be462dea585050fbed9b8b80628d57ea88a113babf5334c5517c"
 license = "MIT"
 source = "https://github.com/philc/vimium"
+
+[[extension]]
+id = "ddkjiahejlhfcafbddmgiahcphecmpfh"
+name = "uBlock Origin Lite"
+version = "2026.1110.1816"
+sha256 = "f830f9b2ac6c40dce7f193717fd286a4c966e8999018d5a3e75998d81751bb8a"
+license = "GPL-3.0"
+source = "https://github.com/uBlockOrigin/uBOL-home"
