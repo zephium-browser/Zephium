@@ -30,11 +30,20 @@ pub struct PageScript {
 impl PageScript {
     /// The WebKit user script, for a tab's `UserContentManager`.
     pub fn user_script(&self) -> webkit2gtk::UserScript {
+        self.user_script_in(webkit2gtk::UserContentInjectedFrames::TopFrame)
+    }
+
+    /// The same script for the given frames; ordinary tabs also host
+    /// extension pages framed by websites.
+    pub fn user_script_in(
+        &self,
+        frames: webkit2gtk::UserContentInjectedFrames,
+    ) -> webkit2gtk::UserScript {
         let allow: Vec<&str> = self.allow.iter().map(String::as_str).collect();
         let block: Vec<&str> = self.block.iter().map(String::as_str).collect();
         webkit2gtk::UserScript::new(
             &self.source,
-            webkit2gtk::UserContentInjectedFrames::TopFrame,
+            frames,
             webkit2gtk::UserScriptInjectionTime::Start,
             &allow,
             &block,

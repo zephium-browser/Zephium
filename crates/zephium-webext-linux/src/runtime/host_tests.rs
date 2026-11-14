@@ -175,8 +175,11 @@ impl Harness {
         out
     }
 
+    /// Native work other than content-script republication.
     fn ops(&mut self) -> Vec<NativeOp> {
-        self.host.take_ops()
+        let mut ops = self.host.take_ops();
+        ops.retain(|op| !matches!(op, NativeOp::ScriptsChanged));
+        ops
     }
 
     fn state(&self) -> Option<BackgroundState> {

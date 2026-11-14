@@ -42,6 +42,7 @@ use zephium_webext_runtime::scripting_registry::{ResourceKind, ScriptRegistry, S
 use zephium_webext_runtime::storage::{AccessLevel, Area, StorageChangeEvent};
 use zephium_webext_runtime::ContextMask;
 
+use super::browser::{self as linux_browser, Finished, TabEvent};
 use super::errors::{truncate, ErrorLog, ExtensionError, ExtensionErrorKind};
 use super::errors::{MAX_ERROR_MESSAGE_BYTES, MAX_ERROR_SOURCE_BYTES};
 use super::storage::{Done, Job, StorageExecutor};
@@ -91,6 +92,8 @@ pub(crate) enum NativeOp {
     CloseOffscreen { install: ExtensionInstallId },
     /// For the engine.
     Notify(Notice),
+    /// Content-script registrations changed: republish the script table.
+    ScriptsChanged,
 }
 
 /// What the engine host hears about.
@@ -274,6 +277,26 @@ enum Work {
     },
     PersistAlarms(ExtensionInstallId),
     PersistListeners(ExtensionInstallId),
+    SendTab {
+        responder: Responder,
+        sender: Box<Sender>,
+        payload: Vec<u8>,
+        route: TabRoute,
+    },
+    ConnectTab {
+        responder: Responder,
+        sender: Box<Sender>,
+        name: String,
+        route: TabRoute,
+    },
+    ScriptsChanged,
+}
+
+/// A `tabs.sendMessage`/`tabs.connect` destination as the caller named it.
+struct TabRoute {
+    tab_id: i64,
+    frame_id: Option<u64>,
+    document_id: Option<String>,
 }
 
 /// The services handlers run against.
@@ -398,6 +421,42 @@ impl MessagingHost for State {
                     name,
                 })
             }
+            MessageRequest::Send {
+                target:
+                    MessageTarget::Tab {
+                        tab_id,
+                        frame_id,
+                        document_id,
+                    },
+                payload,
+            } => self.defer(invocation, |responder| Work::SendTab {
+                responder,
+                sender,
+                payload,
+                route: TabRoute {
+                    tab_id,
+                    frame_id,
+                    document_id,
+                },
+            }),
+            MessageRequest::Connect {
+                target:
+                    MessageTarget::Tab {
+                        tab_id,
+                        frame_id,
+                        document_id,
+                    },
+                name,
+            } => self.defer(invocation, |responder| Work::ConnectTab {
+                responder,
+                sender,
+                name,
+                route: TabRoute {
+                    tab_id,
+                    frame_id,
+                    document_id,
+                },
+            }),
             MessageRequest::Send { .. } | MessageRequest::Connect { .. } => {
                 if let Ok(install) = self.install(&sender) {
                     install.record_unhandled(invocation.name());
@@ -462,6 +521,7 @@ impl ScriptingHost for State {
         candidate: ScriptRegistry,
     ) -> Result<(), ApiError> {
         self.install(sender)?.scripts = candidate;
+        self.work.push(Work::ScriptsChanged);
         Ok(())
     }
 }
@@ -813,6 +873,8 @@ pub struct RuntimeHost {
     sends: HashMap<u64, (MessageId, Responder)>,
     awaiting: HashMap<u64, ContextKey>,
     ops: VecDeque<NativeOp>,
+    browser: Rc<linux_browser::Shared>,
+    pending_out: Vec<(ContextKey, Vec<u8>)>,
     kick: Option<Rc<dyn Fn()>>,
     armed: Option<u64>,
     scale: u64,
@@ -1107,6 +1169,8 @@ impl RuntimeHost {
         let table = table().map_err(|error| format!("{error:?}"))?;
         let storage = StorageExecutor::start().map_err(|error| error.to_string())?;
         let now = (config.clock)();
+        let browser = Rc::new(linux_browser::Shared::default());
+        browser.set_profile(config.profile);
         Ok(Self {
             dispatcher: Dispatcher::new(table),
             state: State {
@@ -1119,7 +1183,7 @@ impl RuntimeHost {
                 now,
                 unix_millis: (config.unix_millis)(),
                 contexts: HashMap::new(),
-                browser: None,
+                browser: Some(Box::new(linux_browser::Browser::new(browser.clone()))),
             },
             router: Router {
                 ports: PortService::new(),
@@ -1138,6 +1202,8 @@ impl RuntimeHost {
             sends: HashMap::new(),
             awaiting: HashMap::new(),
             ops: VecDeque::new(),
+            browser,
+            pending_out: Vec::new(),
             kick: None,
             armed: None,
             scale: config.scale.max(1),
@@ -1335,7 +1401,16 @@ impl RuntimeHost {
             Activation::Enabled => None,
         };
         let has_background = state.background.is_some();
+        self.browser.admit(
+            install,
+            linux_browser::InstallFacts {
+                extension_id: state.extension_id.as_str().to_owned(),
+                root: state.root.clone(),
+                manifest: state.manifest.clone(),
+            },
+        );
         self.state.installs.insert(install, state);
+        self.op(NativeOp::ScriptsChanged);
         if let (Some((installed, start)), true) = (reason, has_background) {
             self.enqueue(
                 install,
@@ -1407,6 +1482,10 @@ impl RuntimeHost {
         self.state.registry.erase(install);
         self.lifecycle.forget(install);
         self.permissions.remove(&install);
+        for responder in self.browser.forget(install) {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+        }
+        self.op(NativeOp::ScriptsChanged);
         if erase {
             self.storage.submit(Job::Destroy {
                 install,
@@ -2591,6 +2670,19 @@ impl RuntimeHost {
                 }
             }
             Work::PersistAlarms(install) => self.persist_alarms(install),
+            Work::ScriptsChanged => self.op(NativeOp::ScriptsChanged),
+            Work::SendTab {
+                responder,
+                sender,
+                payload,
+                route,
+            } => self.send_tab(sender, payload, &route, responder, out),
+            Work::ConnectTab {
+                responder,
+                sender,
+                name,
+                route,
+            } => self.connect_tab(sender, &name, &route, responder, out),
             Work::PersistListeners(install) => {
                 let snapshot = self.state.registry.snapshot(install);
                 if let (Some(state), Ok(bytes)) = (
@@ -2907,7 +2999,28 @@ impl Runtime for RuntimeHost {
         self.check_timer();
     }
 
+    fn injection_result(
+        &mut self,
+        _view: crate::bridge::BridgeViewId,
+        result: &zephium_webkit_web_process_protocol::protocol::InjectionResult,
+    ) {
+        if let Some(finished) = self.browser.injection_result(result) {
+            let mut out = Outbox::default();
+            self.finish(finished, &mut out);
+            self.pending_out.extend(out.frames);
+            if let Some(kick) = &self.kick {
+                kick();
+            }
+        }
+    }
+
     fn frame_lifecycle(&mut self, event: &FrameLifecycle, _: &mut Outbox) {
+        self.browser.frame_event(event);
+        if let FrameLifecycle::MainDocumentChanged { tab, document } = event {
+            for permissions in self.permissions.values_mut() {
+                let _ = permissions.main_document_changed(*tab, *document);
+            }
+        }
         // Resolve createDocument once the bridge saw the load: posts the
         // document made before it are handled by the next idle.
         if let FrameLifecycle::DocumentLoaded {
@@ -2935,6 +3048,9 @@ impl Runtime for RuntimeHost {
         let _ = (context, error);
     }
 }
+
+#[path = "host_browser.rs"]
+pub(crate) mod glue;
 
 #[cfg(test)]
 #[path = "host_tests.rs"]

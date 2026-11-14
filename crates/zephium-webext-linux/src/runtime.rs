@@ -7,8 +7,11 @@
 //! earliest deadline any service has; native callbacks are queued and
 //! handled from an idle source, never re-entrantly.
 
+mod browser;
+mod content;
 mod errors;
 pub(crate) mod host;
+mod icons;
 mod storage;
 
 use std::cell::{Cell, RefCell};
@@ -30,6 +33,7 @@ use zephium_webext_runtime::i18n::{fallback_chain, LocaleEnvironment, Messages};
 use zephium_webext_runtime::lifecycle::BackgroundState;
 use zephium_webext_runtime::permissions::InstallPermissions;
 
+pub use self::browser::{BrowserCall, BrowserSettlement};
 pub use self::errors::{
     ExtensionError, ExtensionErrorKind, MAX_ERRORS_PER_INSTALL, MAX_ERROR_MESSAGE_BYTES,
 };
@@ -45,6 +49,7 @@ use crate::views::{
     create_view, ExtensionPage, Owned, PageEntry, PageKind, PageScript, ViewError, ViewKindKey,
     ViewRequests, Views,
 };
+pub use zephium_webext_runtime::api::action::Activation as ActionActivation;
 
 const MAX_LOCALE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const DRAIN_QUIET: Duration = Duration::from_millis(100);
@@ -80,6 +85,13 @@ pub trait RuntimeEngine {
     /// or `runtime.openOptionsPage()`.
     fn notice(&self, notice: &Notice) {
         let _ = notice;
+    }
+
+    /// Browser work for the extension namespaces. Answer calls that carry a
+    /// request through [`ProfileRuntime::settle_browser`], never from
+    /// inside this method.
+    fn browser_call(&self, call: BrowserCall) {
+        let _ = call;
     }
 }
 
@@ -213,6 +225,24 @@ struct Inner {
     retired: Cell<bool>,
     events: RefCell<VecDeque<NativeEvent>>,
     next_page: Cell<u64>,
+    browser: Rc<browser::Shared>,
+    tabs: RefCell<HashMap<BridgeViewId, TabEntry>>,
+    content: RefCell<TabContent>,
+    script_generation: Cell<u64>,
+}
+
+/// What every ordinary tab gets, rebuilt when installs or registrations change.
+#[derive(Default)]
+struct TabContent {
+    plan: AttachPlan,
+    scripts: Vec<PageScript>,
+    styles: Vec<content::TabStyle>,
+}
+
+struct TabEntry {
+    view: glib::WeakRef<webkit2gtk::WebView>,
+    scripts: Vec<webkit2gtk::UserScript>,
+    styles: Vec<webkit2gtk::UserStyleSheet>,
 }
 
 /// One profile's extension runtime. GTK thread only; clones share it.
@@ -301,6 +331,7 @@ impl ProfileRuntime {
             scale,
         })
         .map_err(RuntimeError::Setup)?;
+        let shared = host.browser();
         let bridge = ProfileBridge::new(
             context,
             BridgeConfig {
@@ -328,6 +359,10 @@ impl ProfileRuntime {
             retired: Cell::new(false),
             events: RefCell::new(VecDeque::new()),
             next_page: Cell::new(1),
+            browser: shared,
+            tabs: RefCell::new(HashMap::new()),
+            content: RefCell::new(TabContent::default()),
+            script_generation: Cell::new(0),
         });
         let weak = Rc::downgrade(&inner);
         let kick: Rc<dyn Fn()> = Rc::new(move || {
@@ -463,22 +498,71 @@ impl ProfileRuntime {
             .collect()
     }
 
-    /// Attaches an ordinary tab's view to the bridge before its first load.
-    /// Include [`Self::extension_pages`] in `plan` and the tab scripts in
-    /// its content manager; when a document commits in it the bridge binds
-    /// it as an extension tab (or content scripts) by itself.
+    /// Attaches an ordinary tab's view before its first load: the bridge
+    /// with the profile's content-script plan, and the page scripts and
+    /// style sheets every enabled extension needs in its content manager.
+    /// Never call it for privileged, preview, Work or agent views.
     pub fn attach_tab(
         &self,
         tab: ItemId,
         view: &webkit2gtk::WebView,
-        plan: &AttachPlan,
     ) -> Result<BridgeViewId, RegisterError> {
-        self.inner.bridge.attach_tab(tab, view, plan)
+        self.inner.attach_ordinary_tab(tab, view)
     }
 
     /// Detaches a tab; its contexts end.
     pub fn detach_tab(&self, view: BridgeViewId) {
-        self.inner.bridge.detach(view);
+        self.inner.detach_ordinary_tab(view);
+    }
+
+    /// The shell's tabs and windows for this profile, for `tabs`, `windows`
+    /// and their events.
+    pub fn publish_surface(&self, surface: zephium_core::extensions::ExtensionBrowserSurface) {
+        let _ = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.publish_surface(surface, out));
+        self.inner.run();
+    }
+
+    /// Answers a [`BrowserCall`] that carried `request`.
+    pub fn settle_browser(&self, request: u64, settlement: BrowserSettlement) {
+        let _ = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.settle_browser(request, settlement, out));
+        self.inner.run();
+    }
+
+    /// Toolbar actions of every running install for `tab`, in install order.
+    pub fn action_states(
+        &self,
+        tab: ItemId,
+        runtimes: &HashMap<ExtensionInstallId, zephium_core::extensions::ExtensionRuntimeInstance>,
+    ) -> Vec<zephium_core::extensions::ExtensionActionState> {
+        self.inner.browser.action_states(tab, runtimes)
+    }
+
+    /// A trusted toolbar click on `tab`: grants `activeTab`, then either
+    /// delivers `action.onClicked` or names the popup to present.
+    pub fn invoke_action(
+        &self,
+        install: ExtensionInstallId,
+        tab: ItemId,
+    ) -> Result<ActionActivation, String> {
+        let result = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.invoke_action(install, tab, out))
+            .map_err(|_| "The extension runtime is busy.".to_owned())
+            .and_then(|result| result.map_err(|error| error.message().to_owned()));
+        self.inner.run();
+        result
+    }
+
+    /// The Chrome tab id the runtime gave a shell tab.
+    pub fn tab_id(&self, tab: ItemId) -> Option<i32> {
+        self.inner.browser.tab_id(tab)
     }
 
     /// Whether navigating `requester` to `uri` may promote it to that
@@ -661,13 +745,20 @@ impl Inner {
             }
             let ops = self
                 .bridge
-                .with_runtime(|host, _| host.take_ops())
+                .with_runtime(|host, out| {
+                    host.take_pending_out(out);
+                    host.take_ops()
+                })
                 .unwrap_or_default();
-            if ops.is_empty() {
+            let outgoing = self.browser.take_outgoing();
+            if ops.is_empty() && outgoing.is_empty() {
                 break;
             }
             for op in ops {
                 self.execute(op);
+            }
+            for item in outgoing {
+                self.outgoing(item);
             }
         }
         self.running.set(false);
@@ -791,6 +882,7 @@ impl Inner {
                     engine.notice(&notice);
                 }
             }
+            NativeOp::ScriptsChanged => self.refresh_content(),
         }
     }
 
@@ -1268,6 +1360,198 @@ impl Inner {
             bridge: drain,
             views: self.views.clone(),
         }
+    }
+}
+
+impl Inner {
+    fn outgoing(self: &Rc<Self>, item: browser::Outgoing) {
+        match item {
+            browser::Outgoing::Engine(call) => {
+                if let Some(engine) = self.engine.upgrade() {
+                    engine.browser_call(call);
+                }
+            }
+            browser::Outgoing::Inject {
+                pending,
+                frame,
+                tab,
+                target,
+                install,
+                step,
+            } => {
+                let sent = self.browser.view_of(tab).and_then(|view| {
+                    let native = self
+                        .bridge
+                        .frame_target(view, target.frame, target.document)?;
+                    let request = zephium_webkit_web_process_protocol::protocol::InjectRequest {
+                        install_id: String::new(),
+                        token: String::new(),
+                        generation: 0,
+                        request_id: 0,
+                        target: native,
+                        world: step.world.clone(),
+                        kind: step.kind,
+                        source: step.source.clone(),
+                        source_url: step.source_url.clone(),
+                        args_json: step.args_json.clone(),
+                        timeout_ms: step.timeout_ms(),
+                    };
+                    self.bridge.inject(view, install, request).ok()
+                });
+                match sent {
+                    Some(id) => self.browser.injection_sent(pending, frame, id),
+                    None => {
+                        let _ = self
+                            .bridge
+                            .with_runtime(|host, out| host.injection_failed(pending, frame, out));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Republishes the content-script table and every tab's plan, page
+    /// scripts and style sheets. New documents see the change.
+    fn refresh_content(self: &Rc<Self>) {
+        if self.retired.get() {
+            return;
+        }
+        let installs = self
+            .bridge
+            .with_runtime(|host, _| host.content_installs())
+            .unwrap_or_default();
+        let generation = self.script_generation.get() + 1;
+        self.script_generation.set(generation);
+        let mut built = content::build(&installs, generation);
+        for (install, problem) in &built.problems {
+            eprintln!("extensions: {install} content scripts withheld: {problem}");
+        }
+        if built.grants.len() > zephium_webkit_web_process_protocol::protocol::MAX_WORLDS {
+            eprintln!("extensions: content scripts limited to the first 16 extensions");
+            built
+                .grants
+                .truncate(zephium_webkit_web_process_protocol::protocol::MAX_WORLDS);
+        }
+        if let Err(error) = self.bridge.publish_scripts(built.table) {
+            eprintln!("extensions: content-script table refused: {error:?}");
+        }
+        let installs: Vec<ExtensionInstallId> = self.records.borrow().keys().copied().collect();
+        let scripts: Vec<PageScript> = installs
+            .into_iter()
+            .filter_map(|install| self.page_script(install, ContextKind::ExtensionTab))
+            .collect();
+        let plan = AttachPlan {
+            worlds: built.grants,
+            extension_pages: self
+                .records
+                .borrow()
+                .values()
+                .map(|record| ExtensionPages {
+                    extension: record.extension_id.clone(),
+                    sandboxed_paths: record.sandboxed.clone(),
+                })
+                .collect(),
+            extension_bootstrap: Arc::from(""),
+            ..AttachPlan::default()
+        };
+        *self.content.borrow_mut() = TabContent {
+            plan: plan.clone(),
+            scripts,
+            styles: built.styles,
+        };
+        let views: Vec<BridgeViewId> = self.tabs.borrow().keys().copied().collect();
+        for view in views {
+            if let Err(error) =
+                self.bridge
+                    .update_plan(view, &plan, crate::bridge::Reattach::AtNextNavigation)
+            {
+                eprintln!("extensions: a tab kept its previous plan: {error:?}");
+            }
+            self.apply_tab_content(view);
+        }
+    }
+
+    fn apply_tab_content(&self, view: BridgeViewId) {
+        use webkit2gtk::{UserContentManagerExt, WebViewExt};
+        let mut tabs = self.tabs.borrow_mut();
+        let Some(entry) = tabs.get_mut(&view) else {
+            return;
+        };
+        let Some(webview) = entry.view.upgrade() else {
+            return;
+        };
+        let Some(manager) = webview.user_content_manager() else {
+            return;
+        };
+        for script in entry.scripts.drain(..) {
+            manager.remove_script(&script);
+        }
+        for style in entry.styles.drain(..) {
+            manager.remove_style_sheet(&style);
+        }
+        let content = self.content.borrow();
+        for script in &content.scripts {
+            let script = script.user_script_in(webkit2gtk::UserContentInjectedFrames::AllFrames);
+            manager.add_script(&script);
+            entry.scripts.push(script);
+        }
+        for style in &content.styles {
+            let allow: Vec<&str> = style.allow.iter().map(String::as_str).collect();
+            let block: Vec<&str> = style.block.iter().map(String::as_str).collect();
+            let sheet = webkit2gtk::UserStyleSheet::new(
+                &style.source,
+                if style.all_frames {
+                    webkit2gtk::UserContentInjectedFrames::AllFrames
+                } else {
+                    webkit2gtk::UserContentInjectedFrames::TopFrame
+                },
+                webkit2gtk::UserStyleLevel::User,
+                &allow,
+                &block,
+            );
+            manager.add_style_sheet(&sheet);
+            entry.styles.push(sheet);
+        }
+    }
+
+    fn attach_ordinary_tab(
+        self: &Rc<Self>,
+        tab: ItemId,
+        view: &webkit2gtk::WebView,
+    ) -> Result<BridgeViewId, RegisterError> {
+        let plan = self.content.borrow().plan.clone();
+        let id = self.bridge.attach_tab(tab, view, &plan)?;
+        self.tabs.borrow_mut().insert(
+            id,
+            TabEntry {
+                view: view.downgrade(),
+                scripts: Vec::new(),
+                styles: Vec::new(),
+            },
+        );
+        self.browser.tab_view(id, Some(tab));
+        self.apply_tab_content(id);
+        Ok(id)
+    }
+
+    fn detach_ordinary_tab(&self, view: BridgeViewId) {
+        use webkit2gtk::{UserContentManagerExt, WebViewExt};
+        if let Some(mut entry) = self.tabs.borrow_mut().remove(&view) {
+            if let Some(manager) = entry
+                .view
+                .upgrade()
+                .and_then(|webview| webview.user_content_manager())
+            {
+                for script in entry.scripts.drain(..) {
+                    manager.remove_script(&script);
+                }
+                for style in entry.styles.drain(..) {
+                    manager.remove_style_sheet(&style);
+                }
+            }
+        }
+        self.browser.tab_view(view, None);
+        self.bridge.detach(view);
     }
 }
 
