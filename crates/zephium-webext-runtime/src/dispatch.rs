@@ -81,6 +81,7 @@ pub struct MethodSpec<S> {
     gate: Gate,
     contexts: ContextMask,
     validate: Option<Validator>,
+    generated_schema: bool,
     handler: Handler<S>,
 }
 
@@ -95,6 +96,7 @@ impl<S> MethodSpec<S> {
             gate,
             contexts,
             validate: None,
+            generated_schema: false,
             handler: Box::new(handler),
         }
     }
@@ -148,7 +150,7 @@ impl<S> ApiTable<S> {
     pub fn register(
         &mut self,
         name: &'static str,
-        spec: MethodSpec<S>,
+        mut spec: MethodSpec<S>,
     ) -> Result<(), RegistrationError> {
         if ApiName::parse(name).is_none() {
             return Err(RegistrationError::InvalidName(name));
@@ -169,6 +171,10 @@ impl<S> ApiTable<S> {
         }
         if self.methods.contains_key(name) {
             return Err(RegistrationError::Duplicate(name));
+        }
+        if spec.validate.is_none() {
+            spec.validate = crate::api::generated::validator(name);
+            spec.generated_schema = spec.validate.is_some();
         }
         self.methods.insert(name, spec);
         Ok(())
@@ -239,7 +245,8 @@ impl<'a> Invocation<'a> {
         self.name
     }
 
-    /// The parsed argument array.
+    /// The parsed argument array. Generated schema validation inserts null
+    /// slots for omitted optionals and applies Chromium object conversion.
     pub fn args(&self) -> &[Value] {
         &self.args
     }
@@ -558,11 +565,16 @@ impl<S> Dispatcher<S> {
         if let Err(error) = spec.gate.check(permissions, sender, None) {
             return Handled(Answer::Now(Err(error)));
         }
-        let args = match parse_arguments(args) {
+        let mut args = match parse_arguments(args) {
             Ok(args) => args,
             Err(_) => return Handled(Answer::Now(Err(ApiError::malformed_arguments()))),
         };
-        if let Some(validate) = spec.validate {
+        if spec.generated_schema {
+            args = match crate::schema::normalize(name, &args) {
+                Ok(args) => args,
+                Err(error) => return Handled(Answer::Now(Err(error))),
+            };
+        } else if let Some(validate) = spec.validate {
             if let Err(error) = validate(&args) {
                 return Handled(Answer::Now(Err(error)));
             }
@@ -783,13 +795,104 @@ mod tests {
             Err(ApiError::malformed_arguments().message().to_owned())
         );
         assert_eq!(
-            run(&background, &history, call_bytes(5, "history.search", "[]")),
+            run(
+                &background,
+                &history,
+                call_bytes(5, "history.search", r#"[{"text":""}]"#)
+            ),
             Ok("[]".into())
         );
         assert_eq!(
             run(&content, &none, call_bytes(6, "storage.get", "[1]")),
             Err("Error in invocation of storage.get(string keys): No matching signature.".into())
         );
+    }
+
+    #[test]
+    fn generated_schemas_refuse_before_handlers_and_normalize_arguments() {
+        let mut table = ApiTable::new();
+        for name in ["tabs.query", "runtime.sendMessage", "storage.local.get"] {
+            table
+                .register(
+                    name,
+                    MethodSpec::new(
+                        Gate::Open,
+                        ContextMask::EXTENSION_PAGES,
+                        |state: &mut Vec<Vec<Value>>, call| {
+                            state.push(call.args().to_vec());
+                            call.reply(Ok(Value::Null))
+                        },
+                    ),
+                )
+                .expect("register");
+        }
+        let mut dispatcher = Dispatcher::new(table);
+        let mut state = Vec::new();
+        let sender = background_sender();
+        let none = permissions(json!({}));
+        let (_, result) = reply(dispatcher.receive(
+            &mut state,
+            &none,
+            &sender,
+            &call_bytes(1, "tabs.query", r#"[{"active":"yes"}]"#),
+            0,
+        ));
+        assert!(result
+            .expect_err("schema error")
+            .contains("Error at property 'active'"));
+        assert!(state.is_empty());
+        for (id, name, arguments) in [
+            (2, "runtime.sendMessage", r#"[{"payload":null}]"#),
+            (3, "storage.local.get", r#"[{"key":null}]"#),
+            (4, "tabs.query", r#"[{"active":null}]"#),
+        ] {
+            let (_, result) = reply(dispatcher.receive(
+                &mut state,
+                &none,
+                &sender,
+                &call_bytes(id, name, arguments),
+                0,
+            ));
+            assert!(result.is_ok(), "{name}: {result:?}");
+        }
+        assert_eq!(
+            state,
+            [
+                vec![Value::Null, json!({"payload":null}), Value::Null],
+                vec![json!({"key":null})],
+                vec![json!({})],
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_validator_keeps_its_argument_contract() {
+        let mut table = ApiTable::new();
+        table
+            .register(
+                "tabs.query",
+                MethodSpec::new(
+                    Gate::Open,
+                    ContextMask::EXTENSION_PAGES,
+                    |state: &mut Vec<Value>, call| {
+                        state.extend_from_slice(call.args());
+                        call.reply(Ok(Value::Null))
+                    },
+                )
+                .validate(|_| Ok(())),
+            )
+            .expect("register");
+        let mut dispatcher = Dispatcher::new(table);
+        let mut state = Vec::new();
+        let (_, result) = reply(dispatcher.receive(
+            &mut state,
+            &permissions(json!({})),
+            &background_sender(),
+            &call_bytes(1, "tabs.query", r#"["custom"]"#),
+            0,
+        ));
+        assert!(result.is_ok());
+        assert_eq!(state, [json!("custom")]);
     }
 
     #[test]
@@ -971,7 +1074,7 @@ mod tests {
             (id, result),
             (
                 77,
-                Err("Message length exceeded maximum allowed length.".into())
+                Err("Message exceeded maximum allowed size of 64MiB.".into())
             )
         );
 

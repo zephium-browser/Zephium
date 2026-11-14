@@ -11,6 +11,8 @@ pub trait ArgumentValidator {
     fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError>;
 }
 
+pub mod generated;
+
 /// Registers every implemented namespace.
 pub fn register<S>(table: &mut ApiTable<S>) -> Result<(), RegistrationError>
 where
