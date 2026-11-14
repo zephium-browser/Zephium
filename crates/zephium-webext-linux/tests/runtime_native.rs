@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "native-tests"))]
 #![forbid(unsafe_code)]
 
+#[path = "runtime_support/mod.rs"]
 mod support;
 
 use std::cell::{Cell, RefCell};
@@ -62,8 +63,14 @@ fn extension_id(index: u8) -> ExtensionId {
 
 fn spec(install: u128, index: u8, directory: &Path) -> InstallSpec {
     let manifest = Manifest::load(directory).unwrap();
-    let (declaration, issues) = PermissionDeclaration::from_manifest(&manifest);
+    let (_, issues) = PermissionDeclaration::from_manifest(&manifest);
     assert!(issues.is_empty(), "{issues:?}");
+    lenient_spec(install, index, directory)
+}
+
+fn lenient_spec(install: u128, index: u8, directory: &Path) -> InstallSpec {
+    let manifest = Manifest::load(directory).unwrap();
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
     InstallSpec {
         install: ExtensionInstallId::from(install),
         extension_id: extension_id(index),
@@ -193,6 +200,17 @@ fn ask(page: &ExtensionPage, message: &str) -> Value {
         .unwrap_or_else(|| panic!("message {message} failed: {reply}"))
 }
 
+/// Waits for the asynchronous onInstalled handler's write.
+fn installed(page: &ExtensionPage) -> Value {
+    let mut stored = Value::Null;
+    wait("onInstalled write", Duration::from_secs(20), || {
+        stored = ask(page, "{type: 'storage'}");
+        !stored["installs"].is_null()
+    });
+    assert_eq!(stored["installs"], 1, "{stored}");
+    stored
+}
+
 fn pss_kib(pid: u32) -> Option<u64> {
     let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
     rollup
@@ -244,8 +262,7 @@ fn native_runtime_classic_background() {
         "{probe}"
     );
     let first_start = probe["startedAt"].as_f64().unwrap();
-    let stored = ask(&page, "{type: 'storage'}");
-    assert_eq!(stored["installs"], 1, "{stored}");
+    let stored = installed(&page);
     assert_eq!(stored["lastReason"], "install");
 
     // Idle termination, then a wake by message from the options page.
@@ -258,6 +275,10 @@ fn native_runtime_classic_background() {
     let probe = ask(&page, "{type: 'probe'}");
     report("classic_message_wake_ms", woken.elapsed().as_millis());
     assert!(probe["startedAt"].as_f64().unwrap() > first_start);
+    assert_eq!(
+        probe["helper"], 42,
+        "install-time imports survive a restart"
+    );
     assert!(runtime.background(install).unwrap().generation > generation);
     let stored = ask(&page, "{type: 'storage'}");
     assert_eq!(stored["installs"], 1, "onInstalled fired again: {stored}");
@@ -408,8 +429,7 @@ fn native_runtime_module_background() {
     assert_eq!(probe["module"], true);
     assert_eq!(probe["awaited"], "top-level await");
     assert_eq!(probe["importScriptsThrows"], true);
-    let stored = ask(&page, "{type: 'storage'}");
-    assert_eq!(stored["installs"], 1);
+    let stored = installed(&page);
     assert_eq!(stored["lastReason"], "install");
     drop(page);
     let mut drain = runtime.retire();
@@ -470,4 +490,129 @@ fn native_runtime_capacity_and_pressure() {
     assert!(drain.run(Duration::from_secs(10)));
     drop(runtime);
     drop(context);
+}
+
+#[test]
+#[ignore = "sandboxed native WebKitGTK; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_runtime_browser_restart() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let directory = tempfile::tempdir().unwrap();
+    let install = ExtensionInstallId::from(0x13);
+    {
+        let engine = Rc::new(Engine::default());
+        let context = context();
+        let runtime = runtime(&context, &module, Some(directory.path()), &engine, SCALE);
+        runtime
+            .install_admitted(spec(0x13, 2, &fixture("classic")))
+            .unwrap();
+        wait("first run ready", Duration::from_secs(30), || {
+            ready(&runtime, install)
+        });
+        let page = open(&runtime, install);
+        installed(&page);
+        drop(page);
+        let mut drain = runtime.retire();
+        assert!(drain.run(Duration::from_secs(10)));
+        drop(runtime);
+        drop(context);
+        wait("first run renderers", Duration::from_secs(10), || {
+            web_processes().is_empty()
+        });
+    }
+    let engine = Rc::new(Engine::default());
+    let context = context();
+    let runtime = runtime(&context, &module, Some(directory.path()), &engine, SCALE);
+    runtime
+        .install_enabled(spec(0x13, 2, &fixture("classic")))
+        .unwrap();
+    runtime.browser_started();
+    assert_eq!(state(&runtime, install), Some(BackgroundState::Stopped));
+    let page = open(&runtime, install);
+    let woken = Instant::now();
+    let probe = ask(&page, "{type: 'probe'}");
+    report("restart_message_wake_ms", woken.elapsed().as_millis());
+    assert_eq!(probe["helper"], 42, "persisted import set: {probe}");
+    let stored = ask(&page, "{type: 'storage'}");
+    assert_eq!(stored["installs"], 1, "{stored}");
+    assert!(
+        runtime.errors(install).is_empty(),
+        "{:?}",
+        runtime.errors(install)
+    );
+    drop(page);
+    let mut drain = runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    drop(runtime);
+    drop(context);
+    wait("no renderers", Duration::from_secs(10), || {
+        web_processes().is_empty()
+    });
+}
+
+/// Boots unmodified public extension sources from `ZEPHIUM_WEBEXT_CORPUS`
+/// (`<dir>/<name>` package roots) until their listeners are registered and
+/// records the API they used that this runtime does not implement.
+#[test]
+#[ignore = "sandboxed native WebKitGTK; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_runtime_real_extensions_smoke() {
+    let _session = support::init();
+    let Some(corpus) = std::env::var_os("ZEPHIUM_WEBEXT_CORPUS").map(PathBuf::from) else {
+        report("smoke", "skipped: ZEPHIUM_WEBEXT_CORPUS unset");
+        return;
+    };
+    let module = ModuleDirectory::new();
+    let engine = Rc::new(Engine::default());
+    let context = context();
+    let runtime = runtime(&context, &module, None, &engine, 1);
+    for (index, name) in ["vimium", "darkreader"].into_iter().enumerate() {
+        let root = corpus.join(name);
+        if !root.join("manifest.json").is_file() {
+            report(&format!("smoke_{name}"), "skipped: no built package");
+            continue;
+        }
+        let install = ExtensionInstallId::from(0x200 + index as u128);
+        let started = Instant::now();
+        if let Err(error) =
+            runtime.install_admitted(lenient_spec(0x200 + index as u128, 10 + index as u8, &root))
+        {
+            report(&format!("smoke_{name}_refused"), error);
+            continue;
+        }
+        let booted = (0..20_000).find(|_| {
+            pump_for(Duration::from_millis(1));
+            ready(&runtime, install)
+                || runtime
+                    .errors(install)
+                    .iter()
+                    .any(|error| error.kind == ExtensionErrorKind::Startup)
+        });
+        report(&format!("smoke_{name}_ready"), ready(&runtime, install));
+        if booted.is_some() && ready(&runtime, install) {
+            report(
+                &format!("smoke_{name}_start_to_listeners_ms"),
+                started.elapsed().as_millis(),
+            );
+        }
+        pump_for(Duration::from_secs(2));
+        for error in runtime.errors(install) {
+            report(
+                &format!("smoke_{name}_error"),
+                format!("{:?}: {}", error.kind, error.message),
+            );
+        }
+        for (call, count) in runtime.unhandled_calls(install) {
+            report(
+                &format!("smoke_{name}_unhandled"),
+                format!("{call} x{count}"),
+            );
+        }
+    }
+    let mut drain = runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    drop(runtime);
+    drop(context);
+    wait("no renderers", Duration::from_secs(10), || {
+        web_processes().is_empty()
+    });
 }

@@ -1,6 +1,5 @@
 import { helperValue } from './lib/helper.mjs';
 
-const awaited = await new Promise((resolve) => setTimeout(() => resolve('top-level await'), 10));
 let importScriptsThrows = false;
 try {
   importScripts('lib/helper.js');
@@ -13,7 +12,7 @@ const scope = {
   document: typeof document,
   helper: helperValue,
   module: true,
-  awaited,
+  awaited: null,
   importScriptsThrows,
   greeting: chrome.i18n.getMessage('greeting', ['now']),
 };
@@ -32,3 +31,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return false;
 });
+
+// Listeners are registered in the first task above; top-level await after it.
+scope.awaited = await new Promise((resolve) => setTimeout(() => resolve('top-level await'), 10));
