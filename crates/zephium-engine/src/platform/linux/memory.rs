@@ -24,3 +24,13 @@ pub fn configure_memory_pressure() {
     network.set_poll_interval(WEB_PROCESS.poll_interval);
     webkit2gtk::WebsiteDataManager::set_memory_pressure_settings(&mut network);
 }
+
+// Ordered fractions, cache release above 300 MiB, and no busy polling.
+const _: () = assert!(
+    0.0 < WEB_PROCESS.conservative_threshold
+        && WEB_PROCESS.conservative_threshold < WEB_PROCESS.strict_threshold
+        && WEB_PROCESS.strict_threshold < 1.0
+        && WEB_PROCESS.memory_limit_mib as f64 * WEB_PROCESS.conservative_threshold >= 300.0
+        && NETWORK_PROCESS_LIMIT_MIB >= 128
+        && WEB_PROCESS.poll_interval >= 10.0
+);
