@@ -926,6 +926,43 @@ fn event_frame(kind: ContextKind, seq: u64, name: &str, args: &Value) -> Option<
     )
 }
 
+/// The manifest as extensions see it, with Chrome's localized string fields.
+fn localized_manifest(manifest: &Manifest) -> Value {
+    let mut raw = manifest.raw().clone();
+    let localize = |value: &mut Value| {
+        if let Some(text) = value.as_str() {
+            *value = Value::String(manifest.localize(text));
+        }
+    };
+    for key in ["name", "short_name", "description"] {
+        if let Some(value) = raw.get_mut(key) {
+            localize(value);
+        }
+    }
+    for key in ["action", "browser_action", "page_action"] {
+        if let Some(value) = raw
+            .get_mut(key)
+            .and_then(|action| action.get_mut("default_title"))
+        {
+            localize(value);
+        }
+    }
+    if let Some(value) = raw
+        .get_mut("omnibox")
+        .and_then(|omnibox| omnibox.get_mut("keyword"))
+    {
+        localize(value);
+    }
+    if let Some(commands) = raw.get_mut("commands").and_then(Value::as_object_mut) {
+        for command in commands.values_mut() {
+            if let Some(value) = command.get_mut("description") {
+                localize(value);
+            }
+        }
+    }
+    raw
+}
+
 fn sender_json(sender: &Sender, browser: &linux_browser::Shared) -> Value {
     let mut value = json!({
         "id": sender.extension_id().as_str(),
@@ -1444,7 +1481,7 @@ impl RuntimeHost {
         let mut state = InstallState {
             extension_id: admitted.extension_id,
             catalog: binding_catalog(&admitted.messages),
-            manifest: admitted.manifest.raw().clone(),
+            manifest: localized_manifest(&admitted.manifest),
             root: admitted.root,
             background: admitted.background,
             worker_surface,

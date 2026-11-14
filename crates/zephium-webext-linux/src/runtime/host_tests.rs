@@ -1044,3 +1044,27 @@ fn retired_installs_keep_the_script_write_barrier_until_io_completion() {
             .unwrap();
     assert_eq!(snapshot[0]["id"], "submitted");
 }
+
+#[test]
+fn extensions_see_their_manifest_strings_localized() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("manifest.json"),
+        r#"{"manifest_version":3,"version":"1","default_locale":"en","name":"__MSG_name__",
+            "description":"__MSG_description__ (__MSG_unknown__)","action":{"default_title":"__MSG_title__"},
+            "commands":{"run":{"description":"__MSG_title__"}},"content_scripts":[{"js":["__MSG_name__.js"],"matches":["<all_urls>"]}]}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(directory.path().join("_locales/en")).unwrap();
+    std::fs::write(
+        directory.path().join("_locales/en/messages.json"),
+        r#"{"name":{"message":"Named"},"description":{"message":"Described"},"title":{"message":"Titled"}}"#,
+    )
+    .unwrap();
+    let manifest = localized_manifest(&Manifest::load(directory.path()).unwrap());
+    assert_eq!(manifest["name"], "Named");
+    assert_eq!(manifest["description"], "Described (__MSG_unknown__)");
+    assert_eq!(manifest["action"]["default_title"], "Titled");
+    assert_eq!(manifest["commands"]["run"]["description"], "Titled");
+    assert_eq!(manifest["content_scripts"][0]["js"][0], "__MSG_name__.js");
+}
