@@ -2,7 +2,6 @@ use proptest::prelude::*;
 use serde_json::json;
 
 use super::*;
-use crate::api::ArgumentValidator;
 use crate::context::tests::{background_sender, content_sender, install, profile};
 use crate::dispatch::{ApiTable, Dispatcher, Inbound};
 use crate::envelope::{ApiName, CallId, Direction, Envelope};
@@ -520,7 +519,7 @@ fn persistent_backend_is_refused_for_incognito() {
 }
 
 #[test]
-fn manual_signatures_reject_malformed_input() {
+fn generated_signatures_reject_malformed_input() {
     for (method, args) in [
         ("get", json!([1])),
         ("get", json!([["a", 1]])),
@@ -535,9 +534,11 @@ fn manual_signatures_reject_malformed_input() {
             json!([{"accessLevel":"TRUSTED_CONTEXTS","other":1}]),
         ),
     ] {
-        assert!(ManualValidator
-            .validate(&format!("storage.local.{method}"), args.as_array().unwrap())
-            .is_err());
+        assert!(crate::schema::validate(
+            &format!("storage.local.{method}"),
+            args.as_array().unwrap()
+        )
+        .is_err());
     }
     for args in [
         json!([]),
@@ -546,9 +547,7 @@ fn manual_signatures_reject_malformed_input() {
         json!([["a"]]),
         json!([{}]),
     ] {
-        ManualValidator
-            .validate("storage.local.get", args.as_array().unwrap())
-            .unwrap();
+        crate::schema::validate("storage.local.get", args.as_array().unwrap()).unwrap();
     }
 }
 

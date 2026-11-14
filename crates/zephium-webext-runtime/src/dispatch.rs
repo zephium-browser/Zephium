@@ -32,6 +32,9 @@ const EXTERNAL_PAGE_METHODS: [&str; 2] = ["runtime.sendMessage", "runtime.connec
 /// writes or declarative-net-request mutation; external pages get only
 /// `runtime.sendMessage` and `runtime.connect`.
 pub fn permitted_contexts(name: &str) -> ContextMask {
+    if name == "events.completeRegistration" {
+        return ContextMask::of(ContextKind::Background);
+    }
     let mut mask = ContextMask::ALL;
     if !EXTERNAL_PAGE_METHODS.contains(&name) {
         mask = mask.without(ContextKind::ExternalPage);
@@ -61,6 +64,8 @@ fn is_privileged_only(name: &str) -> bool {
 /// Why a method could not be registered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistrationError {
+    /// Missing generated schema or unsupported feature metadata.
+    MissingSchema(&'static str),
     /// Not a dotted API name.
     InvalidName(&'static str),
     /// Already registered.
@@ -146,6 +151,18 @@ impl<S> ApiTable<S> {
         Self::default()
     }
 
+    /// Registers a service using generated arguments, permission and contexts.
+    pub fn register_generated(
+        &mut self,
+        name: &'static str,
+        handler: impl Fn(&mut S, Invocation<'_>) -> Handled + Send + Sync + 'static,
+    ) -> Result<(), RegistrationError> {
+        let access = crate::schema::access(name).ok_or(RegistrationError::MissingSchema(name))?;
+        let mut spec = MethodSpec::new(access.gate, access.contexts, handler);
+        spec.generated_schema = true;
+        self.register(name, spec)
+    }
+
     /// Registers one method.
     pub fn register(
         &mut self,
@@ -154,6 +171,9 @@ impl<S> ApiTable<S> {
     ) -> Result<(), RegistrationError> {
         if ApiName::parse(name).is_none() {
             return Err(RegistrationError::InvalidName(name));
+        }
+        if spec.generated_schema {
+            spec.contexts = spec.contexts.intersection(permitted_contexts(name));
         }
         if spec.contexts.is_empty() {
             return Err(RegistrationError::NoContexts(name));
@@ -172,7 +192,7 @@ impl<S> ApiTable<S> {
         if self.methods.contains_key(name) {
             return Err(RegistrationError::Duplicate(name));
         }
-        if spec.validate.is_none() {
+        if !spec.generated_schema && spec.validate.is_none() {
             spec.validate = crate::api::generated::validator(name);
             spec.generated_schema = spec.validate.is_some();
         }
@@ -183,6 +203,16 @@ impl<S> ApiTable<S> {
     /// The contexts a registered method is available to.
     pub fn contexts(&self, name: &str) -> Option<ContextMask> {
         self.methods.get(name).map(|spec| spec.contexts)
+    }
+
+    /// The permission a registered method requires.
+    pub fn gate(&self, name: &str) -> Option<Gate> {
+        self.methods.get(name).map(|spec| spec.gate)
+    }
+
+    /// Registered names, in unspecified order.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.methods.keys().copied()
     }
 
     /// The number of registered methods.
@@ -970,6 +1000,64 @@ mod tests {
         let (_, result) =
             reply(dispatcher.receive(&mut state, &native, &background_sender(), &connect, 0));
         assert_eq!(result, Ok("null".into()));
+    }
+
+    #[test]
+    fn generated_metadata_cannot_widen_policy_or_admit_the_main_world() {
+        let mut table = ApiTable::<State>::new();
+        for name in [
+            "runtime.connectNative",
+            "runtime.sendNativeMessage",
+            "permissions.request",
+            "cookies.get",
+            "management.getSelf",
+            "debugger.attach",
+            "privacy.services.passwordSavingEnabled.set",
+            "privacy.network.webRTCIPHandlingPolicy.clear",
+            "declarativeNetRequest.updateDynamicRules",
+            "declarativeNetRequest.updateSessionRules",
+            "declarativeNetRequest.updateEnabledRulesets",
+            "declarativeNetRequest.setExtensionActionOptions",
+            "storage.local.get",
+            "runtime.sendMessage",
+            "runtime.connect",
+        ] {
+            // Even a future generated rule admitting every context is capped here.
+            let mut spec = MethodSpec::new(Gate::Open, ContextMask::ALL, |_: &mut State, call| {
+                call.reply(Ok(Value::Null))
+            });
+            spec.generated_schema = true;
+            table.register(name, spec).unwrap();
+            assert_eq!(
+                table.contexts(name),
+                Some(permitted_contexts(name)),
+                "{name}"
+            );
+        }
+        let mut generated = ApiTable::<State>::new();
+        generated
+            .register_generated("runtime.connectNative", |_: &mut State, call| {
+                call.reply(Ok(Value::Null))
+            })
+            .unwrap();
+        assert!(crate::schema::access("runtime.connectNative")
+            .unwrap()
+            .contexts
+            .contains(ContextKind::ExtensionFrame));
+        assert!(!generated
+            .contexts("runtime.connectNative")
+            .unwrap()
+            .contains(ContextKind::ExtensionFrame));
+        assert!(authority()
+            .bind_tab(
+                &TabDocument {
+                    tab: ItemId::from(5),
+                    frame: FrameId::MAIN,
+                    committed: committed("https://example.com/", 2),
+                },
+                &ClaimedWorld::Page
+            )
+            .is_err());
     }
 
     #[test]

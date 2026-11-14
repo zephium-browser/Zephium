@@ -1,8 +1,7 @@
 //! Locale selection and bounded Chrome message substitution, without I/O.
 
-use crate::api::ArgumentValidator;
 use crate::dispatch::{ApiTable, RegistrationError};
-use crate::{ApiError, ContextKind, ContextMask, ExtensionId, Gate, MethodSpec, Sender};
+use crate::{ApiError, ExtensionId, Sender};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -356,36 +355,6 @@ pub trait I18nHost {
     fn messages(&self, sender: &Sender) -> Result<&Messages, ApiError>;
 }
 
-/// Handwritten validation behind the shared schema boundary.
-pub struct I18nValidator;
-impl ArgumentValidator for I18nValidator {
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        if method != "i18n.getMessage" {
-            return if args.is_empty() {
-                Ok(())
-            } else {
-                Err(ApiError::malformed_arguments())
-            };
-        }
-        if args.is_empty() || args.len() > 3 || !args[0].is_string() {
-            return Err(ApiError::malformed_arguments());
-        }
-        substitutions(args.get(1))?;
-        if let Some(options) = args.get(2) {
-            let options = options
-                .as_object()
-                .ok_or_else(ApiError::malformed_arguments)?;
-            if options
-                .iter()
-                .any(|(key, value)| key != "escapeLt" || !value.is_boolean())
-            {
-                return Err(ApiError::malformed_arguments());
-            }
-        }
-        Ok(())
-    }
-}
-
 fn substitutions(value: Option<&Value>) -> Result<Vec<String>, ApiError> {
     match value {
         None | Some(Value::Null) => Ok(Vec::new()),
@@ -429,49 +398,43 @@ pub fn register<S: I18nHost + 'static>(table: &mut ApiTable<S>) -> Result<(), Re
         "i18n.getUILanguage",
         "i18n.getAcceptLanguages",
     ] {
-        table.register(
-            name,
-            MethodSpec::new(
-                Gate::Open,
-                ContextMask::ALL.without(ContextKind::ExternalPage),
-                |host: &mut S, invocation| {
-                    let result = (|| {
-                        I18nValidator.validate(invocation.name(), invocation.args())?;
-                        let messages = host.messages(invocation.sender())?;
-                        if messages.extension_id() != invocation.sender().extension_id() {
-                            return Err(ApiError::context_invalidated());
-                        }
-                        match invocation.name() {
-                            "i18n.getMessage" => {
-                                let args = invocation.args();
-                                let name =
-                                    args[0].as_str().ok_or_else(ApiError::malformed_arguments)?;
-                                let escape = args
-                                    .get(2)
-                                    .and_then(|options| options.get("escapeLt"))
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(false);
-                                messages
-                                    .get_message(name, &substitutions(args.get(1))?, escape)
-                                    .map(Value::String)
-                            }
-                            "i18n.getUILanguage" => {
-                                Ok(Value::String(messages.ui_language().to_owned()))
-                            }
-                            _ => Ok(Value::Array(
-                                messages
-                                    .accept_languages()
-                                    .iter()
-                                    .cloned()
-                                    .map(Value::String)
-                                    .collect(),
-                            )),
-                        }
-                    })();
-                    invocation.reply(result)
-                },
-            ),
-        )?;
+        table.register_generated(name, |host: &mut S, invocation| {
+            let result = (|| {
+                let substitutions = if invocation.name() == "i18n.getMessage" {
+                    substitutions(invocation.args().get(1))?
+                } else {
+                    Vec::new()
+                };
+                let messages = host.messages(invocation.sender())?;
+                if messages.extension_id() != invocation.sender().extension_id() {
+                    return Err(ApiError::context_invalidated());
+                }
+                match invocation.name() {
+                    "i18n.getMessage" => {
+                        let args = invocation.args();
+                        let name = args[0].as_str().ok_or_else(ApiError::malformed_arguments)?;
+                        let escape = args
+                            .get(2)
+                            .and_then(|options| options.get("escapeLt"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        messages
+                            .get_message(name, &substitutions, escape)
+                            .map(Value::String)
+                    }
+                    "i18n.getUILanguage" => Ok(Value::String(messages.ui_language().to_owned())),
+                    _ => Ok(Value::Array(
+                        messages
+                            .accept_languages()
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    )),
+                }
+            })();
+            invocation.reply(result)
+        })?;
     }
     Ok(())
 }

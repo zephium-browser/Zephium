@@ -17,9 +17,7 @@ use crate::envelope::PortId;
 use crate::errors::ApiError;
 use crate::limits::{message_limit, Charge, Clock, Limiter, Reservation, MAX_PORTS_PER_INSTALL};
 
-pub use api::{
-    parse_request, register, MessageRequest, MessageTarget, MessagingHost, MessagingValidator,
-};
+pub use api::{parse_request, register, MessageRequest, MessageTarget, MessagingHost};
 pub use messages::{
     ListenerOutcome, MessageId, MessageListener, MessageService, MessageSettlement, OneShotDelivery,
 };

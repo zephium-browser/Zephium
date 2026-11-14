@@ -13,13 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use zephium_core::ids::ExtensionInstallId;
 
-use crate::api::ArgumentValidator;
 use crate::context::{ContextKey, ContextKind, ContextMask, Sender};
-use crate::dispatch::{ApiTable, Handled, Invocation, MethodSpec, RegistrationError};
+use crate::dispatch::{ApiTable, Handled, Invocation, RegistrationError};
 use crate::envelope::{ApiName, EventSeq};
 use crate::errors::ApiError;
 use crate::limits::{MAX_QUEUED_EVENTS_PER_BACKGROUND, MAX_QUEUED_EVENT_BYTES_PER_BACKGROUND};
-use crate::permissions::Gate;
 use crate::storage::{Storage, StorageChangeEvent};
 
 use filters::FilterCost;
@@ -163,9 +161,7 @@ impl EventRegistry {
         event: &str,
         filter: Option<&Value>,
     ) -> Result<bool, ApiError> {
-        if !EVENT_APIS.iter().any(|(known, _)| *known == event)
-            || !event_contexts(event).contains(sender.kind())
-        {
+        if !EVENT_APIS.contains(&event) || !event_contexts(event).contains(sender.kind()) {
             return Err(ApiError::not_available_in_context(event));
         }
         let key = sender.context_key();
@@ -395,7 +391,7 @@ impl EventRegistry {
         check_snapshot_specs(&snapshot.listeners)?;
         let mut listeners = Vec::with_capacity(snapshot.listeners.len());
         for (spec, cost) in snapshot.listeners.into_iter().zip(costs) {
-            if !EVENT_APIS.iter().any(|(known, _)| *known == spec.event) {
+            if !EVENT_APIS.contains(&spec.event.as_str()) {
                 return Err(ApiError::other("Invalid extension listener snapshot."));
             }
             let filter = ListenerFilter::parse(&spec.event, spec.filter.as_ref())?;
@@ -719,42 +715,14 @@ pub enum ListenerRequest {
 
 /// Adapter implementation of authenticated listener operations and persistence.
 pub trait EventsHost {
-    /// Replaceable argument-validation seam for generated schemas.
-    fn validate_event_arguments(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        ManualValidator.validate(method, args)
-    }
     /// Applies a validated request. Durable changes settle after persistence.
     fn listener_request(&mut self, request: ListenerRequest, invocation: Invocation<'_>)
         -> Handled;
 }
 
-/// Hand-written listener signatures, replaceable with generated schemas.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ManualValidator;
-
-impl ArgumentValidator for ManualValidator {
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        if method == "events.completeRegistration" {
-            return if args.is_empty() {
-                Ok(())
-            } else {
-                Err(ApiError::malformed_arguments())
-            };
-        }
-        let (event, operation) = method
-            .rsplit_once('.')
-            .ok_or_else(ApiError::malformed_arguments)?;
-        let event = EVENT_APIS
-            .iter()
-            .find_map(|(known, _)| (*known == event).then_some(*known))
-            .ok_or_else(ApiError::unknown_method)?;
-        parse_listener_request(event, operation, args).map(|_| ())
-    }
-}
-
 /// Installs listener binding operations with their event's permission gate.
 pub fn register<S: EventsHost + 'static>(table: &mut ApiTable<S>) -> Result<(), RegistrationError> {
-    for &(event, gate) in EVENT_APIS {
+    for &event in EVENT_APIS {
         for operation in [
             "addListener",
             "removeListener",
@@ -765,46 +733,18 @@ pub fn register<S: EventsHost + 'static>(table: &mut ApiTable<S>) -> Result<(), 
             // uses compile-time strings below instead of leaking allocations.
             let name = listener_method(event, operation);
             if let Some(name) = name {
-                table.register(
-                    name,
-                    MethodSpec::new(
-                        gate,
-                        event_contexts(event),
-                        move |host: &mut S, invocation| {
-                            if let Err(error) =
-                                host.validate_event_arguments(invocation.name(), invocation.args())
-                            {
-                                return invocation.reply(Err(error));
-                            }
-                            match parse_listener_request(event, operation, invocation.args()) {
-                                Ok(request) => host.listener_request(request, invocation),
-                                Err(error) => invocation.reply(Err(error)),
-                            }
-                        },
-                    ),
-                )?;
+                table.register_generated(name, move |host: &mut S, invocation| {
+                    match parse_listener_request(event, operation, invocation.args()) {
+                        Ok(request) => host.listener_request(request, invocation),
+                        Err(error) => invocation.reply(Err(error)),
+                    }
+                })?;
             }
         }
     }
-    table.register(
-        "events.completeRegistration",
-        MethodSpec::new(
-            Gate::Open,
-            ContextMask::of(ContextKind::Background),
-            |host: &mut S, invocation| {
-                if let Err(error) =
-                    host.validate_event_arguments(invocation.name(), invocation.args())
-                {
-                    return invocation.reply(Err(error));
-                }
-                if invocation.args().is_empty() {
-                    host.listener_request(ListenerRequest::CompleteRegistration, invocation)
-                } else {
-                    invocation.reply(Err(ApiError::malformed_arguments()))
-                }
-            },
-        ),
-    )
+    table.register_generated("events.completeRegistration", |host: &mut S, invocation| {
+        host.listener_request(ListenerRequest::CompleteRegistration, invocation)
+    })
 }
 
 fn parse_listener_request(
@@ -822,12 +762,13 @@ fn parse_listener_request(
         .and_then(ListenerId::new)
         .ok_or_else(ApiError::malformed_arguments)?;
     match operation {
-        "addListener" if (1..=2).contains(&args.len()) => {
-            ListenerFilter::parse(event, args.get(1))?;
+        "addListener" if args.get(2).is_none_or(|value| value.is_null()) => {
+            let filter = args.get(1).filter(|value| !value.is_null());
+            ListenerFilter::parse(event, filter)?;
             Ok(ListenerRequest::Add {
                 event,
                 id,
-                filter: args.get(1).cloned(),
+                filter: filter.cloned(),
             })
         }
         "removeListener" if args.len() == 1 => Ok(ListenerRequest::Remove { event, id }),
@@ -837,11 +778,13 @@ fn parse_listener_request(
 }
 
 fn event_contexts(event: &str) -> ContextMask {
-    if matches!(event, "runtime.onMessage" | "runtime.onConnect") || is_storage_event(event) {
-        ContextMask::ALL.without(ContextKind::ExternalPage)
-    } else {
-        ContextMask::EXTENSION_PAGES
-    }
+    crate::schema::access(&format!("{event}.addListener"))
+        .map(|access| {
+            access
+                .contexts
+                .intersection(crate::dispatch::permitted_contexts(event))
+        })
+        .unwrap_or(ContextMask::NONE)
 }
 
 fn is_storage_event(event: &str) -> bool {
@@ -856,8 +799,8 @@ fn is_storage_event(event: &str) -> bool {
 }
 
 macro_rules! event_catalog {
-    ($(($name:literal, $gate:expr)),* $(,)?) => {
-        const EVENT_APIS: &[(&str, Gate)] = &[$(($name, $gate)),*];
+    ($( $name:literal ),* $(,)?) => {
+        const EVENT_APIS: &[&str] = &[$($name),*];
         fn listener_method(event: &str, operation: &str) -> Option<&'static str> {
             match (event, operation) {
                 $(( $name, "addListener") => Some(concat!($name, ".addListener")),
@@ -871,60 +814,42 @@ macro_rules! event_catalog {
 }
 
 event_catalog!(
-    ("runtime.onMessage", Gate::Open),
-    ("runtime.onConnect", Gate::Open),
-    ("runtime.onMessageExternal", Gate::Open),
-    ("runtime.onConnectExternal", Gate::Open),
-    ("runtime.onInstalled", Gate::Open),
-    ("runtime.onStartup", Gate::Open),
-    ("runtime.onSuspend", Gate::Open),
-    ("runtime.onSuspendCanceled", Gate::Open),
-    ("storage.onChanged", Gate::Requires("storage")),
-    ("alarms.onAlarm", Gate::Requires("alarms")),
-    ("storage.local.onChanged", Gate::Requires("storage")),
-    ("storage.sync.onChanged", Gate::Requires("storage")),
-    ("storage.session.onChanged", Gate::Requires("storage")),
-    ("storage.managed.onChanged", Gate::Requires("storage")),
-    ("tabs.onCreated", Gate::Open),
-    ("tabs.onUpdated", Gate::Open),
-    ("tabs.onRemoved", Gate::Open),
-    ("tabs.onActivated", Gate::Open),
-    ("windows.onCreated", Gate::Open),
-    ("windows.onRemoved", Gate::Open),
-    ("windows.onFocusChanged", Gate::Open),
-    (
-        "webNavigation.onBeforeNavigate",
-        Gate::Requires("webNavigation")
-    ),
-    ("webNavigation.onCommitted", Gate::Requires("webNavigation")),
-    (
-        "webNavigation.onDOMContentLoaded",
-        Gate::Requires("webNavigation")
-    ),
-    ("webNavigation.onCompleted", Gate::Requires("webNavigation")),
-    (
-        "webNavigation.onErrorOccurred",
-        Gate::Requires("webNavigation")
-    ),
-    (
-        "webNavigation.onHistoryStateUpdated",
-        Gate::Requires("webNavigation")
-    ),
-    (
-        "webNavigation.onReferenceFragmentUpdated",
-        Gate::Requires("webNavigation")
-    ),
-    ("webRequest.onBeforeRequest", Gate::Requires("webRequest")),
-    (
-        "webRequest.onBeforeSendHeaders",
-        Gate::Requires("webRequest")
-    ),
-    ("webRequest.onSendHeaders", Gate::Requires("webRequest")),
-    ("webRequest.onHeadersReceived", Gate::Requires("webRequest")),
-    ("webRequest.onResponseStarted", Gate::Requires("webRequest")),
-    ("webRequest.onCompleted", Gate::Requires("webRequest")),
-    ("webRequest.onErrorOccurred", Gate::Requires("webRequest")),
-    ("webRequest.onAuthRequired", Gate::Requires("webRequest")),
+    "runtime.onMessage",
+    "runtime.onConnect",
+    "runtime.onMessageExternal",
+    "runtime.onConnectExternal",
+    "runtime.onInstalled",
+    "runtime.onStartup",
+    "runtime.onSuspend",
+    "runtime.onSuspendCanceled",
+    "storage.onChanged",
+    "alarms.onAlarm",
+    "storage.local.onChanged",
+    "storage.sync.onChanged",
+    "storage.session.onChanged",
+    "storage.managed.onChanged",
+    "tabs.onCreated",
+    "tabs.onUpdated",
+    "tabs.onRemoved",
+    "tabs.onActivated",
+    "windows.onCreated",
+    "windows.onRemoved",
+    "windows.onFocusChanged",
+    "webNavigation.onBeforeNavigate",
+    "webNavigation.onCommitted",
+    "webNavigation.onDOMContentLoaded",
+    "webNavigation.onCompleted",
+    "webNavigation.onErrorOccurred",
+    "webNavigation.onHistoryStateUpdated",
+    "webNavigation.onReferenceFragmentUpdated",
+    "webRequest.onBeforeRequest",
+    "webRequest.onBeforeSendHeaders",
+    "webRequest.onSendHeaders",
+    "webRequest.onHeadersReceived",
+    "webRequest.onResponseStarted",
+    "webRequest.onCompleted",
+    "webRequest.onErrorOccurred",
+    "webRequest.onAuthRequired",
 );
 
 #[cfg(test)]

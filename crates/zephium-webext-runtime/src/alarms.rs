@@ -6,12 +6,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::ArgumentValidator;
-use crate::context::{ContextMask, Sender};
-use crate::dispatch::{ApiTable, MethodSpec, RegistrationError};
+use crate::context::Sender;
+use crate::dispatch::{ApiTable, RegistrationError};
 use crate::errors::ApiError;
 use crate::limits::Clock;
-use crate::permissions::Gate;
 
 /// Maximum active alarms for one install.
 pub const MAX_ALARMS: usize = 500;
@@ -295,7 +293,7 @@ impl Alarms {
         self.restore(snapshot, now)
     }
 
-    /// Runs a manually validated `alarms.*` call. Null represents an absent
+    /// Runs a schema-validated `alarms.*` call. Null represents an absent
     /// alarm or void result on the JSON bridge; bindings own undefined mapping.
     /// Hosts persist mutations before acknowledging durable completion.
     pub fn handle(
@@ -304,17 +302,16 @@ impl Alarms {
         args: &[Value],
         now: AlarmEnvironment,
     ) -> Result<Value, ApiError> {
-        ManualValidator.validate(method, args)?;
+        let args = crate::schema::normalize(method, args)?;
+        let args = args.as_slice();
         match method {
             "alarms.create" => {
-                let (name, value) = match args {
-                    [info] => (None, info),
-                    [name, info] => (name.as_str(), info),
-                    _ => return Err(signature_error(method)),
+                let [name, value] = args else {
+                    return Err(ApiError::malformed_arguments());
                 };
-                let info =
-                    serde_json::from_value(value.clone()).map_err(|_| signature_error(method))?;
-                self.create(name, info, now)?;
+                let info = serde_json::from_value(value.clone())
+                    .map_err(|_| ApiError::malformed_arguments())?;
+                self.create(name.as_str(), info, now)?;
                 Ok(Value::Null)
             }
             "alarms.get" => serialize(self.get(optional_name(args))),
@@ -429,43 +426,6 @@ fn optional_name(args: &[Value]) -> &str {
     args.first().and_then(Value::as_str).unwrap_or_default()
 }
 
-fn signature_error(method: &str) -> ApiError {
-    let signature = match method {
-        "alarms.create" => "optional string name, object alarmInfo",
-        "alarms.get" | "alarms.clear" => "optional string name",
-        _ => "",
-    };
-    ApiError::no_matching_signature(method, signature)
-}
-
-/// Manual validation, replaceable by the generated schema validator.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ManualValidator;
-
-impl ArgumentValidator for ManualValidator {
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        let valid = match method {
-            "alarms.create" => match args {
-                [info] => serde_json::from_value::<AlarmCreateInfo>(info.clone()).is_ok(),
-                [name, info] if name.is_string() => {
-                    serde_json::from_value::<AlarmCreateInfo>(info.clone()).is_ok()
-                }
-                _ => false,
-            },
-            "alarms.get" | "alarms.clear" => {
-                args.is_empty() || matches!(args, [name] if name.is_string())
-            }
-            "alarms.getAll" | "alarms.clearAll" => args.is_empty(),
-            _ => return Err(ApiError::unknown_method()),
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(signature_error(method))
-        }
-    }
-}
-
 /// Adapter seam: select the install-scoped service using authenticated sender
 /// identity, supply time, and settle persistence before reporting success.
 pub trait AlarmHost {
@@ -487,19 +447,10 @@ pub fn register<S: AlarmHost + 'static>(table: &mut ApiTable<S>) -> Result<(), R
         "alarms.clear",
         "alarms.clearAll",
     ] {
-        table.register(
-            name,
-            MethodSpec::new(
-                Gate::Requires("alarms"),
-                ContextMask::EXTENSION_PAGES,
-                |state: &mut S, call| {
-                    let result = ManualValidator
-                        .validate(call.name(), call.args())
-                        .and_then(|()| state.alarm_call(call.sender(), call.name(), call.args()));
-                    call.reply(result)
-                },
-            ),
-        )?;
+        table.register_generated(name, |state: &mut S, call| {
+            let result = state.alarm_call(call.sender(), call.name(), call.args());
+            call.reply(result)
+        })?;
     }
     Ok(())
 }

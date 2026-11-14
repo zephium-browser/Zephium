@@ -10,10 +10,14 @@ use crate::api::generated;
 use crate::errors::ApiError;
 use crate::limits::MAX_ARGUMENT_DEPTH;
 
+mod access;
+pub use access::{access, Access};
+
 const MAX_REFERENCE_DEPTH: usize = 64;
 const MAX_PARAMETERS: usize = 64;
 
 struct Method {
+    feature_rules: Vec<Value>,
     namespace: String,
     invocation_name: String,
     setting_argument: Option<Value>,
@@ -23,6 +27,7 @@ struct Method {
 }
 
 struct Catalog {
+    namespace_rules: HashMap<String, Vec<Value>>,
     methods: HashMap<String, Method>,
     references: HashMap<String, (String, Value)>,
 }
@@ -55,15 +60,78 @@ fn qualify(namespace: &str, reference: &str) -> String {
     }
 }
 
+// Callback functions never cross JSON; the binding sends bounded callback IDs.
+fn add_listener_methods(namespaces: &mut [Value]) -> Result<(), ()> {
+    let event_type = namespaces
+        .iter()
+        .find(|ns| ns["namespace"] == "events")
+        .and_then(|ns| array(ns, "types").iter().find(|kind| kind["id"] == "Event"));
+    let operations = event_type
+        .map(|kind| array(kind, "functions").to_vec())
+        .unwrap_or_default();
+    for namespace in namespaces {
+        let mut methods = array(namespace, "functions").to_vec();
+        for event in array(namespace, "events") {
+            for operation in operations.iter().filter(|op| {
+                matches!(
+                    op["name"].as_str(),
+                    Some("addListener" | "removeListener" | "hasListener" | "hasListeners")
+                )
+            }) {
+                let mut method = operation.clone();
+                method["name"] = format!(
+                    "{}.{}",
+                    event["name"].as_str().ok_or(())?,
+                    operation["name"].as_str().ok_or(())?
+                )
+                .into();
+                method["feature_rules"] = event["feature_rules"].clone();
+                for parameter in method["parameters"].as_array_mut().ok_or(())? {
+                    if parameter["type"] == "function" {
+                        *parameter = serde_json::json!({"name":"callback", "type":"number", "bridge_callback":true, "minimum":1, "maximum":9_007_199_254_740_991_i64});
+                    }
+                }
+                if operation["name"] == "addListener" {
+                    let parameters = method["parameters"].as_array_mut().ok_or(())?;
+                    parameters.extend(array(event, "extraParameters").iter().cloned());
+                    if let Some(filter) = event_filter(event) {
+                        parameters.push(filter);
+                    }
+                }
+                methods.push(method);
+            }
+        }
+        namespace["functions"] = methods.into();
+    }
+    Ok(())
+}
+
+fn event_filter(event: &Value) -> Option<Value> {
+    let filters = event.get("filters")?.as_array()?;
+    let mut properties = Map::new();
+    for filter in filters {
+        properties.insert(filter.get("name")?.as_str()?.to_owned(), filter.clone());
+    }
+    Some(
+        serde_json::json!({"name":"filter", "type":"object", "optional":true, "properties":properties}),
+    )
+}
+
 impl Catalog {
     fn parse(json: &str) -> Result<Self, ()> {
-        let namespaces: Vec<Value> = serde_json::from_str(json).map_err(|_| ())?;
+        let mut namespaces: Vec<Value> = serde_json::from_str(json).map_err(|_| ())?;
+        add_listener_methods(&mut namespaces)?;
         let mut result = Self {
+            namespace_rules: HashMap::new(),
             methods: HashMap::new(),
             references: HashMap::new(),
         };
         for schema in &namespaces {
             let namespace = schema.get("namespace").and_then(Value::as_str).ok_or(())?;
+            result.namespace_rules.insert(
+                namespace.to_owned(),
+                array(schema, "feature_rules").to_vec(),
+            );
             for kind in array(schema, "types") {
                 let id = kind.get("id").and_then(Value::as_str).ok_or(())?;
                 if result
@@ -113,6 +181,7 @@ impl Catalog {
                     }
                 }
                 let method = Method {
+                    feature_rules: array(function, "feature_rules").to_vec(),
                     namespace: namespace.to_owned(),
                     invocation_name: if namespace == "storage" && name.contains('.') {
                         format!("storage.{}", name.rsplit('.').next().ok_or(())?)
@@ -325,7 +394,7 @@ impl Catalog {
                 let number = value
                     .as_f64()
                     .ok_or_else(|| "Value must not be NaN or Infinity.".to_owned())?;
-                if !number.is_finite() {
+                if !number.is_finite() || (flag(spec, "bridge_callback") && number.fract() != 0.0) {
                     return Err("Value must not be NaN or Infinity.".into());
                 }
                 if let Some(minimum) = spec.get("minimum").and_then(Value::as_i64) {
@@ -621,7 +690,21 @@ pub fn validate(name: &str, args: &[Value]) -> Result<(), ApiError> {
 /// Dates and binary identities require binding-side handling and cannot be
 /// represented by caller-supplied JSON marker objects.
 pub fn normalize(name: &str, args: &[Value]) -> Result<Vec<Value>, ApiError> {
-    catalog()?.normalize(name, args)
+    catalog()?.normalize(source_method(name), args)
+}
+
+pub(crate) fn source_method(name: &str) -> &str {
+    // The binding uses a background-only internal name for this notification.
+    if name == "events.completeRegistration" {
+        "runtime.markListenerRegistrationComplete"
+    } else {
+        name
+    }
+}
+
+/// Whether this method (including a generated event's binding operation) exists.
+pub fn contains(name: &str) -> bool {
+    catalog().is_ok_and(|catalog| catalog.methods.contains_key(source_method(name)))
 }
 
 /// The exact Chromium invocation signature, including its callback parameter.

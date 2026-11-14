@@ -23,6 +23,7 @@ use crate::permissions::{
 use crate::ports::{MessageRequest, MessagingHost};
 use crate::scripting_registry::{ResourceKind, ScriptRegistry, ScriptingHost};
 use crate::storage::{Storage, StorageChangeEvent, StorageHost};
+use crate::ApiError;
 
 const HOST_REACHED: &str = "Test host reached.";
 
@@ -378,4 +379,222 @@ fn external_pages_reach_only_the_two_explicit_messaging_entry_points() {
         Err(HOST_REACHED.into())
     );
     assert_eq!(host.calls.get(), 2);
+}
+
+#[test]
+fn registered_methods_use_generated_metadata_with_the_policy_ceiling() {
+    let mut table = ApiTable::<Host>::new();
+    register(&mut table).unwrap();
+    for name in table.names() {
+        assert!(
+            crate::schema::contains(name),
+            "missing generated member: {name}"
+        );
+        let access =
+            crate::schema::access(name).unwrap_or_else(|| panic!("missing metadata: {name}"));
+        assert_eq!(table.gate(name), Some(access.gate), "{name}");
+        assert_eq!(
+            table.contexts(name),
+            Some(
+                access
+                    .contexts
+                    .intersection(crate::dispatch::permitted_contexts(name))
+            ),
+            "{name}"
+        );
+    }
+    for (name, permission) in [
+        ("storage.session.get", "storage"),
+        ("storage.local.onChanged.addListener", "storage"),
+        ("alarms.create", "alarms"),
+        ("alarms.onAlarm.addListener", "alarms"),
+        ("scripting.registerContentScripts", "scripting"),
+        ("runtime.connectNative", "nativeMessaging"),
+        ("webNavigation.onCommitted.addListener", "webNavigation"),
+        ("webRequest.onBeforeRequest.addListener", "webRequest"),
+    ] {
+        assert_eq!(table.gate(name), Some(crate::Gate::Requires(permission)));
+    }
+    assert_eq!(table.gate("tabs.connect"), Some(crate::Gate::Open));
+    assert_eq!(
+        table.gate("windows.onCreated.addListener"),
+        Some(crate::Gate::Open)
+    );
+    assert!(!table
+        .contexts("storage.local.get")
+        .unwrap()
+        .contains(ContextKind::UserScript));
+    assert!(!table
+        .contexts("alarms.get")
+        .unwrap()
+        .contains(ContextKind::Offscreen));
+    assert!(table
+        .contexts("runtime.connect")
+        .unwrap()
+        .contains(ContextKind::UserScript));
+}
+
+#[test]
+fn normalized_optional_arguments_reach_services_and_invalid_shapes_do_not() {
+    let mut table = ApiTable::<Host>::new();
+    register(&mut table).unwrap();
+    let mut dispatcher = Dispatcher::new(table);
+    let mut host = Host::default();
+    let sender = background_sender();
+    let granted = permissions(&[
+        "storage",
+        "alarms",
+        "scripting",
+        "nativeMessaging",
+        "webNavigation",
+        "webRequest",
+    ]);
+    for (method, args) in [
+        ("storage.local.get", json!([null])),
+        ("storage.local.getBytesInUse", json!([])),
+        ("alarms.create", json!([{"delayInMinutes":1}])),
+        ("alarms.get", json!([null])),
+        ("alarms.clear", json!([])),
+        ("i18n.getMessage", json!(["hello"])),
+        ("i18n.getMessage", json!(["hello", null, null])),
+        ("scripting.getRegisteredContentScripts", json!([null])),
+        ("scripting.unregisterContentScripts", json!([])),
+        ("runtime.connect", json!([])),
+        ("runtime.connect", json!([{"name":"port"}])),
+        ("runtime.sendMessage", json!([{"nested":null}])),
+        (
+            "runtime.sendMessage",
+            json!([EXTENSION, {"nested":null}, null]),
+        ),
+        ("tabs.connect", json!([1])),
+        ("tabs.sendMessage", json!([1, null])),
+        (
+            "runtime.sendNativeMessage",
+            json!(["org.example.host", {"nested":null}]),
+        ),
+        ("webNavigation.onCommitted.addListener", json!([1])),
+        (
+            "webRequest.onBeforeRequest.addListener",
+            json!([1, {"urls":["https://example.com/*"]}]),
+        ),
+    ] {
+        assert_eq!(
+            call(&mut dispatcher, &mut host, &sender, &granted, method, args),
+            Err(HOST_REACHED.into()),
+            "{method}"
+        );
+    }
+    let count = host.calls.get();
+    for (method, args) in [
+        ("storage.local.set", json!([[]])),
+        ("alarms.create", json!([{"delayInMinutes":"soon"}])),
+        ("i18n.getMessage", json!(["hello", [], {"escapeLt":1}])),
+        (
+            "scripting.registerContentScripts",
+            json!([[{"id":"a","world":"BAD"}]]),
+        ),
+        ("runtime.connect", json!([{"unknown":true}])),
+        ("tabs.sendMessage", json!([1, {}, {"frameId":-1}])),
+        ("storage.onChanged.addListener", json!([1.5])),
+        (
+            "webRequest.onBeforeRequest.addListener",
+            json!([1, {"urls":["https://example.com/*"], "types":["invalid"]}]),
+        ),
+        (
+            "webNavigation.onCommitted.addListener",
+            json!([1, {"url":[{"unknown":true}]}]),
+        ),
+    ] {
+        let expected = crate::schema::normalize(method, args.as_array().unwrap()).unwrap_err();
+        assert_eq!(
+            call(&mut dispatcher, &mut host, &sender, &granted, method, args),
+            Err(expected.message().to_owned()),
+            "{method}"
+        );
+    }
+    assert_eq!(host.calls.get(), count);
+}
+
+#[test]
+fn generated_methods_without_handlers_are_an_explicit_backlog() {
+    let mut table = ApiTable::<Host>::new();
+    register(&mut table).unwrap();
+    let implemented: std::collections::BTreeSet<_> = table.names().collect();
+    let namespaces: std::collections::BTreeSet<_> = table
+        .names()
+        .filter_map(|name| {
+            crate::schema::source_method(name)
+                .split_once('.')
+                .map(|(namespace, _)| namespace)
+        })
+        .collect();
+    let missing: Vec<_> = generated::METHOD_VALIDATORS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| {
+            namespaces.contains(name.split_once('.').unwrap().0) && !implemented.contains(name)
+        })
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            "i18n.detectLanguage",
+            "runtime.getBackgroundPage",
+            "runtime.getContexts",
+            "runtime.getManifest",
+            "runtime.getPackageDirectoryEntry",
+            "runtime.getPlatformInfo",
+            "runtime.getURL",
+            "runtime.getVersion",
+            "runtime.markListenerRegistrationComplete",
+            "runtime.openOptionsPage",
+            "runtime.reload",
+            "runtime.requestUpdateCheck",
+            "runtime.restart",
+            "runtime.restartAfterDelay",
+            "runtime.setUninstallURL",
+            "scripting.executeScript",
+            "scripting.insertCSS",
+            "scripting.removeCSS",
+            "tabs.captureVisibleTab",
+            "tabs.create",
+            "tabs.createSplit",
+            "tabs.detectLanguage",
+            "tabs.discard",
+            "tabs.duplicate",
+            "tabs.executeScript",
+            "tabs.get",
+            "tabs.getAllInWindow",
+            "tabs.getCurrent",
+            "tabs.getSelected",
+            "tabs.getZoom",
+            "tabs.getZoomSettings",
+            "tabs.goBack",
+            "tabs.goForward",
+            "tabs.group",
+            "tabs.highlight",
+            "tabs.insertCSS",
+            "tabs.move",
+            "tabs.query",
+            "tabs.reload",
+            "tabs.remove",
+            "tabs.removeCSS",
+            "tabs.sendRequest",
+            "tabs.setZoom",
+            "tabs.setZoomSettings",
+            "tabs.ungroup",
+            "tabs.unsplit",
+            "tabs.update",
+            "webNavigation.getAllFrames",
+            "webNavigation.getFrame",
+            "webRequest.handlerBehaviorChanged",
+            "windows.create",
+            "windows.get",
+            "windows.getAll",
+            "windows.getCurrent",
+            "windows.getLastFocused",
+            "windows.remove",
+            "windows.update",
+        ]
+    );
 }

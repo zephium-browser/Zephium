@@ -68,6 +68,10 @@ impl ListenerFilter {
         if ApiName::parse(event).is_none() {
             return Err(invalid_filter());
         }
+        let mut args = vec![serde_json::json!(1)];
+        args.extend(value.cloned());
+        let normalized = crate::schema::normalize(&format!("{event}.addListener"), &args)?;
+        let value = normalized.get(1).filter(|value| !value.is_null());
         let Some(value) = value else {
             return if event.starts_with("webRequest.") {
                 Err(invalid_filter())
@@ -77,7 +81,6 @@ impl ListenerFilter {
         };
         let object = value.as_object().ok_or_else(invalid_filter)?;
         let filter = if event.starts_with("webNavigation.") {
-            only_fields(object, &["url"])?;
             let filters = object
                 .get("url")
                 .ok_or_else(invalid_filter)?
@@ -91,18 +94,11 @@ impl ListenerFilter {
                     .collect::<Result<_, _>>()?,
             )
         } else if event.starts_with("webRequest.") {
-            only_fields(object, &["urls", "types", "tabId", "windowId"])?;
             let urls = strings(object.get("urls").ok_or_else(invalid_filter)?)?
                 .into_iter()
                 .map(|s| MatchPattern::parse(&s).map_err(|_| invalid_filter()))
                 .collect::<Result<_, _>>()?;
             let types = object.get("types").map(strings).transpose()?;
-            if types
-                .as_ref()
-                .is_some_and(|types| types.iter().any(|t| !RESOURCE_TYPES.contains(&t.as_str())))
-            {
-                return Err(invalid_filter());
-            }
             let integer = |name| {
                 object
                     .get(name)
@@ -123,18 +119,11 @@ impl ListenerFilter {
             event,
             "windows.onCreated" | "windows.onRemoved" | "windows.onFocusChanged"
         ) {
-            only_fields(object, &["windowTypes"])?;
             let types = object
                 .get("windowTypes")
                 .map(strings)
                 .transpose()?
                 .unwrap_or_else(|| vec!["normal".into(), "popup".into()]);
-            if types
-                .iter()
-                .any(|s| !["normal", "popup", "panel", "app", "devtools"].contains(&s.as_str()))
-            {
-                return Err(invalid_filter());
-            }
             Filter::Windows(types)
         } else {
             return Err(invalid_filter());
@@ -205,20 +194,16 @@ impl UrlFilter {
     fn parse(value: &Value) -> Result<Self, ApiError> {
         let fields = value.as_object().ok_or_else(invalid_filter)?;
         for (name, value) in fields {
-            if TEXT_FIELDS.contains(&name.as_str()) {
-                value.as_str().ok_or_else(invalid_filter)?;
-            } else if matches!(name.as_str(), "urlMatches" | "originAndPathMatches") {
+            if matches!(name.as_str(), "urlMatches" | "originAndPathMatches") {
                 value
                     .as_str()
                     .filter(|v| v.len() <= MAX_REGEX_BYTES)
                     .ok_or_else(invalid_filter)?;
-            } else if name == "schemes" {
-                strings(value)?;
             } else if name == "ports" {
                 validate_ports(value)?;
-            } else if name == "cidrBlocks" {
+            } else if matches!(name.as_str(), "schemes" | "cidrBlocks") {
                 strings(value)?;
-            } else {
+            } else if !TEXT_FIELDS.contains(&name.as_str()) {
                 return Err(invalid_filter());
             }
         }
@@ -329,14 +314,6 @@ fn strings(value: &Value) -> Result<Vec<String>, ApiError> {
         .collect()
 }
 
-fn only_fields(object: &Map<String, Value>, allowed: &[&str]) -> Result<(), ApiError> {
-    if object.keys().all(|name| allowed.contains(&name.as_str())) {
-        Ok(())
-    } else {
-        Err(invalid_filter())
-    }
-}
-
 fn validate_ports(value: &Value) -> Result<(), ApiError> {
     let list = value
         .as_array()
@@ -425,21 +402,4 @@ const TEXT_FIELDS: &[&str] = &[
     "urlEquals",
     "urlPrefix",
     "urlSuffix",
-];
-const RESOURCE_TYPES: &[&str] = &[
-    "main_frame",
-    "sub_frame",
-    "stylesheet",
-    "script",
-    "image",
-    "font",
-    "object",
-    "xmlhttprequest",
-    "ping",
-    "csp_report",
-    "media",
-    "websocket",
-    "webtransport",
-    "webbundle",
-    "other",
 ];

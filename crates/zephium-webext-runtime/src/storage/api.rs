@@ -1,10 +1,8 @@
 use serde_json::Value;
 
-use crate::api::ArgumentValidator;
-use crate::context::{ContextKind, ContextMask, Sender};
-use crate::dispatch::{ApiTable, Invocation, MethodSpec, RegistrationError};
+use crate::context::Sender;
+use crate::dispatch::{ApiTable, Invocation, RegistrationError};
 use crate::errors::ApiError;
-use crate::permissions::Gate;
 
 use super::{AccessLevel, Area, GetKeys, Mutation, Storage, StorageChangeEvent};
 
@@ -19,69 +17,6 @@ pub trait StorageHost {
     /// Routes a committed change to the install's `storage.onChanged` and
     /// area-specific listeners. Filter recipient access again at delivery.
     fn storage_changed(&mut self, sender: &Sender, change: StorageChangeEvent);
-    /// Replaceable argument-validation seam for generated schema validators.
-    fn validate_storage_arguments(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        ManualValidator.validate(method, args)
-    }
-}
-
-/// Hand-written Chrome signatures, replaceable at the adapter boundary.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ManualValidator;
-
-impl ArgumentValidator for ManualValidator {
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        let member = method.rsplit('.').next().unwrap_or("");
-        let valid = match member {
-            "get" => {
-                args.is_empty()
-                    || (args.len() == 1
-                        && (args[0].is_null() || args[0].is_object() || string_keys(&args[0])))
-            }
-            "getBytesInUse" => {
-                args.is_empty() || (args.len() == 1 && (args[0].is_null() || string_keys(&args[0])))
-            }
-            "set" => args.len() == 1 && args[0].is_object(),
-            "remove" => args.len() == 1 && string_keys(&args[0]),
-            "clear" | "getKeys" => args.is_empty(),
-            "setAccessLevel" => {
-                args.len() == 1
-                    && args[0].as_object().is_some_and(|options| {
-                        options.len() == 1
-                            && options.get("accessLevel").is_some_and(|level| {
-                                matches!(
-                                    level.as_str(),
-                                    Some("TRUSTED_CONTEXTS" | "TRUSTED_AND_UNTRUSTED_CONTEXTS")
-                                )
-                            })
-                    })
-            }
-            _ => false,
-        };
-        if valid {
-            Ok(())
-        } else {
-            Err(ApiError::no_matching_signature(method, signature(member)))
-        }
-    }
-}
-
-fn signature(member: &str) -> &'static str {
-    match member {
-        "get" => "optional [string|array|object] keys, optional function callback",
-        "getBytesInUse" => "optional [string|array] keys, optional function callback",
-        "set" => "object items, optional function callback",
-        "remove" => "[string|array] keys, optional function callback",
-        "setAccessLevel" => "object accessOptions, optional function callback",
-        _ => "optional function callback",
-    }
-}
-
-fn string_keys(value: &Value) -> bool {
-    value.is_string()
-        || value
-            .as_array()
-            .is_some_and(|keys| keys.iter().all(Value::is_string))
 }
 
 fn keys(value: &Value) -> Vec<String> {
@@ -100,7 +35,6 @@ fn handle<S: StorageHost>(
     invocation: &Invocation<'_>,
     area: Area,
 ) -> Result<Value, ApiError> {
-    host.validate_storage_arguments(invocation.name(), invocation.args())?;
     let now = host.storage_now_nanos();
     let sender = invocation.sender();
     let unlimited = invocation.permissions().has_api("unlimitedStorage");
@@ -223,20 +157,12 @@ pub fn register<S: StorageHost + 'static>(
             ],
         ),
     ];
-    let contexts = ContextMask::ALL.without(ContextKind::ExternalPage);
     for (area, methods) in AREAS {
         for name in methods {
-            table.register(
-                name,
-                MethodSpec::new(
-                    Gate::Requires("storage"),
-                    contexts,
-                    move |host: &mut S, invocation| {
-                        let result = handle(host, &invocation, area);
-                        invocation.reply(result)
-                    },
-                ),
-            )?;
+            table.register_generated(name, move |host: &mut S, invocation| {
+                let result = handle(host, &invocation, area);
+                invocation.reply(result)
+            })?;
         }
     }
     Ok(())

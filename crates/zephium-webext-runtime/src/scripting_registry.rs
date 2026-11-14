@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zephium_webext::manifest::{normalize_resource, ContentScript, Manifest, RunAt, World};
 
-use crate::api::ArgumentValidator;
 use crate::dispatch::{ApiTable, RegistrationError};
 use crate::pattern::{ContentScriptMatcher, FrameDocument, MatchOptions};
-use crate::{ApiError, ContextMask, Gate, MethodSpec, Sender};
+use crate::{ApiError, Sender};
 
 /// Maximum static plus dynamic registrations per install.
 pub const MAX_REGISTERED_SCRIPTS: usize = 1_024;
@@ -423,49 +422,10 @@ pub trait ScriptingHost {
     ) -> Result<(), ApiError>;
 }
 
-/// Handwritten schemas until generated validators are installed.
-pub struct ScriptingValidator;
-impl ArgumentValidator for ScriptingValidator {
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError> {
-        match method {
-            "scripting.registerContentScripts" | "scripting.updateContentScripts" => {
-                if args.len() != 1 || !args[0].is_array() {
-                    return Err(ApiError::malformed_arguments());
-                }
-                let entries = args[0]
-                    .as_array()
-                    .ok_or_else(ApiError::malformed_arguments)?;
-                if entries.len() > MAX_REGISTERED_SCRIPTS
-                    || entries.iter().any(|value| !value.is_object())
-                {
-                    return Err(ApiError::malformed_arguments());
-                }
-                if method == "scripting.registerContentScripts" {
-                    let _: Vec<RegisteredScript> = serde_json::from_value(args[0].clone())
-                        .map_err(|_| ApiError::malformed_arguments())?;
-                }
-            }
-            _ => {
-                filter(args)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 fn filter(args: &[Value]) -> Result<Option<Vec<String>>, ApiError> {
-    if args.is_empty() {
+    let Some(object) = args.first().filter(|value| !value.is_null()) else {
         return Ok(None);
-    }
-    if args.len() != 1 {
-        return Err(ApiError::malformed_arguments());
-    }
-    let object = args[0]
-        .as_object()
-        .ok_or_else(ApiError::malformed_arguments)?;
-    if object.keys().any(|key| key != "ids") {
-        return Err(ApiError::malformed_arguments());
-    }
+    };
     object
         .get("ids")
         .map(|ids| {
@@ -489,46 +449,38 @@ pub fn register<S: ScriptingHost + 'static>(
         "scripting.unregisterContentScripts",
         "scripting.getRegisteredContentScripts",
     ] {
-        table.register(
-            name,
-            MethodSpec::new(
-                Gate::Requires("scripting"),
-                ContextMask::EXTENSION_PAGES,
-                |host: &mut S, invocation| {
-                    let result = (|| {
-                        ScriptingValidator.validate(invocation.name(), invocation.args())?;
-                        let sender = invocation.sender();
-                        let mut candidate = host.script_registry(sender)?.clone();
-                        let args = invocation.args();
-                        match invocation.name() {
-                            "scripting.registerContentScripts" => candidate.register(
-                                serde_json::from_value(args[0].clone())
-                                    .map_err(|_| ApiError::malformed_arguments())?,
-                                |path, kind| host.validate_script_resource(sender, path, kind),
-                            )?,
-                            "scripting.updateContentScripts" => candidate.update(
-                                args[0]
-                                    .as_array()
-                                    .ok_or_else(ApiError::malformed_arguments)?,
-                                |path, kind| host.validate_script_resource(sender, path, kind),
-                            )?,
-                            "scripting.unregisterContentScripts" => {
-                                candidate.unregister(filter(args)?.as_deref())?
-                            }
-                            _ => {
-                                return serde_json::to_value(
-                                    candidate.get_registered(filter(args)?.as_deref()),
-                                )
-                                .map_err(|_| ApiError::malformed_arguments())
-                            }
-                        }
-                        host.commit_script_registry(sender, candidate)?;
-                        Ok(Value::Null)
-                    })();
-                    invocation.reply(result)
-                },
-            ),
-        )?;
+        table.register_generated(name, |host: &mut S, invocation| {
+            let result = (|| {
+                let sender = invocation.sender();
+                let mut candidate = host.script_registry(sender)?.clone();
+                let args = invocation.args();
+                match invocation.name() {
+                    "scripting.registerContentScripts" => candidate.register(
+                        serde_json::from_value(args[0].clone())
+                            .map_err(|_| ApiError::malformed_arguments())?,
+                        |path, kind| host.validate_script_resource(sender, path, kind),
+                    )?,
+                    "scripting.updateContentScripts" => candidate.update(
+                        args[0]
+                            .as_array()
+                            .ok_or_else(ApiError::malformed_arguments)?,
+                        |path, kind| host.validate_script_resource(sender, path, kind),
+                    )?,
+                    "scripting.unregisterContentScripts" => {
+                        candidate.unregister(filter(args)?.as_deref())?
+                    }
+                    _ => {
+                        return serde_json::to_value(
+                            candidate.get_registered(filter(args)?.as_deref()),
+                        )
+                        .map_err(|_| ApiError::malformed_arguments())
+                    }
+                }
+                host.commit_script_registry(sender, candidate)?;
+                Ok(Value::Null)
+            })();
+            invocation.reply(result)
+        })?;
     }
     Ok(())
 }

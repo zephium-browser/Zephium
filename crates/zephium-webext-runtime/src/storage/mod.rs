@@ -20,7 +20,7 @@ use crate::limits::{
     STORAGE_LOCAL_QUOTA_BYTES, STORAGE_LOCAL_UNLIMITED_QUOTA_BYTES, STORAGE_SESSION_QUOTA_BYTES,
 };
 
-pub use api::{register, ManualValidator, StorageHost};
+pub use api::{register, StorageHost};
 pub use backend::{MemoryBackend, SqliteBackend, StorageBackend};
 pub use quota::{
     item_bytes, MAX_ITEMS, MAX_SUSTAINED_WRITE_OPERATIONS_PER_MINUTE,

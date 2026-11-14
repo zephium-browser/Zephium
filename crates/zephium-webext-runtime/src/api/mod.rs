@@ -2,18 +2,9 @@
 //! `register(&mut ApiTable<S>)` and listed in [`register`].
 
 use crate::dispatch::{ApiTable, RegistrationError};
-use crate::ApiError;
-use serde_json::Value;
-
-/// Replaceable validation boundary for handwritten and generated schemas.
-pub trait ArgumentValidator {
-    /// Rejects malformed arguments before invoking a service or adapter.
-    fn validate(&self, method: &str, args: &[Value]) -> Result<(), ApiError>;
-}
-
 pub mod generated;
 
-/// Registers every implemented namespace.
+/// Registers every implemented namespace using generated schemas and feature metadata.
 pub fn register<S>(table: &mut ApiTable<S>) -> Result<(), RegistrationError>
 where
     S: crate::storage::StorageHost

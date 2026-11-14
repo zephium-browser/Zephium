@@ -216,16 +216,13 @@ fn event_argument_validator_rejects_bad_ids_and_shapes() {
         json!([9_007_199_254_740_992_u64]),
         json!([1, {}, 3]),
     ] {
-        assert!(ManualValidator
-            .validate("storage.onChanged.addListener", args.as_array().unwrap())
-            .is_err());
+        assert!(
+            crate::schema::validate("storage.onChanged.addListener", args.as_array().unwrap())
+                .is_err()
+        );
     }
-    ManualValidator
-        .validate("storage.session.onChanged.addListener", &[json!(1)])
-        .unwrap();
-    ManualValidator
-        .validate("storage.local.onChanged.hasListeners", &[])
-        .unwrap();
+    crate::schema::validate("storage.session.onChanged.addListener", &[json!(1)]).unwrap();
+    crate::schema::validate("storage.local.onChanged.hasListeners", &[]).unwrap();
 }
 
 #[test]
