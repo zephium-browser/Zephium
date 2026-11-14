@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { graphicsDetails, graphicsStatus, graphicsWarnings } from "../lib/graphics";
-import { environmentOverride, gpuReport, steppedDown } from "./graphics-fixtures";
+import { environmentOverride, gpuReport, heldBack, steppedDown } from "./graphics-fixtures";
 
 test("Automatic on a driver without known problems runs the full GPU path", () => {
   expect(graphicsStatus(gpuReport())).toEqual({
@@ -96,7 +96,8 @@ test("details read as people name their hardware, with the native reason kept ve
   expect(rows.session!.value).toBe("Wayland · Mutter");
   expect(rows.engine!.value).toBe("WebKitGTK 2.54.2 · GTK 3.24.52");
   expect(rows.selected!.value).toBe("GPU, chosen by Automatic");
-  expect(rows.selected!.note).toBe("no evidenced renderer exception; retain WebKit defaults");
+  // The native reason is internal wording; it stays in the copied report only.
+  expect(JSON.stringify(rows)).not.toContain("evidenced");
 });
 
 test("missing GL facts fall back to the kernel device and say what is unknown", () => {
@@ -129,4 +130,23 @@ test("NVIDIA's proprietary version outranks Mesa, and native warnings stay untra
   expect(graphicsWarnings(report)).toEqual([
     { text: "renderer state could not be read", native: true },
   ]);
+});
+
+test("Automatic holding a slower mode after repeated failures says so, apart from a one-off step-down", () => {
+  const report = gpuReport(heldBack());
+  expect(graphicsStatus(report)).toEqual({
+    kind: "held",
+    title: "Automatic is staying in Compatibility mode",
+    detail:
+      "The faster mode failed to start twice with this graphics driver, so Zephium won’t try it again until the driver, WebKitGTK or session changes.",
+  });
+  const rows = Object.fromEntries(graphicsDetails(report).map((row) => [row.id, row.value]));
+  expect(rows.selected).toBe("Compatibility, after repeated failed starts");
+  // Asking to retry waits for a restart, and choosing a mode replaces the retry.
+  const retry = gpuReport({ ...heldBack(), retry_requested: true, restart_required: true });
+  expect(graphicsStatus(retry)).toEqual({
+    kind: "restart",
+    title: "Restart Zephium to try the faster mode again",
+    detail: "Until then, Zephium keeps running in Compatibility mode.",
+  });
 });

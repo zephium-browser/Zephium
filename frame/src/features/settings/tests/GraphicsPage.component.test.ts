@@ -5,7 +5,7 @@ import { commands, page, userEvent } from "vitest/browser";
 import type { GpuReport, RendererPreference } from "$shared/ipc/bindings";
 import * as notices from "$session/notice.svelte";
 import GraphicsPage from "../components/sections/GraphicsPage.svelte";
-import { environmentOverride, gpuReport, steppedDown } from "./graphics-fixtures";
+import { environmentOverride, gpuReport, heldBack, steppedDown } from "./graphics-fixtures";
 
 declare module "vitest/browser" {
   interface BrowserCommands {
@@ -19,6 +19,7 @@ const native = vi.hoisted(() => ({
   saveFails: false,
   readFails: false,
   set: vi.fn(),
+  retry: vi.fn(),
   relaunch: vi.fn(async () => true),
 }));
 
@@ -38,6 +39,11 @@ vi.mock("$shared/ipc/bindings", async () => {
         preference,
         restart_required: preference !== native.initial,
       };
+      return { status: "ok", data: native.report };
+    },
+    rendererRetryFaster: async () => {
+      native.retry();
+      native.report = { ...native.report, retry_requested: true, restart_required: true };
       return { status: "ok", data: native.report };
     },
     appRelaunch: native.relaunch,
@@ -162,6 +168,42 @@ test("after a failed start Zephium says it stepped down and can keep that mode",
   await expect
     .element(screen.getByText("Running in Compatibility mode after a startup problem"))
     .toBeVisible();
+});
+
+test("Automatic staying in a slower mode explains why and can try the faster one again", async () => {
+  native.report = gpuReport(heldBack());
+  const screen = await render(GraphicsPage);
+  await expect
+    .element(screen.getByText("Automatic is staying in Compatibility mode"))
+    .toBeVisible();
+  await expect
+    .element(screen.getByText(/failed to start twice with this graphics driver/u))
+    .toBeVisible();
+  await expect.element(radio("Automatic")).toHaveAttribute("aria-checked", "true");
+  await expect
+    .element(screen.getByText("Compatibility, after repeated failed starts"))
+    .toBeVisible();
+  expect(screen.getByRole("button", { name: "Restart Zephium" }).query()).toBeNull();
+  await screen.getByRole("button", { name: "Try the Faster Mode Again" }).click();
+  expect(native.retry).toHaveBeenCalledOnce();
+  expect(native.set).not.toHaveBeenCalled();
+  await expect
+    .element(screen.getByText("Restart Zephium to try the faster mode again"))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("status").filter({ hasText: "Saved." }))
+    .toHaveTextContent("Saved. It takes effect the next time Zephium starts.");
+  expect(native.relaunch).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Restart Zephium" }).click();
+  expect(native.relaunch).toHaveBeenCalledOnce();
+});
+
+test("details keep the native selection reason out of the page", async () => {
+  native.report = gpuReport(steppedDown());
+  const screen = await render(GraphicsPage);
+  await expect.element(screen.getByText("Compatibility, after a failed start")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("previous automatic startup");
+  expect(screen.container.textContent).not.toContain("fallback 1/2");
 });
 
 test("a choice that cannot be saved says so and shows what is stored", async () => {

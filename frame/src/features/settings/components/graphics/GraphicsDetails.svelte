@@ -94,10 +94,7 @@
     {#each rows as row (row.id)}
       <div class="fact" data-fact={row.id}>
         <dt>{row.label}</dt>
-        <dd>
-          <span class="value">{row.value}</span>
-          {#if row.note}<span class="note" lang="en">{row.note}</span>{/if}
-        </dd>
+        <dd><span class="value">{row.value}</span></dd>
       </div>
     {/each}
   {:else}
@@ -207,15 +204,6 @@
   .value.muted {
     color: var(--color-muted);
     font-weight: 400;
-  }
-
-  .note {
-    color: var(--color-muted);
-    font-family: var(--font-mono);
-    font-size: var(--text-caption);
-    line-height: 1.5;
-    overflow-wrap: anywhere;
-    user-select: text;
   }
 
   .placeholder {

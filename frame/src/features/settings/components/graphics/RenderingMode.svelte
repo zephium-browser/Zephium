@@ -95,7 +95,7 @@
           ? CommandLineIcon
           : status.kind === "restart"
             ? RefreshIcon
-            : status.kind === "recovered"
+            : status.kind === "recovered" || status.kind === "held"
               ? Alert02Icon
               : InformationCircleIcon}
         size={16}
@@ -118,6 +118,10 @@
         variant="primary"
         pending={graphics.restarting()}
         onclick={() => void graphics.restart()}>{m.navigation_error_restart()}</Button
+      >
+    {:else if status.kind === "held"}
+      <Button size="compact" disabled={graphics.saving()} onclick={() => void graphics.tryFaster()}
+        >{m.graphics_held_retry()}</Button
       >
     {:else if status.kind === "recovered"}
       <Button
@@ -290,6 +294,7 @@
   }
 
   .status[data-kind="recovered"] .glyph,
+  .status[data-kind="held"] .glyph,
   .status[data-kind="failed"] .glyph {
     color: var(--color-warning);
   }

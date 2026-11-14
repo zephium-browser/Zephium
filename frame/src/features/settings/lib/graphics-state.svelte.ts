@@ -63,6 +63,24 @@ export function createGraphics() {
           : m.graphics_saved();
   }
 
+  /** "Try the faster mode again": the next automatic start ignores the repeated failures. */
+  async function tryFaster() {
+    if (report === null || saving) return;
+    saving = true;
+    saveFailed = false;
+    announcement = "";
+    const result = await observe(commands.rendererRetryFaster(), LIMIT);
+    if (!live) return;
+    saving = false;
+    if (result.state === "received" && result.value.status === "ok") {
+      report = result.value.data;
+      announcement = m.graphics_saved_restart();
+      return;
+    }
+    saveFailed = true;
+    await load();
+  }
+
   async function restart() {
     if (restarting) return;
     restarting = true;
@@ -87,6 +105,7 @@ export function createGraphics() {
     restartFailed: () => restartFailed,
     retry: () => void load(),
     choose,
+    tryFaster,
     restart,
     /** Adopts a report read for the clipboard, which is newer than the one shown. */
     adopt: (next: GpuReport) => {

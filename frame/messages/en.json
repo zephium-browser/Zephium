@@ -4052,5 +4052,10 @@
   "graphics_report_help": "Plain text for a bug report: your GPU, drivers, displays, graphics variables and the mode in use. Nothing is sent.",
   "graphics_report_copy": "Copy Report",
   "graphics_report_copied": "Graphics report copied",
-  "graphics_report_failed": "Couldn’t read the graphics report. Try again."
+  "graphics_report_failed": "Couldn’t read the graphics report. Try again.",
+  "graphics_held": "Automatic is staying in {mode} mode",
+  "graphics_held_detail": "The faster mode failed to start twice with this graphics driver, so Zephium won’t try it again until the driver, WebKitGTK or session changes.",
+  "graphics_held_retry": "Try the Faster Mode Again",
+  "graphics_retry_restart": "Restart Zephium to try the faster mode again",
+  "graphics_selected_held": "{mode}, after repeated failed starts"
 }

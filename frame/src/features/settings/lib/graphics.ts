@@ -53,6 +53,7 @@ export type GraphicsStatus =
   | { kind: "environment"; title: string; detail: string; variables: string[] }
   | { kind: "restart"; title: string; detail: string }
   | { kind: "recovered"; title: string; detail: string; keep: RendererPreference }
+  | { kind: "held"; title: string; detail: string }
   | { kind: "current"; title: string; detail: string };
 
 /** What runs now and why, in the order that explains the most. */
@@ -69,6 +70,12 @@ export function graphicsStatus(report: GpuReport): GraphicsStatus {
         .filter((entry) => RENDERER_VARIABLES.has(entry.name))
         .map((entry) => `${entry.name}=${entry.value}`),
     };
+  if (report.retry_requested && preference === "automatic")
+    return {
+      kind: "restart",
+      title: m.graphics_retry_restart(),
+      detail: m.graphics_restart_detail({ mode: running }),
+    };
   // A saved mode whose path already runs needs no restart the person would notice.
   const unchanged = MODE_PATH[preference] === selection.path;
   if (report.restart_required && !unchanged)
@@ -78,6 +85,12 @@ export function graphicsStatus(report: GpuReport): GraphicsStatus {
       detail: m.graphics_restart_detail({ mode: running }),
     };
   if (report.restart_required) return { kind: "current", title, detail: m.graphics_running_same() };
+  if (selection.source === "repeated_failure")
+    return {
+      kind: "held",
+      title: m.graphics_held({ mode: running }),
+      detail: m.graphics_held_detail(),
+    };
   if (selection.source === "crash_recovery")
     return {
       kind: "recovered",
@@ -125,15 +138,10 @@ const SOURCES: Record<SelectionSource, (inputs: { mode: string }) => string> = {
   preference: m.graphics_selected_preference,
   environment: m.graphics_selected_environment,
   crash_recovery: m.graphics_selected_recovery,
+  repeated_failure: m.graphics_selected_held,
 };
 
-export type DetailRow = {
-  id: string;
-  label: string;
-  value: string;
-  /** Diagnostic text from the native report, which is not translated. */
-  note?: string;
-};
+export type DetailRow = { id: string; label: string; value: string };
 
 /** The few facts someone diagnosing a GPU problem reads first. The rest is in the copied report. */
 export function graphicsDetails(report: GpuReport): DetailRow[] {
@@ -166,7 +174,6 @@ export function graphicsDetails(report: GpuReport): DetailRow[] {
       id: "selected",
       label: m.graphics_selected(),
       value: SOURCES[selection.source]({ mode: modeName(pathMode(selection.path)) }),
-      note: selection.reason,
     },
   ];
 }

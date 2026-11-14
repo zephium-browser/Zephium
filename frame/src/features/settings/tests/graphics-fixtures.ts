@@ -55,11 +55,12 @@ export function gpuReport(overrides: Overrides = {}): GpuReport {
       path: "default",
       source: "policy",
       reason: "no evidenced renderer exception; retain WebKit defaults",
-      crash_recovery: { fallback_steps: 0, previous_incomplete_path: null },
+      crash_recovery: { fallback_steps: 0, previous_incomplete_path: null, held_path: null },
       ...selection,
     },
     environment: [{ name: "GDK_BACKEND", value: "wayland" }],
     restart_required: false,
+    retry_requested: false,
     startup_status: "window shown; recovery reset",
     state_warnings: [],
     text: "Zephium Linux GPU report\nSession: Wayland; compositor: Mutter; probe: Supported\n",
@@ -86,6 +87,16 @@ export const steppedDown = (): Overrides => ({
     source: "crash_recovery",
     reason:
       "previous automatic startup did not show a window; fallback 1/2 (reset after a successful start); policy: no evidenced renderer exception; retain WebKit defaults",
-    crash_recovery: { fallback_steps: 1, previous_incomplete_path: "default" },
+    crash_recovery: { fallback_steps: 1, previous_incomplete_path: "default", held_path: null },
+  },
+});
+
+export const heldBack = (): Overrides => ({
+  selection: {
+    path: "force_shm",
+    source: "repeated_failure",
+    reason:
+      "automatic startup failed twice with this graphics fingerprint; staying on ForceShm until the driver, WebKitGTK, session or GPU changes, or a retry is requested; policy: no evidenced renderer exception; retain WebKit defaults",
+    crash_recovery: { fallback_steps: 0, previous_incomplete_path: null, held_path: "force_shm" },
   },
 });

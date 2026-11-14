@@ -6,7 +6,7 @@ import type { GpuReport } from "$shared/ipc/bindings";
 import { accountFixture } from "$shared/testing/account";
 import * as settings from "../lib/settings-state.svelte";
 import SettingsLookStage from "./SettingsLookStage.svelte";
-import { environmentOverride, gpuReport, steppedDown } from "./graphics-fixtures";
+import { environmentOverride, gpuReport, heldBack, steppedDown } from "./graphics-fixtures";
 
 declare module "vitest/browser" {
   interface BrowserCommands {
@@ -90,6 +90,11 @@ test("Graphics in each state it can explain, both themes", async () => {
   );
   await shoot("environment", gpuReport({ ...environmentOverride(), preference: "gpu" }));
   await shoot("step-down", gpuReport(steppedDown()));
+  await shoot("held", gpuReport(heldBack()));
+  await shoot(
+    "held-retry-pending",
+    gpuReport({ ...heldBack(), retry_requested: true, restart_required: true }),
+  );
   const software = gpuReport({
     detection: { driver_class: "software", probe_outcome: "inconclusive" },
     state_warnings: ["renderer state directory is not private; preferences are read-only"],
