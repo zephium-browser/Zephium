@@ -343,6 +343,11 @@ fn harden_privileged_webview(chrome: &webkit2gtk::WebView) -> Result<(), LinuxIn
     if !context.is_process_swap_on_cross_site_navigation_enabled() {
         return Err(LinuxInitError::ProcessSwapDisabled);
     }
+    // Privileged surfaces never navigate back and load only bundled assets:
+    // no back/forward pages or dead cached resources are worth keeping.
+    if context.cache_model() != webkit2gtk::CacheModel::DocumentViewer {
+        context.set_cache_model(webkit2gtk::CacheModel::DocumentViewer);
+    }
 
     const DOWNLOAD_DENY_MARKER: &str = "zephium-privileged-download-deny-installed";
     // SAFETY: this private key is used only as a bool in this module and is
