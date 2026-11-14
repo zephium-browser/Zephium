@@ -792,13 +792,50 @@ fn native_runtime_dnr_updates_and_persistence() {
 
     let native_context = context();
     let profile = runtime(&native_context, &module, Some(storage.path()), &engine, 1);
+    profile.set_browser(Box::new(network_fixture::Browser::new(&server.origin)));
     profile
         .install_enabled(spec(0x301, 2, package.path()))
         .unwrap();
+    // An enabled install starts its background lazily; rules restore without it.
+    wait("DNR rules restored", Duration::from_secs(30), || {
+        profile
+            .network_status(install)
+            .is_some_and(|status| !status.loading)
+    });
+    assert_eq!(state(&profile, install), Some(BackgroundState::Stopped));
+    assert!(
+        profile.errors(install).is_empty(),
+        "{:?}",
+        profile.errors(install)
+    );
+    let tab = webkit2gtk::WebView::with_context(&native_context);
+    let bridge_view = profile
+        .attach_tab_with_id(ItemId::from(2), 2, &tab, &AttachPlan::default())
+        .unwrap();
+    tab.load_uri(&format!("{}/page?restored", server.origin));
+    wait("DNR restored tab load", Duration::from_secs(20), || {
+        !tab.is_loading() && tab.uri().is_some()
+    });
+    pump_for(Duration::from_millis(500));
+    assert!(
+        !network_fetch(&tab, "/persisted"),
+        "restored dynamic rule must be enforced"
+    );
+    assert!(network_fetch(&tab, "/static-block?ruleset-still-disabled"));
+    profile.detach_tab(bridge_view);
+    tab.stop_loading();
+    drop(tab);
+    let options = open(&profile, install);
+    assert_eq!(
+        script(
+            &options,
+            "await chrome.runtime.sendMessage({}).catch(()=>{});return true;"
+        )["ok"],
+        true
+    );
     wait("DNR restored background", Duration::from_secs(30), || {
         ready(&profile, install)
     });
-    let options = open(&profile, install);
     assert_eq!(
         script(
             &options,
